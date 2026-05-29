@@ -36,9 +36,16 @@ echo "📥 Repo..."
 if [[ ! -d "$APP_DIR" ]]; then
   git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
 else
-  cd "$APP_DIR"
-  git pull
+  # Bei Re-Run: git als der Owner-User aufrufen damit kein 'dubious ownership'-Fehler
+  if id "$APP_USER" >/dev/null 2>&1 && [[ "$(stat -c %U "$APP_DIR" 2>/dev/null)" == "$APP_USER" ]]; then
+    sudo -u "$APP_USER" git -C "$APP_DIR" pull
+  else
+    cd "$APP_DIR" && git pull
+  fi
 fi
+
+# Damit zukünftige 'git pull' als root nicht mit 'dubious ownership' brechen
+git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
 
 cd "$APP_DIR"
 
