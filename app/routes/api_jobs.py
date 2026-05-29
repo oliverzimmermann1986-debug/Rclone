@@ -50,10 +50,15 @@ def _run_backup_thread(job_id: int, dry_run: bool, pairs_filter=None):
                 db.job_set_log_file(job_id, str(log_file))
                 logger.info(f"=== Backup #{job_id} startet (dry_run={dry_run}, pairs={pairs_filter}) ===")
                 summary = rclone_job.run_job(dry_run=dry_run, pairs_filter=pairs_filter)
-                status = "ok"
                 if rclone_job.is_cancelled():
                     status = "error"
                     summary["error"] = "Abgebrochen"
+                elif summary.get("enabled") is False:
+                    status = "ok"
+                elif "ok" in summary:
+                    status = "ok" if summary["ok"] else "error"
+                else:
+                    status = "ok" if summary.get("ok_count", 0) == summary.get("total_pairs", 0) else "error"
                 db.job_finish(job_id, status, summary)
                 logger.info(f"=== Backup #{job_id} {status} ===")
             except Exception as e:
