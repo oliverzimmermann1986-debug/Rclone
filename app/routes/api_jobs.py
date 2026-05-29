@@ -175,6 +175,50 @@ def backup_progress():
     }
 
 
+
+@router.post("/backup/quick")
+def run_quick_sync(payload: dict):
+    """Ad-hoc-Sync ohne Pair-Speichern. Payload: {remote, local, direction,
+    mode, dry_run, extra_args}. direction=pull|push|bisync, mode=copy|sync|bisync."""
+    from ..jobs import rclone_sync as rj
+    if not _locks["backup"].acquire(blocking=False):
+        raise HTTPException(409, "Backup läuft bereits")
+    job_id = get_db().job_start("quicksync")
+    def _run():
+        db = get_db()
+        fh = None
+        try:
+            with file_lock_or_none("backup") as flock:
+                if flock is None:
+                    db.job_finish(job_id, "skipped", {"error": "anderer Backup läuft"})
+                    return
+                try:
+                    log_file, fh = _setup_job_logger(job_id, "quicksync")
+                    db.job_set_log_file(job_id, str(log_file))
+                    result = rj.run_quick(
+                        remote_path=payload.get("remote", ""),
+                        local_path=payload.get("local", ""),
+                        direction=payload.get("direction", "bisync"),
+                        mode=payload.get("mode", "bisync"),
+                        dry_run=bool(payload.get("dry_run", False)),
+                        extra_args=payload.get("extra_args"),
+                    )
+                    status = "ok" if result.get("ok") else "error"
+                    db.job_finish(job_id, status, result)
+                except Exception as e:
+                    logger.exception(f"QuickSync #{job_id} fail")
+                    db.job_finish(job_id, "error", {"error": str(e)})
+        finally:
+            if fh:
+                try:
+                    logging.getLogger().removeHandler(fh)
+                    fh.close()
+                except Exception: pass
+            _locks["backup"].release()
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "job_id": job_id}
+
+
 @router.get("/list")
 def list_jobs(kind: Optional[str] = None, limit: int = 50):
     return get_db().job_list(kind=kind, limit=limit)

@@ -148,3 +148,43 @@ th { font-size: 11px; text-transform: uppercase; color: var(--fg-dim); letter-sp
   text-transform: uppercase; letter-spacing: .06em;
 }
 .card h3:first-of-type { margin-top: 12px; }
+
+/* ── Storage-Übersicht ─────────────────────────────────────────────── */
+.storage-row {
+  padding: 14px 0; border-bottom: 1px solid var(--border);
+}
+.storage-row:last-child { border-bottom: 0; }
+.storage-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 4px;
+}
+.storage-paths {
+  display: flex; gap: 16px; margin-bottom: 8px; flex-wrap: wrap;
+}
+.storage-bars { margin: 6px 0; }
+.progress-bar div.warn { background: var(--err); }
+
+/* ── Pair-Extras (min_local_files) ─────────────────────────────────── */
+.pair-extras {
+  display: flex; align-items: center; flex-wrap: wrap;
+  padding: 8px 0 0; margin-top: 6px; border-top: 1px solid var(--border);
+}
+.pair-extras label { text-transform: none; letter-spacing: 0; }
+.pair-extras input[type="number"] {
+  padding: 4px 8px; font-size: 12px;
+}
+
+/* ── Webhooks ──────────────────────────────────────────────────────── */
+.webhook-row {
+  padding: 12px; border: 1px solid var(--border); border-radius: 5px;
+  margin-bottom: 10px;
+}
+.hook-events {
+  display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px;
+}
+.hook-events label {
+  display: flex; align-items: center; gap: 4px;
+  text-transform: none; letter-spacing: 0; color: var(--fg);
+  cursor: pointer; font-size: 12px;
+}
+.hook-events input[type="checkbox"] { width: auto; margin: 0; }

@@ -89,3 +89,49 @@ def change_password(body: PasswordChange, user: str = Depends(require_auth)) -> 
     cfg.set("web", "password", "")  # Klartext-Fallback aufräumen
     cfg.save()
     return {"ok": True, "message": "Passwort geändert"}
+
+
+class FilterPayload(BaseModel):
+    content: str
+
+
+@router.get("/filter-file")
+def get_filter_file() -> dict:
+    """Inhalt der rclone-filters.txt. Pfad aus config.backup.filter_file
+    oder Default /opt/rclone-sync/data/rclone-filters.txt."""
+    cfg = get_config()
+    p = cfg.get("backup", "filter_file",
+                default="/opt/rclone-sync/data/rclone-filters.txt")         or "/opt/rclone-sync/data/rclone-filters.txt"
+    from pathlib import Path as _P
+    base = _P("/opt/rclone-sync").resolve()
+    resolved = _P(p).resolve()
+    if not str(resolved).startswith(str(base)):
+        raise HTTPException(400, "filter_file muss unter /opt/rclone-sync liegen")
+    if not resolved.exists():
+        return {"path": str(resolved), "exists": False, "content": ""}
+    try:
+        return {"path": str(resolved), "exists": True,
+                "content": resolved.read_text(encoding="utf-8")}
+    except Exception as e:
+        raise HTTPException(500, f"Lesefehler: {e}")
+
+
+@router.put("/filter-file")
+def save_filter_file(body: FilterPayload) -> dict:
+    """rclone-Filter-Datei schreiben (idempotent, atomic via .tmp+rename)."""
+    cfg = get_config()
+    p = cfg.get("backup", "filter_file",
+                default="/opt/rclone-sync/data/rclone-filters.txt")         or "/opt/rclone-sync/data/rclone-filters.txt"
+    from pathlib import Path as _P
+    base = _P("/opt/rclone-sync").resolve()
+    path = _P(p).resolve()
+    if not str(path).startswith(str(base)):
+        raise HTTPException(400, "filter_file muss unter /opt/rclone-sync liegen")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(body.content, encoding="utf-8")
+        tmp.replace(path)
+        return {"ok": True, "path": str(path), "bytes": len(body.content.encode())}
+    except Exception as e:
+        raise HTTPException(500, f"Schreibfehler: {e}")

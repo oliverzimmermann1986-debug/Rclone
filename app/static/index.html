@@ -14,7 +14,7 @@
     <button :class="page==='dashboard' && 'active'" @click="page='dashboard'">Dashboard</button>
     <button :class="page==='pairs' && 'active'" @click="page='pairs'; loadConfig()">Pairs</button>
     <button :class="page==='jobs' && 'active'" @click="page='jobs'; loadJobs()">Jobs</button>
-    <button :class="page==='config' && 'active'" @click="page='config'; loadConfig()">Einstellungen</button>
+    <button :class="page==='config' && 'active'" @click="page='config'; loadConfig(); loadFilterFile()">Einstellungen</button>
     <a href="/logout" class="logout">Logout</a>
   </nav>
 </header>
@@ -32,6 +32,52 @@
       <button class="primary" @click="runBackup(false)" :disabled="status.backup">▶ Backup starten</button>
       <button @click="runBackup(true)" :disabled="status.backup">🔍 Dry-Run</button>
       <button class="danger" @click="cancelBackup()" x-show="status.backup">✗ Abbrechen</button>
+      <button @click="showQuick=!showQuick; if(showQuick) quick.dry_run=true">⚡ Quick-Sync</button>
+    </div>
+  </div>
+
+  <!-- Quick-Sync Panel -->
+  <div class="card" x-show="showQuick" x-cloak>
+    <div class="card-head"><h2>⚡ Quick-Sync (ad-hoc)</h2></div>
+    <div class="field">
+      <label>Remote</label>
+      <div class="input-with-pick">
+        <input x-model="quick.remote" placeholder="pcloud:/medien/Backup">
+        <button @click="openQuickPicker('remote')" title="rclone-Pfad">📂</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>Lokal</label>
+      <div class="input-with-pick">
+        <input x-model="quick.local" placeholder="/mnt/backup">
+        <button @click="openQuickPicker('local')" title="Lokaler Pfad">📂</button>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>Richtung</label>
+        <select x-model="quick.direction" @change="if(quick.direction==='bisync')quick.mode='bisync'">
+          <option value="pull">⬇ Pull · Remote → Lokal</option>
+          <option value="push">⬆ Push · Lokal → Remote</option>
+          <option value="bisync">⇄ Bi-Sync</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Modus</label>
+        <select x-model="quick.mode" :disabled="quick.direction==='bisync'">
+          <option value="copy">Copy (keine Löschungen)</option>
+          <option value="sync">Sync (Mirror — löscht!)</option>
+          <option value="bisync" x-show="quick.direction==='bisync'">Bi-Sync</option>
+        </select>
+      </div>
+    </div>
+    <div class="field" style="flex-direction:row; align-items:center; gap:8px;">
+      <input type="checkbox" id="qs-dry" x-model="quick.dry_run">
+      <label for="qs-dry" style="text-transform:none; letter-spacing:0; font-size:13px;">Dry-Run</label>
+    </div>
+    <div class="btn-row">
+      <button class="primary" @click="runQuickSync()" :disabled="status.backup || !quick.remote || !quick.local">▶ Quick-Sync starten</button>
+      <button @click="showQuick=false">Abbrechen</button>
     </div>
   </div>
 
@@ -51,6 +97,48 @@
         </div>
         <div class="progress-bar"><div :style="`width:${p.percent || 0}%`"></div></div>
         <div class="muted small mono" x-text="(p.speed || '—') + ' · ETA ' + (p.eta || '—')"></div>
+      </div>
+    </template>
+  </div>
+
+  <!-- Storage-Übersicht -->
+  <div class="card">
+    <div class="card-head">
+      <h2>💾 Speicher-Übersicht</h2>
+      <button @click="loadStorage(true)" :disabled="storage.loading">
+        <span x-show="!storage.loading">↻ Inkl. Remote (langsam)</span>
+        <span x-show="storage.loading">… lädt</span>
+      </button>
+    </div>
+    <template x-if="storage.pairs.length === 0">
+      <div class="muted small">Keine Pairs konfiguriert — leg welche im Pairs-Tab an.</div>
+    </template>
+    <template x-for="p in storage.pairs" :key="p.name">
+      <div class="storage-row">
+        <div class="storage-head">
+          <strong x-text="p.name"></strong>
+          <span class="muted small mono" x-text="p.schedule || '—'"></span>
+        </div>
+        <div class="storage-paths small muted">
+          <span class="mono" x-text="'📡 ' + p.remote"></span>
+          <span class="mono" x-text="'💾 ' + p.local"></span>
+        </div>
+        <div class="storage-bars" x-show="p.local_disk?.exists">
+          <div class="muted small">
+            Lokal: <span x-text="formatBytes(p.local_disk?.used_bytes)"></span> / <span x-text="formatBytes(p.local_disk?.total_bytes)"></span>
+            (<span x-text="p.local_disk?.percent_used"></span>% belegt · <span x-text="formatBytes(p.local_disk?.free_bytes)"></span> frei)
+          </div>
+          <div class="progress-bar">
+            <div :style="`width:${p.local_disk?.percent_used || 0}%`"
+                 :class="(p.local_disk?.percent_used||0) > 90 ? 'warn' : ''"></div>
+          </div>
+        </div>
+        <div class="muted small" x-show="p.last_sync">
+          Letzter Sync: <span x-text="formatTs(p.last_sync)"></span> · <span x-text="formatBytes(p.last_transferred)"></span>
+        </div>
+        <div class="muted small" x-show="p.remote_size">
+          📡 Remote: <span x-text="formatBytes(p.remote_size?.bytes)"></span> · <span x-text="p.remote_size?.count"></span> Files
+        </div>
       </div>
     </template>
   </div>
@@ -108,6 +196,17 @@
           <button @click="runSinglePair(p.name)" :disabled="status.backup" title="Nur dieses Paar">▶</button>
           <button @click="testPair(idx)" title="Konnektivität testen">⌬</button>
           <button class="danger" @click="config.backup.pairs.splice(idx,1)">✗</button>
+        </div>
+        <div class="pair-extras">
+          <label class="small muted">
+            🛡 Mount-Check (min. Files):
+            <input type="number" min="0" x-model.number="p.min_local_files"
+                   :placeholder="'1 = nur prüfen ob nicht leer · 0 = aus'"
+                   style="width: 80px; display: inline-block; margin-left: 4px;">
+          </label>
+          <span class="muted small" style="margin-left: 16px;">
+            Schützt vor versehentlicher Cloud-Löschung wenn HDD weg ist. Default 1 = bricht ab wenn lokaler Pfad komplett leer.
+          </span>
         </div>
         <div x-show="testResults[idx]" class="test-result" :class="testResults[idx]?.ok ? 'ok' : 'err'">
           <span x-text="testResults[idx]?.message || testResults[idx]?.error"></span>
@@ -170,6 +269,63 @@
     <div class="btn-row" style="margin-top: 20px;">
       <button class="primary" @click="saveConfig()">💾 Speichern</button>
     </div>
+  </div>
+
+  <!-- Notifications / Webhooks -->
+  <div class="card">
+    <div class="card-head">
+      <h2>🔔 Notifications</h2>
+      <button @click="addWebhook()">+ Webhook</button>
+    </div>
+    <p class="muted small">Pro Webhook: Typ + URL + Events. Discord = Bot-Webhook-URL · Telegram = <code>https://api.telegram.org/botTOKEN/sendMessage?chat_id=XXX&text={message}</code> · Generic = beliebige URL die JSON-POST entgegennimmt.</p>
+    <template x-if="!config.notifications?.webhooks?.length">
+      <div class="muted small">Keine Webhooks konfiguriert.</div>
+    </template>
+    <template x-for="(h, idx) in (config.notifications?.webhooks || [])" :key="idx">
+      <div class="webhook-row">
+        <div class="row" style="grid-template-columns: 140px 1fr 36px;">
+          <select x-model="h.type">
+            <option value="discord">Discord</option>
+            <option value="telegram">Telegram</option>
+            <option value="generic">Generic JSON</option>
+          </select>
+          <input x-model="h.url" placeholder="https://discord.com/api/webhooks/...">
+          <button class="danger" @click="config.notifications.webhooks.splice(idx,1)">✗</button>
+        </div>
+        <div class="hook-events">
+          <template x-for="ev in ['sync_started','sync_ok','sync_error','conflict','mount_check_failed','cancelled']" :key="ev">
+            <label class="small">
+              <input type="checkbox" :checked="(h.events||[]).includes(ev)"
+                     @change="toggleHookEvent(h, ev)">
+              <span x-text="ev"></span>
+            </label>
+          </template>
+        </div>
+      </div>
+    </template>
+    <div class="btn-row" style="margin-top: 12px;">
+      <button class="primary" @click="saveConfig()">💾 Speichern</button>
+    </div>
+  </div>
+
+  <!-- Filter-Datei -->
+  <div class="card">
+    <div class="card-head">
+      <h2>🔍 Filter-Datei (rclone --filter-from)</h2>
+      <div>
+        <button @click="loadFilterFile()" :disabled="filterFile.loading">↻ Laden</button>
+        <button class="primary" @click="saveFilterFile()" :disabled="!filterFile.dirty">💾 Speichern</button>
+      </div>
+    </div>
+    <p class="muted small">
+      Pattern pro Zeile. <code>-</code> = exclude, <code>+</code> = include.
+      Doku: <a href="https://rclone.org/filtering/" target="_blank" style="color:var(--accent)">rclone.org/filtering</a>
+    </p>
+    <div class="muted small mono" x-show="filterFile.path" x-text="'📁 ' + filterFile.path"></div>
+    <textarea x-model="filterFile.content" @input="filterFile.dirty=true"
+              rows="14" class="mono"
+              placeholder="- .DS_Store&#10;- Thumbs.db&#10;- *.tmp"></textarea>
+    <div class="small muted" x-show="filterFile.dirty">⚠ ungespeicherte Änderungen</div>
   </div>
 
   <!-- Passwort ändern -->

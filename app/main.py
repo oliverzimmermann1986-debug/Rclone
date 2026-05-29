@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from .auth import SESSION_COOKIE, SESSION_MAX_AGE, create_session, verify_password
 from .config_store import get_config
 from .db import get_db
-from .routes import api_browse, api_config, api_jobs, api_test
+from .routes import api_browse, api_config, api_jobs, api_storage, api_test
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,6 +66,7 @@ app = FastAPI(
 app.include_router(api_config.router)
 app.include_router(api_jobs.router)
 app.include_router(api_test.router)
+app.include_router(api_storage.router)
 app.include_router(api_browse.router)
 
 # Static + UI

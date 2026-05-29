@@ -255,12 +255,58 @@ def _sync_pair(pair: Dict, args: List[str], log_dir: Path, dry_run: bool) -> Dic
     lok, lmsg = _remote_reachable(local)
     if not rok or not lok:
         logger.error(f"[{name}] Pre-Check failed: remote={rmsg!r} local={lmsg!r}")
+        try:
+            from ..notifications import notify
+            notify("mount_check_failed", f"⚠ Pair '{name}' Pre-Check fehlgeschlagen",
+                   f"Remote: {rmsg}\nLokal: {lmsg}", pair=name)
+        except Exception:
+            pass
         return {
             "name": name, "remote": remote, "local": local,
             "ok": False,
             "error": f"Pre-Check fail (remote: {rmsg} / local: {lmsg})",
             "skipped": True,
         }
+
+    # Mount-Health-Check für LOKALE Pfade: schützt gegen "leerer Mount
+    # = HDD nicht gemountet → bisync löscht alle Cloud-Files" Disaster.
+    # Pair kann min_local_files explizit setzen (z.B. 100 für Media-Folder),
+    # default ist 1 (nur 'Mount muss überhaupt was haben').
+    # min_local_files=0 deaktiviert den Check explizit.
+    if not _is_remote(local):
+        min_files = pair.get("min_local_files", 1)
+        if min_files is None:
+            min_files = 1
+        if int(min_files) > 0:
+            try:
+                local_path = Path(local)
+                if not local_path.exists():
+                    msg = f"Lokaler Pfad existiert nicht: {local}"
+                    logger.error(f"[{name}] Mount-Check: {msg}")
+                    from ..notifications import notify
+                    notify("mount_check_failed",
+                           f"⚠ Pair '{name}' — Mount fehlt",
+                           f"{msg}\n\nSync ABGEBROCHEN um Cloud-Löschung zu verhindern.",
+                           pair=name)
+                    return {"name": name, "remote": remote, "local": local,
+                            "ok": False, "error": msg, "skipped": True}
+                # Count Files (1 Level reicht für die Sanity-Prüfung)
+                file_count = sum(1 for _ in local_path.rglob("*") if _.is_file())
+                if file_count < int(min_files):
+                    msg = (f"Nur {file_count} Files unter {local}, "
+                           f"min_local_files={min_files}. Mount-Drop vermutet.")
+                    logger.error(f"[{name}] Mount-Check: {msg}")
+                    from ..notifications import notify
+                    notify("mount_check_failed",
+                           f"⚠ Pair '{name}' — verdächtig wenige Files",
+                           f"{msg}\n\nSync ABGEBROCHEN um Cloud-Löschung zu verhindern. "
+                           "Falls Absicht: min_local_files im Pair auf 0 setzen.",
+                           pair=name)
+                    return {"name": name, "remote": remote, "local": local,
+                            "ok": False, "error": msg, "skipped": True}
+                logger.info(f"[{name}] Mount-Check ok ({file_count} Files >= {min_files})")
+            except Exception as e:
+                logger.warning(f"[{name}] Mount-Check Exception: {e} — überspringe")
 
     # Nur mkdir wenn die zweite Seite tatsächlich ein lokaler Pfad ist.
     # Cloud→Cloud-Pairs (z.B. pcloud:/x ↔ gdrive:/y) haben keinen
@@ -448,11 +494,20 @@ def run_job(dry_run: bool = False, pairs_filter: list = None) -> Dict:
     # Webhook-Notify (asynchron). Dry-Runs nicht melden, das ist nur Probelauf.
     if not dry_run:
         try:
-            from ..core import webhook
-            event = "backup_done" if ok_count == len(pairs) else "job_failed"
-            webhook.notify(event, summary)
+            from ..notifications import notify
+            if ok_count == len(pairs):
+                notify("sync_ok",
+                       f"✓ Sync erfolgreich ({ok_count}/{len(pairs)} Paare)",
+                       f"Dauer: {duration:.0f}s · {total_transferred} Bytes",
+                       summary=summary)
+            else:
+                fail_names = [r.get("name", "?") for r in results if not r.get("ok")]
+                notify("sync_error",
+                       f"✗ Sync mit Fehlern ({ok_count}/{len(pairs)})",
+                       f"Fehlgeschlagen: {', '.join(fail_names)}\nDauer: {duration:.0f}s",
+                       summary=summary)
         except Exception as e:
-            logger.warning(f"webhook.notify failed (non-fatal): {e}")
+            logger.warning(f"notify failed (non-fatal): {e}")
 
     return summary
 

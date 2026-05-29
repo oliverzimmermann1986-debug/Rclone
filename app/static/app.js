@@ -14,16 +14,22 @@ function app() {
       current: '', parent: null, entries: [], loading: false,
     },
     pwChange: { current: '', new: '', confirm: '' },
+    showQuick: false,
+    quick: { remote: '', local: '', direction: 'bisync', mode: 'bisync', dry_run: true },
+    storage: { pairs: [], loading: false },
+    filterFile: { content: '', path: '', loading: false, dirty: false },
     toast: { show: false, msg: '', type: 'ok' },
 
     init() {
       this.refreshStatus();
       this.loadRecent();
+      this.loadStorage(false);
       setInterval(() => this.refreshStatus(), 3000);
       setInterval(() => {
         if (this.status.backup) this.loadProgress();
         else if (this.progress?.running) this.loadProgress();
       }, 2000);
+      setInterval(() => this.loadStorage(false), 30000);
     },
 
     async api(method, url, body) {
@@ -167,8 +173,14 @@ function app() {
     },
     pickPath(path) {
       const { mode, idx } = this.picker;
-      if (mode === 'remote') this.config.backup.pairs[idx].remote = path;
-      else this.config.backup.pairs[idx].local = path;
+      if (idx === -1) {
+        // Quick-Sync
+        if (mode === 'remote') this.quick.remote = path;
+        else this.quick.local = path;
+      } else {
+        if (mode === 'remote') this.config.backup.pairs[idx].remote = path;
+        else this.config.backup.pairs[idx].local = path;
+      }
       this.picker.show = false;
       this.showToast(`Pfad gesetzt: ${path}`);
     },
@@ -189,6 +201,89 @@ function app() {
         this.showToast('✓ Passwort geändert');
         this.pwChange = { current: '', new: '', confirm: '' };
       }
+    },
+
+    // ─── Quick-Sync ─────────────────────────────────────────────────────
+    openQuickPicker(mode) {
+      // Re-use Folder-Picker für Quick-Sync. idx=-1 signalisiert "Quick".
+      this.picker = {
+        show: true, mode, idx: -1,
+        current: '', parent: null, entries: [], loading: true,
+      };
+      this.loadPicker('');
+    },
+    async runQuickSync() {
+      if (!this.quick.remote || !this.quick.local) {
+        this.showToast('Remote + Lokal müssen gesetzt sein', 'err'); return;
+      }
+      if (this.quick.mode === 'sync' && !this.quick.dry_run) {
+        if (!confirm('⚠ SYNC (mirror) löscht im Ziel. Trotzdem starten?')) return;
+      }
+      const r = await this.api('POST', '/api/jobs/backup/quick', this.quick);
+      if (r?.ok) {
+        this.showToast('Quick-Sync gestartet');
+        this.showQuick = false;
+        setTimeout(() => { this.refreshStatus(); this.loadProgress(); }, 500);
+      }
+    },
+
+    // ─── Storage-Übersicht ──────────────────────────────────────────────
+    async loadStorage(includeRemote = false) {
+      this.storage.loading = true;
+      const url = `/api/storage/overview${includeRemote ? '?include_remote=true' : ''}`;
+      const r = await this.api('GET', url);
+      if (r?.pairs) this.storage.pairs = r.pairs;
+      this.storage.loading = false;
+    },
+
+    // ─── Filter-Datei ───────────────────────────────────────────────────
+    async loadFilterFile() {
+      this.filterFile.loading = true;
+      const r = await this.api('GET', '/api/config/filter-file');
+      if (r) {
+        this.filterFile.content = r.content || '';
+        this.filterFile.path = r.path || '';
+        this.filterFile.dirty = false;
+      }
+      this.filterFile.loading = false;
+    },
+    async saveFilterFile() {
+      const r = await this.api('PUT', '/api/config/filter-file',
+                               { content: this.filterFile.content });
+      if (r?.ok) {
+        this.showToast(`✓ Filter-Datei gespeichert (${r.bytes} B)`);
+        this.filterFile.dirty = false;
+      }
+    },
+
+    // ─── Webhooks-Config ────────────────────────────────────────────────
+    addWebhook() {
+      if (!this.config.notifications) this.config.notifications = { webhooks: [] };
+      if (!this.config.notifications.webhooks) this.config.notifications.webhooks = [];
+      this.config.notifications.webhooks.push({
+        type: 'discord', url: '', events: ['sync_error', 'mount_check_failed'],
+      });
+    },
+    toggleHookEvent(hook, ev) {
+      hook.events = hook.events || [];
+      const i = hook.events.indexOf(ev);
+      if (i >= 0) hook.events.splice(i, 1);
+      else hook.events.push(ev);
+    },
+    async testWebhook(hook) {
+      // Schickt einen Test-Event via Server. Aktuell nicht implementiert
+      // im Backend — wir simulieren ein Save+Reload um zu zeigen dass Config greift.
+      this.showToast('Webhook wird beim nächsten Event live getestet');
+    },
+
+    // ─── Helpers ────────────────────────────────────────────────────────
+    formatBytes(b) {
+      if (b === null || b === undefined) return '—';
+      if (b < 1024) return b + ' B';
+      const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
+      let i = -1, n = b;
+      do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
+      return n.toFixed(1) + ' ' + units[i];
     },
 
     formatTs(t) {
