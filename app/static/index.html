@@ -180,6 +180,13 @@
       <div class="hint">5-Felder-Cron. <code>0 3 * * *</code> = täglich 03:00. <code>manual</code> = nur Button.</div>
     </div>
 
+    <div class="pair-cols-head">
+      <div></div>
+      <div>📡 Remote (Cloud)</div>
+      <div>💾 Lokal</div>
+      <div>⏱ Schedule</div>
+      <div colspan="3"></div>
+    </div>
     <template x-for="(p, idx) in config.backup.pairs" :key="idx">
       <div class="pair-edit">
         <div class="row">
@@ -189,10 +196,28 @@
             <button @click="openPicker('remote', idx)" title="rclone-Pfad auswählen">📂</button>
           </div>
           <div class="input-with-pick">
-            <input x-model="p.local" placeholder="/mnt/media-nas/Filme">
+            <input x-model="p.local" placeholder="/mnt/data/medien/Filme">
             <button @click="openPicker('local', idx)" title="Lokalen Pfad auswählen">📂</button>
           </div>
-          <input x-model="p.schedule" placeholder="0 3 * * * oder manual">
+          <div class="schedule-cell">
+            <select x-model="p.schedule" @change="if(p.schedule==='__custom__')p.schedule=''" class="small">
+              <option value="manual">⏸ Manuell (nur Button)</option>
+              <option value="0 2 * * *">Täglich 02:00</option>
+              <option value="0 3 * * *">Täglich 03:00</option>
+              <option value="0 4 * * *">Täglich 04:00</option>
+              <option value="0 */6 * * *">Alle 6 Stunden</option>
+              <option value="0 */12 * * *">Alle 12 Stunden</option>
+              <option value="0 4 * * 0">Sonntags 04:00</option>
+              <option value="0 4 * * 1">Montags 04:00</option>
+              <option value="0 9 * * 1-5">Werktags 09:00</option>
+              <option value="*/15 * * * *">Alle 15 Min</option>
+              <option value="*/30 * * * *">Alle 30 Min</option>
+              <option value="0 * * * *">Stündlich</option>
+              <option value="__custom__">⚙ Eigene Cron…</option>
+            </select>
+            <input x-model="p.schedule" placeholder="0 3 * * *" class="mono cron-input"
+                   x-show="!['manual','0 2 * * *','0 3 * * *','0 4 * * *','0 */6 * * *','0 */12 * * *','0 4 * * 0','0 4 * * 1','0 9 * * 1-5','*/15 * * * *','*/30 * * * *','0 * * * *'].includes(p.schedule)">
+          </div>
           <button @click="runSinglePair(p.name)" :disabled="status.backup" title="Nur dieses Paar">▶</button>
           <button @click="testPair(idx)" title="Konnektivität testen">⌬</button>
           <button class="danger" @click="config.backup.pairs.splice(idx,1)">✗</button>
@@ -214,7 +239,7 @@
               <option value="sync">Sync (mirror — löscht!)</option>
             </select>
           </label>
-          <span class="cron-hint mono small" x-text="humanCron(p.schedule)"></span>
+          <span class="cron-hint" x-text="humanCron(p.schedule)"></span>
         </div>
         <div class="pair-extras">
           <label class="small muted">

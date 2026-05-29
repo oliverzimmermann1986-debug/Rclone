@@ -205,3 +205,33 @@ th { font-size: 11px; text-transform: uppercase; color: var(--fg-dim); letter-sp
   background: rgba(6,182,212,.08); border-radius: 12px;
   font-size: 11px; margin-left: auto;
 }
+
+/* ── Pair-Spalten-Header ───────────────────────────────────────────── */
+.pair-cols-head {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr 1.5fr 1.2fr 36px 36px 36px;
+  gap: 6px; padding: 0 12px 6px;
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--fg-dim);
+}
+.pair-cols-head > div { padding: 0 4px; }
+
+/* Pair-Edit Row müssen die gleichen Grid-Columns haben wie der Header */
+.pair-edit .row {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr 1.5fr 1.2fr 36px 36px 36px;
+  gap: 6px; align-items: center;
+}
+
+/* Schedule-Cell: Select + optional Custom-Input */
+.schedule-cell { display: flex; flex-direction: column; gap: 4px; }
+.schedule-cell select { width: 100%; font-size: 12px; padding: 6px 8px; }
+.schedule-cell .cron-input { font-size: 11px; padding: 4px 8px; }
+
+/* Cron-Hint prominenter */
+.cron-hint {
+  color: var(--accent); padding: 4px 12px;
+  background: rgba(6,182,212,.12); border: 1px solid rgba(6,182,212,.3);
+  border-radius: 12px; font-size: 12px; font-weight: 500;
+  margin-left: auto; white-space: nowrap;
+}
