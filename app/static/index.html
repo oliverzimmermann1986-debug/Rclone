@@ -96,11 +96,17 @@
       <div class="pair-edit">
         <div class="row">
           <input x-model="p.name" placeholder="Name">
-          <input x-model="p.remote" placeholder="pcloud:/medien/Filme">
-          <input x-model="p.local" placeholder="/mnt/media-nas/Filme">
+          <div class="input-with-pick">
+            <input x-model="p.remote" placeholder="pcloud:/medien/Filme">
+            <button @click="openPicker('remote', idx)" title="rclone-Pfad auswählen">📂</button>
+          </div>
+          <div class="input-with-pick">
+            <input x-model="p.local" placeholder="/mnt/media-nas/Filme">
+            <button @click="openPicker('local', idx)" title="Lokalen Pfad auswählen">📂</button>
+          </div>
           <input x-model="p.schedule" placeholder="0 3 * * * oder manual">
           <button @click="runSinglePair(p.name)" :disabled="status.backup" title="Nur dieses Paar">▶</button>
-          <button @click="testPair(idx)">⌬</button>
+          <button @click="testPair(idx)" title="Konnektivität testen">⌬</button>
           <button class="danger" @click="config.backup.pairs.splice(idx,1)">✗</button>
         </div>
         <div x-show="testResults[idx]" class="test-result" :class="testResults[idx]?.ok ? 'ok' : 'err'">
@@ -165,7 +171,70 @@
       <button class="primary" @click="saveConfig()">💾 Speichern</button>
     </div>
   </div>
+
+  <!-- Passwort ändern -->
+  <div class="card">
+    <div class="card-head"><h2>🔑 Passwort ändern</h2></div>
+    <div class="field">
+      <label>Aktuelles Passwort</label>
+      <input type="password" x-model="pwChange.current" autocomplete="current-password">
+    </div>
+    <div class="field">
+      <label>Neues Passwort (min. 8 Zeichen)</label>
+      <input type="password" x-model="pwChange.new" autocomplete="new-password">
+    </div>
+    <div class="field">
+      <label>Neues Passwort wiederholen</label>
+      <input type="password" x-model="pwChange.confirm" autocomplete="new-password">
+    </div>
+    <div class="btn-row">
+      <button class="primary" @click="changePassword()" :disabled="!pwChange.current || !pwChange.new || pwChange.new !== pwChange.confirm || pwChange.new.length < 8">
+        Passwort ändern
+      </button>
+    </div>
+  </div>
 </section>
+
+<!-- Folder-Picker-Modal -->
+<div class="modal" x-show="picker.show" @click.self="picker.show=false" x-cloak>
+  <div class="modal-body" style="max-width: 700px;">
+    <div class="modal-head">
+      <h3>
+        <span x-show="picker.mode === 'remote'">📡 rclone-Pfad wählen</span>
+        <span x-show="picker.mode === 'local'">💾 Lokalen Pfad wählen</span>
+      </h3>
+      <button type="button" class="close-x" @click="picker.show=false">✕ Schließen</button>
+    </div>
+    <div class="picker-path mono small muted" x-text="picker.current || '/'"></div>
+    <div class="picker-list">
+      <div class="picker-row" x-show="picker.parent !== null && picker.parent !== picker.current"
+           @click="loadPicker(picker.parent)">
+        <span class="picker-icon">⤴</span>
+        <span class="picker-name muted">..</span>
+      </div>
+      <template x-if="picker.loading">
+        <div class="picker-row muted"><em>lädt…</em></div>
+      </template>
+      <template x-for="e in picker.entries" :key="e.path">
+        <div class="picker-row" @click="loadPicker(e.path)">
+          <span class="picker-icon" x-text="e.is_mount ? '💾' : '📁'"></span>
+          <span class="picker-name" x-text="e.name"></span>
+          <button @click.stop="pickPath(e.path)" class="picker-select">wählen</button>
+        </div>
+      </template>
+      <div class="picker-row muted" x-show="!picker.loading && picker.entries.length === 0">
+        <em>(leer)</em>
+      </div>
+    </div>
+    <div class="picker-footer">
+      <span class="muted small">Aktueller Pfad:</span>
+      <span class="mono small" x-text="picker.current || '/'"></span>
+      <button class="primary" @click="pickPath(picker.current)" x-show="picker.current && picker.current !== '/'">
+        diesen Pfad wählen
+      </button>
+    </div>
+  </div>
+</div>
 
 <!-- Log-Modal -->
 <div class="modal" x-show="logModal.show" @click.self="logModal.show=false" x-cloak>

@@ -59,3 +59,33 @@ def update_config(body: ConfigUpdate) -> Dict[str, Any]:
     cfg._data = new_data
     cfg.save()
     return {"ok": True}
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/change-password")
+def change_password(body: PasswordChange, user: str = Depends(require_auth)) -> Dict[str, Any]:
+    """Ändert das eigene Web-Passwort. Erfordert aktuelles Passwort als
+    Verification, damit ein gestohlenes Session-Cookie nicht reicht."""
+    import bcrypt
+    from ..auth import verify_password
+    cfg = get_config()
+
+    # Current verifizieren
+    if not verify_password(user, body.current_password):
+        raise HTTPException(403, "Aktuelles Passwort falsch")
+
+    new = body.new_password.strip()
+    if len(new) < 8:
+        raise HTTPException(400, "Neues Passwort muss min. 8 Zeichen haben")
+    if new == body.current_password:
+        raise HTTPException(400, "Neues Passwort muss vom alten abweichen")
+
+    new_hash = bcrypt.hashpw(new.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("ascii")
+    cfg.set("web", "password_hash", new_hash)
+    cfg.set("web", "password", "")  # Klartext-Fallback aufräumen
+    cfg.save()
+    return {"ok": True, "message": "Passwort geändert"}

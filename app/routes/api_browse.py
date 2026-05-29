@@ -60,20 +60,68 @@ def browse_rclone(path: str = "") -> Dict[str, Any]:
 
 
 @router.get("/local")
-def browse_local(path: str = "/mnt") -> Dict[str, Any]:
+def browse_local(path: str = "") -> Dict[str, Any]:
+    """Lokaler Pfad-Browser. Bei path='' werden alle echten Mountpoints
+    aus /proc/mounts gelistet (intern + extern, ohne System-FS wie proc/sys).
+    Damit externe HDDs, USB-Sticks, zusaetzliche Mounts erreichbar sind."""
+    BLOCKED_PREFIXES = ("/proc", "/sys", "/dev", "/run", "/boot", "/lost+found")
+    BLOCKED_FSTYPES = {
+        "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2",
+        "fusectl", "binfmt_misc", "mqueue", "tracefs", "pstore", "bpf",
+        "ramfs", "configfs", "debugfs", "securityfs", "autofs", "rpc_pipefs",
+        "fuse.gvfsd-fuse", "nsfs", "overlay",
+    }
+    BLOCKED_NAMES = {".snapshot", ".zfs", "__pycache__", "$RECYCLE.BIN"}
+
+    if not path or path == "/":
+        # Root-View: alle echten Mounts + Top-Level-Roots
+        entries = []
+        seen = set()
+        try:
+            with open("/proc/mounts") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 3:
+                        continue
+                    mp = parts[1]
+                    fstype = parts[2]
+                    if fstype in BLOCKED_FSTYPES:
+                        continue
+                    if any(mp.startswith(b) for b in BLOCKED_PREFIXES):
+                        continue
+                    if mp == "/" or mp in seen:
+                        continue
+                    seen.add(mp)
+                    entries.append({
+                        "name": f"{mp}  [{fstype}]",
+                        "path": mp, "is_dir": True, "is_mount": True,
+                    })
+        except OSError:
+            pass
+        # Plus Standard-Roots auch wenn nicht eigener Mount
+        for d in ("/", "/mnt", "/media", "/opt", "/home", "/srv", "/var/lib"):
+            if d in seen or any(d.startswith(b) for b in BLOCKED_PREFIXES):
+                continue
+            if Path(d).is_dir():
+                entries.append({"name": d, "path": d, "is_dir": True, "is_mount": False})
+                seen.add(d)
+        entries.sort(key=lambda e: e["path"])
+        return {"path": "/", "parent": None, "is_root": True, "entries": entries}
+
     p = Path(path).expanduser().resolve()
-    # Erlaubte Roots
-    allowed = (Path("/mnt"), Path("/opt/rclone-sync"))
-    if not any(str(p).startswith(str(a)) for a in allowed):
-        raise HTTPException(403, f"Pfad nicht erlaubt: {p}")
+    if any(str(p).startswith(b) for b in BLOCKED_PREFIXES):
+        raise HTTPException(403, f"Pfad gesperrt: {p}")
     if not p.exists() or not p.is_dir():
         return {"path": str(p), "entries": [], "error": "Verzeichnis fehlt"}
     entries = []
     try:
         for x in sorted(p.iterdir(), key=lambda x: x.name.lower()):
-            if x.is_dir() and not x.name.startswith("."):
-                entries.append({"name": x.name, "path": str(x), "is_dir": True})
+            if not x.is_dir():
+                continue
+            if x.name.startswith(".") or x.name in BLOCKED_NAMES:
+                continue
+            entries.append({"name": x.name, "path": str(x), "is_dir": True})
     except PermissionError:
         raise HTTPException(403, "Keine Leseberechtigung")
-    parent = str(p.parent) if str(p.parent) != str(p) else None
-    return {"path": str(p), "parent": parent, "entries": entries}
+    parent = str(p.parent) if p.parent != p else ""
+    return {"path": str(p), "parent": parent, "entries": entries, "is_root": False}

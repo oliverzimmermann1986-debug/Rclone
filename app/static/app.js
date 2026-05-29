@@ -9,6 +9,11 @@ function app() {
     rcloneArgsText: '',
     testResults: {},
     logModal: { show: false, id: null, text: '' },
+    picker: {
+      show: false, mode: null, idx: null,
+      current: '', parent: null, entries: [], loading: false,
+    },
+    pwChange: { current: '', new: '', confirm: '' },
     toast: { show: false, msg: '', type: 'ok' },
 
     init() {
@@ -137,6 +142,53 @@ function app() {
       this.testResults[idx] = { loading: true };
       const r = await this.api('POST', '/api/test/rclone', { pair_index: idx });
       this.testResults[idx] = r;
+    },
+
+    // ─── Folder-Picker ──────────────────────────────────────────────────
+    openPicker(mode, idx) {
+      // mode: 'remote' (rclone) | 'local' (FS)
+      this.picker = {
+        show: true, mode, idx,
+        current: '', parent: null, entries: [], loading: true,
+      };
+      this.loadPicker('');
+    },
+    async loadPicker(path) {
+      this.picker.loading = true;
+      this.picker.current = path;
+      const endpoint = this.picker.mode === 'remote' ? '/api/browse/rclone' : '/api/browse/local';
+      const r = await this.api('GET', endpoint + (path ? '?path=' + encodeURIComponent(path) : ''));
+      if (r) {
+        this.picker.parent = r.parent;
+        this.picker.entries = r.entries || [];
+        this.picker.current = r.path || path || '';
+      }
+      this.picker.loading = false;
+    },
+    pickPath(path) {
+      const { mode, idx } = this.picker;
+      if (mode === 'remote') this.config.backup.pairs[idx].remote = path;
+      else this.config.backup.pairs[idx].local = path;
+      this.picker.show = false;
+      this.showToast(`Pfad gesetzt: ${path}`);
+    },
+
+    // ─── Passwort ändern ────────────────────────────────────────────────
+    async changePassword() {
+      if (this.pwChange.new !== this.pwChange.confirm) {
+        this.showToast('Wiederholung passt nicht', 'err'); return;
+      }
+      if (this.pwChange.new.length < 8) {
+        this.showToast('Min. 8 Zeichen', 'err'); return;
+      }
+      const r = await this.api('POST', '/api/config/change-password', {
+        current_password: this.pwChange.current,
+        new_password: this.pwChange.new,
+      });
+      if (r?.ok) {
+        this.showToast('✓ Passwort geändert');
+        this.pwChange = { current: '', new: '', confirm: '' };
+      }
     },
 
     formatTs(t) {
