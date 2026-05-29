@@ -54,8 +54,9 @@ chown -R $APP_USER:$APP_USER "$APP_DIR"
 if [[ ! -f "$APP_DIR/data/config.yaml" ]]; then
   echo "📝 Default-Config mit zufälligem Passwort + Secret..."
   cp "$APP_DIR/config/config.example.yaml" "$APP_DIR/data/config.yaml"
-  GEN_PASS=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
-  GEN_SECRET=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48)
+  # openssl statt 'tr | head' — vermeidet SIGPIPE-Fehler unter 'set -e'
+  GEN_PASS=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)
+  GEN_SECRET=$(openssl rand -base64 48 | tr -d '/+=' | cut -c1-48)
   # Default-Felder befüllen
   python3 - <<PY
 import yaml
