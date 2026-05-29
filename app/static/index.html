@@ -7,7 +7,7 @@
 <script defer src="https://unpkg.com/[email protected]/dist/cdn.min.js"></script>
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body x-data="app()" x-init="init()">
+<body x-data="app()" x-init="init()" @keydown.escape.window="if(logModal.show) logModal.show=false">
 <header>
   <h1>🔄 rclone-sync</h1>
   <nav>
@@ -168,13 +168,13 @@
 </section>
 
 <!-- Log-Modal -->
-<div class="modal" x-show="logModal.show" @click.self="logModal.show=false">
+<div class="modal" x-show="logModal.show" @click.self="logModal.show=false" x-cloak>
   <div class="modal-body">
     <div class="modal-head">
       <h3>Job #<span x-text="logModal.id"></span> Log</h3>
-      <button @click="logModal.show=false">✕</button>
+      <button type="button" class="close-x" @click="logModal.show=false" aria-label="Schließen">✕ Schließen</button>
     </div>
-    <pre class="log" x-text="logModal.text"></pre>
+    <pre class="log" x-text="logModal.text || '(leer — Log-Datei existiert nicht oder Job hat nichts geloggt)'"></pre>
   </div>
 </div>
 
