@@ -1,0 +1,16 @@
+[Unit]
+Description=rclone bisync (pCloud <-> NAS)
+After=network-online.target rclone-sync-web.service
+
+[Service]
+Type=oneshot
+User=rclone-sync
+Group=rclone-sync
+WorkingDirectory=/opt/rclone-sync
+Environment="PATH=/opt/rclone-sync/venv/bin:/usr/bin:/bin"
+Environment="SCRAPPER_CONFIG=/opt/rclone-sync/data/config.yaml"
+Environment="RCLONE_CACHE_DIR=/opt/rclone-sync/data/.rclone-cache"
+ExecStartPre=/bin/mkdir -p /opt/rclone-sync/data/.rclone-cache
+ExecStartPre=/bin/chown rclone-sync:rclone-sync /opt/rclone-sync/data/.rclone-cache
+ExecStart=/opt/rclone-sync/venv/bin/python -m app.jobs.backup_cli
+TimeoutStartSec=14400

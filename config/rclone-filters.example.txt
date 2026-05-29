@@ -1,0 +1,9 @@
+# rclone-Filter-Datei — Eine Pattern pro Zeile.
+# - = exclude, + = include
+# Doku: https://rclone.org/filtering/
+- .DS_Store
+- Thumbs.db
+- *.tmp
+- *.partial
+- .Trash/**
+- @eaDir/**

@@ -1,0 +1,83 @@
+# ============================================================
+# rclone-sync-container Konfiguration
+# Kopiere als data/config.yaml und passe die Werte an.
+# ============================================================
+
+web:
+  username: admin
+  # Wird beim ersten Start zu password_hash migriert. Lass leer
+  # wenn du via 'python -m app.cli set-password' setzen willst.
+  password: ""
+  password_hash: ""
+  # Wird beim ersten Start automatisch generiert wenn leer.
+  secret_key: ""
+
+paths:
+  data_dir: /opt/rclone-sync/data
+  logs_dir: /opt/rclone-sync/logs
+  temp_dir: /opt/rclone-sync/temp
+
+# ============================================================
+# rclone-Sync-Pairs
+# ============================================================
+backup:
+  enabled: true
+  rclone_remote: pcloud
+  # Globaler Default-Schedule für Pairs ohne eigene 'schedule'-Definition.
+  # Standard-Cron-Format (5 Felder: Min Hour Day Month Weekday).
+  # Beispiele:
+  #   "0 3 * * *"      - täglich 03:00
+  #   "0 */6 * * *"    - alle 6h zur vollen Stunde
+  #   "*/15 * * * *"   - alle 15 Minuten
+  #   "0 9 * * 1-5"    - werktags 09:00
+  # "off" / "manual" / "" = kein Auto-Sync, nur Button im UI
+  default_schedule: "0 3 * * *"
+
+  # MIGRIERT aus Scrappercontainer (491776c).
+  # Pairs aus der alten Konfig — anpassen wie gewünscht.
+  pairs:
+    - name: Serien
+      remote: pcloud:/medien/Serien
+      local: /mnt/media-nas/Serien
+      schedule: "0 2 * * *"          # täglich 02:00
+    - name: Filme
+      remote: pcloud:/medien/Filme
+      local: /mnt/media-nas/Filme
+      schedule: "0 4 * * 0"          # sonntags 04:00
+    - name: Iphone_backup
+      remote: pcloud:/medien/Iphone_backup
+      local: /mnt/media-nas/Iphone_backup
+      schedule: "manual"             # nur via Button
+
+  # rclone-Args die für ALLE Pairs gelten. Per-Pair-Args werden ZUSÄTZLICH
+  # angehängt (Override-Behavior je nach rclone-Flag).
+  rclone_args:
+    - "--transfers=4"
+    - "--checkers=8"
+    - "--bwlimit=20M"
+
+  # Pfad zu einer rclone-Filter-Datei. Wird automatisch via --filter-from
+  # übergeben wenn die Datei existiert.
+  filter_file: /opt/rclone-sync/data/rclone-filters.txt
+
+  # Trash-Ordner für überschriebene/gelöschte Files. Relativer Pfad
+  # landet unter dem Remote-Root.
+  # backup_dir: ".bisync-trash/{date}"
+  backup_dir: ""
+
+  # Konflikt-Auflösung bei bisync:
+  #   "auto"   - Default: rclone schreibt zwei .conflict-Files für manuelle Lösung
+  #   "newer"  - jüngeres File behalten
+  #   "older"  - älteres File behalten
+  #   "larger" - größeres File behalten
+  #   "path1"  - Cloud (Remote) gewinnt
+  #   "path2"  - Local gewinnt
+  conflict_resolve: auto
+
+  # Immutable-Mode: rclone schreibt NIE über existierende Files. Schutz
+  # vor manipulierter Cloud / Ransomware.
+  immutable: false
+
+  # Bandwidth-Limit als String "10M" (10 MB/s) oder als Schedule
+  # ("08:00,5M 20:00,off") — siehe rclone-Doku.
+  bwlimit: ""

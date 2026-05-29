@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rclone-sync</title>
+<script defer src="https://unpkg.com/[email protected]/dist/cdn.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body x-data="app()" x-init="init()">
+<header>
+  <h1>🔄 rclone-sync</h1>
+  <nav>
+    <button :class="page==='dashboard' && 'active'" @click="page='dashboard'">Dashboard</button>
+    <button :class="page==='pairs' && 'active'" @click="page='pairs'; loadConfig()">Pairs</button>
+    <button :class="page==='jobs' && 'active'" @click="page='jobs'; loadJobs()">Jobs</button>
+    <button :class="page==='config' && 'active'" @click="page='config'; loadConfig()">Einstellungen</button>
+    <a href="/logout" class="logout">Logout</a>
+  </nav>
+</header>
+
+<main>
+
+<!-- ==== DASHBOARD ==== -->
+<section x-show="page==='dashboard'">
+  <div class="card">
+    <div class="card-head">
+      <h2>Backup</h2>
+      <span class="pill" :class="status.backup ? 'running' : 'idle'" x-text="status.backup ? 'läuft' : 'idle'"></span>
+    </div>
+    <div class="btn-row">
+      <button class="primary" @click="runBackup(false)" :disabled="status.backup">▶ Backup starten</button>
+      <button @click="runBackup(true)" :disabled="status.backup">🔍 Dry-Run</button>
+      <button class="danger" @click="cancelBackup()" x-show="status.backup">✗ Abbrechen</button>
+    </div>
+  </div>
+
+  <!-- Live-Progress -->
+  <div class="card" x-show="progress && progress.running">
+    <div class="card-head">
+      <h2>Live-Progress</h2>
+      <span class="pill running" x-text="(progress?.done_pairs || 0) + ' / ' + (progress?.total_pairs || 0) + ' Paare'"></span>
+    </div>
+    <div class="muted small">Laufzeit: <span x-text="formatDur(progress?.elapsed_sec)"></span></div>
+    <template x-for="p in (progress?.pairs || [])" :key="p.name">
+      <div class="pair-row">
+        <div class="pair-head">
+          <strong x-text="p.name"></strong>
+          <span class="pill" :class="p.status" x-text="p.status"></span>
+          <span class="mono small" x-text="(p.transferred || '—') + ' / ' + (p.total || '—')"></span>
+        </div>
+        <div class="progress-bar"><div :style="`width:${p.percent || 0}%`"></div></div>
+        <div class="muted small mono" x-text="(p.speed || '—') + ' · ETA ' + (p.eta || '—')"></div>
+      </div>
+    </template>
+  </div>
+
+  <!-- Letzte Jobs -->
+  <div class="card">
+    <div class="card-head"><h2>Letzte Jobs</h2></div>
+    <table>
+      <thead><tr><th>Zeit</th><th>Status</th><th>Dauer</th><th>Summary</th><th></th></tr></thead>
+      <tbody>
+        <template x-for="j in recentJobs" :key="j.id">
+          <tr>
+            <td x-text="formatTs(j.started_at)"></td>
+            <td><span class="pill" :class="j.status" x-text="j.status"></span></td>
+            <td x-text="j.ended_at ? formatDur(j.ended_at - j.started_at) : '—'"></td>
+            <td class="mono small" x-text="summaryShort(j.summary)"></td>
+            <td><button @click="showLog(j.id)">Log</button></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ==== PAIRS ==== -->
+<section x-show="page==='pairs'">
+  <div class="card">
+    <div class="card-head">
+      <h2>Sync-Paare</h2>
+      <button class="primary" @click="addPair()">+ Pair</button>
+    </div>
+    <div class="field">
+      <label>rclone Remote (Default)</label>
+      <input x-model="config.backup.rclone_remote" placeholder="pcloud">
+    </div>
+    <div class="field">
+      <label>Default-Schedule (Cron)</label>
+      <input x-model="config.backup.default_schedule" placeholder="0 3 * * *">
+      <div class="hint">5-Felder-Cron. <code>0 3 * * *</code> = täglich 03:00. <code>manual</code> = nur Button.</div>
+    </div>
+
+    <template x-for="(p, idx) in config.backup.pairs" :key="idx">
+      <div class="pair-edit">
+        <div class="row">
+          <input x-model="p.name" placeholder="Name">
+          <input x-model="p.remote" placeholder="pcloud:/medien/Filme">
+          <input x-model="p.local" placeholder="/mnt/media-nas/Filme">
+          <input x-model="p.schedule" placeholder="0 3 * * * oder manual">
+          <button @click="runSinglePair(p.name)" :disabled="status.backup" title="Nur dieses Paar">▶</button>
+          <button @click="testPair(idx)">⌬</button>
+          <button class="danger" @click="config.backup.pairs.splice(idx,1)">✗</button>
+        </div>
+        <div x-show="testResults[idx]" class="test-result" :class="testResults[idx]?.ok ? 'ok' : 'err'">
+          <span x-text="testResults[idx]?.message || testResults[idx]?.error"></span>
+        </div>
+      </div>
+    </template>
+
+    <div class="btn-row" style="margin-top: 20px;">
+      <button class="primary" @click="saveConfig()">💾 Speichern</button>
+      <button @click="testRclone()">⌬ Remotes testen</button>
+    </div>
+    <div x-show="testResults._global" class="test-result" :class="testResults._global?.ok ? 'ok' : 'err'">
+      <span x-text="testResults._global?.message || testResults._global?.error"></span>
+      <div class="mono small" x-show="testResults._global?.remotes" x-text="'Verfügbar: ' + (testResults._global?.remotes || []).join(', ')"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ==== JOBS ==== -->
+<section x-show="page==='jobs'">
+  <div class="card">
+    <div class="card-head">
+      <h2>Job-History</h2>
+      <button @click="cleanupFailed()">🗑 Fehlgeschlagene löschen</button>
+    </div>
+    <table>
+      <thead><tr><th>ID</th><th>Zeit</th><th>Status</th><th>Dauer</th><th>Summary</th><th></th></tr></thead>
+      <tbody>
+        <template x-for="j in jobs" :key="j.id">
+          <tr>
+            <td x-text="j.id"></td>
+            <td x-text="formatTs(j.started_at)"></td>
+            <td><span class="pill" :class="j.status" x-text="j.status"></span></td>
+            <td x-text="j.ended_at ? formatDur(j.ended_at - j.started_at) : '—'"></td>
+            <td class="mono small" x-text="summaryShort(j.summary)"></td>
+            <td><button @click="showLog(j.id)">Log</button></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ==== CONFIG ==== -->
+<section x-show="page==='config'">
+  <div class="card">
+    <div class="card-head"><h2>Einstellungen</h2></div>
+    <div class="field">
+      <label>Web-Username</label>
+      <input x-model="config.web.username">
+    </div>
+    <div class="field">
+      <label>Logs-Dir</label>
+      <input x-model="config.paths.logs_dir">
+    </div>
+    <h3>rclone-Args (zusätzlich, eine pro Zeile)</h3>
+    <textarea x-model="rcloneArgsText" rows="6" class="mono"></textarea>
+    <h3>Filter-Datei (rclone --filter-from)</h3>
+    <input x-model="config.backup.filter_file" placeholder="/opt/rclone-sync/data/rclone-filters.txt">
+    <div class="btn-row" style="margin-top: 20px;">
+      <button class="primary" @click="saveConfig()">💾 Speichern</button>
+    </div>
+  </div>
+</section>
+
+<!-- Log-Modal -->
+<div class="modal" x-show="logModal.show" @click.self="logModal.show=false">
+  <div class="modal-body">
+    <div class="modal-head">
+      <h3>Job #<span x-text="logModal.id"></span> Log</h3>
+      <button @click="logModal.show=false">✕</button>
+    </div>
+    <pre class="log" x-text="logModal.text"></pre>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" :class="toast.type" x-show="toast.show" x-text="toast.msg"></div>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

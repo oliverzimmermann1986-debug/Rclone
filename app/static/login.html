@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rclone-sync · Login</title>
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0d12;color:#e7edf5;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.box{background:#11161e;border:1px solid #232c3a;border-radius:8px;padding:32px;width:340px;max-width:90%}
+h1{margin:0 0 24px;font-size:18px;color:#06b6d4}
+label{display:block;margin-bottom:6px;color:#8e9aae;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+input{width:100%;padding:10px 12px;background:#0a0d12;border:1px solid #232c3a;border-radius:5px;color:#e7edf5;font-size:14px;box-sizing:border-box;margin-bottom:14px}
+input:focus{outline:none;border-color:#06b6d4}
+button{width:100%;padding:11px;background:#06b6d4;color:#fff;border:0;border-radius:5px;font-size:14px;font-weight:500;cursor:pointer}
+button:hover{background:#0891b2}
+.err{background:rgba(248,113,113,.15);border:1px solid #f87171;color:#fca5a5;padding:10px;border-radius:5px;margin-bottom:14px;font-size:13px}
+</style>
+</head>
+<body>
+<form class="box" method="post" action="/login">
+<h1>🔄 rclone-sync</h1>
+<script>if(location.search.includes('error=1'))document.write('<div class="err">Falsches Login</div>')</script>
+<label>Username</label>
+<input type="text" name="username" autofocus required>
+<label>Passwort</label>
+<input type="password" name="password" required>
+<button type="submit">Einloggen</button>
+</form>
+</body>
+</html>

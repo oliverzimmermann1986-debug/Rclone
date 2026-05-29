@@ -1,0 +1,38 @@
+[Unit]
+Description=rclone-sync Web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=rclone-sync
+Group=rclone-sync
+WorkingDirectory=/opt/rclone-sync
+Environment="PATH=/opt/rclone-sync/venv/bin:/usr/bin:/bin"
+Environment="RCLONE_SYNC_CONFIG=/opt/rclone-sync/data/config.yaml"
+Environment="RCLONE_CACHE_DIR=/opt/rclone-sync/data/.rclone-cache"
+ExecStartPre=/bin/mkdir -p /opt/rclone-sync/data/.rclone-cache /opt/rclone-sync/logs
+ExecStartPre=/bin/chown rclone-sync:rclone-sync /opt/rclone-sync/data/.rclone-cache /opt/rclone-sync/logs
+# Bind: 0.0.0.0 falls Reverse-Proxy in eigenem Container; 127.0.0.1 falls im selben.
+ExecStart=/opt/rclone-sync/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 --proxy-headers --forwarded-allow-ips=*
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Härtung
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/rclone-sync /mnt
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
