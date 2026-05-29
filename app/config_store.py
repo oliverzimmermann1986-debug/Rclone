@@ -17,16 +17,35 @@ class Config:
     def __init__(self, path: Path):
         self.path = path
         self._data: dict = {}
+        self._mtime: float = 0.0
         self._load()
 
     def _load(self) -> None:
         if self.path.exists():
             with open(self.path, "r", encoding="utf-8") as f:
                 self._data = yaml.safe_load(f) or {}
+            try:
+                self._mtime = self.path.stat().st_mtime
+            except OSError:
+                self._mtime = 0.0
         else:
             self._data = {}
+            self._mtime = 0.0
+
+    def _maybe_reload(self) -> None:
+        """Re-load wenn das File extern geändert wurde (z.B. via CLI
+        `set-password`). Vermeidet stale-state-Bugs bei laufendem Web-Service."""
+        if not self.path.exists():
+            return
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            return
+        if mtime > self._mtime + 0.01:  # >10ms newer
+            self._load()
 
     def get(self, *keys, default=None):
+        self._maybe_reload()
         cur: Any = self._data
         for k in keys:
             if not isinstance(cur, dict):
@@ -53,6 +72,10 @@ class Config:
         with open(tmp, "w", encoding="utf-8") as f:
             yaml.dump(self._data, f, allow_unicode=True, sort_keys=False)
         tmp.replace(self.path)
+        try:
+            self._mtime = self.path.stat().st_mtime
+        except OSError:
+            pass
 
     def reload(self) -> None:
         with _lock:
