@@ -20,12 +20,12 @@ Ausgegliedert aus [Scrappercontainer](https://github.com/appear7240/Scrappercont
 
 ```bash
 # In einem frischen Debian/Ubuntu-LXC als root:
-curl -fsSL https://raw.githubusercontent.com/USERNAME/rclone-sync-container/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/appear7240/rclone-sync-container/main/scripts/install.sh | bash
 ```
 
 oder manuell:
 ```bash
-git clone https://github.com/USERNAME/rclone-sync-container.git /opt/rclone-sync
+git clone https://github.com/appear7240/rclone-sync-container.git /opt/rclone-sync
 cd /opt/rclone-sync
 sudo bash scripts/install.sh
 ```

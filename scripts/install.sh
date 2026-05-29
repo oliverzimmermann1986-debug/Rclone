@@ -5,7 +5,7 @@ set -euo pipefail
 
 APP_USER="rclone-sync"
 APP_DIR="/opt/rclone-sync"
-REPO_URL="${REPO_URL:-https://github.com/USERNAME/rclone-sync-container.git}"
+REPO_URL="${REPO_URL:-https://github.com/appear7240/rclone-sync-container.git}"
 BRANCH="${BRANCH:-main}"
 
 if [[ $EUID -ne 0 ]]; then
