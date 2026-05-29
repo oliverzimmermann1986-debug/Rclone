@@ -135,7 +135,10 @@ function app() {
     },
 
     addPair() {
-      this.config.backup.pairs.push({ name: '', remote: '', local: '', schedule: '' });
+      this.config.backup.pairs.push({
+        name: '', remote: '', local: '', schedule: '',
+        direction: 'bisync', mode: 'bisync', min_local_files: 1,
+      });
     },
 
     async testRclone() {
@@ -288,7 +291,51 @@ function app() {
 
     formatTs(t) {
       if (!t) return '—';
-      return new Date(t * 1000).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
+      const d = new Date(t * 1000);
+      const now = new Date();
+      const diff = (now - d) / 1000;
+      // < 24h: 'heute HH:MM' / 'gestern HH:MM' / sonst Datum
+      const hhmm = d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+      if (diff < 60) return 'gerade eben';
+      if (diff < 3600) return Math.round(diff / 60) + ' Min. her';
+      if (d.toDateString() === now.toDateString()) return 'heute ' + hhmm;
+      const yest = new Date(now); yest.setDate(yest.getDate() - 1);
+      if (d.toDateString() === yest.toDateString()) return 'gestern ' + hhmm;
+      if (diff < 7 * 86400) return d.toLocaleDateString('de-DE', { weekday: 'short' }) + ' ' + hhmm;
+      return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' }) + ' ' + hhmm;
+    },
+
+    humanCron(expr) {
+      if (!expr) return '';
+      const e = expr.trim().toLowerCase();
+      if (!e || e === 'manual' || e === 'off' || e === '') return '⏸ manuell (nur Button)';
+      const parts = e.split(/\s+/);
+      if (parts.length !== 5) return '? ungültig';
+      const [m, h, dom, mon, dow] = parts;
+      const DAYS = ['So','Mo','Di','Mi','Do','Fr','Sa'];
+      const time = (() => {
+        if (m === '*' && h === '*') return 'jede Minute';
+        if (m === '*') return `jede Minute (h=${h})`;
+        if (m.startsWith('*/')) return `alle ${m.slice(2)} Min`;
+        const mm = m.padStart(2, '0');
+        if (h === '*') return `jede volle Stunde:${mm}`;
+        if (h.startsWith('*/')) return `alle ${h.slice(2)}h um :${mm}`;
+        return `${h.padStart(2,'0')}:${mm}`;
+      })();
+      const day = (() => {
+        if (dow !== '*') {
+          if (dow.includes('-')) {
+            const [a,b] = dow.split('-').map(Number);
+            return `${DAYS[a]}–${DAYS[b]}`;
+          }
+          if (dow.includes(',')) return dow.split(',').map(n => DAYS[+n] || n).join(',');
+          return DAYS[+dow] || dow;
+        }
+        if (dom !== '*') return `am ${dom}.`;
+        if (mon !== '*') return `Monat ${mon}`;
+        return 'täglich';
+      })();
+      return `${day} ${time}`;
     },
     formatDur(s) {
       if (!s) return '—';

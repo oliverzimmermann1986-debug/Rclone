@@ -117,7 +117,7 @@
       <div class="storage-row">
         <div class="storage-head">
           <strong x-text="p.name"></strong>
-          <span class="muted small mono" x-text="p.schedule || '—'"></span>
+          <span class="muted small" x-text="humanCron(p.schedule)"></span>
         </div>
         <div class="storage-paths small muted">
           <span class="mono" x-text="'📡 ' + p.remote"></span>
@@ -197,6 +197,25 @@
           <button @click="testPair(idx)" title="Konnektivität testen">⌬</button>
           <button class="danger" @click="config.backup.pairs.splice(idx,1)">✗</button>
         </div>
+        <div class="pair-meta">
+          <label class="small">
+            Richtung:
+            <select x-model="p.direction" @change="if(p.direction!=='bisync'&&p.mode==='bisync')p.mode='copy';if(p.direction==='bisync')p.mode='bisync'" style="width:auto; display:inline-block; padding:4px 8px;">
+              <option value="bisync">⇄ Bi-Sync</option>
+              <option value="pull">⬇ Pull · Remote → Lokal</option>
+              <option value="push">⬆ Push · Lokal → Remote</option>
+            </select>
+          </label>
+          <label class="small">
+            Modus:
+            <select x-model="p.mode" :disabled="!p.direction || p.direction==='bisync'" style="width:auto; display:inline-block; padding:4px 8px;">
+              <option value="bisync" x-show="p.direction==='bisync'">Bi-Sync</option>
+              <option value="copy">Copy (kein Löschen)</option>
+              <option value="sync">Sync (mirror — löscht!)</option>
+            </select>
+          </label>
+          <span class="cron-hint mono small" x-text="humanCron(p.schedule)"></span>
+        </div>
         <div class="pair-extras">
           <label class="small muted">
             🛡 Mount-Check (min. Files):
@@ -205,7 +224,7 @@
                    style="width: 80px; display: inline-block; margin-left: 4px;">
           </label>
           <span class="muted small" style="margin-left: 16px;">
-            Schützt vor versehentlicher Cloud-Löschung wenn HDD weg ist. Default 1 = bricht ab wenn lokaler Pfad komplett leer.
+            Default 1 = bricht ab wenn lokaler Pfad leer (schützt vor Cloud-Löschung).
           </span>
         </div>
         <div x-show="testResults[idx]" class="test-result" :class="testResults[idx]?.ok ? 'ok' : 'err'">

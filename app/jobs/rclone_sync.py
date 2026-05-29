@@ -331,15 +331,34 @@ def _sync_pair(pair: Dict, args: List[str], log_dir: Path, dry_run: bool) -> Dic
     pair_safety = _pair_safety_args(get_config(), remote)
     effective_args = list(args) + pair_args + pair_safety
 
+    # Direction + Mode pro Pair. Default = bisync (backward compatible).
+    direction = (pair.get("direction") or "bisync").lower()
+    mode = (pair.get("mode") or "bisync").lower()
+    if direction == "bisync":
+        verb = "bisync"
+        src, dst = remote, local
+    elif direction == "pull":
+        # Remote → Lokal. Bei sync = mirror (löscht in Lokal), copy = nur kopieren.
+        verb = "sync" if mode == "sync" else "copy"
+        src, dst = remote, local
+    elif direction == "push":
+        # Lokal → Remote.
+        verb = "sync" if mode == "sync" else "copy"
+        src, dst = local, remote
+    else:
+        logger.warning(f"[{name}] unbekannte direction='{direction}', fallback bisync")
+        verb = "bisync"
+        src, dst = remote, local
+
     cmd = [
-        "rclone", "bisync", remote, local,
-        *_rclone_cache_args("bisync"),
+        "rclone", verb, src, dst,
+        *_rclone_cache_args(verb),
         "--stats", "10s", "--stats-one-line",
     ] + effective_args
     if dry_run:
         cmd.append("--dry-run")
 
-    logger.info(f"[{name}] {' '.join(shlex.quote(c) for c in cmd)}")
+    logger.info(f"[{name}] [{direction}/{mode}] {' '.join(shlex.quote(c) for c in cmd)}")
 
     summary = {
         "name": name,
@@ -371,9 +390,9 @@ def _sync_pair(pair: Dict, args: List[str], log_dir: Path, dry_run: bool) -> Dic
         class _R: pass
         res = _R()
         res.returncode = res_returncode
-        # Bei "Must run --resync" automatisch nachholen
+        # Bei "Must run --resync" automatisch nachholen (nur für bisync relevant)
         log_content = log_file.read_text(errors="ignore") if log_file.exists() else ""
-        if res.returncode != 0 and "Must run --resync" in log_content:
+        if verb == "bisync" and res.returncode != 0 and "Must run --resync" in log_content:
             logger.info(f"[{name}] auto --resync")
             cmd_resync = ["rclone", "bisync", remote, local,
                           *_rclone_cache_args("bisync"), "--resync"] + effective_args
