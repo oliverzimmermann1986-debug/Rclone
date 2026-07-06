@@ -1,10 +1,7 @@
-"""CLI: minütlich aufgerufen, triggert fällige Pairs.
-
-Wird von systemd-Timer scrapper-scheduler.timer aufgerufen.
-Liest Per-Pair-Schedules und syncht nur was jetzt dran ist.
-"""
+"""CLI: minütlich aufgerufen, triggert fällige Pairs."""
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from datetime import datetime
@@ -17,44 +14,52 @@ from .rclone_sync import run_job
 from .scheduler import find_due_pairs
 
 
+def _configure_logging(log_file: Path | None = None) -> None:
+    handlers = [logging.StreamHandler(sys.stdout)]
+    if log_file is not None:
+        handlers.insert(0, logging.FileHandler(log_file, encoding="utf-8"))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
 def main() -> int:
     cfg = get_config()
     db = get_db()
-
     due, status = find_due_pairs(cfg, db)
+
+    if not due:
+        # Normalfall: kein Logfile pro Minute erzeugen.
+        _configure_logging(None)
+        logging.getLogger("scheduler_cli").info("Keine fälligen Pairs (%d konfiguriert)", len(status))
+        return 0
 
     log_dir = Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"scheduler-{datetime.now():%Y%m%d-%H%M%S}.log"
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
-    )
+    _configure_logging(log_file)
     logger = logging.getLogger("scheduler_cli")
-
-    if not due:
-        # Kein Pair fällig - das ist der Normalfall, fast jede Minute
-        logger.info("Keine fälligen Pairs (%d konfiguriert)", len(status))
-        return 0
-
     logger.info("Fällige Pairs: %s", due)
 
-    # File-Lock damit nicht zwei Sync-Aufrufe parallel laufen
-    lock_path = Path("/tmp/scrapper-backup.lock")
-    with file_lock_or_none(lock_path) as got_lock:
-        if not got_lock:
+    with file_lock_or_none("backup") as got_lock:
+        if got_lock is None:
             logger.warning("Sync läuft bereits - überspringe diesen Tick")
             return 0
+
+        job_id = db.job_start("backup", log_file=str(log_file))
         try:
             summary = run_job(dry_run=False, pairs_filter=due)
-            logger.info("Scheduler-Run fertig: %s", summary)
+            status_name = "ok" if summary.get("ok") else "error"
+            db.job_finish(job_id, status_name, summary)
+            logger.info("Scheduler-Run fertig: %s", json.dumps(summary, ensure_ascii=False, default=str)[:1000])
+            return 0 if status_name == "ok" else 1
         except Exception as e:
             logger.exception("Scheduler-Run gescheitert: %s", e)
+            db.job_finish(job_id, "error", {"error": str(e), "due": due})
             return 1
-
-    return 0
 
 
 if __name__ == "__main__":

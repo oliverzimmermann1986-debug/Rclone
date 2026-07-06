@@ -18,6 +18,9 @@ function app() {
     quick: { remote: '', local: '', direction: 'bisync', mode: 'bisync', dry_run: true },
     storage: { pairs: [], loading: false },
     filterFile: { content: '', path: '', loading: false, dirty: false },
+    doctor: { loading: false, data: null },
+    plan: { loading: false, data: null, dry_run: true },
+    maintenance: { logs: [], loading: false, prune: null },
     toast: { show: false, msg: '', type: 'ok' },
 
     init() {
@@ -56,6 +59,10 @@ function app() {
     showToast(msg, type = 'ok') {
       this.toast = { show: true, msg, type };
       setTimeout(() => this.toast.show = false, 3500);
+    },
+
+    busy() {
+      return !!(this.status?.backup || this.status?.check || this.status?.quicksync);
     },
 
     async refreshStatus() {
@@ -113,6 +120,56 @@ function app() {
       }
     },
 
+    async loadPlan(dryRun = true) {
+      this.plan.loading = true;
+      this.plan.dry_run = dryRun;
+      const r = await this.api('GET', `/api/jobs/backup/plan?dry_run=${dryRun}`);
+      if (r) this.plan.data = r;
+      this.plan.loading = false;
+    },
+
+    async checkPair(name) {
+      if (!confirm(`Read-only Check für "${name}" starten?`)) return;
+      const r = await this.api('POST', `/api/jobs/backup/check/${encodeURIComponent(name)}`);
+      if (r?.ok) {
+        this.showToast(`Check für "${name}" gestartet`);
+        setTimeout(() => { this.refreshStatus(); this.loadJobs(); }, 500);
+      }
+    },
+
+    clonePair(idx) {
+      const src = this.config.backup.pairs[idx] || {};
+      const clone = JSON.parse(JSON.stringify(src));
+      clone.name = (clone.name || 'Pair') + '_Kopie';
+      clone.enabled = false;
+      clone.schedule = 'manual';
+      this.config.backup.pairs.splice(idx + 1, 0, clone);
+      this.showToast('Pair geklont (deaktiviert)');
+    },
+
+    async loadDoctor() {
+      this.doctor.loading = true;
+      const r = await this.api('GET', '/api/diagnostics/doctor');
+      if (r) this.doctor.data = r;
+      this.doctor.loading = false;
+    },
+
+    async loadLogs() {
+      this.maintenance.loading = true;
+      const r = await this.api('GET', '/api/maintenance/logs?limit=200');
+      if (r?.logs) this.maintenance.logs = r.logs;
+      this.maintenance.loading = false;
+    },
+
+    async pruneLogs(dryRun = true) {
+      const r = await this.api('POST', `/api/maintenance/logs/prune?days=30&dry_run=${dryRun}`);
+      if (r) {
+        this.maintenance.prune = r;
+        this.showToast(dryRun ? `${r.matched} alte Logs gefunden` : `${r.deleted} alte Logs gelöscht`);
+        this.loadLogs();
+      }
+    },
+
     async loadConfig() {
       const r = await this.api('GET', '/api/config');
       if (!r) return;
@@ -122,6 +179,17 @@ function app() {
       r.backup ||= {};
       r.backup.pairs ||= [];
       r.backup.rclone_args ||= [];
+      r.backup.tuning ||= {};
+      r.notifications ||= { webhooks: [] };
+      r.notifications.webhooks ||= [];
+      for (const p of r.backup.pairs) {
+        if (p.enabled === undefined) p.enabled = true;
+        p.schedule ||= 'manual';
+        p.direction ||= 'bisync';
+        p.mode ||= p.direction === 'bisync' ? 'bisync' : 'copy';
+        if (p.min_local_files === undefined) p.min_local_files = 1;
+        p.exclude ||= ''; p.include ||= ''; p.filter ||= ''; p.rclone_args ||= '';
+      }
       this.config = r;
       this.rcloneArgsText = (r.backup.rclone_args || []).join('\n');
     },
@@ -136,8 +204,10 @@ function app() {
 
     addPair() {
       this.config.backup.pairs.push({
-        name: '', remote: '', local: '', schedule: '',
+        name: '', remote: '', local: '', schedule: 'manual', enabled: true,
         direction: 'bisync', mode: 'bisync', min_local_files: 1,
+        exclude: '.DS_Store\nThumbs.db', include: '', filter: '', rclone_args: '',
+        transfers: '', checkers: '', max_delete: '',
       });
     },
 
@@ -273,10 +343,10 @@ function app() {
       if (i >= 0) hook.events.splice(i, 1);
       else hook.events.push(ev);
     },
-    async testWebhook(hook) {
-      // Schickt einen Test-Event via Server. Aktuell nicht implementiert
-      // im Backend — wir simulieren ein Save+Reload um zu zeigen dass Config greift.
-      this.showToast('Webhook wird beim nächsten Event live getestet');
+    async testWebhook(idx) {
+      await this.saveConfig();
+      const r = await this.api('POST', '/api/config/test-webhook', { index: idx, event: 'sync_ok' });
+      if (r?.ok) this.showToast('✓ Webhook-Test gesendet');
     },
 
     // ─── Helpers ────────────────────────────────────────────────────────
@@ -348,6 +418,7 @@ function app() {
     summaryShort(s) {
       if (!s) return '—';
       if (s.ok_count !== undefined) return `${s.ok_count}/${s.total_pairs} Paare${s.dry_run ? ' (dry)' : ''}`;
+      if (s.pair && s.command) return `Check ${s.pair}`;
       if (s.error) return '✗ ' + s.error.substring(0, 80);
       return JSON.stringify(s).substring(0, 80);
     },

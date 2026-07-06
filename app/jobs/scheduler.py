@@ -43,7 +43,7 @@ def _last_success_ts(db, pair_name: str) -> Optional[float]:
             continue
         summary = j.get("summary") or {}
         for ps in summary.get("pairs") or []:
-            if ps.get("name") == pair_name and ps.get("status") in ("ok", "skipped"):
+            if ps.get("name") == pair_name and (ps.get("ok") is True or ps.get("status") in ("ok", "skipped")):
                 return j.get("ended_at") or j.get("started_at")
     return None
 

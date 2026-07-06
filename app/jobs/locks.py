@@ -1,66 +1,50 @@
-"""File-basierte Locks zwischen Web-Trigger und systemd-CLI.
-
-Der In-Process ``threading.Lock`` in api_jobs schützt nur den Web-Prozess.
-Wenn der ``rclone-sync.timer`` feuert während ein Web-Trigger schon läuft,
-würden ZWEI Scraper-Prozesse gleichzeitig E-Mails lesen und Videos laden -
-plus die History/Pending-DB beschreiben. Dieses Modul schließt die Lücke
-per ``fcntl.flock``, das auch über Prozessgrenzen hinweg greift.
-
-Verwendung:
-    with file_lock_or_none("scraper") as fh:
-        if fh is None:
-            # anderer Prozess hält den Lock - sauber rausgehen
-            return
-        # ... Job-Arbeit ...
-
-Der Lock wird beim Verlassen des with-Blocks automatisch freigegeben,
-auch bei Exception oder ``os._exit``.
-"""
+"""Prozessübergreifende File-Locks für Web-Trigger, CLI und Scheduler."""
 from __future__ import annotations
 
 import fcntl
 import logging
 import os
+import re
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Union
 
 logger = logging.getLogger(__name__)
 
-LOCK_DIR = Path("/opt/rclone-sync/data/locks")
+LOCK_DIR = Path(os.getenv("RCLONE_SYNC_LOCK_DIR", "/opt/rclone-sync/data/locks"))
+
+
+def _safe_lock_name(name: Union[str, Path]) -> str:
+    raw = str(name).strip() or "default"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._") or "default"
 
 
 @contextmanager
-def file_lock_or_none(name: str) -> Iterator[Optional[object]]:
+def file_lock_or_none(name: Union[str, Path]) -> Iterator[Optional[object]]:
     """Versucht non-blocking eine Datei zu locken.
 
     Yields:
-        Das geöffnete File-Handle wenn der Lock erworben wurde,
-        sonst ``None`` (Caller MUSS checken).
-
-    Der Lock-File-Pfad ist ``{LOCK_DIR}/{name}.lock``. Das File bleibt
-    zwischen Runs liegen (nur die ``fcntl.flock``-Sperre ist transient).
+        File-Handle wenn der Lock erworben wurde, sonst ``None``.
     """
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    lock_path = LOCK_DIR / f"{name}.lock"
+    safe_name = _safe_lock_name(name)
+    lock_path = LOCK_DIR / f"{safe_name}.lock"
     fh = None
     acquired = False
     try:
-        fh = open(lock_path, "w")
+        fh = open(lock_path, "w", encoding="utf-8")
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             acquired = True
-            # PID reinschreiben - rein informativ für Debugging
             fh.write(f"{os.getpid()}\n")
             fh.flush()
             yield fh
         except BlockingIOError:
-            # Lock ist von anderem Prozess gehalten
             try:
-                other_pid = lock_path.read_text().strip()
+                other_pid = lock_path.read_text(encoding="utf-8").strip()
             except Exception:
                 other_pid = "?"
-            logger.info(f"file_lock '{name}': gehalten von PID {other_pid}")
+            logger.info("file_lock %r: gehalten von PID %s", safe_name, other_pid)
             yield None
     finally:
         if fh is not None:
@@ -75,9 +59,7 @@ def file_lock_or_none(name: str) -> Iterator[Optional[object]]:
                 pass
 
 
-def is_locked(name: str) -> bool:
-    """Probiert non-blocking, ob der Lock frei wäre. Gibt ihn sofort wieder ab.
-    Achtung: zwischen Probe und Action-Aufruf kann sich der Status ändern.
-    """
+def is_locked(name: Union[str, Path]) -> bool:
+    """Prüft, ob der Lock aktuell belegt ist."""
     with file_lock_or_none(name) as fh:
         return fh is None
