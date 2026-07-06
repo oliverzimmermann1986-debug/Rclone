@@ -14,6 +14,7 @@
     <button :class="page==='dashboard' && 'active'" @click="page='dashboard'">Dashboard</button>
     <button :class="page==='pairs' && 'active'" @click="page='pairs'; loadConfig()">Pairs</button>
     <button :class="page==='jobs' && 'active'" @click="page='jobs'; loadJobs()">Jobs</button>
+    <button :class="page==='doctor' && 'active'" @click="page='doctor'; loadDoctor(); loadLogs()">Doctor</button>
     <button :class="page==='config' && 'active'" @click="page='config'; loadConfig(); loadFilterFile()">Einstellungen</button>
     <a href="/logout" class="logout">Logout</a>
   </nav>
@@ -26,14 +27,43 @@
   <div class="card">
     <div class="card-head">
       <h2>Backup</h2>
-      <span class="pill" :class="status.backup ? 'running' : 'idle'" x-text="status.backup ? 'läuft' : 'idle'"></span>
+      <span class="pill" :class="busy() ? 'running' : 'idle'" x-text="busy() ? 'läuft' : 'idle'"></span>
     </div>
     <div class="btn-row">
-      <button class="primary" @click="runBackup(false)" :disabled="status.backup">▶ Backup starten</button>
-      <button @click="runBackup(true)" :disabled="status.backup">🔍 Dry-Run</button>
-      <button class="danger" @click="cancelBackup()" x-show="status.backup">✗ Abbrechen</button>
+      <button class="primary" @click="runBackup(false)" :disabled="busy()">▶ Backup starten</button>
+      <button @click="runBackup(true)" :disabled="busy()">🔍 Dry-Run</button>
+      <button @click="loadPlan(true)">🧭 Plan anzeigen</button>
+      <button class="danger" @click="cancelBackup()" x-show="busy()">✗ Abbrechen</button>
       <button @click="showQuick=!showQuick; if(showQuick) quick.dry_run=true">⚡ Quick-Sync</button>
     </div>
+  </div>
+
+  <!-- Plan Preview -->
+  <div class="card" x-show="plan.data" x-cloak>
+    <div class="card-head">
+      <h2>🧭 Ausführungsplan</h2>
+      <div class="btn-row">
+        <button @click="loadPlan(true)" :disabled="plan.loading">Dry-Run Plan</button>
+        <button @click="plan.data=null">Schließen</button>
+      </div>
+    </div>
+    <template x-if="plan.data?.warnings?.length">
+      <div class="test-result err">
+        <strong>Warnungen</strong>
+        <ul>
+          <template x-for="w in plan.data.warnings" :key="w"><li x-text="w"></li></template>
+        </ul>
+      </div>
+    </template>
+    <template x-for="p in (plan.data?.pairs || [])" :key="p.name">
+      <details class="plan-row">
+        <summary>
+          <strong x-text="p.name"></strong>
+          <span class="pill" :class="p.verb==='sync' ? 'skipped' : 'ok'" x-text="p.verb + ' · ' + p.direction"></span>
+        </summary>
+        <pre class="mono code" x-text="p.command"></pre>
+      </details>
+    </template>
   </div>
 
   <!-- Quick-Sync Panel -->
@@ -76,7 +106,7 @@
       <label for="qs-dry" style="text-transform:none; letter-spacing:0; font-size:13px;">Dry-Run</label>
     </div>
     <div class="btn-row">
-      <button class="primary" @click="runQuickSync()" :disabled="status.backup || !quick.remote || !quick.local">▶ Quick-Sync starten</button>
+      <button class="primary" @click="runQuickSync()" :disabled="busy() || !quick.remote || !quick.local">▶ Quick-Sync starten</button>
       <button @click="showQuick=false">Abbrechen</button>
     </div>
   </div>
@@ -185,7 +215,7 @@
       <div>📡 Remote (Cloud)</div>
       <div>💾 Lokal</div>
       <div>⏱ Schedule</div>
-      <div colspan="3"></div>
+      <div colspan="5"></div>
     </div>
     <template x-for="(p, idx) in config.backup.pairs" :key="idx">
       <div class="pair-edit">
@@ -218,11 +248,16 @@
             <input x-model="p.schedule" placeholder="0 3 * * *" class="mono cron-input"
                    x-show="!['manual','0 2 * * *','0 3 * * *','0 4 * * *','0 */6 * * *','0 */12 * * *','0 4 * * 0','0 4 * * 1','0 9 * * 1-5','*/15 * * * *','*/30 * * * *','0 * * * *'].includes(p.schedule)">
           </div>
-          <button @click="runSinglePair(p.name)" :disabled="status.backup" title="Nur dieses Paar">▶</button>
+          <button @click="runSinglePair(p.name)" :disabled="busy()" title="Nur dieses Paar">▶</button>
           <button @click="testPair(idx)" title="Konnektivität testen">⌬</button>
+          <button @click="checkPair(p.name)" :disabled="busy() || !p.name" title="Read-only rclone check">✓</button>
+          <button @click="clonePair(idx)" title="Klonen">⧉</button>
           <button class="danger" @click="config.backup.pairs.splice(idx,1)">✗</button>
         </div>
         <div class="pair-meta">
+          <label class="small">
+            <input type="checkbox" x-model="p.enabled" style="width:auto"> Aktiv
+          </label>
           <label class="small">
             Richtung:
             <select x-model="p.direction" @change="if(p.direction!=='bisync'&&p.mode==='bisync')p.mode='copy';if(p.direction==='bisync')p.mode='bisync'" style="width:auto; display:inline-block; padding:4px 8px;">
@@ -248,10 +283,23 @@
                    :placeholder="'1 = nur prüfen ob nicht leer · 0 = aus'"
                    style="width: 80px; display: inline-block; margin-left: 4px;">
           </label>
-          <span class="muted small" style="margin-left: 16px;">
-            Default 1 = bricht ab wenn lokaler Pfad leer (schützt vor Cloud-Löschung).
-          </span>
+          <label class="small muted" style="margin-left: 16px;">
+            Transfers:
+            <input type="number" min="1" x-model="p.transfers" placeholder="global" style="width:80px;display:inline-block;margin-left:4px;">
+          </label>
+          <label class="small muted" style="margin-left: 16px;">
+            Max Delete:
+            <input type="number" min="0" x-model="p.max_delete" placeholder="z.B. 100" style="width:90px;display:inline-block;margin-left:4px;">
+          </label>
         </div>
+        <details class="advanced">
+          <summary>Erweiterte Pair-Regeln / Filter</summary>
+          <div class="row two">
+            <div class="field"><label>Include Pattern</label><textarea x-model="p.include" rows="4" placeholder="+ *.jpg"></textarea></div>
+            <div class="field"><label>Exclude Pattern</label><textarea x-model="p.exclude" rows="4" placeholder=".DS_Store"></textarea></div>
+          </div>
+          <div class="field"><label>Pair rclone_args</label><textarea x-model="p.rclone_args" rows="3" placeholder="--size-only&#10;--ignore-existing"></textarea></div>
+        </details>
         <div x-show="testResults[idx]" class="test-result" :class="testResults[idx]?.ok ? 'ok' : 'err'">
           <span x-text="testResults[idx]?.message || testResults[idx]?.error"></span>
         </div>
@@ -277,17 +325,81 @@
       <button @click="cleanupFailed()">🗑 Fehlgeschlagene löschen</button>
     </div>
     <table>
-      <thead><tr><th>ID</th><th>Zeit</th><th>Status</th><th>Dauer</th><th>Summary</th><th></th></tr></thead>
+      <thead><tr><th>ID</th><th>Typ</th><th>Zeit</th><th>Status</th><th>Dauer</th><th>Summary</th><th></th></tr></thead>
       <tbody>
         <template x-for="j in jobs" :key="j.id">
           <tr>
             <td x-text="j.id"></td>
+            <td x-text="j.kind"></td>
             <td x-text="formatTs(j.started_at)"></td>
             <td><span class="pill" :class="j.status" x-text="j.status"></span></td>
             <td x-text="j.ended_at ? formatDur(j.ended_at - j.started_at) : '—'"></td>
             <td class="mono small" x-text="summaryShort(j.summary)"></td>
             <td><button @click="showLog(j.id)">Log</button></td>
           </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ==== DOCTOR ==== -->
+<section x-show="page==='doctor'">
+  <div class="card">
+    <div class="card-head">
+      <h2>🩺 Doctor / Diagnose</h2>
+      <button @click="loadDoctor()" :disabled="doctor.loading">↻ Prüfen</button>
+    </div>
+    <template x-if="doctor.loading"><div class="muted">prüfe…</div></template>
+    <template x-if="doctor.data">
+      <div>
+        <div class="test-result" :class="doctor.data.ok ? 'ok' : 'err'">
+          Gesamtstatus: <strong x-text="doctor.data.level"></strong>
+        </div>
+        <h3>System</h3>
+        <template x-for="c in doctor.data.checks" :key="c.name + c.message">
+          <div class="doctor-row" :class="c.level">
+            <span class="pill" :class="c.level === 'error' ? 'error' : (c.level === 'warn' ? 'skipped' : 'ok')" x-text="c.level"></span>
+            <strong x-text="c.name"></strong>
+            <span x-text="c.message"></span>
+          </div>
+        </template>
+        <h3>Pairs</h3>
+        <template x-for="p in doctor.data.pairs" :key="p.name">
+          <details class="doctor-pair">
+            <summary><strong x-text="p.name"></strong> <span class="muted small" x-text="p.enabled ? 'aktiv' : 'deaktiviert'"></span></summary>
+            <div class="mono small muted" x-text="'📡 ' + p.remote + ' · 💾 ' + p.local"></div>
+            <template x-for="c in p.checks" :key="c.name + c.message">
+              <div class="doctor-row" :class="c.level">
+                <span class="pill" :class="c.level === 'error' ? 'error' : (c.level === 'warn' ? 'skipped' : 'ok')" x-text="c.level"></span>
+                <strong x-text="c.name"></strong>
+                <span x-text="c.message"></span>
+              </div>
+            </template>
+            <template x-for="w in p.warnings" :key="w">
+              <div class="doctor-row warn"><span class="pill skipped">warn</span><span x-text="w"></span></div>
+            </template>
+          </details>
+        </template>
+      </div>
+    </template>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>🧹 Wartung</h2>
+      <div class="btn-row">
+        <button @click="loadLogs()">Logs laden</button>
+        <button @click="pruneLogs(true)">Prune-Test 30 Tage</button>
+        <button class="danger" @click="if(confirm('Logs älter 30 Tage wirklich löschen?')) pruneLogs(false)">Alte Logs löschen</button>
+      </div>
+    </div>
+    <div class="muted small" x-show="maintenance.prune" x-text="maintenance.prune?.dry_run ? (maintenance.prune.matched + ' Logs wären betroffen') : (maintenance.prune.deleted + ' Logs gelöscht')"></div>
+    <table x-show="maintenance.logs.length">
+      <thead><tr><th>Log</th><th>Größe</th><th>Geändert</th></tr></thead>
+      <tbody>
+        <template x-for="l in maintenance.logs.slice(0,50)" :key="l.path">
+          <tr><td class="mono small" x-text="l.path"></td><td x-text="formatBytes(l.size)"></td><td x-text="formatTs(l.mtime)"></td></tr>
         </template>
       </tbody>
     </table>
@@ -306,6 +418,14 @@
       <label>Logs-Dir</label>
       <input x-model="config.paths.logs_dir">
     </div>
+    <h3>Strukturierte rclone-Tuning-Werte</h3>
+    <div class="row four">
+      <div class="field"><label>Transfers</label><input type="number" x-model="config.backup.tuning.transfers" placeholder="4"></div>
+      <div class="field"><label>Checkers</label><input type="number" x-model="config.backup.tuning.checkers" placeholder="8"></div>
+      <div class="field"><label>Retries</label><input type="number" x-model="config.backup.tuning.retries" placeholder="3"></div>
+      <div class="field"><label>Max Delete</label><input type="number" x-model="config.backup.tuning.max_delete" placeholder="Schutzlimit"></div>
+    </div>
+    <label class="small muted"><input type="checkbox" x-model="config.backup.tuning.fast_list" style="width:auto"> --fast-list aktivieren</label>
     <h3>rclone-Args (zusätzlich, eine pro Zeile)</h3>
     <textarea x-model="rcloneArgsText" rows="6" class="mono"></textarea>
     <h3>Filter-Datei (rclone --filter-from)</h3>
@@ -327,13 +447,14 @@
     </template>
     <template x-for="(h, idx) in (config.notifications?.webhooks || [])" :key="idx">
       <div class="webhook-row">
-        <div class="row" style="grid-template-columns: 140px 1fr 36px;">
+        <div class="row" style="grid-template-columns: 140px 1fr 70px 36px;">
           <select x-model="h.type">
             <option value="discord">Discord</option>
             <option value="telegram">Telegram</option>
             <option value="generic">Generic JSON</option>
           </select>
           <input x-model="h.url" placeholder="https://discord.com/api/webhooks/...">
+          <button @click="testWebhook(idx)" title="Test senden">Test</button>
           <button class="danger" @click="config.notifications.webhooks.splice(idx,1)">✗</button>
         </div>
         <div class="hook-events">

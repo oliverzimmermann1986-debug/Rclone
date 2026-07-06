@@ -135,3 +135,31 @@ def save_filter_file(body: FilterPayload) -> dict:
         return {"ok": True, "path": str(path), "bytes": len(body.content.encode())}
     except Exception as e:
         raise HTTPException(500, f"Schreibfehler: {e}")
+
+
+class WebhookTest(BaseModel):
+    index: int
+    event: str = "sync_ok"
+
+
+@router.post("/test-webhook")
+def test_webhook(body: WebhookTest) -> Dict[str, Any]:
+    """Sendet einen Test an genau einen konfigurierten Webhook."""
+    from ..notifications import notify_one, EVENTS
+    cfg = get_config()
+    hooks = cfg.get("notifications", "webhooks", default=[]) or []
+    if body.index < 0 or body.index >= len(hooks):
+        raise HTTPException(404, "Webhook nicht gefunden")
+    if body.event not in EVENTS:
+        raise HTTPException(400, "Unbekanntes Event")
+    try:
+        notify_one(
+            hooks[body.index],
+            body.event,
+            "rclone-sync Test",
+            "Das ist ein Test aus der rclone-sync Web-UI.",
+            source="ui-test",
+        )
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(502, f"Webhook-Test fehlgeschlagen: {e}")

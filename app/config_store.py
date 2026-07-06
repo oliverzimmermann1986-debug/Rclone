@@ -3,6 +3,7 @@ Kompatibel mit dem alten scrapper-Konfig-Layout."""
 from __future__ import annotations
 
 import os
+import stat
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -71,6 +72,10 @@ class Config:
         tmp = self.path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             yaml.dump(self._data, f, allow_unicode=True, sort_keys=False)
+        try:
+            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
         tmp.replace(self.path)
         try:
             self._mtime = self.path.stat().st_mtime

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..auth import require_auth
 from ..config_store import get_config
@@ -83,18 +83,26 @@ def _run_backup_thread(job_id: int, dry_run: bool, pairs_filter=None):
 def run_backup(dry_run: bool = Query(False), pairs: Optional[str] = Query(None)):
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup läuft bereits")
-    pairs_filter = [p.strip() for p in pairs.split(",")] if pairs else None
+    pairs_filter = [p.strip() for p in pairs.split(",") if p.strip()] if pairs else None
     job_id = get_db().job_start("backup")
     t = threading.Thread(target=_run_backup_thread, args=(job_id, dry_run, pairs_filter), daemon=True)
     t.start()
     return {"ok": True, "job_id": job_id, "pairs": pairs_filter}
 
 
+@router.get("/backup/plan")
+def backup_plan(dry_run: bool = Query(True), pairs: Optional[str] = Query(None)):
+    """Zeigt die rclone-Kommandos und Warnungen, ohne rclone zu starten."""
+    pairs_filter = [p.strip() for p in pairs.split(",") if p.strip()] if pairs else None
+    return rclone_job.build_job_plan(dry_run=dry_run, pairs_filter=pairs_filter)
+
+
 @router.post("/backup/cancel")
 def cancel_backup():
     db = get_db()
-    if not db.job_running("backup"):
-        return {"ok": False, "error": "Kein laufender Backup"}
+    running = db.job_running("backup") or db.job_running("check") or db.job_running("quicksync")
+    if not running:
+        return {"ok": False, "error": "Kein laufender Job"}
     return rclone_job.cancel_job()
 
 
@@ -102,6 +110,43 @@ def cancel_backup():
 def run_single_pair(pair_name: str):
     """Einzelnes Pair triggern (für Audit / On-Demand-Sync)."""
     return run_backup(dry_run=False, pairs=pair_name)
+
+
+@router.post("/backup/check/{pair_name}")
+def check_pair(pair_name: str, one_way: Optional[bool] = Query(None), download: bool = Query(False)):
+    """Read-only rclone check für ein Pair. Läuft als eigener Job."""
+    if not _locks["backup"].acquire(blocking=False):
+        raise HTTPException(409, "Backup/Check läuft bereits")
+    job_id = get_db().job_start("check")
+
+    def _run():
+        db = get_db()
+        fh = None
+        try:
+            with file_lock_or_none("backup") as flock:
+                if flock is None:
+                    db.job_finish(job_id, "skipped", {"error": "anderer Backup läuft"})
+                    return
+                try:
+                    log_file, fh = _setup_job_logger(job_id, "check")
+                    db.job_set_log_file(job_id, str(log_file))
+                    result = rclone_job.run_pair_check(pair_name, one_way=one_way, download=download)
+                    status = "ok" if result.get("ok") else "error"
+                    db.job_finish(job_id, status, result)
+                except Exception as e:
+                    logger.exception("Check #%s fail", job_id)
+                    db.job_finish(job_id, "error", {"error": str(e)})
+        finally:
+            if fh:
+                try:
+                    logging.getLogger().removeHandler(fh)
+                    fh.close()
+                except Exception:
+                    pass
+            _locks["backup"].release()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "job_id": job_id}
 
 
 @router.get("/backup/progress")
@@ -137,28 +182,35 @@ def backup_progress():
         r'(?:,\s*([\d.]+\s*\w*)/s)?'
         r'(?:,\s*ETA\s*(\S+))?'
     )
+    active_pair_logs = rclone_job.get_active_pair_logs()
     for pair in pairs_cfg:
         name = pair.get("name", "")
-        status = "pending"
-        if f"PAAR '{name}'" in log_text or f"pair '{name}'" in log_text.lower():
+        status = "running" if name in active_pair_logs else "pending"
+        pair_log_text = ""
+        pair_log = active_pair_logs.get(name)
+        if pair_log and Path(pair_log).exists():
+            try:
+                with open(pair_log, "rb") as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - 32768))
+                    pair_log_text = f.read().decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+        search_text = pair_log_text or log_text
+        if "Transferred:" in pair_log_text and "Errors:" in pair_log_text:
             status = "running"
-        if f"PAAR '{name}' OK" in log_text or f"'{name}' fertig" in log_text:
-            status = "done"
-        if f"'{name}' FEHLER" in log_text or f"'{name}' ERROR" in log_text:
-            status = "error"
-        # Letzte Stats-Zeile für dieses Pair
-        pair_block = log_text.split(f"PAAR '{name}'")
         latest_stats = None
-        if len(pair_block) > 1:
-            for line in reversed(pair_block[-1].splitlines()):
-                m = stats_re.search(line)
-                if m:
-                    latest_stats = m
-                    break
+        for line in reversed(search_text.splitlines()):
+            m = stats_re.search(line)
+            if m:
+                latest_stats = m
+                break
         if latest_stats:
             pairs_status.append({
                 "name": name,
                 "status": status,
+                "log_file": pair_log,
                 "transferred": latest_stats.group(1),
                 "total": latest_stats.group(2),
                 "percent": float(latest_stats.group(3)) if latest_stats.group(3) else None,
@@ -166,8 +218,9 @@ def backup_progress():
                 "eta": latest_stats.group(5),
             })
         else:
-            pairs_status.append({"name": name, "status": status, "transferred": None,
-                                  "total": None, "percent": None, "speed": None, "eta": None})
+            pairs_status.append({"name": name, "status": status, "log_file": pair_log,
+                                  "transferred": None, "total": None, "percent": None,
+                                  "speed": None, "eta": None})
 
     return {
         "running": True,
@@ -181,8 +234,17 @@ def backup_progress():
 
 
 
+class QuickSyncPayload(BaseModel):
+    remote: str = Field(default="")
+    local: str = Field(default="")
+    direction: str = Field(default="bisync", pattern="^(pull|push|bisync)$")
+    mode: str = Field(default="bisync", pattern="^(copy|sync|bisync)$")
+    dry_run: bool = False
+    extra_args: list[str] | str | None = None
+
+
 @router.post("/backup/quick")
-def run_quick_sync(payload: dict):
+def run_quick_sync(payload: QuickSyncPayload):
     """Ad-hoc-Sync ohne Pair-Speichern. Payload: {remote, local, direction,
     mode, dry_run, extra_args}. direction=pull|push|bisync, mode=copy|sync|bisync."""
     from ..jobs import rclone_sync as rj
@@ -201,12 +263,12 @@ def run_quick_sync(payload: dict):
                     log_file, fh = _setup_job_logger(job_id, "quicksync")
                     db.job_set_log_file(job_id, str(log_file))
                     result = rj.run_quick(
-                        remote_path=payload.get("remote", ""),
-                        local_path=payload.get("local", ""),
-                        direction=payload.get("direction", "bisync"),
-                        mode=payload.get("mode", "bisync"),
-                        dry_run=bool(payload.get("dry_run", False)),
-                        extra_args=payload.get("extra_args"),
+                        remote_path=payload.remote,
+                        local_path=payload.local,
+                        direction=payload.direction,
+                        mode=payload.mode,
+                        dry_run=payload.dry_run,
+                        extra_args=payload.extra_args,
                     )
                     status = "ok" if result.get("ok") else "error"
                     db.job_finish(job_id, status, result)
@@ -226,13 +288,19 @@ def run_quick_sync(payload: dict):
 
 @router.get("/list")
 def list_jobs(kind: Optional[str] = None, limit: int = 50):
-    return get_db().job_list(kind=kind, limit=limit)
+    return get_db().job_list(kind=kind, limit=max(1, min(limit, 500)))
 
 
 @router.post("/cleanup-failed")
 def cleanup_failed_jobs():
     deleted = get_db().jobs_delete_failed()
     return {"ok": True, "deleted": deleted}
+
+
+@router.get("/status/current")
+def status_current():
+    db = get_db()
+    return {"backup": db.job_running("backup"), "check": db.job_running("check"), "quicksync": db.job_running("quicksync")}
 
 
 @router.get("/{job_id}")
@@ -245,21 +313,20 @@ def job_detail(job_id: int):
 
 @router.get("/{job_id}/log")
 def job_log(job_id: int, tail: int = 500):
+    tail = max(1, min(int(tail or 500), 5000))
     j = get_db().job_get(job_id)
     if not j:
         raise HTTPException(404, "Job nicht gefunden")
     log_file = j.get("log_file")
-    if not log_file or not Path(log_file).exists():
+    if not log_file:
+        return {"log": ""}
+    p = Path(log_file).resolve()
+    logs_dir = Path(get_config().get("paths", "logs_dir", default="/opt/rclone-sync/logs")).resolve()
+    if not str(p).startswith(str(logs_dir)) or not p.exists():
         return {"log": ""}
     try:
-        with open(log_file, "r", errors="ignore") as f:
+        with open(p, "r", errors="ignore") as f:
             lines = f.readlines()[-tail:]
         return {"log": "".join(lines)}
     except Exception as e:
         return {"log": f"<Fehler: {e}>"}
-
-
-@router.get("/status/current")
-def status_current():
-    db = get_db()
-    return {"backup": db.job_running("backup")}

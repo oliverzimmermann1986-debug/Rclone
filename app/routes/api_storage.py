@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends
 from ..auth import require_auth
 from ..config_store import get_config
 from ..db import get_db
+from ..jobs.rclone_sync import _is_remote
 
 logger = logging.getLogger(__name__)
 
@@ -60,17 +61,17 @@ def overview(include_remote: bool = False) -> Dict[str, Any]:
     db = get_db()
     pairs = cfg.get("backup", "pairs", default=[]) or []
     out = []
+    recent_jobs = db.job_list(kind="backup", limit=50)
     for p in pairs:
         local = p.get("local", "")
         info: Dict[str, Any] = {
             "name": p.get("name"),
             "local": local, "remote": p.get("remote"),
             "schedule": p.get("schedule", ""),
-            "local_disk": _disk_usage(local) if local and not local.endswith(":") else None,
+            "local_disk": _disk_usage(local) if local and not _is_remote(local) else None,
         }
         # Letzter erfolgreicher Job für dieses Pair (aus jobs.summary)
-        jobs = db.job_list(kind="backup", limit=20)
-        for j in jobs:
+        for j in recent_jobs:
             if not j.get("summary"):
                 continue
             for pr in j["summary"].get("pairs", []):

@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from ..auth import require_auth
 from ..config_store import get_config
+from ..jobs.rclone_sync import _is_remote
 
 router = APIRouter(prefix="/api/test", tags=["test"], dependencies=[Depends(require_auth)])
 
@@ -33,9 +34,9 @@ def test_rclone(req: RcloneTest) -> Dict[str, Any]:
         result = {
             "ok": True, "remotes": remotes,
             "configured_remote": configured,
-            "remote_exists": configured in remotes,
+            "remote_exists": (configured in remotes) if configured else None,
         }
-        if not result["remote_exists"]:
+        if configured and not result["remote_exists"]:
             result["ok"] = False
             result["error"] = f"Konfigurierter Remote '{configured}' fehlt. Vorhanden: {', '.join(remotes)}"
             return result
@@ -45,17 +46,22 @@ def test_rclone(req: RcloneTest) -> Dict[str, Any]:
             if req.pair_index >= len(pairs):
                 return {**result, "ok": False, "error": "pair_index ungültig"}
             pair = pairs[req.pair_index]
+            remote_path = pair.get("remote", "")
             r2 = subprocess.run(
-                ["rclone", "size", pair.get("remote", "")],
+                ["rclone", "size", remote_path],
                 capture_output=True, text=True, timeout=60,
             )
-            result["remote_path"] = pair.get("remote")
+            result["remote_path"] = remote_path
             result["remote_size_output"] = (r2.stdout if r2.returncode == 0 else r2.stderr).strip()[:300]
-            result["local_path"] = pair.get("local")
-            result["local_exists"] = Path(pair.get("local", "")).exists()
+            if r2.returncode != 0:
+                result["ok"] = False
+                result["error"] = f"Remote-Pfad nicht lesbar: {remote_path}"
+            local_path = pair.get("local", "")
+            result["local_path"] = local_path
+            result["local_exists"] = True if _is_remote(local_path) else Path(local_path).exists()
             if not result["local_exists"]:
                 result["ok"] = False
-                result["error"] = f"Lokaler Pfad fehlt: {pair.get('local')}"
+                result["error"] = f"Lokaler Pfad fehlt: {local_path}"
 
         result["message"] = f"rclone ok — {len(remotes)} Remote(s)"
         return result
