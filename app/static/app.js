@@ -421,11 +421,27 @@ function app() {
     },
 
     async copyLog() {
+      const text = this.filteredLog();
       try {
-        await navigator.clipboard.writeText(this.filteredLog());
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          // Fallback für HTTP: navigator.clipboard existiert nur in Secure Contexts.
+          const area = document.createElement('textarea');
+          area.value = text;
+          area.setAttribute('readonly', '');
+          area.style.position = 'fixed';
+          area.style.opacity = '0';
+          document.body.appendChild(area);
+          area.select();
+          area.setSelectionRange(0, area.value.length);
+          const ok = document.execCommand('copy');
+          document.body.removeChild(area);
+          if (!ok) throw new Error('execCommand copy fehlgeschlagen');
+        }
         this.showToast('Log kopiert');
       } catch (_) {
-        this.showToast('Log konnte nicht kopiert werden', 'err');
+        this.showToast('Kopieren blockiert — Download-Button nutzen', 'err');
       }
     },
 

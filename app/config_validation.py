@@ -242,6 +242,9 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         backup.get("collect_pre_post_stats", False)
     )
     backup["auto_resync"] = _boolean(backup.get("auto_resync", False))
+    backup["auto_resync_first_run"] = _boolean(
+        backup.get("auto_resync_first_run", True), default=True
+    )
     backup["recover"] = _boolean(backup.get("recover", True), default=True)
     backup["resilient"] = _boolean(backup.get("resilient", True), default=True)
     backup["allow_unsafe_rclone_args"] = _boolean(

@@ -1,6 +1,12 @@
-# Audit und Optimierungen – rclone-sync-container 1.5.2
+# Audit und Optimierungen – rclone-sync-container 1.5.3
 
 Stand: 11.07.2026
+
+
+## Neu und behoben in 1.5.3
+
+- **Neu:** Baseline-Resync beim Erstlauf eines bisync-Pairs läuft automatisch (`auto_resync_first_run`, Standard an, pro Pair abschaltbar). Gilt ausschließlich, solange das Pair noch nie erfolgreich gelaufen ist — spätere Resync-Verlangen bleiben wie bisher gesperrt, bis `auto_resync` bewusst gesetzt wird. Bei DB-Fehlern bleibt der Resync fail-closed gesperrt. Vier neue Tests.
+- **Behoben:** „Log kopieren" schlug über HTTP immer fehl, weil `navigator.clipboard` nur in Secure Contexts existiert. Jetzt Textarea-Fallback; die Fehlermeldung verweist auf den Download-Button.
 
 
 ## Bugfixes in 1.5.2

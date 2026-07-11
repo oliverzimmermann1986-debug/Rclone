@@ -755,6 +755,27 @@ def _parse_final_stats(log_tail: str) -> dict[str, Any]:
     return {}
 
 
+def _first_run_resync_allowed(
+    pair: dict[str, Any], backup: dict[str, Any], pair_name: str
+) -> bool:
+    """Erlaubt den Baseline-Resync genau einmal: solange das Pair noch nie
+    erfolgreich gelaufen ist. Danach ist ein Resync-Verlangen ein Störfall,
+    der bewusst per auto_resync freigegeben werden muss."""
+    if not bool(
+        pair.get("auto_resync_first_run", backup.get("auto_resync_first_run", True))
+    ):
+        return False
+    try:
+        from ..db import get_db
+
+        return get_db().pair_last_success(pair_name) is None
+    except Exception:
+        logger.exception(
+            "[%s] Erststart-Prüfung fehlgeschlagen; Resync bleibt gesperrt", pair_name
+        )
+        return False
+
+
 def _sync_pair(
     pair: dict[str, Any],
     args: list[str],
@@ -846,7 +867,10 @@ def _sync_pair(
         )
         backup = get_config().get("backup", default={}) or {}
         auto_resync = bool(pair.get("auto_resync", backup.get("auto_resync", False)))
-        if needs_resync and auto_resync and not is_cancelled():
+        first_run_resync = False
+        if needs_resync and not auto_resync:
+            first_run_resync = _first_run_resync_allowed(pair, backup, name)
+        if needs_resync and (auto_resync or first_run_resync) and not is_cancelled():
             mode_value = (
                 str(pair.get("resync_mode") or backup.get("resync_mode") or "")
                 .strip()
@@ -857,7 +881,14 @@ def _sync_pair(
             if mode_value and mode_value != "path1":
                 resync_flags += ["--resync-mode", mode_value]
             resync_cmd = [*cmd[:separator_index], *resync_flags, *cmd[separator_index:]]
-            logger.warning("[%s] automatischer Resync wird ausgeführt", name)
+            if first_run_resync:
+                logger.warning(
+                    "[%s] Erstlauf: Baseline-Resync wird automatisch ausgeführt", name
+                )
+                summary["resync"] = "first_run"
+            else:
+                logger.warning("[%s] automatischer Resync wird ausgeführt", name)
+                summary["resync"] = "auto"
             rc = _run_rclone_command(
                 resync_cmd,
                 log_file,

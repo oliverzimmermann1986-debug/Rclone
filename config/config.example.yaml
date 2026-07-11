@@ -165,6 +165,9 @@ backup:
   max_lock: 2m
   # Automatisches --resync bleibt aus: erst Log/Plan prüfen und bewusst starten.
   auto_resync: false
+  # Baseline-Resync beim allerersten Lauf eines bisync-Pairs automatisch
+  # ausführen (einmalig, solange noch kein erfolgreicher Lauf existiert).
+  auto_resync_first_run: true
   resync_mode: path1
 
 notifications:
