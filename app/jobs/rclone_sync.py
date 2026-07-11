@@ -459,7 +459,6 @@ def _remote_reachable(
                     "--stat",
                     "--no-mimetype",
                     "--no-modtime",
-                    "--no-size",
                     *_rclone_cache_args(),
                     "--",
                     path,
