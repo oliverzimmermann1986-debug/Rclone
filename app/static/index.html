@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#111827">
   <title>rclone-sync</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.5.2">
-  <script defer src="/static/alpine.min.js?v=1.5.2"></script>
+  <link rel="stylesheet" href="/static/style.css?v=1.5.3">
+  <script defer src="/static/alpine.min.js?v=1.5.3"></script>
 </head>
 <body x-data="app()" x-init="init()" @keydown.escape.window="closeOverlays()">
   <div class="app-shell">
@@ -50,7 +50,7 @@
         </div>
         <div class="sidebar-meta">
           <span x-text="overview.data?.system?.virtualization || '—'"></span>
-          <span x-text="'v' + (overview.data?.app?.version || '1.5.2')"></span>
+          <span x-text="'v' + (overview.data?.app?.version || '1.5.3')"></span>
         </div>
       </div>
     </aside>
@@ -644,6 +644,6 @@
   </div>
 
   <div class="toast" :class="toast.type" x-show="toast.show" x-transition.opacity x-text="toast.msg" role="status" aria-live="polite" x-cloak></div>
-  <script src="/static/app.js?v=1.5.2"></script>
+  <script src="/static/app.js?v=1.5.3"></script>
 </body>
 </html>
