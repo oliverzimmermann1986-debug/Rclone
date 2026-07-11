@@ -1,332 +1,625 @@
-"""API für Sync-Jobs: Start, Cancel, Progress, History, Logs."""
+"""API für Sync-Jobs: Start, Cancel, Progress, History und Logs."""
+
 from __future__ import annotations
 
+import csv
+import io
+import json
 import logging
+import os
 import re
 import subprocess
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from ..auth import require_auth
 from ..config_store import get_config
 from ..db import get_db
 from ..jobs import rclone_sync as rclone_job
+from ..rclone_args import rclone_subprocess_env
 from ..jobs.locks import file_lock_or_none
+from ..jobs.runtime_state import active_processes
+from ..security import ensure_within, is_relative_to, parse_browse_roots, require_csrf
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/jobs", tags=["jobs"], dependencies=[Depends(require_auth)])
+router = APIRouter(
+    prefix="/api/jobs",
+    tags=["jobs"],
+    dependencies=[Depends(require_auth), Depends(require_csrf)],
+)
 
-_locks: Dict[str, threading.Lock] = {"backup": threading.Lock()}
+_locks: dict[str, threading.Lock] = {"backup": threading.Lock()}
+_STATS_RE = re.compile(
+    r"Transferred:\s*([\d.]+\s*\w*)\s*/\s*([\d.]+\s*\w*)"
+    r"(?:,\s*(?:([\d.]+)\s*%|-))?"
+    r"(?:,\s*([\d.]+\s*\w*)/s)?"
+    r"(?:,\s*ETA\s*(\S+))?"
+)
 
 
-def _setup_job_logger(job_id: int, kind: str):
-    log_dir = Path(get_config().get("paths", "logs_dir", default="/opt/rclone-sync/logs"))
+def _job_log_target() -> logging.Logger:
+    return logging.getLogger("app.jobs")
+
+
+def _setup_job_logger(job_id: int, kind: str) -> tuple[Path, logging.FileHandler]:
+    log_dir = Path(
+        get_config().get("paths", "logs_dir", default="/opt/rclone-sync/logs")
+    )
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"{kind}-{datetime.now():%Y%m%d-%H%M%S}-job{job_id}.log"
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    logging.getLogger().addHandler(fh)
-    return log_file, fh
-
-
-def _run_backup_thread(job_id: int, dry_run: bool, pairs_filter=None):
-    db = get_db()
-    fh = None
+    handler = logging.FileHandler(log_file, encoding="utf-8")
     try:
-        with file_lock_or_none("backup") as flock:
-            if flock is None:
-                db.job_finish(job_id, "skipped", {"error": "anderer Backup läuft (CLI?)"})
+        os.chmod(log_file, 0o600)
+    except OSError:
+        pass
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    _job_log_target().addHandler(handler)
+    return log_file, handler
+
+
+def _remove_job_logger(handler: logging.FileHandler | None) -> None:
+    if handler is None:
+        return
+    try:
+        _job_log_target().removeHandler(handler)
+        handler.close()
+    except Exception:
+        logger.exception("Job-Log-Handler konnte nicht geschlossen werden")
+
+
+def _known_pair_names() -> set[str]:
+    pairs = get_config().get("backup", "pairs", default=[]) or []
+    return {
+        str(pair.get("name"))
+        for pair in pairs
+        if isinstance(pair, dict) and pair.get("name")
+    }
+
+
+def _parse_pair_filter(raw: Optional[str]) -> Optional[list[str]]:
+    if raw is None:
+        return None
+    names = list(dict.fromkeys(part.strip() for part in raw.split(",") if part.strip()))
+    if not names:
+        raise HTTPException(400, "Keine Pair-Namen angegeben")
+    unknown = [name for name in names if name not in _known_pair_names()]
+    if unknown:
+        raise HTTPException(404, f"Pair(s) nicht gefunden: {', '.join(unknown)}")
+    return names
+
+
+def _finish_status(result: dict[str, Any]) -> str:
+    if result.get("cancelled") or rclone_job.is_cancelled():
+        return "cancelled"
+    return "ok" if result.get("ok") else "error"
+
+
+def _run_backup_thread(
+    job_id: int, dry_run: bool, pairs_filter: Optional[list[str]]
+) -> None:
+    db = get_db()
+    handler: logging.FileHandler | None = None
+    try:
+        with file_lock_or_none("backup") as file_lock:
+            if file_lock is None:
+                db.job_finish(
+                    job_id,
+                    "skipped",
+                    {"error": "Ein anderer Sync hält den Prozess-Lock"},
+                )
                 return
+            log_file, handler = _setup_job_logger(job_id, "backup")
+            db.job_set_log_file(job_id, str(log_file))
+            logger.info(
+                "Backup #%s startet (dry_run=%s, pairs=%s)",
+                job_id,
+                dry_run,
+                pairs_filter,
+            )
             try:
-                log_file, fh = _setup_job_logger(job_id, "backup")
-                db.job_set_log_file(job_id, str(log_file))
-                logger.info(f"=== Backup #{job_id} startet (dry_run={dry_run}, pairs={pairs_filter}) ===")
-                summary = rclone_job.run_job(dry_run=dry_run, pairs_filter=pairs_filter)
-                if rclone_job.is_cancelled():
-                    status = "error"
-                    summary["error"] = "Abgebrochen"
-                elif summary.get("enabled") is False:
-                    status = "ok"
-                elif "ok" in summary:
-                    status = "ok" if summary["ok"] else "error"
-                else:
-                    status = "ok" if summary.get("ok_count", 0) == summary.get("total_pairs", 0) else "error"
-                db.job_finish(job_id, status, summary)
-                logger.info(f"=== Backup #{job_id} {status} ===")
-            except Exception as e:
-                logger.exception(f"Backup #{job_id} fehlgeschlagen")
-                db.job_finish(job_id, "error", {"error": str(e)})
-    except Exception as e:
+                summary = rclone_job.run_job(
+                    dry_run=dry_run, pairs_filter=pairs_filter, trigger="web"
+                )
+            except Exception as exc:
+                logger.exception("Backup #%s fehlgeschlagen", job_id)
+                db.job_finish(job_id, "error", {"error": str(exc)})
+                return
+            status = _finish_status(summary)
+            if status == "cancelled":
+                summary.setdefault("error", "Abgebrochen")
+                summary["cancelled"] = True
+            db.job_finish(job_id, status, summary)
+            logger.info("Backup #%s %s", job_id, status)
+    except Exception as exc:
+        logger.exception("Backup #%s Setup fehlgeschlagen", job_id)
         try:
-            db.job_finish(job_id, "error", {"error": f"setup failed: {e}"})
+            db.job_finish(job_id, "error", {"error": f"Setup fehlgeschlagen: {exc}"})
         except Exception:
-            pass
+            logger.exception("Jobstatus konnte nicht gespeichert werden")
     finally:
-        if fh is not None:
-            try:
-                logging.getLogger().removeHandler(fh)
-                fh.close()
-            except Exception:
-                pass
+        _remove_job_logger(handler)
         _locks["backup"].release()
 
 
+def _start_job_or_release(kind: str, log_file: Optional[str] = None) -> int:
+    """Legt den Job an; gibt bei Fehlern den bereits gehaltenen Lock wieder frei.
+
+    Ohne diese Absicherung bleibt _locks["backup"] nach einer job_start-Exception
+    (DB gesperrt, Platte voll) dauerhaft belegt und jeder weitere Sync liefert 409.
+    """
+    try:
+        return get_db().job_start(kind, log_file=log_file)
+    except Exception as exc:
+        _locks["backup"].release()
+        logger.exception("Job (%s) konnte nicht angelegt werden", kind)
+        raise HTTPException(500, f"Job konnte nicht angelegt werden: {exc}")
+
+
+def _start_thread(
+    target, *, job_id: int, name: str, args: tuple[Any, ...] = ()
+) -> None:
+    try:
+        thread = threading.Thread(target=target, args=args, name=name, daemon=True)
+        thread.start()
+    except Exception as exc:
+        _locks["backup"].release()
+        get_db().job_finish(
+            job_id, "error", {"error": f"Thread konnte nicht gestartet werden: {exc}"}
+        )
+        raise HTTPException(500, "Job konnte nicht gestartet werden")
+
+
 @router.post("/backup/run")
-def run_backup(dry_run: bool = Query(False), pairs: Optional[str] = Query(None)):
+def run_backup(
+    dry_run: bool = Query(False), pairs: Optional[str] = Query(None)
+) -> dict[str, Any]:
+    pairs_filter = _parse_pair_filter(pairs)
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup läuft bereits")
-    pairs_filter = [p.strip() for p in pairs.split(",") if p.strip()] if pairs else None
-    job_id = get_db().job_start("backup")
-    t = threading.Thread(target=_run_backup_thread, args=(job_id, dry_run, pairs_filter), daemon=True)
-    t.start()
+    job_id = _start_job_or_release("backup")
+    _start_thread(
+        _run_backup_thread,
+        job_id=job_id,
+        name=f"backup-job-{job_id}",
+        args=(job_id, dry_run, pairs_filter),
+    )
     return {"ok": True, "job_id": job_id, "pairs": pairs_filter}
 
 
 @router.get("/backup/plan")
-def backup_plan(dry_run: bool = Query(True), pairs: Optional[str] = Query(None)):
-    """Zeigt die rclone-Kommandos und Warnungen, ohne rclone zu starten."""
-    pairs_filter = [p.strip() for p in pairs.split(",") if p.strip()] if pairs else None
-    return rclone_job.build_job_plan(dry_run=dry_run, pairs_filter=pairs_filter)
+def backup_plan(
+    dry_run: bool = Query(True), pairs: Optional[str] = Query(None)
+) -> dict[str, Any]:
+    return rclone_job.build_job_plan(
+        dry_run=dry_run, pairs_filter=_parse_pair_filter(pairs)
+    )
 
 
 @router.post("/backup/cancel")
-def cancel_backup():
+def cancel_backup() -> dict[str, Any]:
     db = get_db()
-    running = db.job_running("backup") or db.job_running("check") or db.job_running("quicksync")
-    if not running:
+    running = (
+        db.job_running("backup")
+        or db.job_running("check")
+        or db.job_running("quicksync")
+    )
+    state = rclone_job.get_runtime_state() or {}
+    if not running and state.get("status") != "running" and not active_processes():
         return {"ok": False, "error": "Kein laufender Job"}
     return rclone_job.cancel_job()
 
 
 @router.post("/backup/run-pair/{pair_name}")
-def run_single_pair(pair_name: str):
-    """Einzelnes Pair triggern (für Audit / On-Demand-Sync)."""
-    return run_backup(dry_run=False, pairs=pair_name)
+def run_single_pair(pair_name: str, dry_run: bool = Query(False)) -> dict[str, Any]:
+    if pair_name not in _known_pair_names():
+        raise HTTPException(404, "Pair nicht gefunden")
+    return run_backup(dry_run=dry_run, pairs=pair_name)
 
 
 @router.post("/backup/check/{pair_name}")
-def check_pair(pair_name: str, one_way: Optional[bool] = Query(None), download: bool = Query(False)):
-    """Read-only rclone check für ein Pair. Läuft als eigener Job."""
+def check_pair(
+    pair_name: str,
+    one_way: Optional[bool] = Query(None),
+    download: bool = Query(False),
+) -> dict[str, Any]:
+    if pair_name not in _known_pair_names():
+        raise HTTPException(404, "Pair nicht gefunden")
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup/Check läuft bereits")
-    job_id = get_db().job_start("check")
+    job_id = _start_job_or_release("check")
 
-    def _run():
+    def run_check() -> None:
         db = get_db()
-        fh = None
+        handler: logging.FileHandler | None = None
         try:
-            with file_lock_or_none("backup") as flock:
-                if flock is None:
-                    db.job_finish(job_id, "skipped", {"error": "anderer Backup läuft"})
+            with file_lock_or_none("backup") as file_lock:
+                if file_lock is None:
+                    db.job_finish(
+                        job_id,
+                        "skipped",
+                        {"error": "Ein anderer Sync hält den Prozess-Lock"},
+                    )
                     return
-                try:
-                    log_file, fh = _setup_job_logger(job_id, "check")
-                    db.job_set_log_file(job_id, str(log_file))
-                    result = rclone_job.run_pair_check(pair_name, one_way=one_way, download=download)
-                    status = "ok" if result.get("ok") else "error"
-                    db.job_finish(job_id, status, result)
-                except Exception as e:
-                    logger.exception("Check #%s fail", job_id)
-                    db.job_finish(job_id, "error", {"error": str(e)})
+                log_file, handler = _setup_job_logger(job_id, "check")
+                db.job_set_log_file(job_id, str(log_file))
+                result = rclone_job.run_pair_check(
+                    pair_name, one_way=one_way, download=download
+                )
+                db.job_finish(job_id, _finish_status(result), result)
+        except Exception as exc:
+            logger.exception("Check #%s fehlgeschlagen", job_id)
+            db.job_finish(job_id, "error", {"error": str(exc)})
         finally:
-            if fh:
-                try:
-                    logging.getLogger().removeHandler(fh)
-                    fh.close()
-                except Exception:
-                    pass
+            _remove_job_logger(handler)
             _locks["backup"].release()
 
-    threading.Thread(target=_run, daemon=True).start()
+    _start_thread(run_check, job_id=job_id, name=f"check-job-{job_id}")
     return {"ok": True, "job_id": job_id}
 
 
+def _tail_text(path: Path, max_bytes: int = 256 * 1024) -> str:
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - max_bytes))
+            return stream.read(max_bytes).decode("utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _latest_stats(text: str) -> dict[str, Any]:
+    for line in reversed(text.splitlines()):
+        match = _STATS_RE.search(line)
+        if match:
+            return {
+                "transferred": match.group(1),
+                "total": match.group(2),
+                "percent": float(match.group(3)) if match.group(3) else None,
+                "speed": match.group(4),
+                "eta": match.group(5),
+            }
+    return {
+        "transferred": None,
+        "total": None,
+        "percent": None,
+        "speed": None,
+        "eta": None,
+    }
+
+
 @router.get("/backup/progress")
-def backup_progress():
-    """Live-Progress mit per-Pair-Stats aus dem Log."""
+def backup_progress() -> dict[str, Any]:
     db = get_db()
-    cfg = get_config()
     running = db.job_running("backup")
-    if not running:
+    state = rclone_job.get_runtime_state() or {}
+    if not running or state.get("status") != "running":
         last = db.job_list(kind="backup", limit=1)
         return {"running": False, "last": last[0] if last else None}
 
-    log_dir = Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "rclone"
-    started = float(running["started_at"])
-
-    pairs_cfg = cfg.get("backup", "pairs", default=[]) or []
-    pairs_status = []
-    log_file = running.get("log_file")
-    log_text = ""
-    if log_file and Path(log_file).exists():
-        try:
-            with open(log_file, "rb") as f:
-                f.seek(0, 2)
-                size = f.tell()
-                f.seek(max(0, size - 32768))
-                log_text = f.read().decode("utf-8", errors="ignore")
-        except Exception:
-            pass
-
-    stats_re = re.compile(
-        r'Transferred:\s*([\d.]+\s*\w*)\s*/\s*([\d.]+\s*\w*)'
-        r'(?:,\s*(?:([\d.]+)\s*%|-))?'
-        r'(?:,\s*([\d.]+\s*\w*)/s)?'
-        r'(?:,\s*ETA\s*(\S+))?'
-    )
-    active_pair_logs = rclone_job.get_active_pair_logs()
-    for pair in pairs_cfg:
-        name = pair.get("name", "")
-        status = "running" if name in active_pair_logs else "pending"
-        pair_log_text = ""
-        pair_log = active_pair_logs.get(name)
-        if pair_log and Path(pair_log).exists():
-            try:
-                with open(pair_log, "rb") as f:
-                    f.seek(0, 2)
-                    size = f.tell()
-                    f.seek(max(0, size - 32768))
-                    pair_log_text = f.read().decode("utf-8", errors="ignore")
-            except Exception:
-                pass
-        search_text = pair_log_text or log_text
-        if "Transferred:" in pair_log_text and "Errors:" in pair_log_text:
-            status = "running"
-        latest_stats = None
-        for line in reversed(search_text.splitlines()):
-            m = stats_re.search(line)
-            if m:
-                latest_stats = m
-                break
-        if latest_stats:
-            pairs_status.append({
-                "name": name,
-                "status": status,
-                "log_file": pair_log,
-                "transferred": latest_stats.group(1),
-                "total": latest_stats.group(2),
-                "percent": float(latest_stats.group(3)) if latest_stats.group(3) else None,
-                "speed": latest_stats.group(4),
-                "eta": latest_stats.group(5),
-            })
-        else:
-            pairs_status.append({"name": name, "status": status, "log_file": pair_log,
-                                  "transferred": None, "total": None, "percent": None,
-                                  "speed": None, "eta": None})
-
+    started = float(state.get("started_at") or running["started_at"])
+    pairs_status: list[dict[str, Any]] = []
+    for name, pair_state in (state.get("pairs") or {}).items():
+        if not isinstance(pair_state, dict):
+            continue
+        log_file = pair_state.get("log_file")
+        text = _tail_text(Path(log_file)) if log_file else ""
+        item = {
+            "name": str(name),
+            "status": pair_state.get("status", "pending"),
+            "log_file": log_file,
+            "error": pair_state.get("error"),
+            **_latest_stats(text),
+        }
+        pairs_status.append(item)
+    pairs_status.sort(key=lambda item: str(item["name"]).casefold())
+    finished = {"done", "error", "cancelled", "skipped"}
     return {
         "running": True,
         "job_id": running["id"],
         "started_at": started,
-        "elapsed_sec": round(time.time() - started),
+        "elapsed_sec": max(0, round(time.time() - started)),
         "pairs": pairs_status,
-        "total_pairs": len(pairs_cfg),
-        "done_pairs": sum(1 for p in pairs_status if p["status"] == "done"),
+        "total_pairs": len(pairs_status),
+        "done_pairs": sum(1 for pair in pairs_status if pair["status"] in finished),
     }
 
 
-
 class QuickSyncPayload(BaseModel):
-    remote: str = Field(default="")
-    local: str = Field(default="")
+    remote: str = Field(min_length=3, max_length=4096)
+    local: str = Field(min_length=1, max_length=4096)
     direction: str = Field(default="bisync", pattern="^(pull|push|bisync)$")
     mode: str = Field(default="bisync", pattern="^(copy|sync|bisync)$")
     dry_run: bool = False
     extra_args: list[str] | str | None = None
+    allow_delete: bool = False
+    max_delete: int | None = Field(default=None, ge=0, le=10_000_000)
+
+
+def _validate_quick_paths(payload: QuickSyncPayload) -> None:
+    if any(char in payload.remote + payload.local for char in ("\x00", "\n", "\r")):
+        raise HTTPException(400, "Pfad enthält ungültige Zeichen")
+    if ":" not in payload.remote or payload.remote.startswith((":", "/", "-")):
+        raise HTTPException(400, "Remote muss ein konfigurierter rclone-Pfad sein")
+    try:
+        result = subprocess.run(
+            ["rclone", "listremotes"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            env=rclone_subprocess_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(503, f"rclone-Remotes konnten nicht geprüft werden: {exc}")
+    remotes = (
+        {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        if result.returncode == 0
+        else set()
+    )
+    remote_name = payload.remote.split(":", 1)[0] + ":"
+    if remote_name not in remotes:
+        raise HTTPException(403, "Remote ist nicht konfiguriert")
+
+    roots = parse_browse_roots(
+        get_config().get(
+            "web",
+            "local_browse_roots",
+            default=["/mnt", "/media", "/srv", "/opt/rclone-sync/data"],
+        )
+    )
+    if not roots:
+        raise HTTPException(503, "Keine lokalen Quick-Sync-Wurzeln konfiguriert")
+    ensure_within(Path(payload.local), roots)
+    if payload.direction == "bisync" and payload.mode != "bisync":
+        raise HTTPException(400, "Bei direction=bisync muss mode=bisync sein")
+    if payload.direction != "bisync" and payload.mode == "bisync":
+        raise HTTPException(400, "Bei pull/push muss mode copy oder sync sein")
+    if payload.mode in {"sync", "bisync"} and not payload.dry_run:
+        backup = get_config().get("backup", default={}) or {}
+        if backup.get("require_delete_confirmation", True) and not payload.allow_delete:
+            raise HTTPException(
+                400,
+                "Produktiver Quick-Lauf benötigt eine ausdrückliche Löschbestätigung",
+            )
+        if (
+            backup.get("require_max_delete_for_sync", True)
+            and payload.max_delete is None
+        ):
+            raise HTTPException(
+                400,
+                "Produktiver Quick-Lauf benötigt eine begrenzte maximale Löschanzahl",
+            )
 
 
 @router.post("/backup/quick")
-def run_quick_sync(payload: QuickSyncPayload):
-    """Ad-hoc-Sync ohne Pair-Speichern. Payload: {remote, local, direction,
-    mode, dry_run, extra_args}. direction=pull|push|bisync, mode=copy|sync|bisync."""
-    from ..jobs import rclone_sync as rj
+def run_quick_sync(payload: QuickSyncPayload) -> dict[str, Any]:
+    _validate_quick_paths(payload)
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup läuft bereits")
-    job_id = get_db().job_start("quicksync")
-    def _run():
+    job_id = _start_job_or_release("quicksync")
+
+    def run_quick() -> None:
         db = get_db()
-        fh = None
+        handler: logging.FileHandler | None = None
         try:
-            with file_lock_or_none("backup") as flock:
-                if flock is None:
-                    db.job_finish(job_id, "skipped", {"error": "anderer Backup läuft"})
-                    return
-                try:
-                    log_file, fh = _setup_job_logger(job_id, "quicksync")
-                    db.job_set_log_file(job_id, str(log_file))
-                    result = rj.run_quick(
-                        remote_path=payload.remote,
-                        local_path=payload.local,
-                        direction=payload.direction,
-                        mode=payload.mode,
-                        dry_run=payload.dry_run,
-                        extra_args=payload.extra_args,
+            with file_lock_or_none("backup") as file_lock:
+                if file_lock is None:
+                    db.job_finish(
+                        job_id,
+                        "skipped",
+                        {"error": "Ein anderer Sync hält den Prozess-Lock"},
                     )
-                    status = "ok" if result.get("ok") else "error"
-                    db.job_finish(job_id, status, result)
-                except Exception as e:
-                    logger.exception(f"QuickSync #{job_id} fail")
-                    db.job_finish(job_id, "error", {"error": str(e)})
+                    return
+                log_file, handler = _setup_job_logger(job_id, "quicksync")
+                db.job_set_log_file(job_id, str(log_file))
+                result = rclone_job.run_quick(
+                    remote_path=payload.remote,
+                    local_path=payload.local,
+                    direction=payload.direction,
+                    mode=payload.mode,
+                    dry_run=payload.dry_run,
+                    extra_args=payload.extra_args,
+                    allow_delete=payload.allow_delete,
+                    max_delete=payload.max_delete,
+                )
+                db.job_finish(job_id, _finish_status(result), result)
+        except Exception as exc:
+            logger.exception("QuickSync #%s fehlgeschlagen", job_id)
+            db.job_finish(job_id, "error", {"error": str(exc)})
         finally:
-            if fh:
-                try:
-                    logging.getLogger().removeHandler(fh)
-                    fh.close()
-                except Exception: pass
+            _remove_job_logger(handler)
             _locks["backup"].release()
-    threading.Thread(target=_run, daemon=True).start()
+
+    _start_thread(run_quick, job_id=job_id, name=f"quicksync-job-{job_id}")
     return {"ok": True, "job_id": job_id}
 
 
 @router.get("/list")
-def list_jobs(kind: Optional[str] = None, limit: int = 50):
-    return get_db().job_list(kind=kind, limit=max(1, min(limit, 500)))
+def list_jobs(
+    kind: Optional[str] = None,
+    status: Optional[str] = None,
+    q: str = Query("", max_length=200),
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    allowed_kinds = {None, "backup", "check", "quicksync"}
+    allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
+    if kind not in allowed_kinds:
+        raise HTTPException(400, "Unbekannter Job-Typ")
+    if status not in allowed_status:
+        raise HTTPException(400, "Unbekannter Job-Status")
+    return get_db().job_list(
+        kind=kind,
+        status=status,
+        query=q,
+        limit=max(1, min(limit, 500)),
+        offset=max(0, min(offset, 1_000_000)),
+    )
+
+
+@router.get("/search")
+def search_jobs(
+    kind: Optional[str] = None,
+    status: Optional[str] = None,
+    q: str = Query("", max_length=200),
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    allowed_kinds = {None, "backup", "check", "quicksync"}
+    allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
+    if kind not in allowed_kinds:
+        raise HTTPException(400, "Unbekannter Job-Typ")
+    if status not in allowed_status:
+        raise HTTPException(400, "Unbekannter Job-Status")
+    db = get_db()
+    bounded_limit = max(1, min(limit, 200))
+    bounded_offset = max(0, min(offset, 1_000_000))
+    return {
+        "items": db.job_list(
+            kind=kind,
+            status=status,
+            query=q,
+            limit=bounded_limit,
+            offset=bounded_offset,
+        ),
+        "total": db.job_count(kind=kind, status=status, query=q),
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+    }
+
+
+@router.get("/export.csv")
+def export_jobs_csv(
+    kind: Optional[str] = None,
+    status: Optional[str] = None,
+    q: str = Query("", max_length=200),
+    limit: int = Query(5000, ge=1, le=10000),
+) -> Response:
+    allowed_kinds = {None, "backup", "check", "quicksync"}
+    allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
+    if kind not in allowed_kinds:
+        raise HTTPException(400, "Unbekannter Job-Typ")
+    if status not in allowed_status:
+        raise HTTPException(400, "Unbekannter Job-Status")
+    jobs = get_db().job_list(kind=kind, status=status, query=q, limit=limit, offset=0)
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, dialect="excel")
+    writer.writerow(
+        [
+            "id",
+            "typ",
+            "status",
+            "gestartet",
+            "beendet",
+            "dauer_sekunden",
+            "zusammenfassung",
+        ]
+    )
+    for job in jobs:
+        started = float(job.get("started_at") or 0)
+        ended = float(job.get("ended_at") or 0)
+        writer.writerow(
+            [
+                job.get("id"),
+                job.get("kind"),
+                job.get("status"),
+                datetime.fromtimestamp(started).astimezone().isoformat()
+                if started
+                else "",
+                datetime.fromtimestamp(ended).astimezone().isoformat() if ended else "",
+                round(max(0.0, ended - started), 3) if started and ended else "",
+                json.dumps(
+                    job.get("summary") or {}, ensure_ascii=False, separators=(",", ":")
+                ),
+            ]
+        )
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    return Response(
+        "\ufeff" + buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename=rclone-sync-jobs-{stamp}.csv",
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.post("/cleanup-failed")
-def cleanup_failed_jobs():
-    deleted = get_db().jobs_delete_failed()
-    return {"ok": True, "deleted": deleted}
+def cleanup_failed_jobs() -> dict[str, Any]:
+    return {"ok": True, "deleted": get_db().jobs_delete_failed()}
 
 
 @router.get("/status/current")
-def status_current():
+def status_current() -> dict[str, Any]:
     db = get_db()
-    return {"backup": db.job_running("backup"), "check": db.job_running("check"), "quicksync": db.job_running("quicksync")}
+    return {
+        "backup": db.job_running("backup"),
+        "check": db.job_running("check"),
+        "quicksync": db.job_running("quicksync"),
+    }
 
 
 @router.get("/{job_id}")
-def job_detail(job_id: int):
-    j = get_db().job_get(job_id)
-    if not j:
+def job_detail(job_id: int) -> dict[str, Any]:
+    job = get_db().job_get(job_id)
+    if not job:
         raise HTTPException(404, "Nicht gefunden")
-    return j
+    return job
 
 
 @router.get("/{job_id}/log")
-def job_log(job_id: int, tail: int = 500):
+def job_log(job_id: int, tail: int = 500) -> dict[str, str]:
     tail = max(1, min(int(tail or 500), 5000))
-    j = get_db().job_get(job_id)
-    if not j:
+    job = get_db().job_get(job_id)
+    if not job:
         raise HTTPException(404, "Job nicht gefunden")
-    log_file = j.get("log_file")
+    log_file = job.get("log_file")
     if not log_file:
         return {"log": ""}
-    p = Path(log_file).resolve()
-    logs_dir = Path(get_config().get("paths", "logs_dir", default="/opt/rclone-sync/logs")).resolve()
-    if not str(p).startswith(str(logs_dir)) or not p.exists():
+    path = Path(log_file).resolve()
+    logs_dir = Path(
+        get_config().get("paths", "logs_dir", default="/opt/rclone-sync/logs")
+    ).resolve()
+    if not is_relative_to(path, logs_dir) or not path.is_file():
         return {"log": ""}
     try:
-        with open(p, "r", errors="ignore") as f:
-            lines = f.readlines()[-tail:]
-        return {"log": "".join(lines)}
-    except Exception as e:
-        return {"log": f"<Fehler: {e}>"}
+        # Speicher bleibt auch bei sehr großen Logs begrenzt.
+        text = _tail_text(path, max_bytes=4 * 1024 * 1024)
+        return {"log": "\n".join(text.splitlines()[-tail:]) + ("\n" if text else "")}
+    except OSError as exc:
+        return {"log": f"<Fehler: {exc}>"}
+
+
+@router.get("/{job_id}/log/download")
+def job_log_download(job_id: int) -> Response:
+    job = get_db().job_get(job_id)
+    if not job:
+        raise HTTPException(404, "Job nicht gefunden")
+    log_file = job.get("log_file")
+    if not log_file:
+        raise HTTPException(404, "Für diesen Job ist kein Log vorhanden")
+    path = Path(str(log_file)).resolve()
+    logs_dir = Path(
+        get_config().get("paths", "logs_dir", default="/opt/rclone-sync/logs")
+    ).resolve()
+    if not is_relative_to(path, logs_dir) or not path.is_file():
+        raise HTTPException(404, "Logdatei nicht gefunden")
+    safe_kind = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(job.get("kind") or "job"))
+    return FileResponse(
+        path,
+        media_type="text/plain; charset=utf-8",
+        filename=f"{safe_kind}-job-{job_id}.log",
+        headers={"Cache-Control": "no-store"},
+    )

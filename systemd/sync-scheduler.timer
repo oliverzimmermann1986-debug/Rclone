@@ -1,10 +1,12 @@
 [Unit]
-Description=Scrapper Per-Pair-Schedule Tick (jede Minute)
+Description=rclone-sync per-pair scheduler tick (jede Minute)
 
 [Timer]
-OnCalendar=*:0/1
+OnCalendar=*-*-* *:*:00
 Persistent=false
 AccuracySec=10s
+RandomizedDelaySec=0
+Unit=sync-scheduler.service
 
 [Install]
 WantedBy=timers.target

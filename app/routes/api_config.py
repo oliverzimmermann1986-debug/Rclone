@@ -1,165 +1,413 @@
-"""API für Config-Lesen + -Schreiben."""
+"""API für validierte, atomare Konfigurationsänderungen."""
+
 from __future__ import annotations
 
-from typing import Any, Dict
+import copy
+import fcntl
+import hashlib
+import os
+import stat
+import tempfile
+from pathlib import Path
+from typing import Any
 
+import bcrypt
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from ..auth import require_auth
-from ..config_store import get_config
+from ..auth import require_auth, verify_password
+from ..config_store import ConfigConflictError, get_config
+from ..config_validation import ConfigValidationError, validate_config
+from ..security import ensure_within, require_csrf
 
-router = APIRouter(prefix="/api/config", tags=["config"], dependencies=[Depends(require_auth)])
+router = APIRouter(
+    prefix="/api/config",
+    tags=["config"],
+    dependencies=[Depends(require_auth), Depends(require_csrf)],
+)
 
-# Sensitiv-Felder die nie zurückgesendet werden (sind hier minimal — nur secret_key)
+_PLACEHOLDER = "***SET***"
 _SENSITIVE = (("web", "secret_key"), ("web", "password_hash"), ("web", "password"))
+_MAX_FILTER_BYTES = 2 * 1024 * 1024
 
 
-def _redact(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    import copy as _c
-    out = _c.deepcopy(cfg)
+def _walk_parent(
+    mapping: dict[str, Any], keys: tuple[str, ...], *, create: bool = False
+) -> dict[str, Any] | None:
+    current: Any = mapping
+    for key in keys[:-1]:
+        if not isinstance(current, dict):
+            return None
+        if key not in current:
+            if not create:
+                return None
+            current[key] = {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else None
+
+
+def _redact(data: dict[str, Any], *, revision: str | None = None) -> dict[str, Any]:
+    out = copy.deepcopy(data)
     for keys in _SENSITIVE:
-        cur = out
-        for k in keys[:-1]:
-            if not isinstance(cur, dict):
-                break
-            cur = cur.get(k, {})
-        if isinstance(cur, dict) and keys[-1] in cur and cur[keys[-1]]:
-            cur[keys[-1]] = "***SET***"
+        parent = _walk_parent(out, keys)
+        if parent is not None and parent.get(keys[-1]):
+            parent[keys[-1]] = _PLACEHOLDER
+    notifications = out.get("notifications")
+    if isinstance(notifications, dict):
+        hooks = notifications.get("webhooks")
+        if isinstance(hooks, list):
+            for hook in hooks:
+                if isinstance(hook, dict) and hook.get("url"):
+                    hook["url"] = _PLACEHOLDER
+    if revision is not None:
+        out["_revision"] = revision
     return out
 
 
-@router.get("")
-def get_config_endpoint() -> Dict[str, Any]:
+def _preserve_sensitive(new_data: dict[str, Any], old_data: dict[str, Any]) -> None:
+    """UI-Platzhalter oder ausgelassene Secrets durch den gespeicherten Wert ersetzen."""
+    for keys in _SENSITIVE:
+        old_parent = _walk_parent(old_data, keys)
+        new_parent = _walk_parent(new_data, keys)
+        old_value = old_parent.get(keys[-1], "") if old_parent else ""
+        if new_parent is None:
+            new_parent = _walk_parent(new_data, keys, create=True)
+        if new_parent is None:
+            continue
+        value = new_parent.get(keys[-1])
+        if value in (None, _PLACEHOLDER):
+            new_parent[keys[-1]] = old_value
+
+    old_hooks = (
+        ((old_data.get("notifications") or {}).get("webhooks") or [])
+        if isinstance(old_data.get("notifications"), dict)
+        else []
+    )
+    new_notifications = new_data.get("notifications")
+    if isinstance(new_notifications, dict) and isinstance(
+        new_notifications.get("webhooks"), list
+    ):
+        by_id = {
+            str(hook.get("id")): hook
+            for hook in old_hooks
+            if isinstance(hook, dict) and hook.get("id")
+        }
+        for index, hook in enumerate(new_notifications["webhooks"]):
+            if not isinstance(hook, dict) or hook.get("url") != _PLACEHOLDER:
+                continue
+            old_hook = by_id.get(str(hook.get("id")))
+            if (
+                old_hook is None
+                and index < len(old_hooks)
+                and isinstance(old_hooks[index], dict)
+            ):
+                old_hook = old_hooks[index]
+            hook["url"] = str((old_hook or {}).get("url") or "")
+
+
+def _filter_revision(path: Path, raw: bytes | None = None) -> str:
+    if raw is None:
+        raw = path.read_bytes() if path.exists() else b""
+    marker = b"present\0" if path.exists() else b"missing\0"
+    return hashlib.sha256(str(path).encode("utf-8") + b"\0" + marker + raw).hexdigest()
+
+
+def _filter_path() -> Path:
     cfg = get_config()
-    return _redact(cfg._data)
+    data_root = Path(cfg.get("paths", "data_dir", default="/opt/rclone-sync/data"))
+    configured = cfg.get(
+        "backup", "filter_file", default=str(data_root / "rclone-filters.txt")
+    ) or str(data_root / "rclone-filters.txt")
+    return ensure_within(Path(str(configured)), [data_root])
+
+
+@router.get("")
+def get_config_endpoint() -> dict[str, Any]:
+    snapshot, revision = get_config().snapshot_with_revision()
+    return _redact(snapshot, revision=revision)
 
 
 class ConfigUpdate(BaseModel):
-    config: Dict[str, Any]
+    config: dict[str, Any]
 
 
 @router.put("")
-def update_config(body: ConfigUpdate) -> Dict[str, Any]:
-    cfg = get_config()
-    new_data = body.config
-    # Sensitive Felder die als '***SET***' kamen behalten, nicht überschreiben
-    for keys in _SENSITIVE:
-        cur_new = new_data
-        cur_old = cfg._data
-        ok = True
-        for k in keys[:-1]:
-            if not isinstance(cur_new, dict) or not isinstance(cur_old, dict):
-                ok = False
-                break
-            cur_new = cur_new.get(k, {})
-            cur_old = cur_old.get(k, {})
-        if ok and isinstance(cur_new, dict) and cur_new.get(keys[-1]) == "***SET***":
-            cur_new[keys[-1]] = cur_old.get(keys[-1], "")
-    cfg._data = new_data
-    cfg.save()
-    return {"ok": True}
+def update_config(body: ConfigUpdate) -> dict[str, Any]:
+    store = get_config()
+    old_data, current_revision = store.snapshot_with_revision()
+    new_data = copy.deepcopy(body.config)
+    expected_revision = str(new_data.pop("_revision", "") or "") or None
+    if expected_revision is None:
+        raise HTTPException(
+            428,
+            {
+                "message": "Konfigurationsrevision fehlt",
+                "reload_required": True,
+                "current_revision": current_revision,
+            },
+        )
+    _preserve_sensitive(new_data, old_data)
+    old_web = old_data.get("web") if isinstance(old_data.get("web"), dict) else {}
+    new_web = new_data.get("web") if isinstance(new_data.get("web"), dict) else {}
+    security_identity_changed = any(
+        str(old_web.get(key) or "") != str(new_web.get(key) or "")
+        for key in ("username", "password_hash", "secret_key")
+    )
+    if security_identity_changed:
+        try:
+            version = int(
+                new_web.get("session_version", old_web.get("session_version", 1)) or 1
+            )
+        except (TypeError, ValueError):
+            version = 1
+        new_web["session_version"] = max(1, version) + 1
+
+    try:
+        normalized, warnings = validate_config(new_data)
+    except ConfigValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Konfiguration ungültig", "errors": exc.errors},
+        )
+    try:
+        revision = store.replace(normalized, expected_revision=expected_revision)
+    except ConfigConflictError:
+        raise HTTPException(
+            409,
+            {
+                "message": "Konfiguration wurde parallel geändert",
+                "reload_required": True,
+                "current_revision": store.revision,
+            },
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            500, f"Konfiguration konnte nicht gespeichert werden: {exc}"
+        )
+    return {
+        "ok": True,
+        "warnings": warnings,
+        "config": _redact(normalized, revision=revision),
+    }
+
+
+@router.post("/validate")
+def validate_config_endpoint(body: ConfigUpdate) -> dict[str, Any]:
+    """Prüft den aktuellen GUI-Entwurf vollständig, ohne ihn zu speichern."""
+    store = get_config()
+    old_data, current_revision = store.snapshot_with_revision()
+    candidate = copy.deepcopy(body.config)
+    expected_revision = str(candidate.pop("_revision", "") or "") or None
+    _preserve_sensitive(candidate, old_data)
+    try:
+        normalized, warnings = validate_config(candidate)
+    except ConfigValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Konfiguration ungültig", "errors": exc.errors},
+        )
+    return {
+        "ok": True,
+        "warnings": warnings,
+        "revision_matches": expected_revision in (None, current_revision),
+        "current_revision": current_revision,
+        "config": _redact(normalized, revision=current_revision),
+    }
 
 
 class PasswordChange(BaseModel):
-    current_password: str
-    new_password: str
+    current_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=12, max_length=1024)
 
 
 @router.post("/change-password")
-def change_password(body: PasswordChange, user: str = Depends(require_auth)) -> Dict[str, Any]:
-    """Ändert das eigene Web-Passwort. Erfordert aktuelles Passwort als
-    Verification, damit ein gestohlenes Session-Cookie nicht reicht."""
-    import bcrypt
-    from ..auth import verify_password
-    cfg = get_config()
-
-    # Current verifizieren
+def change_password(
+    body: PasswordChange, user: str = Depends(require_auth)
+) -> dict[str, Any]:
+    """Ändert das Passwort und invalidiert alle bestehenden Sessions."""
     if not verify_password(user, body.current_password):
         raise HTTPException(403, "Aktuelles Passwort falsch")
 
-    new = body.new_password.strip()
-    if len(new) < 8:
-        raise HTTPException(400, "Neues Passwort muss min. 8 Zeichen haben")
+    new = body.new_password
+    if new != new.strip():
+        raise HTTPException(
+            400, "Passwort darf nicht mit Leerzeichen beginnen oder enden"
+        )
     if new == body.current_password:
         raise HTTPException(400, "Neues Passwort muss vom alten abweichen")
 
-    new_hash = bcrypt.hashpw(new.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("ascii")
-    cfg.set("web", "password_hash", new_hash)
-    cfg.set("web", "password", "")  # Klartext-Fallback aufräumen
-    cfg.save()
-    return {"ok": True, "message": "Passwort geändert"}
+    new_hash = bcrypt.hashpw(new.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode(
+        "ascii"
+    )
+
+    def updater(data: dict[str, Any]) -> None:
+        web = data.setdefault("web", {})
+        if not isinstance(web, dict):
+            raise ValueError("web muss ein Mapping sein")
+        web["password_hash"] = new_hash
+        web["password"] = ""
+        try:
+            current_version = int(web.get("session_version", 1) or 1)
+        except (TypeError, ValueError):
+            current_version = 1
+        web["session_version"] = max(1, current_version) + 1
+
+    try:
+        store = get_config()
+        store.update(updater)
+        data_dir = Path(store.get("paths", "data_dir", default="/opt/rclone-sync/data"))
+        (data_dir / ".initial-password").unlink(missing_ok=True)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(500, f"Passwort konnte nicht gespeichert werden: {exc}")
+    return {"ok": True, "message": "Passwort geändert", "reauthenticate": True}
 
 
 class FilterPayload(BaseModel):
-    content: str
+    content: str = Field(max_length=_MAX_FILTER_BYTES)
+    revision: str = Field(min_length=64, max_length=64)
 
 
 @router.get("/filter-file")
-def get_filter_file() -> dict:
-    """Inhalt der rclone-filters.txt. Pfad aus config.backup.filter_file
-    oder Default /opt/rclone-sync/data/rclone-filters.txt."""
-    cfg = get_config()
-    p = cfg.get("backup", "filter_file",
-                default="/opt/rclone-sync/data/rclone-filters.txt")         or "/opt/rclone-sync/data/rclone-filters.txt"
-    from pathlib import Path as _P
-    base = _P("/opt/rclone-sync").resolve()
-    resolved = _P(p).resolve()
-    if not str(resolved).startswith(str(base)):
-        raise HTTPException(400, "filter_file muss unter /opt/rclone-sync liegen")
-    if not resolved.exists():
-        return {"path": str(resolved), "exists": False, "content": ""}
+def get_filter_file() -> dict[str, Any]:
+    path = _filter_path()
+    if not path.exists():
+        return {
+            "path": str(path),
+            "exists": False,
+            "content": "",
+            "revision": _filter_revision(path, b""),
+        }
+    if not path.is_file():
+        raise HTTPException(400, "filter_file ist keine Datei")
     try:
-        return {"path": str(resolved), "exists": True,
-                "content": resolved.read_text(encoding="utf-8")}
-    except Exception as e:
-        raise HTTPException(500, f"Lesefehler: {e}")
+        if path.stat().st_size > _MAX_FILTER_BYTES:
+            raise HTTPException(413, "Filter-Datei ist zu groß")
+        raw = path.read_bytes()
+        return {
+            "path": str(path),
+            "exists": True,
+            "content": raw.decode("utf-8"),
+            "revision": _filter_revision(path, raw),
+        }
+    except HTTPException:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise HTTPException(500, f"Lesefehler: {exc}")
 
 
 @router.put("/filter-file")
-def save_filter_file(body: FilterPayload) -> dict:
-    """rclone-Filter-Datei schreiben (idempotent, atomic via .tmp+rename)."""
-    cfg = get_config()
-    p = cfg.get("backup", "filter_file",
-                default="/opt/rclone-sync/data/rclone-filters.txt")         or "/opt/rclone-sync/data/rclone-filters.txt"
-    from pathlib import Path as _P
-    base = _P("/opt/rclone-sync").resolve()
-    path = _P(p).resolve()
-    if not str(path).startswith(str(base)):
-        raise HTTPException(400, "filter_file muss unter /opt/rclone-sync liegen")
-    path.parent.mkdir(parents=True, exist_ok=True)
+def save_filter_file(body: FilterPayload) -> dict[str, Any]:
+    path = _filter_path()
+    encoded = body.content.encode("utf-8")
+    if len(encoded) > _MAX_FILTER_BYTES:
+        raise HTTPException(413, "Filter-Datei ist zu groß")
     try:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(body.content, encoding="utf-8")
-        tmp.replace(path)
-        return {"ok": True, "path": str(path), "bytes": len(body.content.encode())}
-    except Exception as e:
-        raise HTTPException(500, f"Schreibfehler: {e}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(f".{path.name}.lock")
+        lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        lock_fd = os.open(lock_path, lock_flags, stat.S_IRUSR | stat.S_IWUSR)
+        os.fchmod(lock_fd, stat.S_IRUSR | stat.S_IWUSR)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            previous = path.read_bytes() if path.exists() else b""
+            current_revision = _filter_revision(path, previous)
+            if body.revision != current_revision:
+                raise HTTPException(
+                    409,
+                    {
+                        "message": "Filter-Datei wurde parallel geändert",
+                        "reload_required": True,
+                        "current_revision": current_revision,
+                    },
+                )
+            if path.exists() and previous != encoded:
+                backup = path.with_suffix(path.suffix + ".bak")
+                backup_fd, backup_tmp_name = tempfile.mkstemp(
+                    prefix=f".{backup.name}.", suffix=".tmp", dir=str(path.parent)
+                )
+                backup_tmp = Path(backup_tmp_name)
+                try:
+                    with os.fdopen(backup_fd, "wb") as stream:
+                        stream.write(previous)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.chmod(backup_tmp, stat.S_IRUSR | stat.S_IWUSR)
+                    os.replace(backup_tmp, backup)
+                finally:
+                    backup_tmp.unlink(missing_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+            )
+            tmp = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(encoded)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+                os.replace(tmp, path)
+                try:
+                    dir_fd = os.open(path.parent, os.O_DIRECTORY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except OSError:
+                    pass
+            finally:
+                tmp.unlink(missing_ok=True)
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+        return {
+            "ok": True,
+            "path": str(path),
+            "bytes": len(encoded),
+            "revision": _filter_revision(path, encoded),
+        }
+    except HTTPException:
+        raise
+    except OSError as exc:
+        raise HTTPException(500, f"Schreibfehler: {exc}")
 
 
 class WebhookTest(BaseModel):
-    index: int
-    event: str = "sync_ok"
+    index: int | None = Field(default=None, ge=0, le=9999)
+    id: str | None = Field(default=None, min_length=8, max_length=64)
+    event: str = Field(default="sync_ok", max_length=64)
 
 
 @router.post("/test-webhook")
-def test_webhook(body: WebhookTest) -> Dict[str, Any]:
-    """Sendet einen Test an genau einen konfigurierten Webhook."""
-    from ..notifications import notify_one, EVENTS
-    cfg = get_config()
-    hooks = cfg.get("notifications", "webhooks", default=[]) or []
-    if body.index < 0 or body.index >= len(hooks):
+def test_webhook(body: WebhookTest) -> dict[str, Any]:
+    from ..notifications import EVENTS, notify_one
+
+    hooks = get_config().get("notifications", "webhooks", default=[]) or []
+    hook = None
+    if body.id:
+        hook = next(
+            (
+                item
+                for item in hooks
+                if isinstance(item, dict) and str(item.get("id")) == body.id
+            ),
+            None,
+        )
+    elif body.index is not None and body.index < len(hooks):
+        hook = hooks[body.index]
+    if not isinstance(hook, dict):
         raise HTTPException(404, "Webhook nicht gefunden")
     if body.event not in EVENTS:
         raise HTTPException(400, "Unbekanntes Event")
     try:
         notify_one(
-            hooks[body.index],
+            hook,
             body.event,
             "rclone-sync Test",
             "Das ist ein Test aus der rclone-sync Web-UI.",
             source="ui-test",
         )
         return {"ok": True}
-    except Exception as e:
-        raise HTTPException(502, f"Webhook-Test fehlgeschlagen: {e}")
+    except Exception as exc:
+        raise HTTPException(502, f"Webhook-Test fehlgeschlagen: {exc}")

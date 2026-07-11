@@ -1,11 +1,13 @@
-"""rclone Sync-/Backup-Jobs für Web-UI, CLI und Scheduler."""
+"""Robuste rclone-Sync-/Backup-Jobs für Web-UI, CLI und Scheduler."""
+
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -13,36 +15,77 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Iterable, Optional
 
 from ..config_store import get_config
+from ..rclone_args import (
+    rclone_subprocess_env,
+    validate_parsed_rclone_args,
+    validate_rclone_args,
+)
+from . import runtime_state
 
 logger = logging.getLogger(__name__)
 
-# rclone braucht ein beschreibbares Cache-Verzeichnis. Bei bisync ist zusätzlich
-# --workdir wichtig, sonst landen Lock-/Listing-Dateien in ~/.cache/rclone/bisync.
 RCLONE_CACHE_DIR = os.getenv("RCLONE_CACHE_DIR", "/opt/rclone-sync/data/.rclone-cache")
 
-_ACTIVE_PROCS: List[subprocess.Popen] = []
+_ACTIVE_PROCS: list[subprocess.Popen] = []
 _ACTIVE_PROCS_LOCK = threading.Lock()
-_ACTIVE_PAIR_LOGS: Dict[str, str] = {}
+_ACTIVE_PAIR_LOGS: dict[str, str] = {}
 _ACTIVE_PAIR_LOGS_LOCK = threading.Lock()
 _CANCEL_EVENT = threading.Event()
 
+_RESYNC_RE = re.compile(
+    r"(?:must run[^\n]*--resync|requires?[^\n]*--resync)", re.IGNORECASE
+)
+_STATS_RE = re.compile(
+    r"Transferred:\s*([^,\n]+?)(?:\s*/\s*([^,\n]+?))?"
+    r"(?:,\s*(?:([\d.]+)%|-))?(?:,\s*([^,\n]+?/s))?(?:,\s*ETA\s*(\S+))?\s*$"
+)
 
-def _rclone_cache_args(verb: Optional[str] = None) -> List[str]:
-    Path(RCLONE_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+
+def _rclone_cache_args(verb: Optional[str] = None) -> list[str]:
+    Path(RCLONE_CACHE_DIR).mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(RCLONE_CACHE_DIR, 0o700)
+    except OSError:
+        pass
     args = ["--cache-dir", RCLONE_CACHE_DIR]
     if verb == "bisync":
-        workdir = f"{RCLONE_CACHE_DIR}/bisync"
-        Path(workdir).mkdir(parents=True, exist_ok=True)
+        workdir = str(Path(RCLONE_CACHE_DIR) / "bisync")
+        Path(workdir).mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(workdir, 0o700)
+        except OSError:
+            pass
         args += ["--workdir", workdir]
     return args
 
 
-def get_active_pair_logs() -> Dict[str, str]:
+def _read_tail(path: Path, max_bytes: int = 1024 * 1024) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max(1024, max_bytes)))
+            return handle.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def get_active_pair_logs() -> dict[str, str]:
     with _ACTIVE_PAIR_LOGS_LOCK:
-        return dict(_ACTIVE_PAIR_LOGS)
+        logs = dict(_ACTIVE_PAIR_LOGS)
+    state = runtime_state.load_run_state() or {}
+    if state.get("status") == "running":
+        for name, pair in (state.get("pairs") or {}).items():
+            if pair.get("status") == "running" and pair.get("log_file"):
+                logs[str(name)] = str(pair["log_file"])
+    return logs
+
+
+def get_runtime_state() -> Optional[dict[str, Any]]:
+    return runtime_state.load_run_state()
 
 
 def _set_active_pair_log(name: str, log_file: Optional[Path]) -> None:
@@ -53,9 +96,12 @@ def _set_active_pair_log(name: str, log_file: Optional[Path]) -> None:
             _ACTIVE_PAIR_LOGS[name] = str(log_file)
 
 
-def _register_proc(proc: subprocess.Popen) -> None:
+def _register_proc(
+    proc: subprocess.Popen, *, pair_name: str = "", log_file: str = ""
+) -> None:
     with _ACTIVE_PROCS_LOCK:
         _ACTIVE_PROCS.append(proc)
+    runtime_state.register_process(proc.pid, pair_name=pair_name, log_file=log_file)
 
 
 def _unregister_proc(proc: subprocess.Popen) -> None:
@@ -64,18 +110,18 @@ def _unregister_proc(proc: subprocess.Popen) -> None:
             _ACTIVE_PROCS.remove(proc)
         except ValueError:
             pass
+    runtime_state.unregister_process(proc.pid)
 
 
 def _terminate_proc(proc: subprocess.Popen, *, graceful_sec: int = 10) -> None:
-    """Beendet rclone robust inklusive Prozessgruppe."""
     if proc.poll() is not None:
         return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except Exception:
+    except (ProcessLookupError, PermissionError, OSError):
         try:
             proc.terminate()
-        except Exception:
+        except OSError:
             return
     try:
         proc.wait(timeout=graceful_sec)
@@ -84,25 +130,27 @@ def _terminate_proc(proc: subprocess.Popen, *, graceful_sec: int = 10) -> None:
         pass
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
+    except (ProcessLookupError, PermissionError, OSError):
         try:
             proc.kill()
-        except Exception:
+        except OSError:
             pass
 
 
-def cancel_job() -> dict:
-    """Killt alle laufenden rclone-Subprozesse und stoppt neue Pair-Starts."""
+def cancel_job() -> dict[str, Any]:
+    """Beendet laufende rclone-Prozesse auch aus CLI-/Scheduler-Prozessen."""
     _CANCEL_EVENT.set()
+    runtime_state.request_cancel_marker()
+    killed = runtime_state.terminate_active_processes(graceful_sec=8)
+    # Fallback für einen Marker-Schreibfehler im aktuellen Prozess.
     with _ACTIVE_PROCS_LOCK:
-        procs = list(_ACTIVE_PROCS)
-    killed = 0
-    for proc in procs:
+        local_procs = list(_ACTIVE_PROCS)
+    for proc in local_procs:
         if proc.poll() is None:
-            _terminate_proc(proc)
-            killed += 1
+            _terminate_proc(proc, graceful_sec=2)
     try:
         from ..notifications import notify
+
         notify("cancelled", "Sync abgebrochen", f"{killed} rclone-Prozess(e) beendet")
     except Exception:
         pass
@@ -110,63 +158,56 @@ def cancel_job() -> dict:
 
 
 def is_cancelled() -> bool:
-    return _CANCEL_EVENT.is_set()
+    return _CANCEL_EVENT.is_set() or runtime_state.cancel_requested()
 
 
 def reset_cancel() -> None:
     _CANCEL_EVENT.clear()
+    runtime_state.reset_cancel_marker()
+
+
+def _bounded_number(
+    value: Any, *, default: float, minimum: float, maximum: float
+) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = default
+    if parsed != parsed:
+        parsed = default
+    return max(minimum, min(parsed, maximum))
 
 
 def _is_remote(path: str) -> bool:
-    if not path or path.startswith("/"):
-        return False
-    return ":" in path
+    return bool(path and not path.startswith(("/", "-")) and ":" in path)
 
 
 def _safe_name(value: str, fallback: str = "pair") -> str:
-    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback)).strip("._")
-    return value[:80] or fallback
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback)).strip("._")
+    return cleaned[:80] or fallback
 
 
-def _parse_rclone_args(value) -> List[str]:
-    """rclone_args kann String oder Liste sein. Quotes werden korrekt beachtet."""
+def _parse_rclone_args(value: Any, *, allow_unsafe: bool = False) -> list[str]:
+    return validate_rclone_args(value, allow_unsafe=allow_unsafe)
+
+
+def _split_lines(value: Any) -> list[str]:
     if not value:
         return []
-    out: List[str] = []
-    if isinstance(value, list):
-        items = value
-    else:
-        items = [value]
-    for item in items:
-        if not isinstance(item, str):
-            continue
-        try:
-            out.extend(shlex.split(item))
-        except ValueError:
-            logger.warning("Ungültige rclone_args ignoriert: %r", item)
-    return out
-
-def _split_lines(value) -> List[str]:
-    """Normalisiert mehrzeilige UI-Felder oder Listen zu non-empty Strings."""
-    if not value:
-        return []
-    if isinstance(value, list):
-        raw = value
-    else:
-        raw = str(value).splitlines()
-    return [str(x).strip() for x in raw if str(x).strip() and not str(x).strip().startswith("#")]
+    raw = value if isinstance(value, list) else str(value).splitlines()
+    return [
+        str(item).strip()
+        for item in raw
+        if str(item).strip() and not str(item).strip().startswith("#")
+    ]
 
 
-def _structured_rclone_args(settings: Dict[str, Any], *, verb: Optional[str] = None) -> List[str]:
-    """Erzeugt sichere rclone-Flags aus strukturierten Config-Feldern.
-
-    Vorteil gegenüber Freitext-rclone_args: UI/Doctor kann Werte erklären und
-    validieren. Unbekannte Felder werden ignoriert, raw overrides bleiben über
-    rclone_args weiterhin möglich.
-    """
+def _structured_rclone_args(
+    settings: dict[str, Any], *, verb: Optional[str] = None
+) -> list[str]:
     if not isinstance(settings, dict):
         return []
-    args: List[str] = []
+    args: list[str] = []
     numeric_or_string = {
         "transfers": "--transfers",
         "checkers": "--checkers",
@@ -183,15 +224,16 @@ def _structured_rclone_args(settings: Dict[str, Any], *, verb: Optional[str] = N
     }
     for key, flag in numeric_or_string.items():
         value = settings.get(key)
-        if value is None or value == "":
-            continue
-        args.append(f"{flag}={value}")
+        if value not in (None, ""):
+            args.append(f"{flag}={value}")
 
-    # Löschschutz nur bei Kommandos, die wirklich löschen können.
-    if verb in ("sync", "bisync"):
+    if verb in {"sync", "bisync"}:
         max_delete = settings.get("max_delete")
         if max_delete not in (None, ""):
             args.append(f"--max-delete={max_delete}")
+        max_delete_size = settings.get("max_delete_size")
+        if max_delete_size not in (None, ""):
+            args.append(f"--max-delete-size={max_delete_size}")
         if settings.get("delete_excluded"):
             args.append("--delete-excluded")
 
@@ -201,532 +243,963 @@ def _structured_rclone_args(settings: Dict[str, Any], *, verb: Optional[str] = N
         "metadata": "--metadata",
         "create_empty_src_dirs": "--create-empty-src-dirs",
         "ignore_existing": "--ignore-existing",
-        "ignore_errors": "--ignore-errors",
         "drive_acknowledge_abuse": "--drive-acknowledge-abuse",
     }
     for key, flag in bool_flags.items():
         if settings.get(key):
             args.append(flag)
+
+    # ignore_errors ist bei sync/bisync gefährlich, weil es Löschungen trotz
+    # I/O-Fehlern erlauben kann. Nur mit bewusstem allow_unsafe_flags übernehmen.
+    if settings.get("ignore_errors") and settings.get("allow_unsafe_flags"):
+        args.append("--ignore-errors")
     return args
 
 
-def _pair_filter_args(pair: Dict[str, Any]) -> List[str]:
-    """Pair-spezifische Include/Exclude/Filter-Regeln aus der UI."""
-    args: List[str] = []
-    for pat in _split_lines(pair.get("include")):
-        # UI verzeiht sowohl "*.jpg" als auch Filter-Syntax "+ *.jpg".
-        if pat.startswith("+ "):
-            pat = pat[2:].strip()
-        args += ["--include", pat]
-    for pat in _split_lines(pair.get("exclude")):
-        # UI verzeiht sowohl ".DS_Store" als auch Filter-Syntax "- .DS_Store".
-        if pat.startswith("- "):
-            pat = pat[2:].strip()
-        args += ["--exclude", pat]
+def _filter_args(cfg, pair: dict[str, Any], verb: str) -> list[str]:
+    args: list[str] = []
+    for pattern in _split_lines(pair.get("include")):
+        args += [
+            "--include",
+            pattern[2:].strip() if pattern.startswith("+ ") else pattern,
+        ]
+    for pattern in _split_lines(pair.get("exclude")):
+        args += [
+            "--exclude",
+            pattern[2:].strip() if pattern.startswith("- ") else pattern,
+        ]
     for rule in _split_lines(pair.get("filter")):
         args += ["--filter", rule]
-    for key, flag in (("include_file", "--include-from"), ("exclude_file", "--exclude-from"), ("filter_file", "--filter-from")):
+
+    for key, flag in (
+        ("include_file", "--include-from"),
+        ("exclude_file", "--exclude-from"),
+    ):
         value = str(pair.get(key) or "").strip()
         if value:
+            if not Path(value).is_file():
+                raise ValueError(f"{key} nicht gefunden: {value}")
             args += [flag, value]
+
+    # Pair-Datei überschreibt die globale Filterdatei. Bisync nutzt bewusst
+    # --filters-file, damit rclone Änderungen hasht und einen Resync erzwingt.
+    filter_file = str(
+        pair.get("filter_file") or cfg.get("backup", "filter_file", default="") or ""
+    ).strip()
+    if filter_file:
+        if not Path(filter_file).is_file():
+            raise ValueError(
+                f"filter_file gesetzt, aber nicht vorhanden: {filter_file}"
+            )
+        args += ["--filters-file" if verb == "bisync" else "--filter-from", filter_file]
     return args
 
 
-def command_to_string(cmd: List[str]) -> str:
-    """Shell-lesbare Darstellung ohne Ausführung."""
-    return " ".join(shlex.quote(str(c)) for c in cmd)
+def command_to_string(cmd: list[str]) -> str:
+    return " ".join(shlex.quote(str(item)) for item in cmd)
 
 
-def _pair_warnings(pair: Dict[str, Any], *, dry_run: bool) -> List[str]:
-    warnings: List[str] = []
+def _pair_warnings(pair: dict[str, Any], *, dry_run: bool) -> list[str]:
+    warnings: list[str] = []
     name = pair.get("name") or "?"
-    direction = (pair.get("direction") or "bisync").lower().strip()
-    mode = (pair.get("mode") or "bisync").lower().strip()
-    if direction in ("pull", "push") and mode == "sync" and not dry_run:
-        warnings.append(f"{name}: mode=sync kann Dateien im Ziel löschen. Erst Dry-Run prüfen.")
-    if direction == "bisync" and pair.get("min_local_files", 1) in (0, "0"):
-        warnings.append(f"{name}: min_local_files=0 deaktiviert den Mount-Schutz bei bisync.")
+    direction = str(pair.get("direction") or "bisync").lower().strip()
+    mode = str(pair.get("mode") or "bisync").lower().strip()
+    destructive = direction == "bisync" or (
+        direction in {"pull", "push"} and mode == "sync"
+    )
+    if destructive and not dry_run:
+        warnings.append(f"{name}: {mode} kann Dateien löschen. Erst Dry-Run prüfen.")
+        if not pair.get("allow_delete"):
+            warnings.append(
+                f"{name}: produktiver {mode} ist ohne allow_delete gesperrt."
+            )
+        if pair.get("max_delete") in (None, "", -1, "-1"):
+            warnings.append(f"{name}: kein begrenztes max_delete am Pair gesetzt.")
+    if direction in {"bisync", "push"} and pair.get("min_local_files", 1) in (0, "0"):
+        warnings.append(
+            f"{name}: min_local_files=0 deaktiviert den lokalen Mount-/Quellschutz."
+        )
     if pair.get("exclude") and pair.get("include"):
-        warnings.append(f"{name}: include und exclude kombiniert — Reihenfolge der Filter ist wichtig.")
+        warnings.append(
+            f"{name}: include und exclude kombiniert — Filterreihenfolge prüfen."
+        )
+    if pair.get("require_mountpoint") and not pair.get("mountpoint"):
+        warnings.append(
+            f"{name}: require_mountpoint prüft mangels mountpoint den lokalen Pair-Pfad selbst."
+        )
     if not pair.get("remote") or not pair.get("local"):
         warnings.append(f"{name}: remote/local unvollständig.")
     return warnings
 
 
 def _count_files_up_to(path: Path, limit: int) -> int:
-    """Zählt nur bis limit. Spart bei großen Medienordnern massive Laufzeit."""
     if limit <= 0:
         return 0
     count = 0
-    for root, _dirs, files in os.walk(path):
+    for _root, _dirs, files in os.walk(path):
         count += len(files)
         if count >= limit:
             return count
     return count
 
 
-def _run_rclone_command(cmd: List[str], log_file: Path, *, timeout_sec: int, append: bool = False,
-                        header: Optional[str] = None) -> int:
+def _run_rclone_command(
+    cmd: list[str],
+    log_file: Path,
+    *,
+    timeout_sec: int,
+    append: bool = False,
+    header: Optional[str] = None,
+    pair_name: str = "",
+) -> int:
     mode = "a" if append else "w"
-    with open(log_file, mode, encoding="utf-8") as f:
+    with log_file.open(mode, encoding="utf-8") as handle:
+        try:
+            os.chmod(log_file, 0o600)
+        except OSError:
+            pass
         if header:
-            f.write(header)
-            f.flush()
+            handle.write(header)
+            handle.flush()
         proc = subprocess.Popen(
             cmd,
-            stdout=f,
+            stdout=handle,
             stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
             start_new_session=True,
+            close_fds=True,
+            env=rclone_subprocess_env(),
         )
-        _register_proc(proc)
+        _register_proc(proc, pair_name=pair_name, log_file=str(log_file))
+        deadline = time.monotonic() + timeout_sec
         try:
-            return int(proc.wait(timeout=timeout_sec))
-        except subprocess.TimeoutExpired:
-            _terminate_proc(proc)
-            raise
+            while True:
+                rc = proc.poll()
+                if rc is not None:
+                    return int(rc)
+                if is_cancelled():
+                    _terminate_proc(proc)
+                    return 130
+                if time.monotonic() >= deadline:
+                    _terminate_proc(proc)
+                    raise subprocess.TimeoutExpired(cmd, timeout_sec)
+                time.sleep(0.25)
         finally:
             _unregister_proc(proc)
 
 
-def _backup_extra_args(cfg) -> List[str]:
-    extra: List[str] = []
-    backup_cfg = cfg.get("backup", default={}) or {}
-
-    filter_file = backup_cfg.get("filter_file") or ""
-    if filter_file and Path(filter_file).is_file():
-        extra += ["--filter-from", filter_file]
-    elif filter_file:
-        logger.warning("filter_file gesetzt aber nicht vorhanden: %s", filter_file)
-
-    bwlimit = (backup_cfg.get("bwlimit") or "").strip()
+def _global_verb_args(cfg, verb: str) -> list[str]:
+    backup = cfg.get("backup", default={}) or {}
+    args: list[str] = []
+    bwlimit = str(backup.get("bwlimit") or "").strip()
     if bwlimit:
-        extra += ["--bwlimit", bwlimit]
-
-    conflict = (backup_cfg.get("conflict_resolve") or "auto").strip()
-    if conflict and conflict != "auto":
-        extra += ["--conflict-resolve", conflict]
-
-    if backup_cfg.get("immutable"):
-        extra += ["--immutable"]
-    return extra
-
-
-def _pair_safety_args(cfg, pair_root: str) -> List[str]:
-    extra: List[str] = []
-    backup_cfg = cfg.get("backup", default={}) or {}
-    backup_dir = (backup_cfg.get("backup_dir") or "").strip()
-    if backup_dir and pair_root:
-        stamp = datetime.now().strftime("%Y-%m-%dT%H-%M")
-        resolved = backup_dir.replace("{date}", stamp)
-        if not _is_remote(resolved) and not resolved.startswith("/"):
-            sep = "" if pair_root.endswith(("/", ":")) else "/"
-            resolved = f"{pair_root}{sep}{resolved}"
-        extra += ["--backup-dir", resolved]
-    return extra
+        args += ["--bwlimit", bwlimit]
+    if backup.get("immutable"):
+        args.append("--immutable")
+    if verb == "bisync":
+        conflict = str(backup.get("conflict_resolve") or "auto").strip().lower()
+        if conflict not in {"", "auto", "none"}:
+            args += ["--conflict-resolve", conflict]
+        if backup.get("resilient", True):
+            args.append("--resilient")
+        if backup.get("recover", True):
+            args.append("--recover")
+        max_lock = str(backup.get("max_lock") or "2m").strip()
+        if max_lock:
+            args += ["--max-lock", max_lock]
+    return args
 
 
-def _remote_reachable(path: str, timeout: int = 15) -> Tuple[bool, str]:
+def _resolve_backup_path(root: str, spec: str, stamp: str) -> str:
+    resolved = spec.replace("{date}", stamp)
+    if _is_remote(resolved) or resolved.startswith("/"):
+        return resolved
+    separator = "" if root.endswith(("/", ":")) else "/"
+    return f"{root}{separator}{resolved}"
+
+
+def _backup_dir_args(
+    cfg, pair: dict[str, Any], verb: str, src: str, dst: str
+) -> list[str]:
+    backup = cfg.get("backup", default={}) or {}
+    generic = str(pair.get("backup_dir") or backup.get("backup_dir") or "").strip()
+    stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    if verb == "bisync":
+        dir1 = str(pair.get("backup_dir1") or backup.get("backup_dir1") or "").strip()
+        dir2 = str(pair.get("backup_dir2") or backup.get("backup_dir2") or "").strip()
+        if generic and not (_is_remote(generic) or generic.startswith("/")):
+            dir1 = dir1 or generic
+            dir2 = dir2 or generic
+        args: list[str] = []
+        if dir1:
+            args += ["--backup-dir1", _resolve_backup_path(src, dir1, stamp)]
+        if dir2:
+            args += ["--backup-dir2", _resolve_backup_path(dst, dir2, stamp)]
+        if generic and not dir1 and not dir2:
+            logger.warning(
+                "Absolutes backup_dir kann bei bisync nicht beiden Seiten sicher zugeordnet werden; nutze backup_dir1/backup_dir2"
+            )
+        return args
+    if generic:
+        return ["--backup-dir", _resolve_backup_path(dst, generic, stamp)]
+    return []
+
+
+def _remote_reachable(
+    path: str, timeout: int = 15, *, allow_missing: bool = False
+) -> tuple[bool, str]:
     if not path:
         return False, "Pfad leer"
     if _is_remote(path):
         try:
-            r = subprocess.run(
-                ["rclone", "lsf", path, "--max-depth", "1", *_rclone_cache_args()],
+            result = subprocess.run(
+                [
+                    "rclone",
+                    "lsjson",
+                    "--stat",
+                    "--no-mimetype",
+                    "--no-modtime",
+                    "--no-size",
+                    *_rclone_cache_args(),
+                    "--",
+                    path,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                stdin=subprocess.DEVNULL,
+                env=rclone_subprocess_env(),
             )
-            if r.returncode == 0:
+            if result.returncode == 0:
                 return True, "ok"
-            err = (r.stderr or r.stdout or "")[:300].strip()
-            if "directory not found" in err.lower() or "not found" in err.lower():
-                return True, "directory empty/new"
-            return False, f"rclone lsf exit={r.returncode}: {err}"
+            error = (result.stderr or result.stdout or "").strip()[:500]
+            missing = any(
+                token in error.lower()
+                for token in (
+                    "directory not found",
+                    "object not found",
+                    "path not found",
+                )
+            )
+            if missing and allow_missing:
+                return True, "Ziel wird beim ersten Sync angelegt"
+            return False, f"rclone lsjson --stat exit={result.returncode}: {error}"
         except subprocess.TimeoutExpired:
-            return False, f"timeout nach {timeout}s"
+            return False, f"Timeout nach {timeout}s"
         except FileNotFoundError:
             return False, "rclone Binary nicht gefunden"
-        except Exception as e:
-            return False, f"{type(e).__name__}: {e}"
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
 
-    p = Path(path)
-    if p.exists() and p.is_dir():
+    local = Path(path)
+    if local.exists() and local.is_dir():
         return True, "ok"
-    if p.parent.exists():
-        return True, "wird beim ersten Sync angelegt"
-    return False, f"weder Pfad noch Parent existiert: {path}"
+    if allow_missing and local.parent.exists() and local.parent.is_dir():
+        return True, "Ziel wird beim ersten Sync angelegt"
+    return False, f"Verzeichnis nicht erreichbar: {path}"
 
 
-def _rclone_stats_remote(remote: str) -> Tuple[int, str]:
+def _format_bytes(value: int) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if abs(amount) < 1024 or unit == "PiB":
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{value} B"
+
+
+def _pair_stats(path: str) -> tuple[int, str]:
+    """Ein einzelner rclone-size-Aufruf statt kompletter Doppel-Traversierung."""
     try:
-        c = subprocess.run(
-            ["rclone", "lsf", remote, "--recursive", "--files-only", *_rclone_cache_args()],
+        result = subprocess.run(
+            ["rclone", "size", "--json", *_rclone_cache_args(), "--", path],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=180,
+            stdin=subprocess.DEVNULL,
+            env=rclone_subprocess_env(),
         )
-        files = len(c.stdout.splitlines()) if c.returncode == 0 else 0
-        s = subprocess.run(
-            ["rclone", "size", remote, *_rclone_cache_args()],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        size = "?"
-        if s.returncode == 0:
-            m = re.search(r"Total size:\s+([^\n]+)", s.stdout)
-            if m:
-                size = m.group(1).strip()
-        return files, size
-    except Exception as e:
-        logger.error("rclone stats %s: %s", remote, e)
+        if result.returncode != 0:
+            return 0, "?"
+        data = json.loads(result.stdout or "{}")
+        count = int(data.get("count") or 0)
+        size = int(data.get("bytes") or 0)
+        return count, _format_bytes(size)
+    except Exception as exc:
+        logger.warning("Stats für %s nicht verfügbar: %s", path, exc)
         return 0, "?"
 
 
-def _local_stats(path: str) -> Tuple[int, str]:
+def _paths_overlap(a: str, b: str) -> bool:
+    if not a or not b or _is_remote(a) != _is_remote(b):
+        return False
+    if _is_remote(a):
+        aa, bb = a.rstrip("/"), b.rstrip("/")
+        return aa == bb or aa.startswith(bb + "/") or bb.startswith(aa + "/")
     try:
-        p = Path(path)
-        if not p.exists():
-            return 0, "0"
-        files = 0
-        for _root, _dirs, names in os.walk(p):
-            files += len(names)
-        d = subprocess.run(["du", "-sh", path], capture_output=True, text=True, timeout=60)
-        size = d.stdout.split()[0] if d.returncode == 0 and d.stdout.split() else "?"
-        return files, size
-    except Exception as e:
-        logger.error("local stats %s: %s", path, e)
-        return 0, "?"
+        pa, pb = Path(a).resolve(), Path(b).resolve()
+        return pa == pb or pa.is_relative_to(pb) or pb.is_relative_to(pa)
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
-def _pair_stats(path: str) -> Tuple[int, str]:
-    return _rclone_stats_remote(path) if _is_remote(path) else _local_stats(path)
+def _has_overlapping_pairs(pairs: list[dict[str, Any]]) -> bool:
+    for index, first in enumerate(pairs):
+        for second in pairs[index + 1 :]:
+            if _paths_overlap(
+                str(first.get("local") or ""), str(second.get("local") or "")
+            ):
+                return True
+            if _paths_overlap(
+                str(first.get("remote") or ""), str(second.get("remote") or "")
+            ):
+                return True
+    return False
 
 
-def _build_pair_command(pair: Dict, base_args: List[str], dry_run: bool) -> Tuple[List[str], str, str, str]:
-    remote = pair["remote"]
-    local = pair["local"]
+def _build_pair_command(
+    pair: dict[str, Any], base_args: list[str], dry_run: bool
+) -> tuple[list[str], str, str, str]:
+    remote = str(pair["remote"])
+    local = str(pair["local"])
     cfg = get_config()
-    backup_cfg = cfg.get("backup", default={}) or {}
+    backup = cfg.get("backup", default={}) or {}
 
-    direction = (pair.get("direction") or "bisync").lower().strip()
-    mode = (pair.get("mode") or "bisync").lower().strip()
+    direction = str(pair.get("direction") or "bisync").lower().strip()
+    mode = str(pair.get("mode") or "bisync").lower().strip()
     if direction == "bisync":
-        verb, src, dst = "bisync", remote, local
+        verb, src, dst, mode = "bisync", remote, local, "bisync"
     elif direction == "pull":
         verb, src, dst = ("sync" if mode == "sync" else "copy"), remote, local
     elif direction == "push":
         verb, src, dst = ("sync" if mode == "sync" else "copy"), local, remote
     else:
-        logger.warning("[%s] unbekannte direction=%r, fallback bisync", pair.get("name"), direction)
-        verb, src, dst, direction = "bisync", remote, local, "bisync"
+        raise ValueError(f"Unbekannte direction: {direction}")
 
-    pair_args = _parse_rclone_args(pair.get("rclone_args"))
-    pair_safety = _pair_safety_args(cfg, remote)
-    structured_global = _structured_rclone_args(backup_cfg.get("tuning") or {}, verb=verb)
-    structured_pair = _structured_rclone_args(pair.get("options") or pair, verb=verb)
-    filter_args = _pair_filter_args(pair)
-    effective_args = list(base_args) + structured_global + structured_pair + filter_args + pair_args + pair_safety
+    allow_unsafe = bool(backup.get("allow_unsafe_rclone_args", False))
+    effective_args = validate_parsed_rclone_args(
+        list(base_args), allow_unsafe=allow_unsafe
+    )
+    effective_args += _global_verb_args(cfg, verb)
+    effective_args += _structured_rclone_args(backup.get("tuning") or {}, verb=verb)
+    effective_args += _structured_rclone_args(pair.get("options") or pair, verb=verb)
+    effective_args += _filter_args(cfg, pair, verb)
+    effective_args += _parse_rclone_args(
+        pair.get("rclone_args"), allow_unsafe=allow_unsafe
+    )
+    effective_args += _backup_dir_args(cfg, pair, verb, src, dst)
 
-    stats_interval = str((backup_cfg.get("tuning") or {}).get("stats_interval") or "10s")
-    cmd = ["rclone", verb, src, dst, *_rclone_cache_args(verb), "--stats", stats_interval, "--stats-one-line"]
+    if verb in {"sync", "bisync"} and not dry_run:
+        if backup.get("require_delete_confirmation", True) and not pair.get(
+            "allow_delete", False
+        ):
+            raise ValueError(
+                f"Produktiver {verb} ist gesperrt: Pair-Option allow_delete fehlt"
+            )
+        effective_max_delete = pair.get(
+            "max_delete", (backup.get("tuning") or {}).get("max_delete")
+        )
+        if backup.get("require_max_delete_for_sync", True) and effective_max_delete in (
+            None,
+            "",
+            -1,
+            "-1",
+        ):
+            raise ValueError(
+                f"Produktiver {verb} ist gesperrt: begrenztes max_delete fehlt"
+            )
+
+    stats_interval = str((backup.get("tuning") or {}).get("stats_interval") or "10s")
+    cmd = [
+        "rclone",
+        verb,
+        *_rclone_cache_args(verb),
+        "--stats",
+        stats_interval,
+        "--stats-one-line",
+    ]
     cmd += effective_args
     if dry_run and "--dry-run" not in cmd:
         cmd.append("--dry-run")
+    cmd += ["--", src, dst]
     return cmd, verb, direction, mode
 
-def _sync_pair(pair: Dict, args: List[str], log_dir: Path, dry_run: bool, timeout_sec: int) -> Dict:
-    name = pair["name"]
-    remote = pair["remote"]
-    local = pair["local"]
 
-    summary = {
+def _nearest_existing_path(path: Path) -> Optional[Path]:
+    current = path
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current if current.exists() else None
+
+
+def _remote_file_count(path: str, timeout: int = 120) -> tuple[Optional[int], str]:
+    try:
+        result = subprocess.run(
+            ["rclone", "size", "--json", *_rclone_cache_args(), "--", path],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env=rclone_subprocess_env(),
+        )
+        if result.returncode != 0:
+            return None, (
+                result.stderr or result.stdout or f"exit {result.returncode}"
+            ).strip()[:500]
+        data = json.loads(result.stdout or "{}")
+        return int(data.get("count") or 0), "ok"
+    except subprocess.TimeoutExpired:
+        return None, f"Timeout nach {timeout}s"
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, str(exc)
+
+
+def _precheck_pair(pair: dict[str, Any]) -> tuple[bool, str]:
+    remote = str(pair.get("remote") or "")
+    local = str(pair.get("local") or "")
+    direction = str(pair.get("direction") or "bisync").lower()
+
+    remote_is_destination = direction == "push"
+    local_is_destination = direction == "pull"
+    remote_ok, remote_msg = _remote_reachable(
+        remote, allow_missing=remote_is_destination
+    )
+    local_ok, local_msg = _remote_reachable(local, allow_missing=local_is_destination)
+    if not remote_ok or not local_ok:
+        return (
+            False,
+            f"Pre-Check fehlgeschlagen (remote: {remote_msg} / local: {local_msg})",
+        )
+
+    min_remote_files = max(0, int(pair.get("min_remote_files", 0) or 0))
+    if min_remote_files > 0 and direction in {"pull", "bisync"}:
+        remote_count, remote_count_msg = _remote_file_count(remote)
+        if remote_count is None:
+            return (
+                False,
+                f"Remote-Dateischutz konnte nicht geprüft werden: {remote_count_msg}",
+            )
+        if remote_count < min_remote_files:
+            return (
+                False,
+                f"Nur {remote_count} Dateien unter {remote}, min_remote_files={min_remote_files}.",
+            )
+
+    if not _is_remote(local):
+        local_path = Path(local)
+        mountpoint_value = str(pair.get("mountpoint") or local).strip()
+        if pair.get("require_mountpoint"):
+            mountpoint_path = Path(mountpoint_value)
+            if not mountpoint_path.exists() or not os.path.ismount(mountpoint_path):
+                return (
+                    False,
+                    f"Erwarteter Mountpoint ist nicht eingehängt: {mountpoint_path}",
+                )
+            try:
+                local_path.resolve().relative_to(mountpoint_path.resolve())
+            except (ValueError, OSError, RuntimeError):
+                return (
+                    False,
+                    f"Lokaler Pfad liegt nicht unter dem Mountpoint: {mountpoint_path}",
+                )
+
+        sentinel = str(pair.get("sentinel_file") or "").strip()
+        if sentinel and not (local_path / sentinel).is_file():
+            return False, f"Sentinel-Datei fehlt: {local_path / sentinel}"
+
+        min_free_gb = max(0.0, float(pair.get("min_free_gb", 0) or 0))
+        if min_free_gb > 0 and direction in {"pull", "bisync"}:
+            usage_target = _nearest_existing_path(local_path)
+            if usage_target is None:
+                return (
+                    False,
+                    f"Freier Speicher konnte für {local} nicht bestimmt werden",
+                )
+            free_gb = shutil.disk_usage(usage_target).free / (1024**3)
+            if free_gb < min_free_gb:
+                return (
+                    False,
+                    f"Zu wenig freier Speicher unter {usage_target}: {free_gb:.1f} GiB < {min_free_gb:.1f} GiB",
+                )
+
+        min_files = pair.get("min_local_files", 1)
+        try:
+            min_files_i = max(0, int(min_files if min_files is not None else 1))
+        except (TypeError, ValueError):
+            min_files_i = 1
+        if min_files_i > 0:
+            if not local_path.exists():
+                return False, (
+                    f"Lokaler Pfad fehlt: {local}. Für ein bewusst neues Ziel min_local_files=0 setzen; "
+                    "andernfalls wird ein fehlender Mount vermutet."
+                )
+            count = _count_files_up_to(local_path, min_files_i)
+            if count < min_files_i:
+                return (
+                    False,
+                    f"Nur {count} Dateien unter {local}, min_local_files={min_files_i}; Mount-Drop vermutet.",
+                )
+    return True, "ok"
+
+
+def _parse_final_stats(log_tail: str) -> dict[str, Any]:
+    for line in reversed(log_tail.splitlines()):
+        match = _STATS_RE.search(line)
+        if match:
+            return {
+                "transferred": match.group(1).strip() if match.group(1) else None,
+                "total": match.group(2).strip() if match.group(2) else None,
+                "percent": float(match.group(3)) if match.group(3) else None,
+                "speed": match.group(4).strip() if match.group(4) else None,
+                "eta": match.group(5),
+            }
+    return {}
+
+
+def _sync_pair(
+    pair: dict[str, Any],
+    args: list[str],
+    log_dir: Path,
+    dry_run: bool,
+    timeout_sec: int,
+    run_id: str,
+) -> dict[str, Any]:
+    name = str(pair["name"])
+    remote = str(pair["remote"])
+    local = str(pair["local"])
+    summary: dict[str, Any] = {
         "name": name,
         "remote": remote,
         "local": local,
         "log_file": "",
         "ok": False,
         "error": "",
-        "transferred": 0,
+        "dry_run": dry_run,
     }
 
-    rok, rmsg = _remote_reachable(remote)
-    lok, lmsg = _remote_reachable(local)
-    if not rok or not lok:
-        msg = f"Pre-Check fail (remote: {rmsg} / local: {lmsg})"
-        logger.error("[%s] %s", name, msg)
+    runtime_state.update_pair(run_id, name, "checking")
+    ok, message = _precheck_pair(pair)
+    if not ok:
+        logger.error("[%s] %s", name, message)
+        summary.update({"error": message, "skipped": True})
+        runtime_state.update_pair(run_id, name, "error", error=message)
         try:
             from ..notifications import notify
-            notify("mount_check_failed", f"⚠ Pair '{name}' Pre-Check fehlgeschlagen", msg, pair=name)
+
+            notify(
+                "mount_check_failed", f"Pair '{name}' abgebrochen", message, pair=name
+            )
         except Exception:
             pass
-        summary.update({"error": msg, "skipped": True})
         return summary
 
-    if not _is_remote(local):
-        min_files = pair.get("min_local_files", 1)
-        if min_files is None:
-            min_files = 1
-        try:
-            min_files_i = int(min_files)
-        except (TypeError, ValueError):
-            min_files_i = 1
-        if min_files_i > 0:
-            local_path = Path(local)
-            if not local_path.exists():
-                msg = f"Lokaler Pfad existiert nicht: {local}"
-                logger.error("[%s] Mount-Check: %s", name, msg)
-                try:
-                    from ..notifications import notify
-                    notify("mount_check_failed", f"⚠ Pair '{name}' — Mount fehlt",
-                           f"{msg}\n\nSync ABGEBROCHEN um Cloud-Löschung zu verhindern.", pair=name)
-                except Exception:
-                    pass
-                summary.update({"error": msg, "skipped": True})
-                return summary
-            file_count = _count_files_up_to(local_path, min_files_i)
-            if file_count < min_files_i:
-                msg = f"Nur {file_count} Files unter {local}, min_local_files={min_files_i}. Mount-Drop vermutet."
-                logger.error("[%s] Mount-Check: %s", name, msg)
-                try:
-                    from ..notifications import notify
-                    notify("mount_check_failed", f"⚠ Pair '{name}' — verdächtig wenige Files",
-                           f"{msg}\n\nSync ABGEBROCHEN. Falls Absicht: min_local_files im Pair auf 0 setzen.", pair=name)
-                except Exception:
-                    pass
-                summary.update({"error": msg, "skipped": True})
-                return summary
-            logger.info("[%s] Mount-Check ok (%s Files >= %s)", name, file_count, min_files_i)
-
-    if not _is_remote(local):
+    if not _is_remote(local) and not Path(local).exists():
         Path(local).mkdir(parents=True, exist_ok=True)
 
-    log_file = log_dir / f"sync-{_safe_name(name)}-{datetime.now():%Y%m%d-%H%M%S}.log"
+    log_file = (
+        log_dir / f"sync-{_safe_name(name)}-{datetime.now():%Y%m%d-%H%M%S-%f}.log"
+    )
     summary["log_file"] = str(log_file)
     _set_active_pair_log(name, log_file)
+    runtime_state.update_pair(
+        run_id, name, "running", log_file=str(log_file), started_at=time.time()
+    )
 
-    cloud_files, cloud_size = _pair_stats(remote)
-    local_files_before, local_size_before = _pair_stats(local)
-    summary.update({
-        "cloud_files": cloud_files,
-        "cloud_size": cloud_size,
-        "local_files_before": local_files_before,
-        "local_size_before": local_size_before,
-    })
-
-    cmd, verb, direction, mode = _build_pair_command(pair, args, dry_run)
-    logger.info("[%s] [%s/%s] %s", name, direction, mode, " ".join(shlex.quote(c) for c in cmd))
+    collect_stats = bool(
+        (get_config().get("backup", default={}) or {}).get(
+            "collect_pre_post_stats", False
+        )
+    )
+    if collect_stats:
+        cloud_files, cloud_size = _pair_stats(remote)
+        local_files_before, local_size_before = _pair_stats(local)
+        summary.update(
+            {
+                "cloud_files": cloud_files,
+                "cloud_size": cloud_size,
+                "local_files_before": local_files_before,
+                "local_size_before": local_size_before,
+            }
+        )
 
     try:
-        if is_cancelled():
-            summary["error"] = "vor Start abgebrochen"
-            _set_active_pair_log(name, None)
-            return summary
-        rc = _run_rclone_command(cmd, log_file, timeout_sec=timeout_sec)
-        log_content = log_file.read_text(errors="ignore") if log_file.exists() else ""
+        cmd, verb, direction, mode = _build_pair_command(pair, args, dry_run)
+        summary.update(
+            {
+                "verb": verb,
+                "direction": direction,
+                "mode": mode,
+                "command": command_to_string(cmd),
+            }
+        )
+        logger.info("[%s] [%s/%s] %s", name, direction, mode, summary["command"])
 
-        auto_resync = bool((get_config().get("backup", default={}) or {}).get("auto_resync", False))
-        needs_resync = verb == "bisync" and rc != 0 and "Must run --resync" in log_content
-        if needs_resync and auto_resync:
-            logger.info("[%s] auto --resync", name)
-            cmd_resync = cmd + ["--resync"]
-            if not is_cancelled():
-                rc = _run_rclone_command(
-                    cmd_resync,
-                    log_file,
-                    timeout_sec=timeout_sec,
-                    append=True,
-                    header="\n\n=== AUTO --resync ===\n\n",
-                )
-                log_content = log_file.read_text(errors="ignore")
+        if is_cancelled():
+            summary["error"] = "Vor Start abgebrochen"
+            summary["cancelled"] = True
+            runtime_state.update_pair(run_id, name, "cancelled", error=summary["error"])
+            return summary
+
+        rc = _run_rclone_command(cmd, log_file, timeout_sec=timeout_sec, pair_name=name)
+        log_tail = _read_tail(log_file)
+        needs_resync = (
+            verb == "bisync" and rc != 0 and bool(_RESYNC_RE.search(log_tail))
+        )
+        backup = get_config().get("backup", default={}) or {}
+        auto_resync = bool(pair.get("auto_resync", backup.get("auto_resync", False)))
+        if needs_resync and auto_resync and not is_cancelled():
+            mode_value = (
+                str(pair.get("resync_mode") or backup.get("resync_mode") or "")
+                .strip()
+                .lower()
+            )
+            separator_index = cmd.index("--")
+            resync_flags = ["--resync"]
+            if mode_value and mode_value != "path1":
+                resync_flags += ["--resync-mode", mode_value]
+            resync_cmd = [*cmd[:separator_index], *resync_flags, *cmd[separator_index:]]
+            logger.warning("[%s] automatischer Resync wird ausgeführt", name)
+            rc = _run_rclone_command(
+                resync_cmd,
+                log_file,
+                timeout_sec=timeout_sec,
+                append=True,
+                header="\n\n=== AUTO RESYNC ===\n\n",
+                pair_name=name,
+            )
+            summary["resync_return_code"] = rc
+            log_tail = _read_tail(log_file)
         elif needs_resync:
             summary["resync_required"] = True
-            logger.warning("[%s] bisync verlangt --resync; auto_resync ist deaktiviert", name)
 
-        summary["ok"] = (rc == 0)
         summary["return_code"] = rc
+        summary.update(_parse_final_stats(log_tail))
+        summary["cancelled"] = is_cancelled() or rc == 130
+        summary["ok"] = rc == 0 and not summary["cancelled"]
         if not summary["ok"]:
-            summary["error"] = "rclone verlangt --resync" if summary.get("resync_required") else f"rclone exit {rc}"
-        summary["transferred"] = sum(
-            1 for ln in log_content.splitlines()
-            if "Copied" in ln or ("Transferred:" in ln and "/" in ln)
+            if summary["cancelled"]:
+                summary["error"] = "Abgebrochen"
+            elif summary.get("resync_required"):
+                summary["error"] = "rclone verlangt einen geprüften --resync-Lauf"
+            else:
+                summary["error"] = f"rclone exit {rc}"
+
+        if collect_stats:
+            local_files_after, local_size_after = _pair_stats(local)
+            summary["local_files_after"] = local_files_after
+            summary["local_size_after"] = local_size_after
+            if (
+                summary.get("cloud_files")
+                and local_files_after
+                and direction == "bisync"
+                and summary["cloud_files"] != local_files_after
+            ):
+                summary["warning"] = "Cloud/Lokal-Dateianzahl unterschiedlich"
+
+        state = (
+            "done"
+            if summary["ok"]
+            else ("cancelled" if summary["cancelled"] else "error")
         )
+        runtime_state.update_pair(
+            run_id, name, state, ok=summary["ok"], error=summary.get("error", "")
+        )
+        return summary
     except subprocess.TimeoutExpired:
         summary["error"] = f"Timeout nach {round(timeout_sec / 3600, 1)}h"
         logger.error("[%s] Timeout", name)
-    except Exception as e:
-        summary["error"] = str(e)
+        runtime_state.update_pair(run_id, name, "error", error=summary["error"])
+        return summary
+    except Exception as exc:
+        summary["error"] = str(exc)
         logger.exception("[%s] Exception", name)
-
-    lf, ls = _pair_stats(local)
-    summary["local_files_after"] = lf
-    summary["local_size_after"] = ls
-    if cloud_files and lf and direction == "bisync" and cloud_files != lf:
-        summary["warning"] = "Cloud/Lokal Anzahl unterschiedlich"
-    _set_active_pair_log(name, None)
-    return summary
+        runtime_state.update_pair(run_id, name, "error", error=summary["error"])
+        return summary
+    finally:
+        _set_active_pair_log(name, None)
 
 
-def _selected_pairs(pairs: Iterable[Dict], pairs_filter: Optional[list]) -> List[Dict]:
-    out = [p for p in pairs if p.get("enabled", True)]
+def _selected_pairs(
+    pairs: Iterable[dict[str, Any]], pairs_filter: Optional[list[str]]
+) -> list[dict[str, Any]]:
+    selected = [pair for pair in pairs if pair.get("enabled", True)]
     if pairs_filter:
-        wanted = {str(p).strip() for p in pairs_filter if str(p).strip()}
-        out = [p for p in out if p.get("name") in wanted]
-    return out
+        wanted = {str(name).strip() for name in pairs_filter if str(name).strip()}
+        selected = [pair for pair in selected if pair.get("name") in wanted]
+    return selected
 
 
-def run_job(dry_run: bool = False, pairs_filter: Optional[list] = None) -> Dict:
+def run_job(
+    dry_run: bool = False,
+    pairs_filter: Optional[list[str]] = None,
+    *,
+    trigger: str = "manual",
+) -> dict[str, Any]:
+    trigger = str(trigger or "manual").strip().lower()[:32] or "manual"
     cfg = get_config()
-    backup_cfg = cfg.get("backup", default={}) or {}
-    if not backup_cfg.get("enabled", True):
-        logger.info("Backup deaktiviert")
+    backup = cfg.get("backup", default={}) or {}
+    if not backup.get("enabled", True):
         return {"enabled": False, "ok": True}
 
-    all_pairs = backup_cfg.get("pairs") or []
-    pairs = _selected_pairs(all_pairs, pairs_filter)
+    pairs = _selected_pairs(backup.get("pairs") or [], pairs_filter)
     if not pairs:
-        return {"enabled": True, "ok": False, "error": "Keine aktiven Sync-Paare passend zur Auswahl"}
+        return {
+            "enabled": True,
+            "ok": False,
+            "error": "Keine aktiven Sync-Paare passend zur Auswahl",
+        }
+
+    names = [str(pair.get("name") or "").strip() for pair in pairs]
+    if any(not name for name in names):
+        return {
+            "enabled": True,
+            "ok": False,
+            "error": "Aktives Pair ohne Namen gefunden",
+        }
+    folded_names = [name.casefold() for name in names]
+    if len(set(folded_names)) != len(folded_names):
+        return {
+            "enabled": True,
+            "ok": False,
+            "error": "Doppelte aktive Pair-Namen gefunden",
+        }
+
+    # Alles, was vor einem Lauf fehlschlagen kann, vor dem Laufzeit-Marker prüfen.
+    base_args = _parse_rclone_args(
+        backup.get("rclone_args"),
+        allow_unsafe=bool(backup.get("allow_unsafe_rclone_args", False)),
+    )
+    log_dir = (
+        Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "rclone"
+    )
+    log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(log_dir, 0o700)
+    except OSError:
+        pass
+    timeout_sec = int(
+        _bounded_number(
+            backup.get("timeout_hours", 4), default=4, minimum=0.1, maximum=168
+        )
+        * 3600
+    )
+    max_parallel = int(
+        _bounded_number(backup.get("max_parallel", 2), default=2, minimum=1, maximum=16)
+    )
+    max_parallel = min(max_parallel, len(pairs))
 
     reset_cancel()
+    run_id = runtime_state.begin_run(names, dry_run=dry_run)
+    warnings: list[str] = []
 
     if not dry_run:
         try:
             from ..notifications import notify
-            notify("sync_started", "Sync gestartet", f"{len(pairs)} Pair(s): {', '.join(p.get('name', '?') for p in pairs)}")
+
+            notify(
+                "sync_started",
+                "Sync gestartet",
+                f"{len(pairs)} Pair(s): {', '.join(names)}",
+            )
         except Exception:
-            pass
-
-    args = _parse_rclone_args(backup_cfg.get("rclone_args"))
-    args += _backup_extra_args(cfg)
-    log_dir = Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "rclone"
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    timeout_hours = float(backup_cfg.get("timeout_hours", 4) or 4)
-    timeout_sec = max(300, int(timeout_hours * 3600))
-    max_parallel = int(backup_cfg.get("max_parallel", 2) or 2)
-    max_parallel = max(1, min(max_parallel, len(pairs)))
+            logger.exception("Start-Benachrichtigung fehlgeschlagen")
+    if max_parallel > 1 and _has_overlapping_pairs(pairs):
+        max_parallel = 1
+        warnings.append(
+            "Überlappende Pair-Pfade erkannt; Ausführung wurde automatisch serialisiert."
+        )
 
     logger.info("Starte Sync mit %d Worker(n) für %d Pair(s)", max_parallel, len(pairs))
-    start = time.time()
-    results: List[Dict] = []
-    with ThreadPoolExecutor(max_workers=max_parallel) as ex:
-        futures = {ex.submit(_sync_pair, p, args, log_dir, dry_run, timeout_sec): p for p in pairs}
-        for fut in as_completed(futures):
-            try:
-                results.append(fut.result())
-            except Exception as e:
-                logger.exception("Pair-Worker fehlgeschlagen")
-                results.append({"name": futures[fut].get("name", "?"), "ok": False, "error": str(e)})
+    started = time.time()
+    results_by_name: dict[str, dict[str, Any]] = {}
+    try:
+        with ThreadPoolExecutor(
+            max_workers=max_parallel, thread_name_prefix="rclone-pair"
+        ) as executor:
+            futures = {
+                executor.submit(
+                    _sync_pair, pair, base_args, log_dir, dry_run, timeout_sec, run_id
+                ): pair
+                for pair in pairs
+            }
+            for future in as_completed(futures):
+                pair = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    logger.exception("Pair-Worker fehlgeschlagen")
+                    result = {
+                        "name": pair.get("name", "?"),
+                        "ok": False,
+                        "error": str(exc),
+                    }
+                result.setdefault("trigger", trigger)
+                results_by_name[str(pair.get("name"))] = result
+    except BaseException as exc:
+        runtime_state.finish_run(run_id, "error", error=str(exc))
+        raise
 
-    duration = time.time() - start
-    total_transferred = sum(r.get("transferred", 0) for r in results)
-    ok_count = sum(1 for r in results if r.get("ok"))
-    summary = {
+    results = [
+        results_by_name.get(
+            str(pair.get("name")),
+            {"name": pair.get("name"), "ok": False, "error": "Kein Ergebnis"},
+        )
+        for pair in pairs
+    ]
+    duration = time.time() - started
+    ok_count = sum(1 for result in results if result.get("ok"))
+    cancelled = is_cancelled()
+    summary: dict[str, Any] = {
         "enabled": True,
-        "ok": ok_count == len(pairs),
-        "started_at": datetime.fromtimestamp(start).isoformat(),
+        "ok": ok_count == len(pairs) and not cancelled,
+        "started_at": datetime.fromtimestamp(started).isoformat(),
         "duration_sec": round(duration, 1),
         "dry_run": dry_run,
         "pairs": results,
         "ok_count": ok_count,
         "total_pairs": len(pairs),
-        "total_transferred": total_transferred,
-        "cancelled": is_cancelled(),
+        "cancelled": cancelled,
+        "warnings": warnings,
+        "run_id": run_id,
+        "trigger": trigger,
     }
 
+    runtime_state.finish_run(
+        run_id, "cancelled" if cancelled else ("ok" if summary["ok"] else "error")
+    )
     if not dry_run:
         try:
             from ..notifications import notify
-            if summary["ok"]:
-                notify("sync_ok", f"✓ Sync erfolgreich ({ok_count}/{len(pairs)} Paare)",
-                       f"Dauer: {duration:.0f}s · Transfers/Stats-Zeilen: {total_transferred}", summary=summary)
-            else:
-                fail_names = [r.get("name", "?") for r in results if not r.get("ok")]
-                notify("sync_error", f"✗ Sync mit Fehlern ({ok_count}/{len(pairs)})",
-                       f"Fehlgeschlagen: {', '.join(fail_names)}\nDauer: {duration:.0f}s", summary=summary)
-        except Exception as e:
-            logger.warning("notify failed (non-fatal): %s", e)
 
+            if summary["ok"]:
+                notify(
+                    "sync_ok",
+                    f"Sync erfolgreich ({ok_count}/{len(pairs)} Paare)",
+                    f"Dauer: {duration:.0f}s",
+                    summary=summary,
+                )
+            elif not cancelled:
+                failed = [
+                    str(result.get("name", "?"))
+                    for result in results
+                    if not result.get("ok")
+                ]
+                notify(
+                    "sync_error",
+                    f"Sync mit Fehlern ({ok_count}/{len(pairs)})",
+                    f"Fehlgeschlagen: {', '.join(failed)}\nDauer: {duration:.0f}s",
+                    summary=summary,
+                )
+        except Exception as exc:
+            logger.warning("Benachrichtigung fehlgeschlagen: %s", exc)
     return summary
 
 
-def build_job_plan(dry_run: bool = True, pairs_filter: Optional[list] = None) -> Dict[str, Any]:
-    """Erstellt eine ausführbare Vorschau ohne rclone zu starten."""
+def build_job_plan(
+    dry_run: bool = True, pairs_filter: Optional[list[str]] = None
+) -> dict[str, Any]:
     cfg = get_config()
-    backup_cfg = cfg.get("backup", default={}) or {}
-    all_pairs = backup_cfg.get("pairs") or []
-    pairs = _selected_pairs(all_pairs, pairs_filter)
-    args = _parse_rclone_args(backup_cfg.get("rclone_args"))
-    args += _backup_extra_args(cfg)
-    planned: List[Dict[str, Any]] = []
-    warnings: List[str] = []
+    backup = cfg.get("backup", default={}) or {}
+    pairs = _selected_pairs(backup.get("pairs") or [], pairs_filter)
+    base_args = _parse_rclone_args(
+        backup.get("rclone_args"),
+        allow_unsafe=bool(backup.get("allow_unsafe_rclone_args", False)),
+    )
+    planned: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    if _has_overlapping_pairs(pairs):
+        warnings.append(
+            "Überlappende Pair-Pfade: produktive Läufe werden automatisch seriell ausgeführt."
+        )
     for pair in pairs:
         try:
-            cmd, verb, direction, mode = _build_pair_command(pair, args, dry_run=dry_run)
-            pw = _pair_warnings(pair, dry_run=dry_run)
-            warnings.extend(pw)
-            planned.append({
-                "name": pair.get("name"),
-                "enabled": pair.get("enabled", True),
-                "remote": pair.get("remote"),
-                "local": pair.get("local"),
-                "verb": verb,
-                "direction": direction,
-                "mode": mode,
-                "dry_run": dry_run,
-                "command": command_to_string(cmd),
-                "warnings": pw,
-            })
-        except Exception as e:
-            planned.append({"name": pair.get("name"), "ok": False, "error": str(e)})
-            warnings.append(f"{pair.get('name', '?')}: Plan konnte nicht gebaut werden: {e}")
+            cmd, verb, direction, mode = _build_pair_command(
+                pair, base_args, dry_run=dry_run
+            )
+            pair_warnings = _pair_warnings(pair, dry_run=dry_run)
+            warnings.extend(pair_warnings)
+            planned.append(
+                {
+                    "name": pair.get("name"),
+                    "enabled": pair.get("enabled", True),
+                    "remote": pair.get("remote"),
+                    "local": pair.get("local"),
+                    "verb": verb,
+                    "direction": direction,
+                    "mode": mode,
+                    "dry_run": dry_run,
+                    "command": command_to_string(cmd),
+                    "warnings": pair_warnings,
+                }
+            )
+        except Exception as exc:
+            planned.append({"name": pair.get("name"), "ok": False, "error": str(exc)})
+            warnings.append(
+                f"{pair.get('name', '?')}: Plan konnte nicht gebaut werden: {exc}"
+            )
     return {
-        "ok": not any(p.get("error") for p in planned),
+        "ok": not any(item.get("error") for item in planned),
         "dry_run": dry_run,
         "total_pairs": len(planned),
         "pairs": planned,
-        "warnings": warnings,
+        "warnings": list(dict.fromkeys(warnings)),
     }
 
 
-def run_pair_check(pair_name: str, *, one_way: Optional[bool] = None, download: bool = False) -> Dict[str, Any]:
-    """Read-only Integritätscheck per `rclone check` für ein Pair."""
+def run_pair_check(
+    pair_name: str, *, one_way: Optional[bool] = None, download: bool = False
+) -> dict[str, Any]:
     cfg = get_config()
-    backup_cfg = cfg.get("backup", default={}) or {}
-    pairs = [p for p in (backup_cfg.get("pairs") or []) if p.get("name") == pair_name]
-    if not pairs:
+    backup = cfg.get("backup", default={}) or {}
+    matches = [
+        pair for pair in (backup.get("pairs") or []) if pair.get("name") == pair_name
+    ]
+    if not matches:
         return {"ok": False, "error": f"Pair nicht gefunden: {pair_name}"}
-    pair = pairs[0]
-    direction = (pair.get("direction") or "bisync").lower().strip()
-    if direction == "push":
-        src, dst = pair.get("local"), pair.get("remote")
-    else:
-        src, dst = pair.get("remote"), pair.get("local")
+    pair = matches[0]
+    direction = str(pair.get("direction") or "bisync").lower().strip()
+    src, dst = (
+        (pair.get("local"), pair.get("remote"))
+        if direction == "push"
+        else (pair.get("remote"), pair.get("local"))
+    )
     if one_way is None:
-        one_way = direction in ("pull", "push")
+        one_way = direction in {"pull", "push"}
 
-    log_dir = Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "rclone"
+    reset_cancel()
+    log_dir = (
+        Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "rclone"
+    )
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"check-{_safe_name(pair_name)}-{datetime.now():%Y%m%d-%H%M%S}.log"
-    args: List[str] = []
-    filter_file = backup_cfg.get("filter_file") or ""
-    if filter_file and Path(filter_file).is_file():
-        args += ["--filter-from", filter_file]
-    bwlimit = (backup_cfg.get("bwlimit") or (backup_cfg.get("tuning") or {}).get("bwlimit") or "")
-    if str(bwlimit).strip():
-        args += ["--bwlimit", str(bwlimit).strip()]
-    # Für check nur read-only/sichere Flags verwenden; backup_dir/conflict/immutable
-    # gehören zu Sync-Läufen und können bei `rclone check` ungültig sein.
-    args += _pair_filter_args(pair)
-    args += _parse_rclone_args(backup_cfg.get("check_args"))
-    cmd = ["rclone", "check", src, dst, *_rclone_cache_args(), "--stats", "10s", "--stats-one-line"] + args
+    log_file = (
+        log_dir / f"check-{_safe_name(pair_name)}-{datetime.now():%Y%m%d-%H%M%S-%f}.log"
+    )
+    args = _filter_args(cfg, pair, "check")
+    args += _parse_rclone_args(
+        backup.get("check_args"),
+        allow_unsafe=bool(backup.get("allow_unsafe_rclone_args", False)),
+    )
+    bwlimit = str(
+        backup.get("bwlimit") or (backup.get("tuning") or {}).get("bwlimit") or ""
+    ).strip()
+    if bwlimit:
+        args += ["--bwlimit", bwlimit]
+    cmd = [
+        "rclone",
+        "check",
+        *_rclone_cache_args(),
+        "--stats",
+        "10s",
+        "--stats-one-line",
+        *args,
+    ]
     if one_way:
         cmd.append("--one-way")
     if download:
         cmd.append("--download")
-    timeout_hours = float(backup_cfg.get("timeout_hours", 4) or 4)
-    timeout_sec = max(300, int(timeout_hours * 3600))
-    result = {
+    cmd += ["--", str(src), str(dst)]
+    timeout_sec = max(300, int(float(backup.get("timeout_hours", 4) or 4) * 3600))
+    result: dict[str, Any] = {
         "pair": pair_name,
         "src": src,
         "dst": dst,
@@ -736,42 +1209,77 @@ def run_pair_check(pair_name: str, *, one_way: Optional[bool] = None, download: 
         "command": command_to_string(cmd),
     }
     try:
-        rc = _run_rclone_command(cmd, log_file, timeout_sec=timeout_sec)
-        result["return_code"] = rc
-        result["ok"] = rc == 0
-        if rc != 0:
-            result["error"] = f"rclone check exit {rc}"
-        return result
+        rc = _run_rclone_command(
+            cmd, log_file, timeout_sec=timeout_sec, pair_name=f"check:{pair_name}"
+        )
+        result.update(
+            {
+                "return_code": rc,
+                "ok": rc == 0 and not is_cancelled(),
+                "cancelled": is_cancelled(),
+            }
+        )
+        result.update(_parse_final_stats(_read_tail(log_file)))
+        if not result["ok"]:
+            result["error"] = (
+                "Abgebrochen" if result["cancelled"] else f"rclone check exit {rc}"
+            )
     except subprocess.TimeoutExpired:
-        result.update({"ok": False, "error": f"Timeout nach {round(timeout_sec / 3600, 1)}h"})
-        return result
-    except Exception as e:
-        logger.exception("pair check failed")
-        result.update({"ok": False, "error": str(e)})
-        return result
+        result.update(
+            {"ok": False, "error": f"Timeout nach {round(timeout_sec / 3600, 1)}h"}
+        )
+    except Exception as exc:
+        logger.exception("Pair-Check fehlgeschlagen")
+        result.update({"ok": False, "error": str(exc)})
+    return result
 
-def run_quick(remote_path: str, local_path: str, direction: str = "bisync",
-              mode: str = "bisync", dry_run: bool = False,
-              extra_args: Optional[list] = None) -> Dict:
+
+def run_quick(
+    remote_path: str,
+    local_path: str,
+    direction: str = "bisync",
+    mode: str = "bisync",
+    dry_run: bool = False,
+    extra_args: Optional[list[str] | str] = None,
+    allow_delete: bool = False,
+    max_delete: Optional[int] = None,
+) -> dict[str, Any]:
     cfg = get_config()
-    rok, rmsg = _remote_reachable(remote_path)
-    lok, lmsg = _remote_reachable(local_path)
-    if not rok or not lok:
-        return {"ok": False, "error": f"Pre-Check fail (remote: {rmsg} / local: {lmsg})",
-                "skipped": True, "remote": remote_path, "local": local_path}
-
-    log_dir = Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "rclone"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = _safe_name(f"{remote_path}-{local_path}", "quick")
-    log_file = log_dir / f"quick-{safe_name}-{datetime.now():%Y%m%d-%H%M%S}.log"
-
-    args = _parse_rclone_args(cfg.get("backup", "rclone_args", default=""))
-    args += _backup_extra_args(cfg)
-    if extra_args:
-        args += _parse_rclone_args(extra_args)
+    pair = {
+        "name": "quick",
+        "remote": remote_path,
+        "local": local_path,
+        "direction": direction,
+        "mode": mode,
+        "min_local_files": 1,
+        "allow_delete": bool(allow_delete),
+        "max_delete": max_delete,
+    }
+    ok, message = _precheck_pair(pair)
+    if not ok:
+        return {
+            "ok": False,
+            "error": message,
+            "skipped": True,
+            "remote": remote_path,
+            "local": local_path,
+        }
 
     reset_cancel()
-    summary = {
+    log_dir = (
+        Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "rclone"
+    )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    safe = _safe_name(f"{remote_path}-{local_path}", "quick")
+    log_file = log_dir / f"quick-{safe}-{datetime.now():%Y%m%d-%H%M%S-%f}.log"
+    backup = cfg.get("backup", default={}) or {}
+    allow_unsafe = bool(backup.get("allow_unsafe_rclone_args", False))
+    base_args = _parse_rclone_args(
+        backup.get("rclone_args", []), allow_unsafe=allow_unsafe
+    )
+    if extra_args:
+        base_args += _parse_rclone_args(extra_args, allow_unsafe=allow_unsafe)
+    summary: dict[str, Any] = {
         "direction": direction,
         "mode": mode,
         "remote": remote_path,
@@ -779,41 +1287,51 @@ def run_quick(remote_path: str, local_path: str, direction: str = "bisync",
         "dry_run": dry_run,
         "log_file": str(log_file),
     }
-
-    pair = {"name": "quick", "remote": remote_path, "local": local_path, "direction": direction, "mode": mode}
-    cmd, verb, direction, mode = _build_pair_command(pair, args, dry_run)
-    logger.info("[quick] %s", " ".join(shlex.quote(c) for c in cmd))
-    summary["cmd"] = " ".join(shlex.quote(c) for c in cmd)
-    summary["verb"] = verb
-
-    timeout_hours = float((cfg.get("backup", default={}) or {}).get("timeout_hours", 4) or 4)
-    timeout_sec = max(300, int(timeout_hours * 3600))
     try:
-        if is_cancelled():
-            summary.update({"ok": False, "error": "vor Start abgebrochen"})
-            return summary
-        rc = _run_rclone_command(cmd, log_file, timeout_sec=timeout_sec)
-        summary["return_code"] = rc
-        log_tail = log_file.read_text(errors="ignore")[-4096:] if log_file.exists() else ""
-
-        auto_resync = bool((cfg.get("backup", default={}) or {}).get("auto_resync", False))
-        if verb == "bisync" and rc != 0 and "Must run --resync" in log_tail:
-            if auto_resync and not is_cancelled():
-                logger.info("[quick] auto --resync")
-                rc = _run_rclone_command(cmd + ["--resync"], log_file, timeout_sec=timeout_sec,
-                                         append=True, header="\n\n=== AUTO --resync ===\n\n")
-                summary["resync_return_code"] = rc
-            else:
-                summary["resync_required"] = True
-
-        summary["ok"] = (rc == 0)
+        cmd, verb, direction, mode = _build_pair_command(pair, base_args, dry_run)
+        summary.update(
+            {
+                "command": command_to_string(cmd),
+                "verb": verb,
+                "direction": direction,
+                "mode": mode,
+            }
+        )
+        timeout_sec = max(
+            300,
+            int(
+                float(
+                    (cfg.get("backup", default={}) or {}).get("timeout_hours", 4) or 4
+                )
+                * 3600
+            ),
+        )
+        rc = _run_rclone_command(
+            cmd, log_file, timeout_sec=timeout_sec, pair_name="quick"
+        )
+        tail = _read_tail(log_file)
+        needs_resync = verb == "bisync" and rc != 0 and bool(_RESYNC_RE.search(tail))
+        if needs_resync:
+            summary["resync_required"] = True
+        summary.update(
+            {
+                "return_code": rc,
+                "cancelled": is_cancelled(),
+                "ok": rc == 0 and not is_cancelled(),
+            }
+        )
+        summary.update(_parse_final_stats(tail))
         if not summary["ok"]:
-            summary["error"] = "rclone verlangt --resync" if summary.get("resync_required") else f"rclone exit {rc}"
-        return summary
+            summary["error"] = (
+                "Abgebrochen"
+                if summary["cancelled"]
+                else (
+                    "rclone verlangt --resync" if needs_resync else f"rclone exit {rc}"
+                )
+            )
     except subprocess.TimeoutExpired:
-        summary.update({"ok": False, "error": f"Timeout nach {round(timeout_sec / 3600, 1)}h"})
-        return summary
-    except Exception as e:
-        logger.exception("quick sync failed")
-        summary.update({"ok": False, "error": str(e)})
-        return summary
+        summary.update({"ok": False, "error": "Timeout"})
+    except Exception as exc:
+        logger.exception("Quick-Sync fehlgeschlagen")
+        summary.update({"ok": False, "error": str(exc)})
+    return summary

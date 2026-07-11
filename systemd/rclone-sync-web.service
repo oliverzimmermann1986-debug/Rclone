@@ -5,34 +5,50 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-NotifyAccess=all
+NotifyAccess=main
 User=rclone-sync
 Group=rclone-sync
 WorkingDirectory=/opt/rclone-sync
+UMask=0077
 Environment="PATH=/opt/rclone-sync/venv/bin:/usr/bin:/bin"
 Environment="RCLONE_SYNC_CONFIG=/opt/rclone-sync/data/config.yaml"
+Environment="RCLONE_SYNC_DB=/opt/rclone-sync/data/rclone-sync.db"
+Environment="RCLONE_SYNC_STATE_DIR=/opt/rclone-sync/data/runtime"
 Environment="RCLONE_CACHE_DIR=/opt/rclone-sync/data/.rclone-cache"
-ExecStartPre=/bin/mkdir -p /opt/rclone-sync/data/.rclone-cache /opt/rclone-sync/logs
-ExecStartPre=/bin/chown rclone-sync:rclone-sync /opt/rclone-sync/data/.rclone-cache /opt/rclone-sync/logs
-# Bind: 0.0.0.0 falls Reverse-Proxy in eigenem Container; 127.0.0.1 falls im selben.
-ExecStart=/opt/rclone-sync/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 --proxy-headers --forwarded-allow-ips=*
+Environment="RCLONE_CONFIG=/home/rclone-sync/.config/rclone/rclone.conf"
+Environment="RCLONE_ASK_PASSWORD=false"
+ExecStartPre=/bin/mkdir -p /opt/rclone-sync/data/.rclone-cache /opt/rclone-sync/data/runtime /opt/rclone-sync/logs /opt/rclone-sync/temp
+ExecStart=/opt/rclone-sync/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 --proxy-headers --forwarded-allow-ips=127.0.0.1,::1 --workers 1 --no-server-header
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 
-# Härtung
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/opt/rclone-sync /mnt
+ReadWritePaths=/opt/rclone-sync/data /opt/rclone-sync/logs /opt/rclone-sync/temp /home/rclone-sync/.config/rclone /mnt /media /srv
+ProtectKernelLogs=true
+ProtectProc=invisible
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+KeyringMode=private
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
 RestrictSUIDSGID=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target

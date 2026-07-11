@@ -1,4 +1,2 @@
-# rclone-sync darf systemd-Units neu laden (für Schedule-Änderungen)
-rclone-sync ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
-rclone-sync ALL=(root) NOPASSWD: /bin/systemctl restart rclone-sync.timer
-rclone-sync ALL=(root) NOPASSWD: /bin/systemctl restart sync-scheduler.timer
+# Aktuell benötigt die Anwendung keine root-Systemctl-Rechte.
+# Datei bleibt absichtlich ohne NOPASSWD-Regeln als sichere Upgrade-Migration.

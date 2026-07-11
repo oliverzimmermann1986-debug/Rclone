@@ -1,8 +1,10 @@
 """CLI: minütlich aufgerufen, triggert fällige Pairs."""
+
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -34,12 +36,19 @@ def main() -> int:
     if not due:
         # Normalfall: kein Logfile pro Minute erzeugen.
         _configure_logging(None)
-        logging.getLogger("scheduler_cli").info("Keine fälligen Pairs (%d konfiguriert)", len(status))
+        logging.getLogger("scheduler_cli").info(
+            "Keine fälligen Pairs (%d konfiguriert)", len(status)
+        )
         return 0
 
     log_dir = Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"scheduler-{datetime.now():%Y%m%d-%H%M%S}.log"
+    try:
+        log_file.touch(mode=0o600, exist_ok=True)
+        os.chmod(log_file, 0o600)
+    except OSError:
+        pass
     _configure_logging(log_file)
     logger = logging.getLogger("scheduler_cli")
     logger.info("Fällige Pairs: %s", due)
@@ -51,10 +60,16 @@ def main() -> int:
 
         job_id = db.job_start("backup", log_file=str(log_file))
         try:
-            summary = run_job(dry_run=False, pairs_filter=due)
-            status_name = "ok" if summary.get("ok") else "error"
+            summary = run_job(dry_run=False, pairs_filter=due, trigger="scheduler")
+            if summary.get("cancelled"):
+                status_name = "cancelled"
+            else:
+                status_name = "ok" if summary.get("ok") else "error"
             db.job_finish(job_id, status_name, summary)
-            logger.info("Scheduler-Run fertig: %s", json.dumps(summary, ensure_ascii=False, default=str)[:1000])
+            logger.info(
+                "Scheduler-Run fertig: %s",
+                json.dumps(summary, ensure_ascii=False, default=str)[:1000],
+            )
             return 0 if status_name == "ok" else 1
         except Exception as e:
             logger.exception("Scheduler-Run gescheitert: %s", e)

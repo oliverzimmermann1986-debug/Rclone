@@ -1,10 +1,11 @@
 [Unit]
-Description=rclone bisync Timer (täglich)
+Description=rclone-sync legacy full-run timer (optional; disabled by installer)
 
 [Timer]
 OnCalendar=*-*-* 03:00:00
 Persistent=true
 RandomizedDelaySec=600
+Unit=rclone-sync.service
 
 [Install]
 WantedBy=timers.target

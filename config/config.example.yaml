@@ -1,83 +1,189 @@
 # ============================================================
-# rclone-sync-container Konfiguration
-# Kopiere als data/config.yaml und passe die Werte an.
+# rclone-sync-container – Beispielkonfiguration (v1.5)
+# Wird bei Neuinstallation nach data/config.yaml kopiert.
 # ============================================================
 
 web:
   username: admin
-  # Wird beim ersten Start zu password_hash migriert. Lass leer
-  # wenn du via 'python -m app.cli set-password' setzen willst.
+  # Installer/CLI setzen ausschließlich password_hash. Kein Klartextpasswort
+  # in produktiven Konfigurationen speichern.
   password: ""
   password_hash: ""
-  # Wird beim ersten Start automatisch generiert wenn leer.
   secret_key: ""
+  session_version: 1
+  session_max_age_seconds: 604800
+
+  # Login-Bremse pro Client-IP, persistent in SQLite.
+  login_window_seconds: 300
+  login_max_failures: 10
+  login_lock_seconds: 900
+
+  # Bei direktem HTTP false. Hinter HTTPS-Reverse-Proxy true setzen.
+  # "auto" funktioniert nur mit korrekt vertrautem Proxy.
+  secure_cookie: false
+  # Nur hinter HTTPS aktivieren, z. B. 31536000. Bei HTTP bleibt HSTS aus.
+  hsts_seconds: 0
+  # In Produktion besser konkrete DNS-Namen/IPs statt "*" verwenden.
+  allowed_hosts:
+    - "*"
+
+  # Der lokale Dateibrowser und Quick-Sync dürfen nur hier zugreifen.
+  local_browse_roots:
+    - /mnt
+    - /media
+    - /srv
+    - /opt/rclone-sync/data
 
 paths:
   data_dir: /opt/rclone-sync/data
   logs_dir: /opt/rclone-sync/logs
   temp_dir: /opt/rclone-sync/temp
 
-# ============================================================
-# rclone-Sync-Pairs
-# ============================================================
 backup:
   enabled: true
-  rclone_remote: pcloud
-  # Globaler Default-Schedule für Pairs ohne eigene 'schedule'-Definition.
-  # Standard-Cron-Format (5 Felder: Min Hour Day Month Weekday).
-  # Beispiele:
-  #   "0 3 * * *"      - täglich 03:00
-  #   "0 */6 * * *"    - alle 6h zur vollen Stunde
-  #   "*/15 * * * *"   - alle 15 Minuten
-  #   "0 9 * * 1-5"    - werktags 09:00
-  # "off" / "manual" / "" = kein Auto-Sync, nur Button im UI
+  timezone: Europe/Berlin
+  max_parallel: 2
+  timeout_hours: 4
+
+  # Zusätzliche vollständige Größen-Traversierungen vor/nach jedem Sync.
+  # Standardmäßig aus Performance-Gründen deaktiviert.
+  collect_pre_post_stats: false
+
+  # Scheduler-Sicherheit: Ein noch nie gelaufenes Pair startet nicht sofort beim
+  # ersten beliebigen Timer-Tick, sondern nur nahe seines Cron-Zeitpunkts.
+  run_on_first_tick: false
+  scheduler_grace_minutes: 15
+  scheduler_retry_minutes: 60
   default_schedule: "0 3 * * *"
 
-  # MIGRIERT aus Scrappercontainer (491776c).
-  # Pairs aus der alten Konfig — anpassen wie gewünscht.
+  # Gefährliche freie rclone-Flags werden standardmäßig blockiert. Diese Ausnahme
+  # nur nach Code-/Planprüfung aktivieren.
+  allow_unsafe_rclone_args: false
+  # Filterdateien standardmäßig nur innerhalb paths.data_dir erlauben.
+  allow_external_filter_files: false
+  # Produktive einseitige sync-Läufe müssen Löschen bewusst freigeben und durch
+  # ein endliches max_delete begrenzen.
+  require_delete_confirmation: true
+  require_max_delete_for_sync: true
+
   pairs:
     - name: Serien
+      # Beispiel-Pairs sind absichtlich deaktiviert. Erst Pfade, Mount/Sentinel,
+      # Dry-Run und Löschgrenzen prüfen, dann aktivieren.
+      enabled: false
       remote: pcloud:/medien/Serien
       local: /mnt/media-nas/Serien
-      schedule: "0 2 * * *"          # täglich 02:00
+      direction: bisync
+      mode: bisync
+      schedule: "0 2 * * *"
+
+      # Schutz gegen fehlende, leere oder falsche Mounts.
+      min_local_files: 10
+      min_remote_files: 10
+      min_free_gb: 5
+      require_mountpoint: true
+      mountpoint: /mnt/media-nas
+      # Relative Sentinel-Datei unterhalb des lokalen Pair-Pfads.
+      sentinel_file: .rclone-sync-ready
+      allow_delete: false
+      max_delete: 100
+
+      include: ""
+      exclude: |-
+        .DS_Store
+        Thumbs.db
+      filter: ""
+      include_file: ""
+      exclude_file: ""
+      filter_file: ""
+      rclone_args: []
+
     - name: Filme
+      enabled: false
       remote: pcloud:/medien/Filme
       local: /mnt/media-nas/Filme
-      schedule: "0 4 * * 0"          # sonntags 04:00
+      direction: pull
+      # copy löscht nichts im Ziel; sync spiegelt und kann löschen.
+      mode: copy
+      schedule: "0 4 * * 0"
+      min_local_files: 10
+      min_remote_files: 10
+      min_free_gb: 5
+      require_mountpoint: true
+      mountpoint: /mnt/media-nas
+      sentinel_file: .rclone-sync-ready
+      allow_delete: false
+      max_delete: 100
+      rclone_args: []
+
     - name: Iphone_backup
+      enabled: false
       remote: pcloud:/medien/Iphone_backup
       local: /mnt/media-nas/Iphone_backup
-      schedule: "manual"             # nur via Button
+      direction: pull
+      mode: copy
+      schedule: manual
+      min_local_files: 1
+      min_remote_files: 0
+      min_free_gb: 1
+      require_mountpoint: true
+      mountpoint: /mnt/media-nas
+      sentinel_file: .rclone-sync-ready
+      rclone_args: []
 
-  # rclone-Args die für ALLE Pairs gelten. Per-Pair-Args werden ZUSÄTZLICH
-  # angehängt (Override-Behavior je nach rclone-Flag).
   rclone_args:
-    - "--transfers=4"
-    - "--checkers=8"
-    - "--bwlimit=20M"
+    - --transfers=4
+    - --checkers=8
 
-  # Pfad zu einer rclone-Filter-Datei. Wird automatisch via --filter-from
-  # übergeben wenn die Datei existiert.
-  filter_file: /opt/rclone-sync/data/rclone-filters.txt
+  tuning:
+    transfers: 4
+    checkers: 8
+    retries: 3
+    low_level_retries: 10
+    stats_interval: 10s
+    fast_list: false
+    # Globales Löschlimit für sync; pro Pair überschreibbar.
+    max_delete: 500
 
-  # Trash-Ordner für überschriebene/gelöschte Files. Relativer Pfad
-  # landet unter dem Remote-Root.
-  # backup_dir: ".bisync-trash/{date}"
-  backup_dir: ""
-
-  # Konflikt-Auflösung bei bisync:
-  #   "auto"   - Default: rclone schreibt zwei .conflict-Files für manuelle Lösung
-  #   "newer"  - jüngeres File behalten
-  #   "older"  - älteres File behalten
-  #   "larger" - größeres File behalten
-  #   "path1"  - Cloud (Remote) gewinnt
-  #   "path2"  - Local gewinnt
-  conflict_resolve: auto
-
-  # Immutable-Mode: rclone schreibt NIE über existierende Files. Schutz
-  # vor manipulierter Cloud / Ransomware.
+  bwlimit: ""
   immutable: false
 
-  # Bandwidth-Limit als String "10M" (10 MB/s) oder als Schedule
-  # ("08:00,5M 20:00,off") — siehe rclone-Doku.
-  bwlimit: ""
+  # Bei bisync wird diese Datei als --filters-file eingebunden; bei copy/sync
+  # als --filter-from. Änderungen an bisync-Filtern können Resync erfordern.
+  filter_file: /opt/rclone-sync/data/rclone-filters.txt
+
+  # Relative Pfade werden auf der jeweiligen Zielseite angelegt.
+  # copy/sync: --backup-dir im Ziel; bisync: --backup-dir1/--backup-dir2.
+  backup_dir: ""
+  backup_dir1: ""
+  backup_dir2: ""
+
+  # bisync-spezifisch
+  conflict_resolve: auto
+  resilient: true
+  recover: true
+  max_lock: 2m
+  # Automatisches --resync bleibt aus: erst Log/Plan prüfen und bewusst starten.
+  auto_resync: false
+  resync_mode: path1
+
+notifications:
+  # HTTP oder lokale/private Ziele nur bewusst freischalten.
+  allow_http: false
+  allow_private_targets: false
+  timeout_seconds: 10
+  max_parallel: 4
+  webhooks: []
+  # Beispiel (URL wird im Browser nach dem Speichern maskiert):
+  # - id: webhook_prod_01
+  #   enabled: true
+  #   type: discord
+  #   url: https://discord.com/api/webhooks/REDACTED
+  #   events: [sync_error, mount_check_failed]
+
+maintenance:
+  auto_prune: true
+  job_retention_days: 180
+  # Unabhängig vom Alter mindestens diese Zahl Jobs behalten.
+  keep_latest_jobs: 500
+  log_retention_days: 90
