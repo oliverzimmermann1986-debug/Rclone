@@ -1,127 +1,209 @@
-"""Per-Pair-Scheduler für Backup-Jobs.
+"""Per-Pair-Scheduler mit Zeitzone, Catch-up und Fehler-Backoff."""
 
-Aufruf:
-    python -m app.jobs.scheduler_cli
-
-Läuft minütlich via systemd-Timer. Liest pair.schedule aus der Config,
-prüft mit croniter ob seit dem letzten erfolgreichen Run die Cron-Zeit
-überschritten wurde, und triggert dann nur die fälligen Pairs.
-
-Schedule-Format ist Standard-Cron (5 Felder):
-    "0 3 * * *"      - täglich 03:00
-    "*/15 * * * *"   - alle 15 Minuten
-    "0 */6 * * *"    - alle 6h zur vollen Stunde
-    "0 9 * * 1-5"    - Mo-Fr 09:00
-
-Sonderwert "off" / "manual" / "" / None deaktiviert den Pair.
-Wenn pair.schedule fehlt, wird backup.default_schedule verwendet
-(Bestandsverhalten = "0 3 * * *" wie der alte Timer).
-"""
 from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+from croniter import croniter
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GLOBAL_SCHEDULE = "0 3 * * *"  # täglich 3 Uhr - Bestandsverhalten
+DEFAULT_GLOBAL_SCHEDULE = "0 3 * * *"
+DEFAULT_TIMEZONE = "Europe/Berlin"
 DISABLED_VALUES = {"", "off", "manual", "disabled", "none"}
+
+
+def _bounded_int(value, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
 
 
 def _is_disabled(schedule: Optional[str]) -> bool:
     return not schedule or schedule.strip().lower() in DISABLED_VALUES
 
 
+def _timezone(name: Optional[str]) -> ZoneInfo:
+    try:
+        return ZoneInfo(name or DEFAULT_TIMEZONE)
+    except Exception:
+        logger.warning(
+            "Ungültige Scheduler-Zeitzone %r; fallback %s", name, DEFAULT_TIMEZONE
+        )
+        return ZoneInfo(DEFAULT_TIMEZONE)
+
+
 def _last_success_ts(db, pair_name: str) -> Optional[float]:
-    """Findet den letzten erfolgreichen Sync-Zeitpunkt für einen Pair.
-    Schaut in jobs.summary.pairs[].name nach dem letzten 'ok'-Job."""
-    rows = db.job_list(kind="backup", limit=200)
-    for j in rows:
-        if j.get("status") != "ok":
-            continue
-        summary = j.get("summary") or {}
-        for ps in summary.get("pairs") or []:
-            if ps.get("name") == pair_name and (ps.get("ok") is True or ps.get("status") in ("ok", "skipped")):
-                return j.get("ended_at") or j.get("started_at")
-    return None
+    result = db.pair_last_success(pair_name)
+    return float(result["ended_at"]) if result and result.get("ended_at") else None
 
 
-def _is_due(schedule: str, last_run: Optional[float], now: Optional[float] = None) -> bool:
-    """Prüft ob ein Pair laut Schedule jetzt dran ist.
+def _last_attempt(db, pair_name: str) -> Optional[Dict]:
+    return db.pair_last_result(pair_name)
 
-    Logik: nimmt die Cron-Expression, berechnet "wann wäre der nächste Run
-    NACH dem letzten Run gewesen" - wenn dieser Zeitpunkt <= jetzt ist, ist
-    der Pair überfällig und sollte laufen.
 
-    Wenn last_run=None (noch nie gelaufen), gilt der Pair sofort als fällig.
-    """
-    from croniter import croniter
+def _next_after(schedule: str, after: float, tz: ZoneInfo) -> float:
+    base = datetime.fromtimestamp(after, tz=tz)
+    return croniter(schedule, base).get_next(datetime).timestamp()
 
+
+def _previous_before(schedule: str, now: float, tz: ZoneInfo) -> float:
+    base = datetime.fromtimestamp(now, tz=tz)
+    return croniter(schedule, base).get_prev(datetime).timestamp()
+
+
+def _is_due(
+    schedule: str,
+    last_run: Optional[float],
+    now: Optional[float] = None,
+    *,
+    timezone_name: str = DEFAULT_TIMEZONE,
+    run_on_first_tick: bool = False,
+    first_run_grace_minutes: int = 15,
+) -> bool:
     if not croniter.is_valid(schedule):
-        logger.warning(f"Ungültige Cron-Expression: {schedule!r}")
+        logger.warning("Ungültige Cron-Expression: %r", schedule)
         return False
-
+    now_value = float(time.time() if now is None else now)
+    tz = _timezone(timezone_name)
     if last_run is None:
-        return True
-
-    now = now or time.time()
-    # Erster geplanter Run-Zeitpunkt nach dem letzten erfolgreichen Run
-    base = datetime.fromtimestamp(last_run, tz=timezone.utc)
-    ci = croniter(schedule, base)
-    next_run = ci.get_next(datetime).timestamp()
-    return now >= next_run
+        if run_on_first_tick:
+            return True
+        previous = _previous_before(schedule, now_value + 1, tz)
+        return 0 <= now_value - previous <= max(1, first_run_grace_minutes) * 60
+    return now_value >= _next_after(schedule, float(last_run), tz)
 
 
-def find_due_pairs(cfg, db, *, now: Optional[float] = None) -> Tuple[List[str], List[Dict]]:
-    """Bestimmt welche Pairs jetzt fällig sind.
-
-    Returnt (due_pair_names, all_pair_status):
-        - due_pair_names: ['pair1', 'pair2'] für den nächsten Sync-Call
-        - all_pair_status: Liste mit Diagnose-Info pro Pair (für UI/Log)
-    """
-    backup_cfg = cfg.get("backup") or {}
-    pairs = backup_cfg.get("pairs") or []
-    default_schedule = (backup_cfg.get("default_schedule") or DEFAULT_GLOBAL_SCHEDULE).strip()
+def find_due_pairs(
+    cfg, db, *, now: Optional[float] = None
+) -> Tuple[List[str], List[Dict]]:
+    backup = cfg.get("backup") or {}
+    pairs = backup.get("pairs") or []
+    default_schedule = str(
+        backup.get("default_schedule") or DEFAULT_GLOBAL_SCHEDULE
+    ).strip()
+    timezone_name = str(backup.get("timezone") or DEFAULT_TIMEZONE)
+    retry_sec = (
+        _bounded_int(
+            backup.get("scheduler_retry_minutes", 60),
+            default=60,
+            minimum=1,
+            maximum=10080,
+        )
+        * 60
+    )
+    grace_minutes = _bounded_int(
+        backup.get("scheduler_grace_minutes", 15),
+        default=15,
+        minimum=1,
+        maximum=1440,
+    )
+    run_on_first_tick = bool(backup.get("run_on_first_tick", False))
+    now_value = float(time.time() if now is None else now)
 
     due: List[str] = []
     status: List[Dict] = []
-
     for pair in pairs:
-        name = pair.get("name") or "?"
+        name = str(pair.get("name") or "?")
         if not pair.get("enabled", True):
             status.append({"name": name, "due": False, "reason": "disabled"})
             continue
 
-        schedule = (pair.get("schedule") or "").strip() or default_schedule
+        schedule = str(pair.get("schedule") or "").strip() or default_schedule
         if _is_disabled(schedule):
-            status.append({"name": name, "due": False, "reason": f"schedule={schedule}"})
+            status.append(
+                {"name": name, "due": False, "reason": f"schedule={schedule}"}
+            )
+            continue
+        if not croniter.is_valid(schedule):
+            status.append(
+                {
+                    "name": name,
+                    "due": False,
+                    "reason": "invalid_schedule",
+                    "error": schedule,
+                }
+            )
             continue
 
-        last_run = _last_success_ts(db, name)
+        last_success = _last_success_ts(db, name)
+        last_attempt = _last_attempt(db, name)
+        retry_due = False
+        attempt_ts = 0.0
+        if last_attempt and not last_attempt.get("ok"):
+            attempt_ts = float(
+                last_attempt.get("ended_at") or last_attempt.get("started_at") or 0
+            )
+            pair_result = last_attempt.get("pair") or {}
+            scheduled_failure = (
+                isinstance(pair_result, dict)
+                and pair_result.get("trigger") == "scheduler"
+            )
+            if attempt_ts > (last_success or 0) and scheduled_failure:
+                if now_value - attempt_ts < retry_sec:
+                    status.append(
+                        {
+                            "name": name,
+                            "due": False,
+                            "schedule": schedule,
+                            "last_run": last_success,
+                            "last_attempt": attempt_ts,
+                            "reason": "retry_backoff",
+                            "retry_at": attempt_ts + retry_sec,
+                        }
+                    )
+                    continue
+                retry_due = True
+
         try:
-            is_due = _is_due(schedule, last_run, now=now)
-        except Exception as e:
-            status.append({"name": name, "due": False, "error": str(e)})
+            is_due = retry_due or _is_due(
+                schedule,
+                last_success,
+                now=now_value,
+                timezone_name=timezone_name,
+                run_on_first_tick=run_on_first_tick,
+                first_run_grace_minutes=grace_minutes,
+            )
+            next_run = next_run_after(
+                schedule, after=last_success or now_value, timezone_name=timezone_name
+            )
+        except Exception as exc:
+            status.append({"name": name, "due": False, "error": str(exc)})
             continue
 
-        status.append({
-            "name": name, "due": is_due, "schedule": schedule,
-            "last_run": last_run,
-        })
+        item = {
+            "name": name,
+            "due": is_due,
+            "schedule": schedule,
+            "timezone": timezone_name,
+            "last_run": last_success,
+            "next_run": next_run,
+        }
+        if retry_due:
+            item["reason"] = "retry_after_failure"
+            item["last_attempt"] = attempt_ts
+        elif last_success is None and not is_due:
+            item["reason"] = "waiting_for_first_schedule"
+        status.append(item)
         if is_due:
             due.append(name)
-
     return due, status
 
 
-def next_run_after(schedule: str, *, after: Optional[float] = None) -> Optional[float]:
-    """Gibt den nächsten geplanten Run-Zeitpunkt als Unix-Timestamp zurück
-    (oder None bei ungültiger/disabled Schedule). Für UI-Anzeige."""
-    from croniter import croniter
-
+def next_run_after(
+    schedule: str,
+    *,
+    after: Optional[float] = None,
+    timezone_name: str = DEFAULT_TIMEZONE,
+) -> Optional[float]:
     if _is_disabled(schedule) or not croniter.is_valid(schedule):
         return None
-    base = datetime.fromtimestamp(after or time.time(), tz=timezone.utc)
+    tz = _timezone(timezone_name)
+    base = datetime.fromtimestamp(float(time.time() if after is None else after), tz=tz)
     return croniter(schedule, base).get_next(datetime).timestamp()

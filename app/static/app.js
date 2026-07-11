@@ -1,426 +1,979 @@
 function app() {
+  const emptyQuick = () => ({
+    remote: '', local: '', direction: 'bisync', mode: 'bisync', dry_run: true,
+    allow_delete: false, max_delete: 100,
+  });
+
   return {
     page: 'dashboard',
-    status: { backup: null },
+    pages: ['dashboard', 'pairs', 'jobs', 'doctor', 'settings'],
+    navOpen: false,
+    online: navigator.onLine,
+    theme: 'system',
+    lastUpdated: null,
+    requestTimeoutMs: 30000,
+
+    overview: { loading: false, data: null },
+    status: { backup: null, check: null, quicksync: null },
     progress: null,
     recentJobs: [],
-    jobs: [],
-    config: { web: {}, paths: {}, backup: { pairs: [], rclone_args: [] } },
-    rcloneArgsText: '',
-    testResults: {},
-    logModal: { show: false, id: null, text: '' },
-    picker: {
-      show: false, mode: null, idx: null,
-      current: '', parent: null, entries: [], loading: false,
+    jobs: {
+      loading: false, items: [], total: 0, offset: 0, limit: 25,
+      kind: '', status: '', q: '',
     },
-    pwChange: { current: '', new: '', confirm: '' },
-    showQuick: false,
-    quick: { remote: '', local: '', direction: 'bisync', mode: 'bisync', dry_run: true },
-    storage: { pairs: [], loading: false },
-    filterFile: { content: '', path: '', loading: false, dirty: false },
-    doctor: { loading: false, data: null },
+
+    config: { web: {}, paths: {}, backup: { pairs: [], rclone_args: [], tuning: {} }, notifications: { webhooks: [] }, maintenance: {} },
+    rcloneArgsText: '',
+    allowedHostsText: '',
+    browseRootsText: '',
+    configDirty: false,
+    pairSearch: '',
+    pairFilter: 'all',
+    newPairPreset: 'push-copy',
+    pairOpen: {},
+    settingsTab: 'general',
+    testResults: {},
+    configValidation: { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true },
+
     plan: { loading: false, data: null, dry_run: true },
-    maintenance: { logs: [], loading: false, prune: null },
-    toast: { show: false, msg: '', type: 'ok' },
+    doctor: { loading: false, data: null },
+    maintenance: { logs: [], loading: false, prune: null, database: null, logQuery: '' },
+    filterFile: { content: '', path: '', revision: '', loading: false, dirty: false },
+    pwChange: { current: '', new: '', confirm: '' },
+    snapshots: { loading: false, items: [], max: 30, restoreName: '', password: '' },
+
+    quickModal: { show: false },
+    quick: emptyQuick(),
+    picker: {
+      show: false, mode: null, idx: null, current: '', parent: null,
+      entries: [], loading: false, search: '',
+    },
+    jobModal: {
+      show: false, job: null, log: '', loading: false, logLoading: false,
+      logSearch: '', autoRefresh: true,
+    },
+    toast: { show: false, msg: '', type: 'ok', timer: null },
 
     init() {
-      this.refreshStatus();
-      this.loadRecent();
-      this.loadStorage(false);
-      setInterval(() => this.refreshStatus(), 3000);
+      this.theme = localStorage.getItem('rclone-sync-theme') || 'system';
+      this.settingsTab = localStorage.getItem('rclone-sync-settings-tab') || 'general';
+      this.pairFilter = localStorage.getItem('rclone-sync-pair-filter') || 'all';
+      this.jobs.kind = localStorage.getItem('rclone-sync-job-kind') || '';
+      this.jobs.status = localStorage.getItem('rclone-sync-job-status') || '';
+      this.applyTheme();
+      this.$watch('settingsTab', (value) => localStorage.setItem('rclone-sync-settings-tab', value));
+      this.$watch('pairFilter', (value) => localStorage.setItem('rclone-sync-pair-filter', value));
+      this.$watch('jobs.kind', (value) => localStorage.setItem('rclone-sync-job-kind', value));
+      this.$watch('jobs.status', (value) => localStorage.setItem('rclone-sync-job-status', value));
+      window.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          if (this.settingsTab === 'filters' && this.filterFile.dirty) this.saveFilterFile();
+          else if (this.configDirty) this.saveConfig();
+        }
+        if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
+          event.preventDefault();
+          const target = this.page === 'jobs' ? document.getElementById('job-search') : document.getElementById('pair-search');
+          target?.focus();
+        }
+      });
+      const hashPage = window.location.hash.replace('#', '');
+      this.page = this.pages.includes(hashPage) ? hashPage : 'dashboard';
+      window.addEventListener('hashchange', () => {
+        const next = window.location.hash.replace('#', '');
+        if (this.pages.includes(next) && next !== this.page) this.navigate(next, false);
+      });
+      window.addEventListener('online', () => { this.online = true; this.refreshAll(true); });
+      window.addEventListener('offline', () => { this.online = false; });
+      window.addEventListener('beforeunload', (event) => {
+        if (this.configDirty || this.filterFile.dirty) {
+          event.preventDefault();
+          event.returnValue = '';
+        }
+      });
+      this.refreshAll(false);
+      if (this.page === 'dashboard') this.loadStorage(false);
+      else this.loadPage(this.page);
       setInterval(() => {
-        if (this.status.backup) this.loadProgress();
-        else if (this.progress?.running) this.loadProgress();
+        if (!document.hidden) this.refreshAll(false);
+      }, 15000);
+      setInterval(() => {
+        if (!document.hidden && (this.busy() || this.progress?.running)) this.loadProgress(true);
+        if (!document.hidden && this.jobModal.show && this.jobModal.autoRefresh && this.jobModal.job?.status === 'running') {
+          this.refreshJobModal();
+        }
       }, 2000);
-      setInterval(() => this.loadStorage(false), 30000);
     },
 
-    async api(method, url, body) {
+    async refreshAll(showToast = false) {
+      const results = await Promise.all([
+        this.loadOverview(true),
+        this.refreshStatus(true),
+        this.loadRecent(true),
+      ]);
+      if (this.busy() || this.progress?.running) await this.loadProgress(true);
+      this.lastUpdated = Date.now();
+      if (showToast && results.some(Boolean)) this.showToast('Ansicht aktualisiert');
+    },
+
+    navigate(next, updateHash = true) {
+      if (!this.pages.includes(next)) return;
+      if ((this.configDirty || this.filterFile.dirty) && ['pairs', 'settings'].includes(this.page) && next !== this.page) {
+        if (!confirm('Es gibt ungespeicherte Änderungen. Seite trotzdem wechseln?')) return;
+      }
+      this.page = next;
+      this.navOpen = false;
+      if (updateHash) history.replaceState(null, '', `#${next}`);
+      this.loadPage(next);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+
+    loadPage(page) {
+      if (page === 'dashboard') {
+        this.loadOverview(true); this.loadRecent(true); this.loadStorage(false);
+      } else if (page === 'pairs') {
+        this.loadConfig();
+      } else if (page === 'jobs') {
+        this.loadJobs(true);
+      } else if (page === 'doctor') {
+        this.loadOverview(true); this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots();
+      } else if (page === 'settings') {
+        this.loadConfig(); this.loadFilterFile();
+      }
+    },
+
+    pageTitle() {
+      return ({ dashboard: 'Übersicht', pairs: 'Sync-Paare', jobs: 'Jobhistorie', doctor: 'System & Diagnose', settings: 'Einstellungen' })[this.page] || 'rclone-sync';
+    },
+
+    cookie(name) {
+      const prefix = encodeURIComponent(name) + '=';
+      for (const part of document.cookie.split(';')) {
+        const value = part.trim();
+        if (value.startsWith(prefix)) return decodeURIComponent(value.slice(prefix.length));
+      }
+      return '';
+    },
+
+    async api(method, url, body, options = {}) {
       try {
-        const opts = { method, credentials: 'include', headers: {} };
+        const upper = String(method || 'GET').toUpperCase();
+        const opts = { method: upper, credentials: 'include', headers: {} };
+        if (!['GET', 'HEAD', 'OPTIONS'].includes(upper)) {
+          opts.headers['X-CSRF-Token'] = this.cookie('rclone_sync_csrf');
+        }
         if (body !== undefined) {
           opts.headers['Content-Type'] = 'application/json';
           opts.body = JSON.stringify(body);
         }
-        const r = await fetch(url, opts);
-        if (!r.ok) {
-          if (r.status === 401) { window.location = '/login'; return null; }
-          const err = await r.json().catch(() => ({}));
-          this.showToast('Fehler: ' + (err.detail || r.statusText), 'err');
+        const controller = new AbortController();
+        opts.signal = controller.signal;
+        const timeout = setTimeout(() => controller.abort(), options.timeoutMs || this.requestTimeoutMs);
+        let response;
+        try { response = await fetch(url, opts); } finally { clearTimeout(timeout); }
+        this.online = true;
+        if (!response.ok) {
+          if (response.status === 401) { window.location = '/login'; return null; }
+          const err = await response.json().catch(() => ({}));
+          const rawDetail = err.detail || response.statusText;
+          let detail = rawDetail;
+          if (typeof detail === 'object') detail = detail.message || (detail.errors || []).join(' · ') || JSON.stringify(detail);
+          if (options.captureError) return { __error: true, status: response.status, detail: rawDetail };
+          if (!options.silent) {
+            if (response.status === 409 && (url === '/api/config' || url === '/api/config/filter-file')) {
+              this.showToast('Parallel geändert: Bitte neu laden und Änderungen erneut prüfen.', 'err');
+            } else {
+              this.showToast(`Fehler: ${detail}`, 'err');
+            }
+          }
           return null;
         }
-        return r.headers.get('content-type')?.includes('json') ? await r.json() : await r.text();
-      } catch (e) {
-        this.showToast('Netzwerkfehler: ' + e.message, 'err');
+        return response.headers.get('content-type')?.includes('json') ? await response.json() : await response.text();
+      } catch (error) {
+        if (error.name !== 'AbortError') this.online = navigator.onLine;
+        if (!options.silent) {
+          this.showToast(error.name === 'AbortError' ? 'Zeitüberschreitung bei der Anfrage' : `Netzwerkfehler: ${error.message}`, 'err');
+        }
         return null;
       }
     },
 
     showToast(msg, type = 'ok') {
-      this.toast = { show: true, msg, type };
-      setTimeout(() => this.toast.show = false, 3500);
+      if (this.toast.timer) clearTimeout(this.toast.timer);
+      this.toast = { show: true, msg, type, timer: null };
+      this.toast.timer = setTimeout(() => { this.toast.show = false; }, 4000);
+    },
+
+    setTheme(theme) {
+      this.theme = theme;
+      localStorage.setItem('rclone-sync-theme', theme);
+      this.applyTheme();
+    },
+
+    cycleTheme() {
+      const values = ['system', 'dark', 'light'];
+      this.setTheme(values[(values.indexOf(this.theme) + 1) % values.length]);
+    },
+
+    applyTheme() {
+      document.documentElement.dataset.theme = this.theme;
+    },
+
+    themeLabel() {
+      return ({ system: 'System', dark: 'Dunkel', light: 'Hell' })[this.theme] || 'System';
     },
 
     busy() {
       return !!(this.status?.backup || this.status?.check || this.status?.quicksync);
     },
 
-    async refreshStatus() {
-      const r = await this.api('GET', '/api/jobs/status/current');
-      if (r) this.status = r;
+    runningJob() {
+      return this.status?.backup || this.status?.check || this.status?.quicksync || null;
     },
 
-    async loadRecent() {
-      const r = await this.api('GET', '/api/jobs/list?limit=8');
-      if (r) this.recentJobs = r;
+    runningKind() {
+      if (this.status?.backup) return 'Backup';
+      if (this.status?.check) return 'Check';
+      if (this.status?.quicksync) return 'Quick-Sync';
+      return '';
     },
 
-    async loadJobs() {
-      const r = await this.api('GET', '/api/jobs/list?limit=50');
-      if (r) this.jobs = r;
+    systemLevel() {
+      const data = this.overview.data;
+      if (!this.online) return 'error';
+      if (!data) return 'pending';
+      if (this.busy()) return 'running';
+      if ((data.alerts || []).some((a) => a.level === 'error')) return 'error';
+      if ((data.alerts || []).some((a) => a.level === 'warn')) return 'warn';
+      return 'ok';
     },
 
-    async loadProgress() {
-      const r = await this.api('GET', '/api/jobs/backup/progress');
-      if (r) this.progress = r;
+    systemLabel() {
+      const level = this.systemLevel();
+      return ({ error: 'Handlungsbedarf', warn: 'Hinweise', running: `${this.runningKind()} läuft`, pending: 'Lädt', ok: 'Betrieb normal' })[level];
+    },
+
+    async loadOverview(silent = false) {
+      this.overview.loading = !silent;
+      const result = await this.api('GET', '/api/diagnostics/overview', undefined, { silent });
+      if (result) this.overview.data = result;
+      this.overview.loading = false;
+      return !!result;
+    },
+
+    async refreshStatus(silent = false) {
+      const result = await this.api('GET', '/api/jobs/status/current', undefined, { silent });
+      if (result) this.status = result;
+      return !!result;
+    },
+
+    async loadRecent(silent = false) {
+      const result = await this.api('GET', '/api/jobs/list?limit=8', undefined, { silent });
+      if (result) this.recentJobs = result;
+      return !!result;
+    },
+
+    async loadJobs(reset = false) {
+      if (reset) this.jobs.offset = 0;
+      this.jobs.loading = true;
+      const params = new URLSearchParams({ limit: this.jobs.limit, offset: this.jobs.offset });
+      if (this.jobs.kind) params.set('kind', this.jobs.kind);
+      if (this.jobs.status) params.set('status', this.jobs.status);
+      if (this.jobs.q.trim()) params.set('q', this.jobs.q.trim());
+      const result = await this.api('GET', `/api/jobs/search?${params}`);
+      if (result) {
+        this.jobs.items = result.items || [];
+        this.jobs.total = result.total || 0;
+      }
+      this.jobs.loading = false;
+    },
+
+    jobPage() { return Math.floor(this.jobs.offset / this.jobs.limit) + 1; },
+    jobPages() { return Math.max(1, Math.ceil(this.jobs.total / this.jobs.limit)); },
+    nextJobs() { if (this.jobs.offset + this.jobs.limit < this.jobs.total) { this.jobs.offset += this.jobs.limit; this.loadJobs(); } },
+    prevJobs() { if (this.jobs.offset > 0) { this.jobs.offset = Math.max(0, this.jobs.offset - this.jobs.limit); this.loadJobs(); } },
+
+    downloadJobsCsv() {
+      const params = new URLSearchParams({ limit: '10000' });
+      if (this.jobs.kind) params.set('kind', this.jobs.kind);
+      if (this.jobs.status) params.set('status', this.jobs.status);
+      if (this.jobs.q.trim()) params.set('q', this.jobs.q.trim());
+      window.location.assign(`/api/jobs/export.csv?${params}`);
+    },
+
+    async loadProgress(silent = false) {
+      const result = await this.api('GET', '/api/jobs/backup/progress', undefined, { silent });
+      if (result) {
+        this.progress = result;
+        if (!result.running) {
+          await Promise.all([this.refreshStatus(true), this.loadRecent(true), this.loadOverview(true)]);
+        }
+      }
+    },
+
+    async ensureConfigSavedForRun() {
+      if (!this.configDirty) return true;
+      if (!confirm('Die Konfiguration enthält ungespeicherte Änderungen. Vor dem Start speichern?')) return false;
+      return await this.saveConfig();
     },
 
     async runBackup(dryRun) {
-      const r = await this.api('POST', `/api/jobs/backup/run?dry_run=${dryRun}`);
-      if (r?.ok) {
+      if (!(await this.ensureConfigSavedForRun())) return;
+      if (!dryRun && !confirm('Produktiven Lauf für alle aktiven Pairs starten? Prüfe vorher möglichst den Plan oder einen Dry-Run.')) return;
+      const result = await this.api('POST', `/api/jobs/backup/run?dry_run=${dryRun}`);
+      if (result?.ok) {
         this.showToast(dryRun ? 'Dry-Run gestartet' : 'Backup gestartet');
-        setTimeout(() => { this.refreshStatus(); this.loadProgress(); }, 500);
+        setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
       }
     },
 
     async cancelBackup() {
-      if (!confirm('Backup abbrechen?')) return;
-      const r = await this.api('POST', '/api/jobs/backup/cancel');
-      if (r?.ok) this.showToast('Cancel-Signal gesendet');
+      if (!confirm('Laufenden Job wirklich abbrechen? Bereits übertragene Änderungen bleiben bestehen.')) return;
+      const result = await this.api('POST', '/api/jobs/backup/cancel');
+      if (result?.ok) this.showToast('Abbruchsignal gesendet');
+      else if (result) this.showToast(result.error || 'Kein laufender Job', 'err');
     },
 
-    async runSinglePair(name) {
-      if (!confirm(`Nur Paar "${name}" syncen?`)) return;
-      const r = await this.api('POST', `/api/jobs/backup/run-pair/${encodeURIComponent(name)}`);
-      if (r?.ok) this.showToast(`"${name}" gestartet`);
+    async runSinglePair(name, dryRun = true) {
+      if (!name) return;
+      if (!(await this.ensureConfigSavedForRun())) return;
+      if (!dryRun && !confirm(`Pair „${name}“ produktiv starten?`)) return;
+      const result = await this.api('POST', `/api/jobs/backup/run-pair/${encodeURIComponent(name)}?dry_run=${dryRun}`);
+      if (result?.ok) {
+        this.showToast(dryRun ? `Dry-Run für „${name}“ gestartet` : `„${name}“ gestartet`);
+        setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
+      }
     },
 
-    async showLog(jobId) {
-      this.logModal = { show: true, id: jobId, text: 'lädt…' };
-      const r = await this.api('GET', `/api/jobs/${jobId}/log?tail=2000`);
-      this.logModal.text = r?.log || '<leer>';
-    },
-
-    async cleanupFailed() {
-      if (!confirm('Alle fehlgeschlagenen Jobs aus DB löschen?')) return;
-      const r = await this.api('POST', '/api/jobs/cleanup-failed');
-      if (r?.ok) {
-        this.showToast(`${r.deleted} gelöscht`);
-        this.loadJobs();
+    async checkPair(name) {
+      if (!name) return;
+      if (!(await this.ensureConfigSavedForRun())) return;
+      const result = await this.api('POST', `/api/jobs/backup/check/${encodeURIComponent(name)}`);
+      if (result?.ok) {
+        this.showToast(`Read-only Check für „${name}“ gestartet`);
+        setTimeout(() => { this.refreshStatus(true); this.loadJobs(true); }, 400);
       }
     },
 
     async loadPlan(dryRun = true) {
+      if (!(await this.ensureConfigSavedForRun())) return;
       this.plan.loading = true;
       this.plan.dry_run = dryRun;
-      const r = await this.api('GET', `/api/jobs/backup/plan?dry_run=${dryRun}`);
-      if (r) this.plan.data = r;
+      const result = await this.api('GET', `/api/jobs/backup/plan?dry_run=${dryRun}`);
+      if (result) this.plan.data = result;
       this.plan.loading = false;
     },
 
-    async checkPair(name) {
-      if (!confirm(`Read-only Check für "${name}" starten?`)) return;
-      const r = await this.api('POST', `/api/jobs/backup/check/${encodeURIComponent(name)}`);
-      if (r?.ok) {
-        this.showToast(`Check für "${name}" gestartet`);
-        setTimeout(() => { this.refreshStatus(); this.loadJobs(); }, 500);
+    openQuick() {
+      this.quick = emptyQuick();
+      this.quickModal.show = true;
+    },
+
+    async runQuickSync() {
+      if (!this.quick.remote || !this.quick.local) {
+        this.showToast('Remote und lokaler Pfad müssen gesetzt sein', 'err'); return;
+      }
+      if (['sync', 'bisync'].includes(this.quick.mode) && !this.quick.dry_run) {
+        if (!this.quick.allow_delete || this.quick.max_delete === null || this.quick.max_delete === '') {
+          this.showToast('Produktiver Sync benötigt Löschfreigabe und Löschlimit', 'err'); return;
+        }
+        if (!confirm(`${this.quick.mode.toUpperCase()} kann bis zu ${this.quick.max_delete} Einträge löschen. Wirklich starten?`)) return;
+      }
+      const result = await this.api('POST', '/api/jobs/backup/quick', this.quick);
+      if (result?.ok) {
+        this.showToast('Quick-Sync gestartet');
+        this.quickModal.show = false;
+        setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
       }
     },
 
-    clonePair(idx) {
-      const src = this.config.backup.pairs[idx] || {};
-      const clone = JSON.parse(JSON.stringify(src));
-      clone.name = (clone.name || 'Pair') + '_Kopie';
-      clone.enabled = false;
-      clone.schedule = 'manual';
-      this.config.backup.pairs.splice(idx + 1, 0, clone);
-      this.showToast('Pair geklont (deaktiviert)');
+    async showJob(job) {
+      this.jobModal = { show: true, job: job || null, log: '', loading: true, logLoading: true, logSearch: '', autoRefresh: true };
+      const detail = await this.api('GET', `/api/jobs/${job.id}`);
+      if (detail) this.jobModal.job = detail;
+      await this.loadJobLog();
+      this.jobModal.loading = false;
     },
 
-    async loadDoctor() {
-      this.doctor.loading = true;
-      const r = await this.api('GET', '/api/diagnostics/doctor');
-      if (r) this.doctor.data = r;
-      this.doctor.loading = false;
+    async loadJobLog(silent = false) {
+      if (!this.jobModal.job?.id) return;
+      this.jobModal.logLoading = !silent;
+      const result = await this.api('GET', `/api/jobs/${this.jobModal.job.id}/log?tail=5000`, undefined, { silent });
+      if (result) this.jobModal.log = result.log || '';
+      this.jobModal.logLoading = false;
     },
 
-    async loadLogs() {
-      this.maintenance.loading = true;
-      const r = await this.api('GET', '/api/maintenance/logs?limit=200');
-      if (r?.logs) this.maintenance.logs = r.logs;
-      this.maintenance.loading = false;
+    async refreshJobModal() {
+      if (!this.jobModal.job?.id) return;
+      const detail = await this.api('GET', `/api/jobs/${this.jobModal.job.id}`, undefined, { silent: true });
+      if (detail) this.jobModal.job = detail;
+      await this.loadJobLog(true);
+      if (detail?.status !== 'running') {
+        this.loadJobs(false); this.loadRecent(true); this.loadOverview(true);
+      }
     },
 
-    async pruneLogs(dryRun = true) {
-      const r = await this.api('POST', `/api/maintenance/logs/prune?days=30&dry_run=${dryRun}`);
-      if (r) {
-        this.maintenance.prune = r;
-        this.showToast(dryRun ? `${r.matched} alte Logs gefunden` : `${r.deleted} alte Logs gelöscht`);
-        this.loadLogs();
+    filteredLog() {
+      const text = this.jobModal.log || '';
+      const needle = this.jobModal.logSearch.trim().toLowerCase();
+      if (!needle) return text;
+      return text.split('\n').filter((line) => line.toLowerCase().includes(needle)).join('\n');
+    },
+
+    async copyLog() {
+      try {
+        await navigator.clipboard.writeText(this.filteredLog());
+        this.showToast('Log kopiert');
+      } catch (_) {
+        this.showToast('Log konnte nicht kopiert werden', 'err');
+      }
+    },
+
+    downloadJobLog() {
+      if (this.jobModal.job?.id) window.location.assign(`/api/jobs/${this.jobModal.job.id}/log/download`);
+    },
+
+    async cleanupFailed() {
+      if (!confirm('Fehlgeschlagene, abgebrochene und verwaiste Jobs aus der Datenbank löschen? Die Logdateien bleiben bestehen.')) return;
+      const result = await this.api('POST', '/api/jobs/cleanup-failed');
+      if (result?.ok) {
+        this.showToast(`${result.deleted} Jobs gelöscht`);
+        this.loadJobs(true); this.loadOverview(true);
       }
     },
 
     async loadConfig() {
-      const r = await this.api('GET', '/api/config');
-      if (!r) return;
-      // Defaults setzen damit Bindings nicht crashen
-      r.web ||= {};
-      r.paths ||= {};
-      r.backup ||= {};
-      r.backup.pairs ||= [];
-      r.backup.rclone_args ||= [];
-      r.backup.tuning ||= {};
-      r.notifications ||= { webhooks: [] };
-      r.notifications.webhooks ||= [];
-      for (const p of r.backup.pairs) {
-        if (p.enabled === undefined) p.enabled = true;
-        p.schedule ||= 'manual';
-        p.direction ||= 'bisync';
-        p.mode ||= p.direction === 'bisync' ? 'bisync' : 'copy';
-        if (p.min_local_files === undefined) p.min_local_files = 1;
-        p.exclude ||= ''; p.include ||= ''; p.filter ||= ''; p.rclone_args ||= '';
+      const result = await this.api('GET', '/api/config');
+      if (!result) return;
+      result.web ||= {};
+      result.paths ||= {};
+      result.web.allowed_hosts ||= ['*'];
+      result.web.local_browse_roots ||= ['/mnt', '/media', '/srv', '/opt/rclone-sync/data'];
+      result.web.secure_cookie ??= false;
+      result.web.session_max_age_seconds ??= 604800;
+      result.web.hsts_seconds ??= 0;
+      result.backup ||= {};
+      result.backup.pairs ||= [];
+      result.backup.rclone_args ||= [];
+      result.backup.tuning ||= {};
+      result.backup.tuning.transfers ??= 4;
+      result.backup.tuning.checkers ??= 8;
+      result.backup.tuning.retries ??= 3;
+      result.backup.tuning.low_level_retries ??= 10;
+      result.backup.tuning.stats_interval ||= '10s';
+      result.backup.tuning.fast_list ??= false;
+      result.backup.tuning.max_delete ??= 500;
+      result.backup.require_delete_confirmation ??= true;
+      result.backup.require_max_delete_for_sync ??= true;
+      result.backup.allow_unsafe_rclone_args ??= false;
+      result.backup.timezone ||= 'Europe/Berlin';
+      result.backup.max_parallel ??= 2;
+      result.backup.timeout_hours ??= 4;
+      result.backup.scheduler_grace_minutes ??= 15;
+      result.backup.scheduler_retry_minutes ??= 60;
+      result.notifications ||= { webhooks: [] };
+      result.notifications.allow_http ??= false;
+      result.notifications.allow_private_targets ??= false;
+      result.notifications.webhooks ||= [];
+      result.maintenance ||= { auto_prune: true, job_retention_days: 180, keep_latest_jobs: 500, log_retention_days: 90 };
+      for (const pair of result.backup.pairs) this.normalizePair(pair);
+      for (const hook of result.notifications.webhooks) if (hook.enabled === undefined) hook.enabled = true;
+      this.config = result;
+      this.rcloneArgsText = (result.backup.rclone_args || []).join('\n');
+      this.allowedHostsText = (result.web.allowed_hosts || []).join('\n');
+      this.browseRootsText = (result.web.local_browse_roots || []).join('\n');
+      this.configDirty = false;
+      this.configValidation = { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true };
+    },
+
+    normalizePair(pair) {
+      if (pair.enabled === undefined) pair.enabled = true;
+      pair.schedule ||= 'manual';
+      pair.direction ||= 'bisync';
+      pair.mode ||= pair.direction === 'bisync' ? 'bisync' : 'copy';
+      if (pair.min_local_files === undefined) pair.min_local_files = 1;
+      if (pair.min_remote_files === undefined) pair.min_remote_files = 0;
+      if (pair.min_free_gb === undefined) pair.min_free_gb = 0;
+      if (pair.allow_delete === undefined) pair.allow_delete = false;
+      if (pair.require_mountpoint === undefined) pair.require_mountpoint = false;
+      pair.mountpoint ||= '';
+      pair.sentinel_file ||= '';
+      pair.exclude ||= '';
+      pair.include ||= '';
+      pair.filter ||= '';
+      pair.transfers ??= '';
+      pair.checkers ??= '';
+      pair.max_delete ??= 100;
+      if (Array.isArray(pair.rclone_args)) pair.rclone_args = pair.rclone_args.join('\n');
+      else pair.rclone_args ||= '';
+    },
+
+    configPayload() {
+      const draft = JSON.parse(JSON.stringify(this.config));
+      draft.backup ||= {}; draft.web ||= {};
+      draft.backup.rclone_args = this.rcloneArgsText.split('\n').map((value) => value.trim()).filter(Boolean);
+      draft.web.allowed_hosts = this.allowedHostsText.split('\n').map((value) => value.trim()).filter(Boolean);
+      draft.web.local_browse_roots = this.browseRootsText.split('\n').map((value) => value.trim()).filter(Boolean);
+      return draft;
+    },
+
+    async validateConfigDraft() {
+      this.configValidation = { loading: true, ok: null, warnings: [], errors: [], revisionMatches: true };
+      const result = await this.api('POST', '/api/config/validate', { config: this.configPayload() }, { captureError: true, silent: true });
+      if (result?.__error) {
+        const detail = result.detail;
+        const errors = Array.isArray(detail?.errors) ? detail.errors : [detail?.message || String(detail || 'Validierung fehlgeschlagen')];
+        this.configValidation = { loading: false, ok: false, warnings: [], errors, revisionMatches: result.status !== 409 };
+        this.showToast(`${errors.length} Konfigurationsfehler gefunden`, 'err');
+        return false;
       }
-      this.config = r;
-      this.rcloneArgsText = (r.backup.rclone_args || []).join('\n');
+      this.configValidation = { loading: false, ok: true, warnings: result?.warnings || [], errors: [], revisionMatches: result?.revision_matches !== false };
+      this.showToast(result?.warnings?.length ? `Gültig mit ${result.warnings.length} Hinweis(en)` : 'Konfiguration ist gültig', result?.warnings?.length ? 'warn' : 'ok');
+      return true;
     },
 
     async saveConfig() {
-      // rcloneArgsText → array
-      this.config.backup.rclone_args = this.rcloneArgsText
-        .split('\n').map(s => s.trim()).filter(Boolean);
-      const r = await this.api('PUT', '/api/config', { config: this.config });
-      if (r?.ok) this.showToast('✓ gespeichert');
+      const result = await this.api('PUT', '/api/config', { config: this.configPayload() });
+      if (!result?.ok) return false;
+      this.config = result.config || this.config;
+      this.configDirty = false;
+      if (result.warnings?.length) this.showToast(`Gespeichert: ${result.warnings.join(' · ')}`, 'warn');
+      else this.showToast('Einstellungen gespeichert');
+      await this.loadConfig();
+      this.loadOverview(true);
+      return true;
     },
 
-    addPair() {
-      this.config.backup.pairs.push({
-        name: '', remote: '', local: '', schedule: 'manual', enabled: true,
-        direction: 'bisync', mode: 'bisync', min_local_files: 1,
+    addPair(preset = this.newPairPreset || 'push-copy') {
+      const templates = {
+        'push-copy': { direction: 'push', mode: 'copy' },
+        'pull-copy': { direction: 'pull', mode: 'copy' },
+        'bisync': { direction: 'bisync', mode: 'bisync' },
+        'push-sync': { direction: 'push', mode: 'sync' },
+      };
+      const selected = templates[preset] || templates['push-copy'];
+      const pair = {
+        name: '', remote: '', local: '', schedule: 'manual', enabled: false,
+        direction: selected.direction, mode: selected.mode, min_local_files: 1,
         exclude: '.DS_Store\nThumbs.db', include: '', filter: '', rclone_args: '',
-        transfers: '', checkers: '', max_delete: '',
+        transfers: '', checkers: '', max_delete: 100, allow_delete: false,
+        min_remote_files: 0, min_free_gb: 0, require_mountpoint: false,
+        mountpoint: '', sentinel_file: '',
+      };
+      this.config.backup.pairs.push(pair);
+      const idx = this.config.backup.pairs.length - 1;
+      this.pairOpen[idx] = true;
+      this.configDirty = true;
+      this.showToast(selected.mode === 'copy' ? 'Sichere Copy-Vorlage angelegt' : 'Deaktivierte Vorlage angelegt – Löschschutz prüfen', selected.mode === 'copy' ? 'ok' : 'warn');
+      this.$nextTick(() => document.getElementById(`pair-${idx}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    },
+
+    clonePair(idx) {
+      const source = this.config.backup.pairs[idx] || {};
+      const clone = JSON.parse(JSON.stringify(source));
+      clone.name = `${clone.name || 'Pair'}_Kopie`;
+      clone.enabled = false;
+      clone.schedule = 'manual';
+      this.config.backup.pairs.splice(idx + 1, 0, clone);
+      this.configDirty = true;
+      this.pairOpen[idx + 1] = true;
+      this.showToast('Pair als deaktivierte Kopie angelegt');
+    },
+
+    removePair(idx) {
+      const pair = this.config.backup.pairs[idx];
+      if (!confirm(`Pair „${pair?.name || 'ohne Namen'}“ aus der Konfiguration entfernen?`)) return;
+      this.config.backup.pairs.splice(idx, 1);
+      this.configDirty = true;
+    },
+
+    movePair(idx, delta) {
+      const target = idx + delta;
+      if (target < 0 || target >= this.config.backup.pairs.length) return;
+      const [pair] = this.config.backup.pairs.splice(idx, 1);
+      this.config.backup.pairs.splice(target, 0, pair);
+      this.configDirty = true;
+    },
+
+    visiblePairCount() {
+      return (this.config.backup.pairs || []).filter((pair) => this.pairVisible(pair)).length;
+    },
+
+    setAllPairsOpen(open) {
+      const next = { ...this.pairOpen };
+      (this.config.backup.pairs || []).forEach((pair, idx) => {
+        if (this.pairVisible(pair)) next[idx] = Boolean(open);
       });
+      this.pairOpen = next;
+    },
+
+    pairVisible(pair) {
+      const needle = this.pairSearch.trim().toLowerCase();
+      if (needle && !`${pair.name || ''} ${pair.remote || ''} ${pair.local || ''}`.toLowerCase().includes(needle)) return false;
+      if (this.pairFilter === 'enabled' && !pair.enabled) return false;
+      if (this.pairFilter === 'disabled' && pair.enabled) return false;
+      if (this.pairFilter === 'destructive' && !(pair.direction === 'bisync' || pair.mode === 'sync')) return false;
+      if (this.pairFilter === 'issues' && this.pairIssues(pair).length === 0 && !this.pairRuntimeIssue(pair)) return false;
+      return true;
+    },
+
+    pairIssues(pair) {
+      const issues = [];
+      if (!String(pair.name || '').trim()) issues.push('Name fehlt');
+      if (!String(pair.remote || '').includes(':')) issues.push('Remote ungültig');
+      if (!String(pair.local || '').trim()) issues.push('Lokaler Pfad fehlt');
+      if (pair.enabled && (!pair.schedule || pair.schedule === 'off')) issues.push('Kein Zeitplan');
+      const destructive = pair.direction === 'bisync' || pair.mode === 'sync';
+      if (destructive && pair.enabled && !pair.allow_delete) issues.push('Löschen nicht freigegeben');
+      if (destructive && pair.enabled && (pair.max_delete === '' || pair.max_delete === null || pair.max_delete === undefined)) issues.push('Löschlimit fehlt');
+      if (pair.require_mountpoint && !String(pair.mountpoint || '').trim()) issues.push('Mountpoint fehlt');
+      return issues;
+    },
+
+    pairRuntimeIssue(pair) {
+      const health = this.pairLastRun(pair);
+      if (health?.last_status === 'stale') return health.error || 'Letzter Lauf blieb unvollständig';
+      if (health?.last_status === 'error') return health.error || 'Letzter Lauf fehlgeschlagen';
+      return '';
+    },
+
+    pairStatus(pair) {
+      const health = this.pairLastRun(pair);
+      if (!pair.enabled) return 'disabled';
+      if (health?.last_status === 'error' || health?.last_status === 'stale') return 'error';
+      if (this.pairIssues(pair).length) return 'warn';
+      if (health?.last_status === 'ok') return 'ok';
+      return 'pending';
+    },
+
+    pairLastRun(pair) {
+      return (this.overview.data?.pairs?.health || []).find((item) => item.name === pair.name) || null;
     },
 
     async testRclone() {
       this.testResults._global = { loading: true };
-      const r = await this.api('POST', '/api/test/rclone', {});
-      this.testResults._global = r;
+      const result = await this.api('POST', '/api/test/rclone', {});
+      this.testResults._global = result || { ok: false, error: 'Test fehlgeschlagen' };
     },
 
     async testPair(idx) {
       this.testResults[idx] = { loading: true };
-      const r = await this.api('POST', '/api/test/rclone', { pair_index: idx });
-      this.testResults[idx] = r;
+      const result = await this.api('POST', '/api/test/rclone', { pair: this.config.backup.pairs[idx] });
+      this.testResults[idx] = result || { ok: false, error: 'Test fehlgeschlagen' };
     },
 
-    // ─── Folder-Picker ──────────────────────────────────────────────────
+    async loadStorage(includeRemote = false) {
+      const result = await this.api('GET', `/api/storage/overview${includeRemote ? '?include_remote=true' : ''}`, undefined, { silent: !includeRemote, timeoutMs: includeRemote ? 120000 : 30000 });
+      if (result?.pairs && this.overview.data) this.overview.data.storage_pairs = result.pairs;
+      return result;
+    },
+
+    storagePairs() { return this.overview.data?.storage_pairs || []; },
+
     openPicker(mode, idx) {
-      // mode: 'remote' (rclone) | 'local' (FS)
-      this.picker = {
-        show: true, mode, idx,
-        current: '', parent: null, entries: [], loading: true,
-      };
+      this.picker = { show: true, mode, idx, current: '', parent: null, entries: [], loading: true, search: '' };
       this.loadPicker('');
     },
+
+    openQuickPicker(mode) { this.openPicker(mode, -1); },
+
     async loadPicker(path) {
       this.picker.loading = true;
       this.picker.current = path;
       const endpoint = this.picker.mode === 'remote' ? '/api/browse/rclone' : '/api/browse/local';
-      const r = await this.api('GET', endpoint + (path ? '?path=' + encodeURIComponent(path) : ''));
-      if (r) {
-        this.picker.parent = r.parent;
-        this.picker.entries = r.entries || [];
-        this.picker.current = r.path || path || '';
+      const result = await this.api('GET', endpoint + (path ? `?path=${encodeURIComponent(path)}` : ''));
+      if (result) {
+        this.picker.parent = result.parent;
+        this.picker.entries = result.entries || [];
+        this.picker.current = result.path || path || '';
       }
       this.picker.loading = false;
     },
+
+    pickerEntries() {
+      const needle = this.picker.search.trim().toLowerCase();
+      return needle ? this.picker.entries.filter((entry) => String(entry.name || '').toLowerCase().includes(needle)) : this.picker.entries;
+    },
+
     pickPath(path) {
       const { mode, idx } = this.picker;
       if (idx === -1) {
-        // Quick-Sync
         if (mode === 'remote') this.quick.remote = path;
         else this.quick.local = path;
       } else {
         if (mode === 'remote') this.config.backup.pairs[idx].remote = path;
         else this.config.backup.pairs[idx].local = path;
+        this.configDirty = true;
       }
       this.picker.show = false;
       this.showToast(`Pfad gesetzt: ${path}`);
     },
 
-    // ─── Passwort ändern ────────────────────────────────────────────────
-    async changePassword() {
-      if (this.pwChange.new !== this.pwChange.confirm) {
-        this.showToast('Wiederholung passt nicht', 'err'); return;
-      }
-      if (this.pwChange.new.length < 8) {
-        this.showToast('Min. 8 Zeichen', 'err'); return;
-      }
-      const r = await this.api('POST', '/api/config/change-password', {
-        current_password: this.pwChange.current,
-        new_password: this.pwChange.new,
-      });
-      if (r?.ok) {
-        this.showToast('✓ Passwort geändert');
-        this.pwChange = { current: '', new: '', confirm: '' };
-      }
+    async loadDoctor() {
+      this.doctor.loading = true;
+      const result = await this.api('GET', '/api/diagnostics/doctor', undefined, { timeoutMs: 120000 });
+      if (result) this.doctor.data = result;
+      this.doctor.loading = false;
     },
 
-    // ─── Quick-Sync ─────────────────────────────────────────────────────
-    openQuickPicker(mode) {
-      // Re-use Folder-Picker für Quick-Sync. idx=-1 signalisiert "Quick".
-      this.picker = {
-        show: true, mode, idx: -1,
-        current: '', parent: null, entries: [], loading: true,
+    doctorCounts() {
+      const data = this.doctor.data;
+      const all = [...(data?.checks || []), ...(data?.pairs || []).flatMap((pair) => pair.checks || [])];
+      return {
+        ok: all.filter((item) => item.level === 'ok').length,
+        warn: all.filter((item) => item.level === 'warn').length,
+        error: all.filter((item) => item.level === 'error').length,
       };
-      this.loadPicker('');
     },
-    async runQuickSync() {
-      if (!this.quick.remote || !this.quick.local) {
-        this.showToast('Remote + Lokal müssen gesetzt sein', 'err'); return;
-      }
-      if (this.quick.mode === 'sync' && !this.quick.dry_run) {
-        if (!confirm('⚠ SYNC (mirror) löscht im Ziel. Trotzdem starten?')) return;
-      }
-      const r = await this.api('POST', '/api/jobs/backup/quick', this.quick);
-      if (r?.ok) {
-        this.showToast('Quick-Sync gestartet');
-        this.showQuick = false;
-        setTimeout(() => { this.refreshStatus(); this.loadProgress(); }, 500);
+
+    async loadLogs() {
+      this.maintenance.loading = true;
+      const query = this.maintenance.logQuery ? `&query=${encodeURIComponent(this.maintenance.logQuery)}` : '';
+      const result = await this.api('GET', `/api/maintenance/logs?limit=200${query}`);
+      if (result?.logs) this.maintenance.logs = result.logs;
+      this.maintenance.loading = false;
+    },
+
+    async pruneLogs(dryRun = true) {
+      const days = Number(this.config.maintenance?.log_retention_days || 90);
+      const result = await this.api('POST', `/api/maintenance/logs/prune?days=${days}&dry_run=${dryRun}`);
+      if (result) {
+        this.maintenance.prune = result;
+        this.showToast(dryRun ? `${result.matched} alte Logs gefunden` : `${result.deleted} alte Logs gelöscht`);
+        this.loadLogs();
       }
     },
 
-    // ─── Storage-Übersicht ──────────────────────────────────────────────
-    async loadStorage(includeRemote = false) {
-      this.storage.loading = true;
-      const url = `/api/storage/overview${includeRemote ? '?include_remote=true' : ''}`;
-      const r = await this.api('GET', url);
-      if (r?.pairs) this.storage.pairs = r.pairs;
-      this.storage.loading = false;
+    async loadDatabaseStatus() {
+      const result = await this.api('GET', '/api/maintenance/database');
+      if (result) this.maintenance.database = result;
     },
 
-    // ─── Filter-Datei ───────────────────────────────────────────────────
+    async pruneDatabase() {
+      const cfg = this.config.maintenance || {};
+      const days = cfg.job_retention_days || 180;
+      const keep = cfg.keep_latest_jobs || 500;
+      const result = await this.api('POST', `/api/maintenance/database/prune?days=${days}&keep_latest=${keep}`);
+      if (result) {
+        this.maintenance.database = result;
+        this.showToast(`${result.deleted_jobs} alte Jobs gelöscht`);
+        this.loadJobs(true); this.loadOverview(true);
+      }
+    },
+
+    async loadSnapshots() {
+      this.snapshots.loading = true;
+      const result = await this.api('GET', '/api/maintenance/config/snapshots', undefined, { silent: true });
+      if (result?.snapshots) {
+        this.snapshots.items = result.snapshots;
+        this.snapshots.max = result.max_snapshots || 30;
+      }
+      this.snapshots.loading = false;
+    },
+
+    async createSnapshot() {
+      const result = await this.api('POST', '/api/maintenance/config/snapshots');
+      if (result?.ok) {
+        this.showToast(`Snapshot erstellt: ${result.snapshot.name}`);
+        await this.loadSnapshots();
+      }
+    },
+
+    async restoreSnapshot() {
+      if (!this.snapshots.restoreName || !this.snapshots.password) {
+        this.showToast('Snapshot und aktuelles Passwort erforderlich', 'err'); return;
+      }
+      if (!confirm('Diesen Snapshot wiederherstellen? Aktuelle Zugangsdaten bleiben erhalten; alle Sitzungen werden beendet.')) return;
+      const selected = this.snapshots.items.find((item) => item.name === this.snapshots.restoreName);
+      const result = await this.api('POST', '/api/maintenance/config/snapshots/restore', {
+        name: this.snapshots.restoreName,
+        current_password: this.snapshots.password,
+        expected_revision: this.config._revision,
+        sha256: selected?.sha256 || null,
+      });
+      if (result?.ok) {
+        this.showToast('Snapshot wiederhergestellt – erneute Anmeldung erforderlich');
+        setTimeout(() => { window.location = '/login'; }, 900);
+      }
+    },
+
+    downloadSupportBundle() { window.location.assign('/api/maintenance/support-bundle'); },
+    downloadRedactedConfig() { window.location.assign('/api/maintenance/config/export'); },
+
     async loadFilterFile() {
       this.filterFile.loading = true;
-      const r = await this.api('GET', '/api/config/filter-file');
-      if (r) {
-        this.filterFile.content = r.content || '';
-        this.filterFile.path = r.path || '';
+      const result = await this.api('GET', '/api/config/filter-file');
+      if (result) {
+        this.filterFile.content = result.content || '';
+        this.filterFile.path = result.path || '';
+        this.filterFile.revision = result.revision || '';
         this.filterFile.dirty = false;
       }
       this.filterFile.loading = false;
     },
+
     async saveFilterFile() {
-      const r = await this.api('PUT', '/api/config/filter-file',
-                               { content: this.filterFile.content });
-      if (r?.ok) {
-        this.showToast(`✓ Filter-Datei gespeichert (${r.bytes} B)`);
+      const result = await this.api('PUT', '/api/config/filter-file', { content: this.filterFile.content, revision: this.filterFile.revision });
+      if (result?.ok) {
+        this.filterFile.revision = result.revision || this.filterFile.revision;
         this.filterFile.dirty = false;
+        this.showToast(`Filter gespeichert (${result.bytes} B)`);
       }
     },
 
-    // ─── Webhooks-Config ────────────────────────────────────────────────
     addWebhook() {
-      if (!this.config.notifications) this.config.notifications = { webhooks: [] };
-      if (!this.config.notifications.webhooks) this.config.notifications.webhooks = [];
+      this.config.notifications ||= { webhooks: [] };
+      this.config.notifications.webhooks ||= [];
       this.config.notifications.webhooks.push({
-        type: 'discord', url: '', events: ['sync_error', 'mount_check_failed'],
+        id: window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+        enabled: true, type: 'discord', url: '', events: ['sync_error', 'mount_check_failed'],
       });
+      this.configDirty = true;
     },
-    toggleHookEvent(hook, ev) {
-      hook.events = hook.events || [];
-      const i = hook.events.indexOf(ev);
-      if (i >= 0) hook.events.splice(i, 1);
-      else hook.events.push(ev);
+
+    toggleHookEvent(hook, event) {
+      hook.events ||= [];
+      const idx = hook.events.indexOf(event);
+      if (idx >= 0) hook.events.splice(idx, 1);
+      else hook.events.push(event);
+      this.configDirty = true;
     },
+
     async testWebhook(idx) {
-      await this.saveConfig();
-      const r = await this.api('POST', '/api/config/test-webhook', { index: idx, event: 'sync_ok' });
-      if (r?.ok) this.showToast('✓ Webhook-Test gesendet');
+      if (this.configDirty && !(await this.saveConfig())) return;
+      const hook = this.config.notifications.webhooks[idx];
+      const result = await this.api('POST', '/api/config/test-webhook', { index: idx, id: hook?.id, event: 'sync_ok' });
+      if (result?.ok) this.showToast('Webhook-Test gesendet');
     },
 
-    // ─── Helpers ────────────────────────────────────────────────────────
-    formatBytes(b) {
-      if (b === null || b === undefined) return '—';
-      if (b < 1024) return b + ' B';
+    async changePassword() {
+      if (this.pwChange.new !== this.pwChange.confirm) { this.showToast('Passwortwiederholung stimmt nicht überein', 'err'); return; }
+      if (this.pwChange.new.length < 12) { this.showToast('Mindestens 12 Zeichen erforderlich', 'err'); return; }
+      const result = await this.api('POST', '/api/config/change-password', { current_password: this.pwChange.current, new_password: this.pwChange.new });
+      if (result?.ok) {
+        this.showToast('Passwort geändert – bitte neu anmelden');
+        setTimeout(() => { window.location = '/login'; }, 800);
+      }
+    },
+
+    async logout() {
+      if ((this.configDirty || this.filterFile.dirty) && !confirm('Ungespeicherte Änderungen verwerfen und abmelden?')) return;
+      const result = await this.api('POST', '/logout');
+      if (result !== null) window.location = '/login';
+    },
+
+    closeOverlays() {
+      if (this.jobModal.show) this.jobModal.show = false;
+      else if (this.picker.show) this.picker.show = false;
+      else if (this.quickModal.show) this.quickModal.show = false;
+      else if (this.plan.data) this.plan.data = null;
+      else this.navOpen = false;
+    },
+
+    markConfigDirty() {
+      this.configDirty = true;
+      if (this.configValidation.ok !== null) this.configValidation.ok = null;
+    },
+
+    formatBytes(value) {
+      if (value === null || value === undefined || value === '') return '—';
+      let bytes = Number(value);
+      if (!Number.isFinite(bytes)) return String(value);
+      if (bytes < 1024) return `${bytes} B`;
       const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
-      let i = -1, n = b;
-      do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
-      return n.toFixed(1) + ' ' + units[i];
+      let index = -1;
+      do { bytes /= 1024; index += 1; } while (bytes >= 1024 && index < units.length - 1);
+      return `${bytes.toFixed(bytes >= 100 ? 0 : 1)} ${units[index]}`;
     },
 
-    formatTs(t) {
-      if (!t) return '—';
-      const d = new Date(t * 1000);
+    formatTs(value) {
+      if (!value) return 'Noch nie';
+      const date = new Date(Number(value) * 1000);
       const now = new Date();
-      const diff = (now - d) / 1000;
-      // < 24h: 'heute HH:MM' / 'gestern HH:MM' / sonst Datum
-      const hhmm = d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+      const diff = Math.max(0, (now - date) / 1000);
+      const time = date.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
       if (diff < 60) return 'gerade eben';
-      if (diff < 3600) return Math.round(diff / 60) + ' Min. her';
-      if (d.toDateString() === now.toDateString()) return 'heute ' + hhmm;
-      const yest = new Date(now); yest.setDate(yest.getDate() - 1);
-      if (d.toDateString() === yest.toDateString()) return 'gestern ' + hhmm;
-      if (diff < 7 * 86400) return d.toLocaleDateString('de-DE', { weekday: 'short' }) + ' ' + hhmm;
-      return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' }) + ' ' + hhmm;
+      if (diff < 3600) return `vor ${Math.round(diff / 60)} Min.`;
+      if (date.toDateString() === now.toDateString()) return `heute ${time}`;
+      const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+      if (date.toDateString() === yesterday.toDateString()) return `gestern ${time}`;
+      return `${date.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' })} ${time}`;
+    },
+
+    formatDateTime(value) {
+      if (!value) return '—';
+      return new Date(Number(value) * 1000).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' });
+    },
+
+    formatDur(seconds) {
+      if (seconds === null || seconds === undefined) return '—';
+      let value = Math.max(0, Math.round(Number(seconds)));
+      const days = Math.floor(value / 86400); value %= 86400;
+      const hours = Math.floor(value / 3600); value %= 3600;
+      const minutes = Math.floor(value / 60); const secs = value % 60;
+      if (days) return `${days}d ${hours}h`;
+      if (hours) return `${hours}h ${minutes}m`;
+      if (minutes) return `${minutes}m ${secs}s`;
+      return `${secs}s`;
+    },
+
+    formatUptime(seconds) {
+      if (!seconds) return '—';
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor((seconds % 86400) / 3600);
+      return days ? `${days} Tage, ${hours} Std.` : `${hours} Std.`;
     },
 
     humanCron(expr) {
-      if (!expr) return '';
-      const e = expr.trim().toLowerCase();
-      if (!e || e === 'manual' || e === 'off' || e === '') return '⏸ manuell (nur Button)';
-      const parts = e.split(/\s+/);
-      if (parts.length !== 5) return '? ungültig';
-      const [m, h, dom, mon, dow] = parts;
-      const DAYS = ['So','Mo','Di','Mi','Do','Fr','Sa'];
-      const time = (() => {
-        if (m === '*' && h === '*') return 'jede Minute';
-        if (m === '*') return `jede Minute (h=${h})`;
-        if (m.startsWith('*/')) return `alle ${m.slice(2)} Min`;
-        const mm = m.padStart(2, '0');
-        if (h === '*') return `jede volle Stunde:${mm}`;
-        if (h.startsWith('*/')) return `alle ${h.slice(2)}h um :${mm}`;
-        return `${h.padStart(2,'0')}:${mm}`;
-      })();
-      const day = (() => {
-        if (dow !== '*') {
-          if (dow.includes('-')) {
-            const [a,b] = dow.split('-').map(Number);
-            return `${DAYS[a]}–${DAYS[b]}`;
-          }
-          if (dow.includes(',')) return dow.split(',').map(n => DAYS[+n] || n).join(',');
-          return DAYS[+dow] || dow;
-        }
-        if (dom !== '*') return `am ${dom}.`;
-        if (mon !== '*') return `Monat ${mon}`;
-        return 'täglich';
-      })();
-      return `${day} ${time}`;
+      if (!expr) return 'Manuell';
+      const value = expr.trim().toLowerCase();
+      if (['manual', 'off', 'disabled', 'none', ''].includes(value)) return 'Manuell';
+      const parts = value.split(/\s+/);
+      if (parts.length !== 5) return 'Cron ungültig';
+      const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+      const days = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+      let time;
+      if (minute.startsWith('*/')) time = `alle ${minute.slice(2)} Min.`;
+      else if (hour === '*') time = `stündlich :${minute.padStart(2, '0')}`;
+      else if (hour.startsWith('*/')) time = `alle ${hour.slice(2)} Std.`;
+      else time = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
+      let day = 'Täglich';
+      if (dayOfWeek !== '*') {
+        if (dayOfWeek.includes('-')) {
+          const [a, b] = dayOfWeek.split('-').map(Number);
+          day = `${days[a] || a}–${days[b] || b}`;
+        } else if (dayOfWeek.includes(',')) day = dayOfWeek.split(',').map((n) => days[Number(n)] || n).join(', ');
+        else day = days[Number(dayOfWeek)] || dayOfWeek;
+      } else if (dayOfMonth !== '*') day = `Am ${dayOfMonth}.`;
+      else if (month !== '*') day = `Monat ${month}`;
+      return `${day} · ${time}`;
     },
-    formatDur(s) {
-      if (!s) return '—';
-      s = Math.round(s);
-      if (s < 60) return s + 's';
-      const m = Math.floor(s / 60);
-      if (m < 60) return m + 'm ' + (s % 60) + 's';
-      return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+
+    statusLabel(status) {
+      return ({ running: 'Läuft', ok: 'Erfolgreich', error: 'Fehler', skipped: 'Übersprungen', cancelled: 'Abgebrochen', stale: 'Verwaist', pending: 'Ausstehend', done: 'Fertig', disabled: 'Deaktiviert', warn: 'Prüfen' })[status] || status || 'Unbekannt';
     },
-    summaryShort(s) {
-      if (!s) return '—';
-      if (s.ok_count !== undefined) return `${s.ok_count}/${s.total_pairs} Paare${s.dry_run ? ' (dry)' : ''}`;
-      if (s.pair && s.command) return `Check ${s.pair}`;
-      if (s.error) return '✗ ' + s.error.substring(0, 80);
-      return JSON.stringify(s).substring(0, 80);
+
+    kindLabel(kind) {
+      return ({ backup: 'Backup', check: 'Check', quicksync: 'Quick-Sync' })[kind] || kind || 'Job';
+    },
+
+    directionLabel(pair) {
+      if (pair.direction === 'pull') return pair.mode === 'sync' ? 'Remote → Lokal · Mirror' : 'Remote → Lokal · Copy';
+      if (pair.direction === 'push') return pair.mode === 'sync' ? 'Lokal → Remote · Mirror' : 'Lokal → Remote · Copy';
+      return 'Bidirektional';
+    },
+
+    summaryShort(summary) {
+      if (!summary) return 'Keine Zusammenfassung';
+      if (summary.ok_count !== undefined) return `${summary.ok_count}/${summary.total_pairs} Paare${summary.dry_run ? ' · Dry-Run' : ''}`;
+      if (summary.pair && summary.command) return `Check ${summary.pair}`;
+      if (summary.error) return String(summary.error).substring(0, 120);
+      if (summary.remote && summary.local) return `${summary.direction || ''} ${summary.mode || ''}`.trim();
+      return 'Details verfügbar';
+    },
+
+    prettyJson(value) {
+      return JSON.stringify(value || {}, null, 2);
     },
   };
 }
