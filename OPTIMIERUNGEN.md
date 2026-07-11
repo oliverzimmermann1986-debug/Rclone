@@ -1,6 +1,12 @@
-# Audit und Optimierungen – rclone-sync-container 1.5.1
+# Audit und Optimierungen – rclone-sync-container 1.5.2
 
 Stand: 11.07.2026
+
+
+## Bugfixes in 1.5.2
+
+- **Behoben:** Der Remote-Pre-Check rief `rclone lsjson` mit dem nicht existierenden Flag `--no-size` auf — jeder Pair-Lauf mit Remote-Pfad scheiterte sofort mit „unknown flag". Das Flag existiert in keiner rclone-Version (lsjson kennt nur `--no-mimetype`/`--no-modtime`, siehe https://rclone.org/commands/rclone_lsjson/); es wurde entfernt.
+- **Hinweis:** Die bisync-Flags der App (`--resilient`, `--recover`, `--conflict-resolve`) benötigen rclone ≥ 1.66. Debian-Paketstände (z. B. 1.60.1 in Debian 13) reichen nicht; aktuelles rclone von rclone.org installieren.
 
 
 ## Bugfixes in 1.5.1

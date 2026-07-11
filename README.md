@@ -1,6 +1,6 @@
 # rclone-sync-container
 
-**Version 1.5.1** – Web- und Scheduler-Dienst für sichere `rclone bisync`, `copy`- und `sync`-Läufe zwischen Cloud-Remotes und lokalen NAS-/Storage-Pfaden. Ausgelegt für einen Debian-/Ubuntu-LXC mit systemd.
+**Version 1.5.2** – Web- und Scheduler-Dienst für sichere `rclone bisync`, `copy`- und `sync`-Läufe zwischen Cloud-Remotes und lokalen NAS-/Storage-Pfaden. Ausgelegt für einen Debian-/Ubuntu-LXC mit systemd.
 
 ## Kernfunktionen
 
