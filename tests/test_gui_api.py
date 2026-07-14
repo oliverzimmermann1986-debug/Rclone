@@ -78,3 +78,43 @@ def test_unsaved_pair_connection_test_uses_inline_draft(tmp_path, monkeypatch):
     assert result["local_exists"] is True
     assert result["remote_size"] == {"count": 12, "bytes": 3456}
     assert calls[1][-2:] == ["--", draft["remote"]]
+
+
+def test_schedule_preview_returns_timezone_aware_next_runs():
+    from app.routes import api_config
+
+    result = api_config.preview_schedule(
+        api_config.SchedulePreviewRequest(
+            expression="0 3 * * *", timezone="Europe/Berlin", count=3
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["enabled"] is True
+    assert result["timezone"] == "Europe/Berlin"
+    assert len(result["next_runs"]) == 3
+    assert all("+" in item["iso"] for item in result["next_runs"])
+    assert [item["timestamp"] for item in result["next_runs"]] == sorted(
+        item["timestamp"] for item in result["next_runs"]
+    )
+
+
+def test_schedule_preview_supports_manual_and_rejects_invalid_cron():
+    from fastapi import HTTPException
+
+    from app.routes import api_config
+
+    manual = api_config.preview_schedule(
+        api_config.SchedulePreviewRequest(expression="manual")
+    )
+    assert manual["enabled"] is False
+    assert manual["next_runs"] == []
+
+    try:
+        api_config.preview_schedule(
+            api_config.SchedulePreviewRequest(expression="not a cron")
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 422
+    else:
+        raise AssertionError("invalid cron must be rejected")

@@ -1,6 +1,6 @@
 # rclone-sync-container
 
-**Version 1.5.3** – Web- und Scheduler-Dienst für sichere `rclone bisync`, `copy`- und `sync`-Läufe zwischen Cloud-Remotes und lokalen NAS-/Storage-Pfaden. Ausgelegt für einen Debian-/Ubuntu-LXC mit systemd.
+**Version 1.6.0** – Web- und Scheduler-Dienst für sichere `rclone bisync`, `copy`- und `sync`-Läufe zwischen Cloud-Remotes und lokalen NAS-/Storage-Pfaden. Ausgelegt für einen Debian-/Ubuntu-LXC mit systemd.
 
 ## Kernfunktionen
 
@@ -20,7 +20,7 @@
 - Filterbare/paginierte Jobhistorie mit Detailansicht, Logsuche und Auto-Aktualisierung
 
 
-## Weboberfläche 1.5
+## Weboberfläche 1.6
 
 Die Oberfläche ist als Betriebszentrale statt als reine Konfigurationsmaske aufgebaut:
 
@@ -32,7 +32,10 @@ Die Oberfläche ist als Betriebszentrale statt als reine Konfigurationsmaske auf
 - **Jobs:** Filter nach Typ und Status, Volltextsuche nach Pair/Fehler/Job-ID, Pagination, CSV-Export, Ergebnisdetails, Live-Log, Logsuche, Kopier- und Downloadfunktion
 - **System:** Doctor-Prüfung, Servicezustände, Speicherübersicht, redigiertes Support-Bundle sowie kontrollierte Log-/Datenbankwartung
 - **Recovery:** lokale, vollständige Konfigurations-Snapshots mit SHA-256-Prüfung, Pre-Restore-Sicherung, Revisionsschutz und erzwungener Neuanmeldung nach Restore
-- **Einstellungen:** getrennte Bereiche für Scheduler, Sicherheit, Webhooks, Filter und Benutzerkonto
+- **Einstellungen:** klar beschriftete Bereiche mit Änderungsstatus, Validierung und kurzen fachlichen Erklärungen
+- **Scheduler-Assistent:** verständliche Auswahl für manuell, täglich, werktags, wöchentlich oder Intervalle; Cron wird automatisch erzeugt, übersetzt und mit den nächsten fünf Terminen in der gewählten Zeitzone geprüft
+- **Leistungsprofile:** „Schonend“, „Ausgewogen“ und „Schnell“ setzen rclone-Parallelität gemeinsam; eine Lastwarnung berücksichtigt aktive Pairs, Transfers und Checkers
+- **Pair-Zeitpläne:** können den globalen Standard ausdrücklich übernehmen oder weiterhin einen eigenen verständlichen Zeitplan verwenden
 - **Mobil:** Bottom-Navigation, touch-taugliche Bedienelemente und reduzierte Tabellenbreite für iPhone/Android
 - **Darstellung:** Hell-, Dunkel- oder Systemmodus; Auswahl wird lokal im Browser gespeichert
 

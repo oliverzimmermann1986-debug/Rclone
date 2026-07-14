@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#111827">
   <title>rclone-sync</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.5.3">
-  <script defer src="/static/alpine.min.js?v=1.5.3"></script>
+  <link rel="stylesheet" href="/static/style.css?v=1.6.0">
+  <script defer src="/static/alpine.min.js?v=1.6.0"></script>
 </head>
 <body x-data="app()" x-init="init()" @keydown.escape.window="closeOverlays()">
   <div class="app-shell">
@@ -50,7 +50,7 @@
         </div>
         <div class="sidebar-meta">
           <span x-text="overview.data?.system?.virtualization || '—'"></span>
-          <span x-text="'v' + (overview.data?.app?.version || '1.5.3')"></span>
+          <span x-text="'v' + (overview.data?.app?.version || '1.6.0')"></span>
         </div>
       </div>
     </aside>
@@ -295,7 +295,7 @@
                     <span class="status-dot" :class="pairStatus(pair)"></span>
                     <span class="pair-title">
                       <strong x-text="pair.name || 'Neues Pair'"></strong>
-                      <small><span x-text="directionLabel(pair)"></span> · <span x-text="humanCron(pair.schedule)"></span></small>
+                      <small><span x-text="directionLabel(pair)"></span> · <span x-text="pairScheduleLabel(pair)"></span></small>
                     </span>
                     <span class="pair-path-preview mono" x-text="pair.local || 'Lokaler Pfad fehlt'"></span>
                     <span class="chevron" :class="pairOpen[idx] && 'rotated'">⌄</span>
@@ -330,7 +330,7 @@
                   </div>
 
                   <div class="form-grid three">
-                    <label class="field"><span>Zeitplan</span><select x-model="pair.schedule"><option value="manual">Manuell</option><option value="0 2 * * *">Täglich 02:00</option><option value="0 3 * * *">Täglich 03:00</option><option value="0 4 * * *">Täglich 04:00</option><option value="0 */6 * * *">Alle 6 Stunden</option><option value="0 */12 * * *">Alle 12 Stunden</option><option value="0 4 * * 0">Sonntag 04:00</option><option value="0 9 * * 1-5">Werktags 09:00</option><option value="*/15 * * * *">Alle 15 Minuten</option><option value="*/30 * * * *">Alle 30 Minuten</option><option value="0 * * * *">Stündlich</option><option value="custom">Eigene Cron-Angabe</option></select><input class="mono" x-show="!['manual','0 2 * * *','0 3 * * *','0 4 * * *','0 */6 * * *','0 */12 * * *','0 4 * * 0','0 9 * * 1-5','*/15 * * * *','*/30 * * * *','0 * * * *'].includes(pair.schedule)" x-model="pair.schedule" placeholder="0 3 * * *"></label>
+                    <label class="field pair-schedule-field"><span>Zeitplan</span><select x-model="pair.schedule"><option value="" x-text="'Standard übernehmen · ' + humanCron(config.backup.default_schedule)"></option><option value="manual">Nur manuell</option><option value="0 2 * * *">Täglich um 02:00 Uhr</option><option value="0 3 * * *">Täglich um 03:00 Uhr</option><option value="0 4 * * *">Täglich um 04:00 Uhr</option><option value="0 */6 * * *">Alle 6 Stunden</option><option value="0 */12 * * *">Alle 12 Stunden</option><option value="0 4 * * 0">Sonntag um 04:00 Uhr</option><option value="0 9 * * 1-5">Werktags um 09:00 Uhr</option><option value="*/15 * * * *">Alle 15 Minuten</option><option value="*/30 * * * *">Alle 30 Minuten</option><option value="0 * * * *">Stündlich</option><option value="custom">Eigene Cron-Angabe</option></select><input class="mono" x-show="!['','manual','0 2 * * *','0 3 * * *','0 4 * * *','0 */6 * * *','0 */12 * * *','0 4 * * 0','0 9 * * 1-5','*/15 * * * *','*/30 * * * *','0 * * * *'].includes(pair.schedule)" x-model="pair.schedule" placeholder="0 3 * * *"><small><strong x-text="pairScheduleLabel(pair)"></strong><span x-show="!pair.schedule"> · übernimmt den Standard aus Einstellungen</span></small></label>
                     <label class="field"><span>Transfers</span><input type="number" min="1" x-model="pair.transfers" placeholder="Globaler Wert"></label>
                     <label class="field"><span>Maximale Löschungen</span><input type="number" min="0" x-model.number="pair.max_delete" placeholder="z. B. 100"></label>
                   </div>
@@ -486,9 +486,13 @@
 
         <!-- SETTINGS -->
         <section x-show="page==='settings'" x-cloak>
-          <div class="page-heading">
-            <div><span class="section-kicker">Anwendung</span><h2>Einstellungen</h2><p>Systempfade, Sicherheit, rclone-Tuning und Benachrichtigungen zentral verwalten.</p></div>
-            <div class="heading-actions"><button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading" x-text="configValidation.loading ? 'Prüfung…' : 'Konfiguration prüfen'"></button><button class="button primary" @click="saveConfig()">Speichern</button></div>
+          <div class="page-heading settings-page-heading">
+            <div><span class="section-kicker">Anwendung</span><h2>Einstellungen</h2><p>Alle wichtigen Vorgaben verständlich gegliedert – von Zeitplanung und Leistung bis Sicherheit und Benachrichtigungen.</p></div>
+            <div class="heading-actions settings-heading-actions">
+              <span class="save-state" :class="configDirty ? 'dirty' : 'saved'"><span></span><span x-text="configDirty ? 'Ungespeicherte Änderungen' : 'Aktueller Stand gespeichert'"></span></span>
+              <button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading" x-text="configValidation.loading ? 'Prüfung…' : 'Konfiguration prüfen'"></button>
+              <button class="button primary" @click="saveConfig()" :disabled="!configDirty">Änderungen speichern</button>
+            </div>
           </div>
 
 
@@ -502,32 +506,118 @@
 
           <div class="settings-layout">
             <nav class="settings-nav" aria-label="Einstellungsbereiche">
-              <button :class="settingsTab==='general' && 'active'" @click="settingsTab='general'">Allgemein</button>
-              <button :class="settingsTab==='scheduler' && 'active'" @click="settingsTab='scheduler'">Scheduler & Leistung</button>
-              <button :class="settingsTab==='security' && 'active'" @click="settingsTab='security'">Sicherheit</button>
-              <button :class="settingsTab==='notifications' && 'active'" @click="settingsTab='notifications'">Benachrichtigungen</button>
-              <button :class="settingsTab==='filters' && 'active'" @click="settingsTab='filters'">Globale Filter</button>
-              <button :class="settingsTab==='account' && 'active'" @click="settingsTab='account'">Konto</button>
+              <button :class="settingsTab==='general' && 'active'" @click="settingsTab='general'"><span class="settings-nav-mark">01</span><span><strong>Allgemein</strong><small>Pfade, Hosts und Zeitzone</small></span></button>
+              <button :class="settingsTab==='scheduler' && 'active'" @click="settingsTab='scheduler'; refreshSchedulePreview()"><span class="settings-nav-mark">02</span><span><strong>Scheduler & Leistung</strong><small>Zeitplan, Last und Aufbewahrung</small></span></button>
+              <button :class="settingsTab==='security' && 'active'" @click="settingsTab='security'"><span class="settings-nav-mark">03</span><span><strong>Sicherheit</strong><small>Löschschutz und Webzugriff</small></span></button>
+              <button :class="settingsTab==='notifications' && 'active'" @click="settingsTab='notifications'"><span class="settings-nav-mark">04</span><span><strong>Benachrichtigungen</strong><small>Webhooks und Ereignisse</small></span></button>
+              <button :class="settingsTab==='filters' && 'active'" @click="settingsTab='filters'"><span class="settings-nav-mark">05</span><span><strong>Globale Filter</strong><small>Ausschlüsse für alle Pairs</small></span></button>
+              <button :class="settingsTab==='account' && 'active'" @click="settingsTab='account'"><span class="settings-nav-mark">06</span><span><strong>Konto</strong><small>Passwort und Oberfläche</small></span></button>
             </nav>
 
             <div class="settings-content">
               <article class="panel" x-show="settingsTab==='general'" @input="markConfigDirty()" @change="markConfigDirty()">
                 <div class="panel-head"><div><span class="section-kicker">Grundkonfiguration</span><h3>Weboberfläche und Pfade</h3></div></div>
-                <div class="form-grid two"><label class="field"><span>Web-Benutzername</span><input x-model="config.web.username"></label><label class="field"><span>Zeitzone</span><input x-model="config.backup.timezone" placeholder="Europe/Berlin"></label></div>
+                <div class="form-grid two"><label class="field"><span>Web-Benutzername</span><input x-model="config.web.username"></label><label class="field"><span>Zeitzone</span><input x-model="config.backup.timezone" @input.debounce.400ms="refreshSchedulePreview()" placeholder="Europe/Berlin"><small>Bestimmt, wann Cron-Zeitpläne im Proxmox-Gast ausgeführt werden.</small></label></div>
                 <div class="form-grid three"><label class="field"><span>Datenverzeichnis</span><input class="mono" x-model="config.paths.data_dir"></label><label class="field"><span>Logverzeichnis</span><input class="mono" x-model="config.paths.logs_dir"></label><label class="field"><span>Temporäres Verzeichnis</span><input class="mono" x-model="config.paths.temp_dir"></label></div>
                 <div class="form-grid two"><label class="field"><span>Erlaubte Hosts · einer pro Zeile</span><textarea class="mono" x-model="allowedHostsText" rows="5" placeholder="backup.example.de"></textarea><small>Für produktive Reverse-Proxys konkrete Hostnamen statt * eintragen.</small></label><label class="field"><span>Lokale Browser-Wurzeln · eine pro Zeile</span><textarea class="mono" x-model="browseRootsText" rows="5" placeholder="/mnt"></textarea><small>Quick-Sync und Dateiauswahl bleiben auf diese Wurzeln beschränkt.</small></label></div>
               </article>
 
-              <article class="panel" x-show="settingsTab==='scheduler'" @input="markConfigDirty()" @change="markConfigDirty()">
-                <div class="panel-head"><div><span class="section-kicker">Planung</span><h3>Scheduler und rclone-Leistung</h3></div></div>
-                <div class="form-grid three"><label class="field"><span>Default-Cron</span><input class="mono" x-model="config.backup.default_schedule" placeholder="0 3 * * *"></label><label class="field"><span>Max. parallele Pairs</span><input type="number" min="1" max="16" x-model.number="config.backup.max_parallel"></label><label class="field"><span>Job-Timeout (Stunden)</span><input type="number" min="0.1" max="168" step="0.5" x-model.number="config.backup.timeout_hours"></label></div>
-                <div class="form-grid two"><label class="field"><span>Scheduler-Toleranz (Minuten)</span><input type="number" min="1" x-model.number="config.backup.scheduler_grace_minutes"></label><label class="field"><span>Retry nach Fehler (Minuten)</span><input type="number" min="1" x-model.number="config.backup.scheduler_retry_minutes"></label></div>
-                <h4 class="subheading">Strukturiertes Tuning</h4>
-                <div class="form-grid four"><label class="field"><span>Transfers</span><input type="number" min="1" x-model.number="config.backup.tuning.transfers"></label><label class="field"><span>Checkers</span><input type="number" min="1" x-model.number="config.backup.tuning.checkers"></label><label class="field"><span>Retries</span><input type="number" min="0" x-model.number="config.backup.tuning.retries"></label><label class="field"><span>Globales Max Delete</span><input type="number" min="0" x-model.number="config.backup.tuning.max_delete"></label></div>
-                <label class="check-row"><input type="checkbox" x-model="config.backup.tuning.fast_list"><span><strong>Fast-List aktivieren</strong><small>Kann bei unterstützten Remotes schneller sein, benötigt aber mehr Speicher.</small></span></label>
-                <label class="field"><span>Zusätzliche globale rclone-Argumente · eines pro Zeile</span><textarea class="mono" x-model="rcloneArgsText" rows="7"></textarea></label>
-                <h4 class="subheading">Aufbewahrung</h4>
-                <div class="form-grid four"><label class="field"><span>Job-Tage</span><input type="number" min="1" x-model.number="config.maintenance.job_retention_days"></label><label class="field"><span>Mind. Jobs behalten</span><input type="number" min="10" x-model.number="config.maintenance.keep_latest_jobs"></label><label class="field"><span>Log-Tage</span><input type="number" min="1" x-model.number="config.maintenance.log_retention_days"></label><label class="check-row inline"><input type="checkbox" x-model="config.maintenance.auto_prune"><span><strong>Automatische Wartung</strong></span></label></div>
+              <article class="scheduler-settings" x-show="settingsTab==='scheduler'" @input="markConfigDirty()" @change="markConfigDirty()">
+                <div class="scheduler-layout">
+                  <div class="scheduler-main">
+                    <section class="settings-section schedule-section">
+                      <div class="settings-section-head">
+                        <div><span class="section-kicker">Zeitplanung</span><h3>Wann sollen automatische Läufe starten?</h3><p>Wähle einen verständlichen Zeitplan. Die Cron-Angabe wird automatisch erzeugt und bleibt für Sonderfälle editierbar.</p></div>
+                        <span class="schedule-validity" :class="schedulePreview.valid === false ? 'error' : (schedulePreview.loading ? 'loading' : 'ok')"><span></span><span x-text="schedulePreview.loading ? 'Prüfe Zeitplan' : (schedulePreview.valid === false ? 'Zeitplan ungültig' : 'Zeitplan gültig')"></span></span>
+                      </div>
+
+                      <div class="schedule-mode-grid" role="group" aria-label="Zeitplan auswählen">
+                        <button type="button" :class="scheduleEditor.mode==='manual' && 'active'" @click="applyScheduleMode('manual')"><strong>Manuell</strong><small>Keine automatischen Läufe</small></button>
+                        <button type="button" :class="scheduleEditor.mode==='daily' && 'active'" @click="applyScheduleMode('daily')"><strong>Täglich</strong><small>Einmal pro Tag</small></button>
+                        <button type="button" :class="scheduleEditor.mode==='weekdays' && 'active'" @click="applyScheduleMode('weekdays')"><strong>Werktags</strong><small>Montag bis Freitag</small></button>
+                        <button type="button" :class="scheduleEditor.mode==='weekly' && 'active'" @click="applyScheduleMode('weekly')"><strong>Wöchentlich</strong><small>Ein fester Wochentag</small></button>
+                        <button type="button" :class="scheduleEditor.mode==='hours' && 'active'" @click="applyScheduleMode('hours')"><strong>Alle X Stunden</strong><small>Regelmäßiger Abstand</small></button>
+                        <button type="button" :class="scheduleEditor.mode==='minutes' && 'active'" @click="applyScheduleMode('minutes')"><strong>Alle X Minuten</strong><small>Für häufige Syncs</small></button>
+                        <button type="button" :class="scheduleEditor.mode==='custom' && 'active'" @click="applyScheduleMode('custom')"><strong>Benutzerdefiniert</strong><small>Freie Cron-Angabe</small></button>
+                      </div>
+
+                      <div class="schedule-builder" x-show="scheduleEditor.mode !== 'manual'">
+                        <label class="field schedule-time" x-show="['daily','weekdays','weekly'].includes(scheduleEditor.mode)"><span>Startzeit</span><input type="time" x-model="scheduleEditor.time" @input="updateScheduleFromEditor()"><small>Lokale Zeit in <strong x-text="config.backup.timezone || 'Europe/Berlin'"></strong>.</small></label>
+                        <label class="field" x-show="scheduleEditor.mode === 'weekly'"><span>Wochentag</span><select x-model="scheduleEditor.weekday" @change="updateScheduleFromEditor()"><option value="1">Montag</option><option value="2">Dienstag</option><option value="3">Mittwoch</option><option value="4">Donnerstag</option><option value="5">Freitag</option><option value="6">Samstag</option><option value="0">Sonntag</option></select></label>
+                        <label class="field" x-show="scheduleEditor.mode === 'hours'"><span>Stundenabstand</span><div class="number-with-unit"><input type="number" min="1" max="23" x-model.number="scheduleEditor.intervalHours" @input="updateScheduleFromEditor()"><span>Stunden</span></div><small>Beispiel: 6 bedeutet 00:00, 06:00, 12:00 und 18:00 Uhr.</small></label>
+                        <label class="field" x-show="scheduleEditor.mode === 'minutes'"><span>Minutenabstand</span><div class="number-with-unit"><input type="number" min="5" max="59" x-model.number="scheduleEditor.intervalMinutes" @input="updateScheduleFromEditor()"><span>Minuten</span></div><small>Für Cloud-Remotes nicht zu klein wählen, um API-Limits zu vermeiden.</small></label>
+                        <label class="field schedule-cron-field" :class="scheduleEditor.mode === 'custom' ? 'wide' : ''"><span>Cron-Ausdruck</span><input class="mono" x-model="config.backup.default_schedule" @input.debounce.250ms="onCustomScheduleInput()" placeholder="0 3 * * *"><small x-show="scheduleEditor.mode !== 'custom'">Wird aus deiner Auswahl erzeugt. Direkte Änderungen wechseln in den Expertenmodus.</small><small x-show="scheduleEditor.mode === 'custom'">Format: Minute · Stunde · Tag · Monat · Wochentag.</small></label>
+                      </div>
+
+                      <div class="schedule-meaning" :class="schedulePreview.valid === false && 'error'">
+                        <div class="schedule-meaning-icon">◷</div>
+                        <div><span>In verständlicher Form</span><strong x-text="humanCron(config.backup.default_schedule)"></strong><small x-text="scheduleModeDescription()"></small></div>
+                        <code x-text="config.backup.default_schedule || 'manual'"></code>
+                      </div>
+                      <div class="inline-error" x-show="schedulePreview.valid === false" x-text="schedulePreview.error"></div>
+                      <div class="inherit-note"><strong>Wichtig:</strong> Dieser Standard gilt nur für Pairs ohne eigenen Zeitplan. Ein Pair mit „manuell“ bleibt manuell.</div>
+                    </section>
+
+                    <section class="settings-section">
+                      <div class="settings-section-head"><div><span class="section-kicker">Ausführung</span><h3>Parallelität und Fehlerbehandlung</h3><p>Diese Werte bestimmen, wie viele Jobs gleichzeitig laufen und wie der Scheduler auf Verzögerungen oder Fehler reagiert.</p></div></div>
+                      <div class="explain-grid">
+                        <label class="explain-field"><span class="explain-number">1</span><span class="field-copy"><strong>Gleichzeitige Sync-Pairs</strong><small>Wie viele Pairs parallel starten dürfen. Für kleine LXC meist 1–2.</small></span><input type="number" min="1" max="16" x-model.number="config.backup.max_parallel"></label>
+                        <label class="explain-field"><span class="explain-number">2</span><span class="field-copy"><strong>Maximale Laufzeit je Job</strong><small>Danach wird ein festhängender Lauf beendet.</small></span><div class="number-with-unit compact"><input type="number" min="0.1" max="168" step="0.5" x-model.number="config.backup.timeout_hours"><span>Std.</span></div></label>
+                        <label class="explain-field"><span class="explain-number">3</span><span class="field-copy"><strong>Nachholfenster</strong><small>War der Gast zum Termin kurz aus, darf der Scheduler den Lauf so lange nachholen.</small></span><div class="number-with-unit compact"><input type="number" min="1" max="1440" x-model.number="config.backup.scheduler_grace_minutes"><span>Min.</span></div></label>
+                        <label class="explain-field"><span class="explain-number">4</span><span class="field-copy"><strong>Neuer Versuch nach Fehler</strong><small>Wartezeit bis ein fehlgeschlagener geplanter Lauf erneut versucht wird.</small></span><div class="number-with-unit compact"><input type="number" min="1" max="10080" x-model.number="config.backup.scheduler_retry_minutes"><span>Min.</span></div></label>
+                      </div>
+                      <div class="load-advice" :class="schedulerRiskLevel()"><span class="load-meter"><i></i></span><div><strong x-text="schedulerRiskLevel() === 'high' ? 'Hohe Systemlast' : (schedulerRiskLevel() === 'medium' ? 'Mittlere Systemlast' : 'Moderate Systemlast')"></strong><small x-text="schedulerRiskText()"></small></div></div>
+                    </section>
+
+                    <section class="settings-section">
+                      <div class="settings-section-head"><div><span class="section-kicker">rclone-Leistung</span><h3>Leistungsprofil wählen</h3><p>Die Profile setzen Transfers, Prüfer und Fast-List gemeinsam. Einzelne Werte können anschließend angepasst werden.</p></div></div>
+                      <div class="performance-presets">
+                        <button type="button" :class="performancePreset==='gentle' && 'active'" @click="setPerformancePreset('gentle')"><span class="preset-icon">◔</span><span><strong>Schonend</strong><small>2 Transfers · 4 Prüfer</small></span></button>
+                        <button type="button" :class="performancePreset==='balanced' && 'active'" @click="setPerformancePreset('balanced')"><span class="preset-icon">◑</span><span><strong>Ausgewogen</strong><small>4 Transfers · 8 Prüfer</small></span></button>
+                        <button type="button" :class="performancePreset==='fast' && 'active'" @click="setPerformancePreset('fast')"><span class="preset-icon">●</span><span><strong>Schnell</strong><small>8 Transfers · 16 Prüfer</small></span></button>
+                        <button type="button" :class="performancePreset==='custom' && 'active'" @click="performancePreset='custom'"><span class="preset-icon">◇</span><span><strong>Individuell</strong><small>Eigene Werte</small></span></button>
+                      </div>
+                      <div class="profile-hint"><strong x-text="performancePreset === 'fast' ? 'Mehr Durchsatz' : (performancePreset === 'gentle' ? 'Weniger Ressourcenverbrauch' : 'Empfohlene Balance')"></strong><span x-text="performanceHint()"></span></div>
+                      <div class="form-grid four tuning-grid" @input="markPerformanceCustom()" @change="markPerformanceCustom()">
+                        <label class="field"><span>Parallele Transfers</span><input type="number" min="1" max="64" x-model.number="config.backup.tuning.transfers"><small>Dateiübertragungen pro aktivem Pair.</small></label>
+                        <label class="field"><span>Parallele Prüfer</span><input type="number" min="1" max="128" x-model.number="config.backup.tuning.checkers"><small>Metadaten- und Dateiprüfungen.</small></label>
+                        <label class="field"><span>rclone-Wiederholungen</span><input type="number" min="0" max="20" x-model.number="config.backup.tuning.retries"><small>Wiederholungen innerhalb eines Jobs.</small></label>
+                        <label class="field danger-field"><span>Globales Löschlimit</span><input type="number" min="0" x-model.number="config.backup.tuning.max_delete"><small>Absolute Obergrenze je Lauf. Pair-Limits können niedriger sein.</small></label>
+                      </div>
+                      <label class="check-row feature-check"><input type="checkbox" x-model="config.backup.tuning.fast_list" @change="markPerformanceCustom()"><span><strong>Fast-List verwenden</strong><small>Kann große unterstützte Remotes beschleunigen, lädt die Dateiliste aber in den Arbeitsspeicher.</small></span><span class="recommendation" x-show="performancePreset==='fast'">Im Profil „Schnell“ aktiv</span></label>
+                      <details class="advanced-settings"><summary><span><strong>Erweiterte rclone-Argumente</strong><small>Nur für Optionen, die oben nicht abgebildet sind.</small></span><span class="mono" x-text="(rcloneArgsText.split('\n').filter(Boolean).length || 0) + ' zusätzliche Argumente'"></span></summary><div class="advanced-settings-body"><label class="field"><span>Ein Argument pro Zeile</span><textarea class="mono" x-model="rcloneArgsText" rows="7" placeholder="--bwlimit=20M"></textarea><small>Transfers, Checkers, Löschschutz und interne Pfade nicht doppelt angeben – diese werden strukturiert verwaltet.</small></label></div></details>
+                    </section>
+
+                    <section class="settings-section">
+                      <div class="settings-section-head"><div><span class="section-kicker">Aufbewahrung</span><h3>Historie automatisch aufräumen</h3><p>Alte Daten werden erst nach Ablauf der Frist entfernt; eine Mindestanzahl aktueller Jobs bleibt erhalten.</p></div></div>
+                      <div class="retention-grid">
+                        <label class="field"><span>Jobhistorie behalten</span><div class="number-with-unit"><input type="number" min="1" x-model.number="config.maintenance.job_retention_days"><span>Tage</span></div><small>Erfolgreiche und fehlgeschlagene Jobdatensätze.</small></label>
+                        <label class="field"><span>Mindestens behalten</span><div class="number-with-unit"><input type="number" min="10" x-model.number="config.maintenance.keep_latest_jobs"><span>Jobs</span></div><small>Schützt die neuesten Einträge unabhängig vom Alter.</small></label>
+                        <label class="field"><span>Logdateien behalten</span><div class="number-with-unit"><input type="number" min="1" x-model.number="config.maintenance.log_retention_days"><span>Tage</span></div><small>Textlogs auf dem Datenträger.</small></label>
+                        <label class="maintenance-toggle"><input type="checkbox" x-model="config.maintenance.auto_prune"><span class="toggle-visual"></span><span><strong>Automatisch aufräumen</strong><small>Wartung nach erfolgreichen Scheduler-Läufen ausführen.</small></span></label>
+                      </div>
+                    </section>
+                  </div>
+
+                  <aside class="scheduler-summary-card">
+                    <div class="summary-card-head"><span class="section-kicker">Live-Vorschau</span><h3>So arbeitet der Scheduler</h3><p>Aus dem aktuellen, noch nicht gespeicherten Entwurf.</p></div>
+                    <div class="summary-primary" :class="schedulePreview.valid === false ? 'error' : (scheduleEditor.mode === 'manual' ? 'manual' : 'active')"><span>Standard-Zeitplan</span><strong x-text="humanCron(config.backup.default_schedule)"></strong><code x-text="config.backup.default_schedule || 'manual'"></code></div>
+                    <dl class="scheduler-facts">
+                      <div><dt>Zeitzone</dt><dd x-text="config.backup.timezone || 'Europe/Berlin'"></dd></div>
+                      <div><dt>Parallel</dt><dd><span x-text="config.backup.max_parallel || 1"></span> Pair(s)</dd></div>
+                      <div><dt>Timeout</dt><dd><span x-text="config.backup.timeout_hours || 4"></span> Stunden</dd></div>
+                      <div><dt>Fehler-Retry</dt><dd>nach <span x-text="config.backup.scheduler_retry_minutes || 60"></span> Min.</dd></div>
+                    </dl>
+                    <div class="next-runs">
+                      <div class="next-runs-head"><strong>Nächste Standard-Termine</strong><span x-show="schedulePreview.loading">wird berechnet…</span></div>
+                      <div class="next-run-empty" x-show="scheduleEditor.mode === 'manual' && !schedulePreview.loading">Keine automatischen Termine</div>
+                      <div class="next-run-empty error" x-show="schedulePreview.valid === false" x-text="schedulePreview.error"></div>
+                      <ol x-show="schedulePreview.nextRuns.length"><template x-for="(run, idx) in schedulePreview.nextRuns" :key="run.iso"><li><span x-text="scheduleNextLabel(run, idx)"></span><small x-text="config.backup.timezone || 'Europe/Berlin'"></small></li></template></ol>
+                    </div>
+                    <div class="summary-warning" x-show="schedulerRiskLevel() !== 'low'" :class="schedulerRiskLevel()"><strong x-text="schedulerRiskLevel() === 'high' ? 'Ressourcen prüfen' : 'Last beobachten'"></strong><span x-text="schedulerRiskText()"></span></div>
+                    <div class="summary-help"><strong>Wie greifen Zeitpläne?</strong><p>Jedes Pair kann einen eigenen Zeitplan haben. Nur ein leeres Zeitplanfeld übernimmt diesen Standard. „Manuell“ schaltet die Automatik für das Pair bewusst aus.</p></div>
+                  </aside>
+                </div>
               </article>
 
               <article class="panel" x-show="settingsTab==='security'" @input="markConfigDirty()" @change="markConfigDirty()">
@@ -644,6 +734,6 @@
   </div>
 
   <div class="toast" :class="toast.type" x-show="toast.show" x-transition.opacity x-text="toast.msg" role="status" aria-live="polite" x-cloak></div>
-  <script src="/static/app.js?v=1.5.3"></script>
+  <script src="/static/app.js?v=1.6.0"></script>
 </body>
 </html>
