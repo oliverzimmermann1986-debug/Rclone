@@ -34,6 +34,9 @@ function app() {
     settingsTab: 'general',
     testResults: {},
     configValidation: { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true },
+    scheduleEditor: { mode: 'daily', time: '03:00', intervalHours: 6, intervalMinutes: 30, weekday: '0' },
+    schedulePreview: { loading: false, valid: null, error: '', nextRuns: [], timer: null },
+    performancePreset: 'balanced',
 
     plan: { loading: false, data: null, dry_run: true },
     doctor: { loading: false, data: null },
@@ -483,6 +486,7 @@ function app() {
       result.backup.require_max_delete_for_sync ??= true;
       result.backup.allow_unsafe_rclone_args ??= false;
       result.backup.timezone ||= 'Europe/Berlin';
+      result.backup.default_schedule ||= '0 3 * * *';
       result.backup.max_parallel ??= 2;
       result.backup.timeout_hours ??= 4;
       result.backup.scheduler_grace_minutes ??= 15;
@@ -498,13 +502,16 @@ function app() {
       this.rcloneArgsText = (result.backup.rclone_args || []).join('\n');
       this.allowedHostsText = (result.web.allowed_hosts || []).join('\n');
       this.browseRootsText = (result.web.local_browse_roots || []).join('\n');
+      this.syncScheduleEditorFromCron();
+      this.performancePreset = this.detectPerformancePreset();
       this.configDirty = false;
       this.configValidation = { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true };
+      this.refreshSchedulePreview();
     },
 
     normalizePair(pair) {
       if (pair.enabled === undefined) pair.enabled = true;
-      pair.schedule ||= 'manual';
+      if (pair.schedule === undefined || pair.schedule === null) pair.schedule = 'manual';
       pair.direction ||= 'bisync';
       pair.mode ||= pair.direction === 'bisync' ? 'bisync' : 'copy';
       if (pair.min_local_files === undefined) pair.min_local_files = 1;
@@ -531,6 +538,155 @@ function app() {
       draft.web.allowed_hosts = this.allowedHostsText.split('\n').map((value) => value.trim()).filter(Boolean);
       draft.web.local_browse_roots = this.browseRootsText.split('\n').map((value) => value.trim()).filter(Boolean);
       return draft;
+    },
+
+    syncScheduleEditorFromCron() {
+      const expression = String(this.config.backup?.default_schedule || 'manual').trim().toLowerCase();
+      const editor = { mode: 'custom', time: '03:00', intervalHours: 6, intervalMinutes: 30, weekday: '0' };
+      if (['', 'manual', 'off', 'disabled', 'none'].includes(expression)) {
+        editor.mode = 'manual';
+      } else {
+        const parts = expression.split(/\s+/);
+        if (parts.length === 5) {
+          const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+          const pad = (value) => String(value).padStart(2, '0');
+          if (/^\d+$/.test(minute) && /^\d+$/.test(hour) && dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+            editor.mode = 'daily'; editor.time = `${pad(hour)}:${pad(minute)}`;
+          } else if (/^\d+$/.test(minute) && /^\d+$/.test(hour) && dayOfMonth === '*' && month === '*' && dayOfWeek === '1-5') {
+            editor.mode = 'weekdays'; editor.time = `${pad(hour)}:${pad(minute)}`;
+          } else if (/^\d+$/.test(minute) && /^\d+$/.test(hour) && dayOfMonth === '*' && month === '*' && /^[0-6]$/.test(dayOfWeek)) {
+            editor.mode = 'weekly'; editor.time = `${pad(hour)}:${pad(minute)}`; editor.weekday = dayOfWeek;
+          } else if (minute === '0' && /^\*\/\d+$/.test(hour) && dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+            editor.mode = 'hours'; editor.intervalHours = Math.max(1, Math.min(23, Number(hour.slice(2)) || 6));
+          } else if (/^\*\/\d+$/.test(minute) && hour === '*' && dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+            editor.mode = 'minutes'; editor.intervalMinutes = Math.max(5, Math.min(59, Number(minute.slice(2)) || 30));
+          }
+        }
+      }
+      this.scheduleEditor = editor;
+    },
+
+    applyScheduleMode(mode) {
+      this.scheduleEditor.mode = mode;
+      this.updateScheduleFromEditor();
+    },
+
+    updateScheduleFromEditor() {
+      const editor = this.scheduleEditor;
+      const [hourRaw, minuteRaw] = String(editor.time || '03:00').split(':');
+      const hour = Math.max(0, Math.min(23, Number(hourRaw) || 0));
+      const minute = Math.max(0, Math.min(59, Number(minuteRaw) || 0));
+      let expression = this.config.backup.default_schedule || 'manual';
+      if (editor.mode === 'manual') expression = 'manual';
+      else if (editor.mode === 'daily') expression = `${minute} ${hour} * * *`;
+      else if (editor.mode === 'weekdays') expression = `${minute} ${hour} * * 1-5`;
+      else if (editor.mode === 'weekly') expression = `${minute} ${hour} * * ${editor.weekday || '0'}`;
+      else if (editor.mode === 'hours') expression = `0 */${Math.max(1, Math.min(23, Number(editor.intervalHours) || 6))} * * *`;
+      else if (editor.mode === 'minutes') expression = `*/${Math.max(5, Math.min(59, Number(editor.intervalMinutes) || 30))} * * * *`;
+      this.config.backup.default_schedule = expression;
+      this.markConfigDirty();
+      this.refreshSchedulePreview();
+    },
+
+    onCustomScheduleInput() {
+      this.scheduleEditor.mode = 'custom';
+      this.markConfigDirty();
+      this.refreshSchedulePreview();
+    },
+
+    refreshSchedulePreview() {
+      if (this.schedulePreview.timer) clearTimeout(this.schedulePreview.timer);
+      this.schedulePreview.timer = setTimeout(() => this.loadSchedulePreview(), 280);
+    },
+
+    async loadSchedulePreview() {
+      const expression = String(this.config.backup?.default_schedule || 'manual').trim();
+      const timezone = String(this.config.backup?.timezone || 'Europe/Berlin').trim();
+      this.schedulePreview = { ...this.schedulePreview, loading: true, valid: null, error: '', nextRuns: [] };
+      const result = await this.api('POST', '/api/config/schedule-preview', { expression, timezone, count: 5 }, { captureError: true, silent: true });
+      if (result?.__error) {
+        const raw = result.detail;
+        const error = typeof raw === 'string' ? raw : (raw?.message || raw?.detail || 'Zeitplan ungültig');
+        this.schedulePreview = { ...this.schedulePreview, loading: false, valid: false, error: String(error), nextRuns: [] };
+        return;
+      }
+      this.schedulePreview = { ...this.schedulePreview, loading: false, valid: true, error: '', nextRuns: result?.next_runs || [], enabled: result?.enabled !== false };
+    },
+
+    scheduleModeDescription() {
+      const descriptions = {
+        manual: 'Automatische Läufe sind ausgeschaltet. Jobs werden ausschließlich manuell gestartet.',
+        daily: 'Ein Lauf pro Tag zur ausgewählten Uhrzeit.',
+        weekdays: 'Montag bis Freitag zur ausgewählten Uhrzeit.',
+        weekly: 'Ein Lauf pro Woche am ausgewählten Wochentag.',
+        hours: 'Regelmäßiger Lauf in einem festen Stundenabstand.',
+        minutes: 'Häufige Ausführung in einem festen Minutenabstand.',
+        custom: 'Freie Cron-Angabe für besondere Zeitpläne.',
+      };
+      return descriptions[this.scheduleEditor.mode] || descriptions.custom;
+    },
+
+    scheduleNextLabel(run, index) {
+      if (!run?.iso) return '—';
+      const date = new Date(run.iso);
+      const now = new Date();
+      const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1);
+      let day = date.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
+      if (date.toDateString() === now.toDateString()) day = 'Heute';
+      else if (date.toDateString() === tomorrow.toDateString()) day = 'Morgen';
+      const time = date.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+      return `${index + 1}. ${day}, ${time}`;
+    },
+
+    setPerformancePreset(preset) {
+      const tuning = this.config.backup.tuning ||= {};
+      const values = {
+        gentle: { transfers: 2, checkers: 4, retries: 3, fast_list: false },
+        balanced: { transfers: 4, checkers: 8, retries: 3, fast_list: false },
+        fast: { transfers: 8, checkers: 16, retries: 3, fast_list: true },
+      };
+      if (values[preset]) Object.assign(tuning, values[preset]);
+      this.performancePreset = preset;
+      this.markConfigDirty();
+    },
+
+    detectPerformancePreset() {
+      const tuning = this.config.backup?.tuning || {};
+      const same = (value, transfers, checkers, retries, fastList) =>
+        Number(value.transfers) === transfers && Number(value.checkers) === checkers && Number(value.retries) === retries && Boolean(value.fast_list) === fastList;
+      if (same(tuning, 2, 4, 3, false)) return 'gentle';
+      if (same(tuning, 4, 8, 3, false)) return 'balanced';
+      if (same(tuning, 8, 16, 3, true)) return 'fast';
+      return 'custom';
+    },
+
+    markPerformanceCustom() {
+      this.performancePreset = this.detectPerformancePreset();
+      this.markConfigDirty();
+    },
+
+    performanceHint() {
+      if (this.performancePreset === 'gentle') return 'Geringe CPU-, RAM- und API-Last. Empfohlen für kleine LXC-Gäste und langsame Remotes.';
+      if (this.performancePreset === 'fast') return 'Hoher Durchsatz, aber deutlich mehr RAM, CPU und gleichzeitige Remote-Anfragen.';
+      if (this.performancePreset === 'custom') return 'Individuelle Werte. Bei Timeouts oder API-Limits Transfers und Checkers reduzieren.';
+      return 'Guter Standard für die meisten Proxmox-LXC mit 2–4 vCPU und mindestens 2 GB RAM.';
+    },
+
+    schedulerRiskLevel() {
+      const parallel = Number(this.config.backup?.max_parallel || 1);
+      const transfers = Number(this.config.backup?.tuning?.transfers || 1);
+      const checkers = Number(this.config.backup?.tuning?.checkers || 1);
+      const pressure = parallel * (transfers + checkers);
+      if (pressure >= 64) return 'high';
+      if (pressure >= 32) return 'medium';
+      return 'low';
+    },
+
+    schedulerRiskText() {
+      const level = this.schedulerRiskLevel();
+      if (level === 'high') return 'Hohe Parallelität: Für kleine LXC wahrscheinlich zu aggressiv.';
+      if (level === 'medium') return 'Mittlere Last: Ressourcen und Remote-API-Limits beobachten.';
+      return 'Moderate Last: für typische Proxmox-Gäste gut geeignet.';
     },
 
     async validateConfigDraft() {
@@ -638,12 +794,19 @@ function app() {
       if (!String(pair.name || '').trim()) issues.push('Name fehlt');
       if (!String(pair.remote || '').includes(':')) issues.push('Remote ungültig');
       if (!String(pair.local || '').trim()) issues.push('Lokaler Pfad fehlt');
-      if (pair.enabled && (!pair.schedule || pair.schedule === 'off')) issues.push('Kein Zeitplan');
+      const effectiveSchedule = String(pair.schedule || this.config.backup?.default_schedule || 'manual').trim().toLowerCase();
+      if (pair.enabled && ['off', 'disabled', 'none'].includes(effectiveSchedule)) issues.push('Zeitplan deaktiviert');
       const destructive = pair.direction === 'bisync' || pair.mode === 'sync';
       if (destructive && pair.enabled && !pair.allow_delete) issues.push('Löschen nicht freigegeben');
       if (destructive && pair.enabled && (pair.max_delete === '' || pair.max_delete === null || pair.max_delete === undefined)) issues.push('Löschlimit fehlt');
       if (pair.require_mountpoint && !String(pair.mountpoint || '').trim()) issues.push('Mountpoint fehlt');
       return issues;
+    },
+
+    pairScheduleLabel(pair) {
+      const own = String(pair?.schedule || '').trim();
+      if (!own) return `Standard · ${this.humanCron(this.config.backup?.default_schedule || 'manual')}`;
+      return this.humanCron(own);
     },
 
     pairRuntimeIssue(pair) {
@@ -943,26 +1106,33 @@ function app() {
     humanCron(expr) {
       if (!expr) return 'Manuell';
       const value = expr.trim().toLowerCase();
-      if (['manual', 'off', 'disabled', 'none', ''].includes(value)) return 'Manuell';
+      if (['manual', 'off', 'disabled', 'none', ''].includes(value)) return 'Nur manuell';
       const parts = value.split(/\s+/);
       if (parts.length !== 5) return 'Cron ungültig';
       const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
-      const days = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+      const days = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+      if (/^\*\/\d+$/.test(minute) && hour === '*' && dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+        return `Alle ${minute.slice(2)} Minuten`;
+      }
+      if (minute === '0' && /^\*\/\d+$/.test(hour) && dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+        return `Alle ${hour.slice(2)} Stunden`;
+      }
       let time;
-      if (minute.startsWith('*/')) time = `alle ${minute.slice(2)} Min.`;
+      if (minute.startsWith('*/')) time = `alle ${minute.slice(2)} Minuten`;
       else if (hour === '*') time = `stündlich :${minute.padStart(2, '0')}`;
-      else if (hour.startsWith('*/')) time = `alle ${hour.slice(2)} Std.`;
-      else time = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
+      else if (hour.startsWith('*/')) time = `alle ${hour.slice(2)} Stunden`;
+      else time = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')} Uhr`;
       let day = 'Täglich';
       if (dayOfWeek !== '*') {
+        if (dayOfWeek === '1-5') day = 'Montag bis Freitag';
         if (dayOfWeek.includes('-')) {
           const [a, b] = dayOfWeek.split('-').map(Number);
-          day = `${days[a] || a}–${days[b] || b}`;
+          day = `${days[a] || a} bis ${days[b] || b}`;
         } else if (dayOfWeek.includes(',')) day = dayOfWeek.split(',').map((n) => days[Number(n)] || n).join(', ');
         else day = days[Number(dayOfWeek)] || dayOfWeek;
       } else if (dayOfMonth !== '*') day = `Am ${dayOfMonth}.`;
       else if (month !== '*') day = `Monat ${month}`;
-      return `${day} · ${time}`;
+      return `${day} um ${time}`;
     },
 
     statusLabel(status) {

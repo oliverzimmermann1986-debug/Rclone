@@ -8,10 +8,13 @@ import hashlib
 import os
 import stat
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import bcrypt
+from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -131,6 +134,12 @@ class ConfigUpdate(BaseModel):
     config: dict[str, Any]
 
 
+class SchedulePreviewRequest(BaseModel):
+    expression: str = Field(default="manual", max_length=128)
+    timezone: str = Field(default="Europe/Berlin", min_length=1, max_length=128)
+    count: int = Field(default=5, ge=1, le=10)
+
+
 @router.put("")
 def update_config(body: ConfigUpdate) -> dict[str, Any]:
     store = get_config()
@@ -212,6 +221,48 @@ def validate_config_endpoint(body: ConfigUpdate) -> dict[str, Any]:
         "revision_matches": expected_revision in (None, current_revision),
         "current_revision": current_revision,
         "config": _redact(normalized, revision=current_revision),
+    }
+
+
+@router.post("/schedule-preview")
+def preview_schedule(body: SchedulePreviewRequest) -> dict[str, Any]:
+    """Liefert eine sichere Vorschau für einen noch ungespeicherten Cron-Entwurf."""
+    expression = body.expression.strip()
+    disabled = {"", "manual", "off", "disabled", "none"}
+    if expression.casefold() in disabled:
+        return {
+            "ok": True,
+            "enabled": False,
+            "expression": expression or "manual",
+            "timezone": body.timezone,
+            "next_runs": [],
+        }
+
+    if not croniter.is_valid(expression):
+        raise HTTPException(422, "Zeitplan ist keine gültige 5-stellige Cron-Angabe")
+    try:
+        timezone = ZoneInfo(body.timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(422, f"Unbekannte Zeitzone: {body.timezone}")
+
+    now = datetime.now(timezone)
+    iterator = croniter(expression, now)
+    runs: list[dict[str, Any]] = []
+    for _ in range(body.count):
+        next_run = iterator.get_next(datetime)
+        runs.append(
+            {
+                "timestamp": next_run.timestamp(),
+                "iso": next_run.isoformat(),
+            }
+        )
+    return {
+        "ok": True,
+        "enabled": True,
+        "expression": expression,
+        "timezone": body.timezone,
+        "generated_at": now.isoformat(),
+        "next_runs": runs,
     }
 
 

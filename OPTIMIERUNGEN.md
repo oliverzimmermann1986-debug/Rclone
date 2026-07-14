@@ -1,6 +1,21 @@
-# Audit und Optimierungen – rclone-sync-container 1.5.3
+# Audit und Optimierungen – rclone-sync-container 1.6.0
 
-Stand: 11.07.2026
+Stand: 14.07.2026
+
+
+## Präzisere Einstellungen und Scheduler-Assistent in 1.6.0
+
+- Einstellungsnavigation mit Nummerierung, Kurzbeschreibung und sichtbarem Speicherstatus neu strukturiert.
+- Scheduler nicht mehr als reine Cron-/Zahlenmaske: Auswahl für manuell, täglich, werktags, wöchentlich, Stunden- und Minutenintervalle.
+- Cron-Ausdruck wird aus der verständlichen Auswahl erzeugt; Expertenmodus und direkte Cron-Bearbeitung bleiben erhalten.
+- Neue authentifizierte Vorschau-API validiert ungespeicherte Zeitpläne und berechnet die nächsten fünf Ausführungen in der konfigurierten Zeitzone.
+- Nachholfenster, Fehler-Retry, Parallelität und Timeout fachlich erklärt und in einzelne Wirkungskarten aufgeteilt.
+- Live-Zusammenfassung zeigt Standard-Zeitplan, Zeitzone, Parallelität, Timeout, Retry und nächste Termine.
+- rclone-Leistungsprofile „Schonend“, „Ausgewogen“ und „Schnell“ sowie dynamische Lastwarnung für Proxmox-LXC ergänzt.
+- Transfers, Checkers, Wiederholungen und Löschlimit enthalten konkrete Wirkungserklärungen; freie rclone-Argumente liegen in einem Expertenbereich.
+- Aufbewahrung als eigener verständlicher Abschnitt mit Einheiten und automatischer Wartung neu gestaltet.
+- Pair-Zeitpläne können den globalen Standard jetzt ausdrücklich übernehmen; Karten zeigen die tatsächlich wirksame Planung verständlich an.
+- Mobile Darstellung für Zeitplan-Auswahl, Erklärungskarten, Leistungsprofile und Live-Vorschau optimiert.
 
 
 ## Neu und behoben in 1.5.3
@@ -147,7 +162,7 @@ Stand: 11.07.2026
 
 ## Testabdeckung
 
-**56 automatisierte Regressionstests** decken unter anderem ab:
+**59 automatisierte Regressionstests** decken unter anderem ab:
 
 - atomare Config- und Filterupdates, Revisionen, Backups und Konflikte
 - persistente Login-Sperren und DB-Migration
