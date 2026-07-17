@@ -1,3 +1,3 @@
 """rclone-sync-container application package."""
 
-__version__ = "1.8.2"
+__version__ = "1.8.3"
