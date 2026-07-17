@@ -3,6 +3,10 @@
 Stand: 17.07.2026
 
 
+## 1.8.5
+
+- PBS-Backups werden jetzt im Pair-Konfigurator verwaltet: eigene Karten unter den rclone-Pairs (Name, Pfade mit Ordner-Browser, Zeitplan, Sichern-Button), neue Vorlage „Backup: Lokale Pfade → Proxmox Backup Server" im Vorlagen-Dropdown. Der Target-Editor im Einstellungs-Tab ist durch einen Verweis ersetzt; dort verbleiben nur die Verbindungsdaten (Repository, Token, Fingerprint, Retention).
+
 ## 1.8.4
 
 - Fehlermeldungen beim Speichern zeigen jetzt die konkreten Validierungsfehler an („Konfiguration ungültig · pbs.targets[0].name ist ungültig · …") statt nur der generischen Meldung — ein ||-Kurzschluss im Frontend hatte die Details verschluckt.
