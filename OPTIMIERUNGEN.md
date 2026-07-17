@@ -1,6 +1,11 @@
-# Audit und Optimierungen – rclone-sync-container 1.7.1
+# Audit und Optimierungen – rclone-sync-container 1.7.2
 
 Stand: 17.07.2026
+
+
+## Hotfix 1.7.2
+
+- Login-Regression aus 1.7.1 behoben: Wegen `Referrer-Policy: no-referrer` senden manche Browser (v. a. Firefox) auch bei same-origin Formular-POSTs `Origin: null`; die harte Ablehnung blockierte den Login mit „Origin-Prüfung fehlgeschlagen". `Origin: null` wird jetzt über `Sec-Fetch-Site` entschieden: `same-origin`/`none` sind erlaubt, `cross-site`/fehlend bleibt abgelehnt.
 
 
 ## Härtung und Fehlerkorrekturen in 1.7.1
