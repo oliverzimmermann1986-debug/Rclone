@@ -327,7 +327,7 @@
                       <strong x-text="pair.name || 'Neues Pair'"></strong>
                       <small><span x-text="directionLabel(pair)"></span> · <span x-text="pairScheduleLabel(pair)"></span></small>
                     </span>
-                    <span class="pair-path-preview mono" x-text="pair.local || 'Lokaler Pfad fehlt'"></span>
+                    <span class="pair-path-preview mono" x-text="(pair.target ?? pair.local) || 'Ziel fehlt'"></span>
                     <span class="chevron" :class="pairOpen[idx] && 'rotated'">⌄</span>
                   </button>
                   <label class="switch" title="Pair aktivieren/deaktivieren"><input type="checkbox" x-model="pair.enabled"><span></span><em x-text="pair.enabled ? 'Aktiv' : 'Aus'"></em></label>
@@ -350,13 +350,13 @@
                 <div class="pair-details" x-show="pairOpen[idx]" x-cloak>
                   <div class="form-grid three">
                     <label class="field"><span>Name</span><input x-model="pair.name" placeholder="z. B. Fotos"></label>
-                    <label class="field"><span>Richtung</span><select x-model="pair.direction" @change="if(pair.direction!=='bisync'&&pair.mode==='bisync')pair.mode='copy';if(pair.direction==='bisync')pair.mode='bisync'"><option value="bisync">Bidirektional – beide Seiten angleichen</option><option value="pull">Remote-Pfad → Lokaler Pfad</option><option value="push">Lokaler Pfad → Remote-Pfad</option></select></label>
-                    <label class="field"><span>Modus</span><select x-model="pair.mode" :disabled="pair.direction==='bisync'"><option value="bisync" x-show="pair.direction==='bisync'">Bi-Sync</option><option value="copy">Copy – ohne Löschen</option><option value="sync">Sync – Mirror mit Löschen</option></select></label>
+                    <label class="field"><span>Sync-Art</span><select x-model="pair.two_way" @change="syncPairDirection(pair)"><option :value="false">Einweg: Quelle → Ziel</option><option :value="true">Bidirektional – beide Seiten angleichen</option></select></label>
+                    <label class="field"><span>Modus</span><select x-model="pair.mode" :disabled="pair.two_way"><option value="bisync" x-show="pair.two_way">Bi-Sync</option><option value="copy">Copy – ohne Löschen</option><option value="sync">Sync – Mirror mit Löschen</option></select></label>
                   </div>
 
                   <div class="form-grid two">
-                    <label class="field"><span>Remote-Pfad · rclone-Remote oder lokaler Pfad</span><div class="input-action"><input class="mono" x-model="pair.remote" placeholder="pcloud:/Backup/Fotos oder /mnt/usb1/fotos"><button @click.prevent="openPicker('remote', idx)" title="Remote durchsuchen">Remote</button><button @click.prevent="openPicker('remote-local', idx)" title="Lokalen Ordner als Quelle wählen (lokal→lokal)">Lokal</button></div></label>
-                    <label class="field"><span>Lokaler Pfad</span><div class="input-action"><input class="mono" x-model="pair.local" placeholder="/mnt/backup/Fotos"><button @click.prevent="openPicker('local', idx)" title="Lokal durchsuchen">Ordner</button></div></label>
+                    <label class="field"><span x-text="pair.two_way ? 'Seite A · lokal oder Cloud' : 'Quelle · lokal oder Cloud'"></span><div class="input-action"><input class="mono" x-model="pair.source" @input="syncPairDirection(pair)" placeholder="/mnt/nas/fotos oder pcloud:/Fotos"><button @click.prevent="openPicker('source-remote', idx)" title="Cloud-Remote durchsuchen">Cloud</button><button @click.prevent="openPicker('source-local', idx)" title="Lokalen Ordner wählen">Lokal</button></div></label>
+                    <label class="field"><span x-text="pair.two_way ? 'Seite B · lokal oder Cloud' : 'Ziel · lokal, Cloud oder PBS'"></span><div class="input-action"><input class="mono" x-model="pair.target" @input="syncPairDirection(pair)" placeholder="/mnt/usb1/fotos oder pcloud:/Backup"><button @click.prevent="openPicker('target-remote', idx)" title="Cloud-Remote durchsuchen">Cloud</button><button @click.prevent="openPicker('target-local', idx)" title="Lokalen Ordner wählen">Lokal</button><button x-show="!pair.two_way" @click.prevent="convertPairToPbs(idx)" title="Als PBS-Backup anlegen (Snapshots statt Kopie)">PBS</button></div></label>
                   </div>
 
                   <div class="form-grid three">

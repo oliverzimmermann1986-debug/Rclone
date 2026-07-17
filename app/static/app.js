@@ -561,6 +561,11 @@ function app() {
       result.notifications.allow_private_targets ??= false;
       result.notifications.webhooks ||= [];
       result.maintenance ||= { auto_prune: true, job_retention_days: 180, keep_latest_jobs: 500, log_retention_days: 90 };
+      for (const pair of (result.backup?.pairs || [])) {
+        pair.two_way = pair.direction === 'bisync';
+        if (pair.direction === 'pull') { pair.source = pair.remote; pair.target = pair.local; }
+        else { pair.source = pair.local; pair.target = pair.remote; }
+      }
       result.pbs ||= {};
       result.pbs.enabled ??= false;
       result.pbs.repository ||= '';
@@ -623,6 +628,26 @@ function app() {
       draft.web.allowed_hosts = this.allowedHostsText.split('\n').map((value) => value.trim()).filter(Boolean);
       draft.web.local_browse_roots = this.browseRootsText.split('\n').map((value) => value.trim()).filter(Boolean);
       for (const target of (draft.pbs?.targets || [])) delete target.pathsText;
+      for (const pair of (draft.backup?.pairs || [])) {
+        const source = (pair.source ?? pair.local ?? '').trim();
+        const target = (pair.target ?? pair.remote ?? '').trim();
+        const isLocal = (value) => value.startsWith('/');
+        if (pair.two_way) {
+          pair.direction = 'bisync'; pair.mode = 'bisync';
+          // Gemischtes Bisync: Cloud-Seite ins remote-Feld, lokale Seite in local (Mount-Schutz).
+          if (isLocal(source) && !isLocal(target)) { pair.remote = target; pair.local = source; }
+          else if (!isLocal(source) && isLocal(target)) { pair.remote = source; pair.local = target; }
+          else { pair.remote = source; pair.local = target; }
+        } else if (isLocal(target) && !isLocal(source)) {
+          // Cloud/anderes → lokales Ziel: pull, damit Mount-Schutz das Ziel bewacht.
+          pair.direction = 'pull'; pair.remote = source; pair.local = target;
+        } else {
+          // Lokale/Cloud-Quelle → beliebiges Ziel: push, Mount-Schutz bewacht die Quelle.
+          pair.direction = 'push'; pair.remote = target; pair.local = source;
+        }
+        if (pair.two_way === false && pair.mode === 'bisync') pair.mode = 'copy';
+        delete pair.source; delete pair.target; delete pair.two_way;
+      }
       return draft;
     },
 
@@ -803,6 +828,25 @@ function app() {
       return true;
     },
 
+    syncPairDirection(pair) {
+      if (pair.two_way === 'true') pair.two_way = true;
+      if (pair.two_way === 'false') pair.two_way = false;
+      if (pair.two_way) pair.mode = 'bisync';
+      else if (pair.mode === 'bisync') pair.mode = 'copy';
+      this.markConfigDirty();
+    },
+    convertPairToPbs(idx) {
+      const pair = this.config.backup.pairs[idx];
+      const paths = (pair.source || '').startsWith('/') ? [pair.source] : [];
+      this.config.pbs.targets.push({
+        name: pair.name || '', paths, pathsText: paths.join('\n'),
+        schedule: pair.schedule || 'manual', namespace: '', backup_id: '',
+      });
+      this.config.backup.pairs.splice(idx, 1);
+      delete this.pairOpen[idx];
+      this.markConfigDirty();
+      this.showToast(this.config.pbs?.enabled ? 'In PBS-Backup umgewandelt – unten prüfen und speichern' : 'PBS-Backup angelegt – Verbindung unter Einstellungen → Proxmox Backup fehlt noch', this.config.pbs?.enabled ? 'ok' : 'warn');
+    },
     addPair(preset = this.newPairPreset || 'push-copy') {
       if (preset === 'pbs') {
         this.addPbsTarget();
@@ -819,8 +863,8 @@ function app() {
       };
       const selected = templates[preset] || templates['push-copy'];
       const pair = {
-        name: '', remote: '', local: '', schedule: 'manual', enabled: false,
-        direction: selected.direction, mode: selected.mode, min_local_files: 1,
+        name: '', remote: '', local: '', source: '', target: '', schedule: 'manual', enabled: false,
+        direction: selected.direction, mode: selected.mode, two_way: selected.direction === 'bisync', min_local_files: 1,
         exclude: '.DS_Store\nThumbs.db', include: '', filter: '', rclone_args: '',
         transfers: '', checkers: '', max_delete: 100, allow_delete: false,
         min_remote_files: 0, min_free_gb: 0, max_success_age_hours: 0, require_mountpoint: false,
@@ -875,7 +919,7 @@ function app() {
 
     pairVisible(pair) {
       const needle = this.pairSearch.trim().toLowerCase();
-      if (needle && !`${pair.name || ''} ${pair.remote || ''} ${pair.local || ''}`.toLowerCase().includes(needle)) return false;
+      if (needle && !`${pair.name || ''} ${pair.remote || ''} ${pair.local || ''} ${pair.source || ''} ${pair.target || ''}`.toLowerCase().includes(needle)) return false;
       if (this.pairFilter === 'enabled' && !pair.enabled) return false;
       if (this.pairFilter === 'disabled' && pair.enabled) return false;
       if (this.pairFilter === 'destructive' && !(pair.direction === 'bisync' || pair.mode === 'sync')) return false;
@@ -886,11 +930,16 @@ function app() {
     pairIssues(pair) {
       const issues = [];
       if (!String(pair.name || '').trim()) issues.push('Name fehlt');
-      if (!String(pair.remote || '').includes(':')) issues.push('Remote ungültig');
-      if (!String(pair.local || '').trim()) issues.push('Lokaler Pfad fehlt');
+      const src = String(pair.source ?? pair.local ?? '').trim();
+      const dst = String(pair.target ?? pair.remote ?? '').trim();
+      if (!src) issues.push('Quelle fehlt');
+      else if (!src.startsWith('/') && !src.includes(':')) issues.push('Quelle ungültig (lokaler Pfad oder remote:/pfad)');
+      if (!dst) issues.push('Ziel fehlt');
+      else if (!dst.startsWith('/') && !dst.includes(':')) issues.push('Ziel ungültig (lokaler Pfad oder remote:/pfad)');
+      if (src && dst && src.replace(/\/+$/, '') === dst.replace(/\/+$/, '')) issues.push('Quelle und Ziel identisch');
       const effectiveSchedule = String(pair.schedule || this.config.backup?.default_schedule || 'manual').trim().toLowerCase();
       if (pair.enabled && ['off', 'disabled', 'none'].includes(effectiveSchedule)) issues.push('Zeitplan deaktiviert');
-      const destructive = pair.direction === 'bisync' || pair.mode === 'sync';
+      const destructive = pair.two_way || pair.direction === 'bisync' || pair.mode === 'sync';
       if (destructive && pair.enabled && !pair.allow_delete) issues.push('Löschen nicht freigegeben');
       if (destructive && pair.enabled && (pair.max_delete === '' || pair.max_delete === null || pair.max_delete === undefined)) issues.push('Löschlimit fehlt');
       if (pair.require_mountpoint && !String(pair.mountpoint || '').trim()) issues.push('Mountpoint fehlt');
@@ -963,7 +1012,7 @@ function app() {
     async loadPicker(path) {
       this.picker.loading = true;
       this.picker.current = path;
-      const endpoint = this.picker.mode === 'remote' ? '/api/browse/rclone' : '/api/browse/local';
+      const endpoint = this.picker.mode.endsWith('-remote') || this.picker.mode === 'remote' ? '/api/browse/rclone' : '/api/browse/local';
       // 'remote-local': lokaler Browser, Auswahl landet im Remote-Feld (lokal→lokal-Sync)
       const result = await this.api('GET', endpoint + (path ? `?path=${encodeURIComponent(path)}` : ''));
       if (result) {
@@ -996,6 +1045,12 @@ function app() {
       if (idx === -1) {
         if (mode === 'remote' || mode === 'remote-local') this.quick.remote = path;
         else this.quick.local = path;
+      } else if (mode.startsWith('source-') || mode.startsWith('target-')) {
+        const pair = this.config.backup.pairs[idx];
+        if (pair) {
+          pair[mode.startsWith('source-') ? 'source' : 'target'] = path;
+          this.syncPairDirection(pair);
+        }
       } else {
         if (mode === 'remote' || mode === 'remote-local') this.config.backup.pairs[idx].remote = path;
         else this.config.backup.pairs[idx].local = path;
@@ -1279,9 +1334,15 @@ function app() {
     },
 
     directionLabel(pair) {
-      if (pair.direction === 'pull') return pair.mode === 'sync' ? 'Remote → Lokal · Mirror' : 'Remote → Lokal · Copy';
-      if (pair.direction === 'push') return pair.mode === 'sync' ? 'Lokal → Remote · Mirror' : 'Lokal → Remote · Copy';
-      return 'Bidirektional';
+      const shorten = (value) => {
+        const text = String(value || '?');
+        return text.length > 28 ? `${text.slice(0, 13)}…${text.slice(-13)}` : text;
+      };
+      if (pair.two_way || pair.direction === 'bisync') return `${shorten(pair.source ?? pair.remote)} ⇄ ${shorten(pair.target ?? pair.local)}`;
+      const mode = pair.mode === 'sync' ? 'Mirror' : 'Copy';
+      const src = pair.source ?? (pair.direction === 'pull' ? pair.remote : pair.local);
+      const dst = pair.target ?? (pair.direction === 'pull' ? pair.local : pair.remote);
+      return `${shorten(src)} → ${shorten(dst)} · ${mode}`;
     },
 
     summaryShort(summary) {
