@@ -37,6 +37,7 @@ from .rclone_args import rclone_subprocess_env
 from .security import CSRF_COOKIE, new_csrf_token, require_csrf
 from .utils import bounded_number as _bounded_number
 from .routes import (
+    api_pbs,
     api_browse,
     api_config,
     api_diagnostics,
@@ -350,6 +351,7 @@ app.include_router(api_storage.router)
 app.include_router(api_diagnostics.router)
 app.include_router(api_maintenance.router)
 app.include_router(api_browse.router)
+app.include_router(api_pbs.router)
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

@@ -136,6 +136,24 @@
             </article>
           </div>
 
+          <article class="panel" x-show="config.pbs?.enabled">
+            <div class="panel-head"><div><span class="section-kicker">Proxmox Backup Server</span><h3>PBS-Targets</h3></div><div class="heading-actions"><button class="button secondary" @click="loadPbsStatus()">Aktualisieren</button><button class="button primary" @click="runPbs()" :disabled="pbs.status?.running">Alle sichern</button></div></div>
+            <div class="inline-error" x-show="pbs.status && !pbs.status.client_available">proxmox-backup-client ist nicht installiert.</div>
+            <table class="table" x-show="(pbs.status?.targets || []).length">
+              <thead><tr><th>Target</th><th>Pfade</th><th>Zeitplan</th><th>Letzter Erfolg</th><th></th></tr></thead>
+              <tbody><template x-for="target in (pbs.status?.targets || [])" :key="target.name">
+                <tr>
+                  <td x-text="target.name"></td>
+                  <td class="mono" x-text="(target.paths || []).join(', ')"></td>
+                  <td class="mono" x-text="target.schedule"></td>
+                  <td x-text="target.last_success ? new Date(target.last_success).toLocaleString() : '–'"></td>
+                  <td><button class="button secondary" @click="runPbs(target.name)" :disabled="pbs.status?.running">Sichern</button></td>
+                </tr>
+              </template></tbody>
+            </table>
+            <p x-show="!(pbs.status?.targets || []).length">Keine Targets konfiguriert — unter Einstellungen → Proxmox Backup anlegen.</p>
+          </article>
+
           <div class="dashboard-grid">
             <article class="panel control-panel">
               <div class="panel-head">
@@ -533,6 +551,7 @@
               <button :class="settingsTab==='notifications' && 'active'" @click="settingsTab='notifications'"><span class="settings-nav-mark">04</span><span><strong>Benachrichtigungen</strong><small>Webhooks und Ereignisse</small></span></button>
               <button :class="settingsTab==='filters' && 'active'" @click="settingsTab='filters'"><span class="settings-nav-mark">05</span><span><strong>Globale Filter</strong><small>Ausschlüsse für alle Pairs</small></span></button>
               <button :class="settingsTab==='account' && 'active'" @click="settingsTab='account'"><span class="settings-nav-mark">06</span><span><strong>Konto</strong><small>Passwort und Oberfläche</small></span></button>
+              <button :class="settingsTab==='pbs' && 'active'" @click="settingsTab='pbs'; loadPbsStatus()"><span class="settings-nav-mark">07</span><span><strong>Proxmox Backup</strong><small>PBS-Datastore und Targets</small></span></button>
             </nav>
 
             <div class="settings-content">
@@ -683,6 +702,34 @@
                 <div class="panel-head"><div><span class="section-kicker">Global</span><h3>rclone-Filterdatei</h3></div><div class="button-row"><button class="button secondary" @click="loadFilterFile()">Neu laden</button><button class="button primary" @click="saveFilterFile()" :disabled="!filterFile.dirty">Filter speichern</button></div></div>
                 <div class="file-path" x-text="filterFile.path || 'Kein Filterpfad konfiguriert'"></div>
                 <label class="field"><span>Filterregeln</span><textarea class="mono code-editor" x-model="filterFile.content" @input="filterFile.dirty=true" rows="22" placeholder="- .DS_Store&#10;- Thumbs.db&#10;- *.tmp"></textarea><small><code>-</code> schließt aus, <code>+</code> schließt ein. Änderungen an Bi-Sync-Filtern können einen kontrollierten Resync erfordern.</small></label>
+              </article>
+
+              <article class="panel" x-show="settingsTab==='pbs'" @input="markConfigDirty()" @change="markConfigDirty()">
+                <div class="panel-head"><div><span class="section-kicker">Proxmox Backup Server</span><h3>Dateibasierte Backups per proxmox-backup-client</h3></div><span class="badge" :class="pbs.status ? (pbs.status.client_available ? 'ok' : 'skipped') : 'neutral'" x-text="pbs.status ? (pbs.status.client_available ? 'Client installiert' : 'Client fehlt') : '–'"></span></div>
+                <label class="check-row feature-check"><input type="checkbox" x-model="config.pbs.enabled"><span><strong>PBS-Integration aktivieren</strong><small>Sichert die Pfade der Targets als .pxar-Archive in den Datastore. Dedup, Verschlüsselung und Verify übernimmt PBS.</small></span></label>
+                <div class="form-grid two">
+                  <label class="field"><span>Repository</span><input class="mono" x-model="config.pbs.repository" placeholder="backup@pbs!lxc203@192.168.1.10:datastore1"><small>Format: user@realm!token@host:datastore — API-Token empfohlen.</small></label>
+                  <label class="field"><span>Token-Secret / Passwort</span><input class="mono" type="password" x-model="config.pbs.password" placeholder="***SET*** = unverändert lassen"><small>Wird serverseitig gespeichert und in der Anzeige maskiert.</small></label>
+                </div>
+                <div class="form-grid three">
+                  <label class="field"><span>TLS-Fingerprint (optional)</span><input class="mono" x-model="config.pbs.fingerprint" placeholder="aa:bb:cc:…"><small>SHA-256 des PBS-Zertifikats; leer = System-CA.</small></label>
+                  <label class="field"><span>Namespace (optional)</span><input class="mono" x-model="config.pbs.namespace"></label>
+                  <label class="field"><span>Backup-ID</span><input class="mono" x-model="config.pbs.backup_id" placeholder="Hostname"><small>Leer = Hostname des Containers.</small></label>
+                </div>
+                <div class="form-grid three">
+                  <label class="field"><span>Timeout</span><div class="number-with-unit compact"><input type="number" min="0.1" max="168" step="0.5" x-model.number="config.pbs.timeout_hours"><span>Std.</span></div></label>
+                  <label class="field"><span>Keep daily / weekly</span><div class="number-with-unit compact"><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_daily"><span>/</span><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_weekly"></div><small>0 = kein automatisches Prune.</small></label>
+                  <label class="field"><span>Keep monthly / yearly</span><div class="number-with-unit compact"><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_monthly"><span>/</span><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_yearly"></div></label>
+                </div>
+                <div class="panel-head"><div><h3>Targets</h3></div><button type="button" class="button secondary" @click="addPbsTarget()">Target hinzufügen</button></div>
+                <template x-for="(target, index) in config.pbs.targets" :key="index">
+                  <div class="form-grid three" style="align-items:start; border-top:1px solid var(--border, #ddd); padding-top:0.8rem;">
+                    <label class="field"><span>Name</span><input x-model="target.name" placeholder="dokumente"></label>
+                    <label class="field"><span>Pfade · einer pro Zeile</span><textarea class="mono" rows="3" x-model="target.pathsText" placeholder="/mnt/nas/dokumente"></textarea></label>
+                    <label class="field"><span>Zeitplan (cron oder manual)</span><input class="mono" x-model="target.schedule" placeholder="0 2 * * *"><button type="button" class="button secondary" style="margin-top:0.4rem;" @click="removePbsTarget(index)">Entfernen</button></label>
+                  </div>
+                </template>
+                <div class="inherit-note" x-show="pbs.status && !pbs.status.client_available"><strong>Hinweis:</strong> proxmox-backup-client ist im Container nicht installiert. Installationsbefehle stehen in config.example.yaml bzw. am Ende von scripts/install.sh.</div>
               </article>
 
               <article class="panel" x-show="settingsTab==='account'">

@@ -191,6 +191,104 @@ def find_due_pairs(
     return due, status
 
 
+def find_due_pbs_targets(
+    cfg, db, *, now: Optional[float] = None
+) -> Tuple[List[str], List[Dict]]:
+    """Fällige PBS-Targets analog zu find_due_pairs.
+
+    Die Läufe werden als pair_runs mit Prefix "pbs:" persistiert, wodurch
+    dieselbe last_success-/Retry-Mechanik greift. Backoff und Nachholfenster
+    kommen aus der backup-Sektion, damit es nur eine Stellschraube gibt.
+    """
+    from .pbs_backup import PAIR_PREFIX, client_path, pbs_settings, pbs_targets
+
+    settings = pbs_settings(cfg)
+    if not bool(settings.get("enabled", False)):
+        return [], []
+    if not client_path():
+        return [], [
+            {"name": "pbs", "due": False, "reason": "client_not_installed"}
+        ]
+
+    backup = cfg.get("backup") or {}
+    timezone_name = str(backup.get("timezone") or DEFAULT_TIMEZONE)
+    retry_sec = (
+        _bounded_int(
+            backup.get("scheduler_retry_minutes", 60),
+            default=60,
+            minimum=1,
+            maximum=10080,
+        )
+        * 60
+    )
+    grace_minutes = _bounded_int(
+        backup.get("scheduler_grace_minutes", 15), default=15, minimum=1, maximum=1440
+    )
+    now_value = float(time.time() if now is None else now)
+
+    due: List[str] = []
+    status: List[Dict] = []
+    for target in pbs_targets(settings):
+        name = str(target.get("name") or "?")
+        run_name = f"{PAIR_PREFIX}{name}"
+        schedule = str(target.get("schedule") or "manual").strip()
+        if _is_disabled(schedule):
+            status.append(
+                {"name": name, "due": False, "reason": f"schedule={schedule}"}
+            )
+            continue
+        if not croniter.is_valid(schedule):
+            status.append({"name": name, "due": False, "reason": "invalid_schedule"})
+            continue
+
+        last_success = _last_success_ts(db, run_name)
+        last_attempt = _last_attempt(db, run_name)
+        retry_due = False
+        if last_attempt and not last_attempt.get("ok"):
+            attempt_ts = float(
+                last_attempt.get("ended_at") or last_attempt.get("started_at") or 0
+            )
+            result = last_attempt.get("pair") or {}
+            scheduled_failure = (
+                isinstance(result, dict) and result.get("trigger") == "scheduler"
+            )
+            if attempt_ts > (last_success or 0) and scheduled_failure:
+                if now_value - attempt_ts < retry_sec:
+                    status.append(
+                        {
+                            "name": name,
+                            "due": False,
+                            "reason": "retry_backoff",
+                            "retry_at": attempt_ts + retry_sec,
+                        }
+                    )
+                    continue
+                retry_due = True
+
+        try:
+            is_due = retry_due or _is_due(
+                schedule,
+                last_success,
+                now=now_value,
+                timezone_name=timezone_name,
+                first_run_grace_minutes=grace_minutes,
+            )
+        except Exception as exc:
+            status.append({"name": name, "due": False, "error": str(exc)})
+            continue
+        status.append(
+            {
+                "name": name,
+                "due": is_due,
+                "schedule": schedule,
+                "last_run": last_success,
+            }
+        )
+        if is_due:
+            due.append(name)
+    return due, status
+
+
 def next_run_after(
     schedule: str,
     *,

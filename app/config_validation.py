@@ -698,6 +698,79 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         )
     )
 
+    pbs = cfg.setdefault("pbs", {})
+    if not isinstance(pbs, dict):
+        errors.append("pbs muss ein Mapping sein")
+        pbs = cfg["pbs"] = {}
+    pbs["enabled"] = _boolean(pbs.get("enabled", False))
+    repository = str(pbs.get("repository") or "").strip()
+    if pbs["enabled"] and not repository:
+        errors.append("pbs.repository ist erforderlich, wenn pbs.enabled gesetzt ist")
+    if repository and not re.match(r"^[^\s@]+@[^\s@!]+(?:![^\s@:]+)?@[^\s:]+:\S+$", repository):
+        warnings.append(
+            "pbs.repository sieht ungewöhnlich aus — erwartet user@realm[!token]@host:datastore"
+        )
+    pbs["repository"] = repository
+    pbs["namespace"] = str(pbs.get("namespace") or "").strip()
+    pbs["backup_id"] = str(pbs.get("backup_id") or "").strip()
+    fingerprint = str(pbs.get("fingerprint") or "").strip()
+    if fingerprint and not re.match(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){31}$", fingerprint):
+        errors.append("pbs.fingerprint muss ein SHA-256-Fingerprint (aa:bb:…) sein")
+    pbs["fingerprint"] = fingerprint
+    pbs["password"] = str(pbs.get("password") or "")
+    if pbs["enabled"] and not pbs["password"]:
+        warnings.append(
+            "pbs.password ist leer — proxmox-backup-client wird ohne Token/Passwort scheitern"
+        )
+    pbs["timeout_hours"] = _number(
+        pbs.get("timeout_hours", 4), default=4, minimum=0.1, maximum=168
+    )
+    keep = pbs.setdefault("keep", {})
+    if not isinstance(keep, dict):
+        errors.append("pbs.keep muss ein Mapping sein")
+        keep = pbs["keep"] = {}
+    for key in ("keep_last", "keep_daily", "keep_weekly", "keep_monthly", "keep_yearly"):
+        if keep.get(key) in (None, ""):
+            keep[key] = 0
+            continue
+        keep[key] = int(
+            _number(keep.get(key), default=0, minimum=0, maximum=3650, integer=True)
+        )
+    targets = pbs.setdefault("targets", [])
+    if not isinstance(targets, list):
+        errors.append("pbs.targets muss eine Liste sein")
+        targets = pbs["targets"] = []
+    seen_targets: set[str] = set()
+    for index, target in enumerate(targets):
+        label = f"pbs.targets[{index}]"
+        if not isinstance(target, dict):
+            errors.append(f"{label} muss ein Mapping sein")
+            continue
+        name = str(target.get("name") or "").strip()
+        if not name or not _NAME_RE.match(name):
+            errors.append(f"{label}.name ist ungültig")
+        elif name in seen_targets:
+            errors.append(f"{label}.name ist doppelt: {name}")
+        seen_targets.add(name)
+        target["name"] = name
+        paths = _normalize_string_list(target.get("paths"))
+        if not paths:
+            errors.append(f"{label}.paths braucht mindestens einen Pfad")
+        for path_value in paths:
+            if not path_value.startswith("/"):
+                errors.append(f"{label}: Pfad muss absolut sein: {path_value}")
+        target["paths"] = paths
+        schedule = str(target.get("schedule") or "manual").strip()
+        if schedule.lower() not in _DISABLED_SCHEDULES and not croniter.is_valid(
+            schedule
+        ):
+            errors.append(f"{label}.schedule ist ungültig: {schedule}")
+        target["schedule"] = schedule
+        target["namespace"] = str(target.get("namespace") or "").strip()
+        target["backup_id"] = str(target.get("backup_id") or "").strip()
+    if pbs["enabled"] and not targets:
+        warnings.append("pbs.enabled ohne pbs.targets — es wird nichts gesichert")
+
     if errors:
         raise ConfigValidationError(errors)
     return cfg, list(dict.fromkeys(warnings))

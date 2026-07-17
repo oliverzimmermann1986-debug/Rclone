@@ -351,6 +351,7 @@ def _run_rclone_command(
     append: bool = False,
     header: Optional[str] = None,
     pair_name: str = "",
+    extra_env: Optional[dict[str, str]] = None,
 ) -> int:
     mode = "a" if append else "w"
     with log_file.open(mode, encoding="utf-8") as handle:
@@ -368,7 +369,7 @@ def _run_rclone_command(
             stdin=subprocess.DEVNULL,
             start_new_session=True,
             close_fds=True,
-            env=rclone_subprocess_env(),
+            env={**rclone_subprocess_env(), **(extra_env or {})},
         )
         _register_proc(proc, pair_name=pair_name, log_file=str(log_file))
         deadline = time.monotonic() + timeout_sec
