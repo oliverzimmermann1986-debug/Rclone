@@ -1,6 +1,17 @@
-# Audit und Optimierungen – rclone-sync-container 1.7.4
+# Audit und Optimierungen – rclone-sync-container 1.8.0
 
 Stand: 17.07.2026
+
+
+## Feature 1.8.0 — Proxmox-Backup-Server-Integration
+
+- Neuer Job-Typ `pbs`: dateibasierte Backups konfigurierter Pfade per `proxmox-backup-client` in einen PBS-Datastore (`app/jobs/pbs_backup.py`). Nutzt dieselbe Prozess-, Log-, Cancel- und Job-Infrastruktur wie rclone; Läufe werden als `pair_runs` mit Prefix `pbs:` persistiert.
+- Konfiguration über neue `pbs`-Sektion (Repository `user@realm!token@host:datastore`, Token-Secret maskiert wie web.password, TLS-Fingerprint, Namespace, Backup-ID, Timeout, optionales serverseitiges Prune via keep-*), vollständig validiert inkl. Cron-Zeitplänen je Target.
+- Scheduler: `find_due_pbs_targets` mit derselben last_success-/Retry-Backoff-/Nachholfenster-Mechanik; der Minuten-Tick startet fällige PBS-Targets unter eigenem File-Lock parallel unabhängig vom rclone-Lock.
+- API `/api/pbs/status` und `/api/pbs/run` (alle Targets oder einzeln), GUI: Einstellungs-Tab „Proxmox Backup" mit Target-Editor und Dashboard-Karte mit Sichern-Buttons; fehlender Client wird angezeigt.
+- Mount-Schutz: fehlende Target-Pfade führen zu einem Fehler statt einem leeren Backup. Abbruch über den bestehenden Cancel wirkt auch auf PBS-Prozesse.
+- Installer nennt am Ende die Installationsbefehle für `proxmox-backup-client` (pbs-client-Repository).
+
 
 
 ## Hotfix 1.7.4

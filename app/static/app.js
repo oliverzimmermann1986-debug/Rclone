@@ -44,6 +44,7 @@ function app() {
     filterFile: { content: '', path: '', revision: '', loading: false, dirty: false },
     pwChange: { current: '', new: '', confirm: '' },
     snapshots: { loading: false, items: [], max: 30, restoreName: '', password: '' },
+    pbs: { loading: false, status: null },
     schedulerControl: { loading: false, paused: false, until: null, remaining_seconds: null, reason: '', enabled: true },
     schedulerPause: { minutes: 60, reason: 'Wartungsfenster' },
     audit: { loading: false, items: [], eventType: '' },
@@ -138,6 +139,7 @@ function app() {
     loadPage(page) {
       if (page === 'dashboard') {
         this.loadOverview(true); this.loadRecent(true); this.loadStorage(false);
+        if (this.config?.pbs?.enabled) this.loadPbsStatus();
       } else if (page === 'pairs') {
         this.loadConfig();
       } else if (page === 'jobs') {
@@ -494,6 +496,32 @@ function app() {
       }
     },
 
+    async loadPbsStatus() {
+      this.pbs.loading = true;
+      const result = await this.api('GET', '/api/pbs/status');
+      this.pbs.loading = false;
+      if (result) this.pbs.status = result;
+    },
+    async runPbs(target = null) {
+      const result = await this.api('POST', '/api/pbs/run', target ? { target } : {});
+      if (result?.ok) {
+        this.showToast(`PBS-Backup gestartet (${(result.targets || []).join(', ')})`);
+        setTimeout(() => { this.loadPbsStatus(); this.loadJobs(); }, 1200);
+      }
+    },
+    addPbsTarget() {
+      this.config.pbs.targets.push({ name: '', paths: [], pathsText: '', schedule: 'manual', namespace: '', backup_id: '' });
+      this.markConfigDirty();
+    },
+    removePbsTarget(index) {
+      this.config.pbs.targets.splice(index, 1);
+      this.markConfigDirty();
+    },
+    syncPbsTargets() {
+      for (const target of (this.config.pbs?.targets || [])) {
+        target.paths = (target.pathsText || '').split('\n').map(v => v.trim()).filter(Boolean);
+      }
+    },
     async loadConfig() {
       const result = await this.api('GET', '/api/config');
       if (!result) return;
@@ -530,6 +558,25 @@ function app() {
       result.notifications.allow_private_targets ??= false;
       result.notifications.webhooks ||= [];
       result.maintenance ||= { auto_prune: true, job_retention_days: 180, keep_latest_jobs: 500, log_retention_days: 90 };
+      result.pbs ||= {};
+      result.pbs.enabled ??= false;
+      result.pbs.repository ||= '';
+      result.pbs.password ||= '';
+      result.pbs.fingerprint ||= '';
+      result.pbs.namespace ||= '';
+      result.pbs.backup_id ||= '';
+      result.pbs.timeout_hours ??= 4;
+      result.pbs.keep ||= {};
+      result.pbs.keep.keep_last ??= 0;
+      result.pbs.keep.keep_daily ??= 7;
+      result.pbs.keep.keep_weekly ??= 4;
+      result.pbs.keep.keep_monthly ??= 6;
+      result.pbs.keep.keep_yearly ??= 0;
+      result.pbs.targets ||= [];
+      for (const target of result.pbs.targets) {
+        target.pathsText = (target.paths || []).join('\n');
+        target.schedule ||= 'manual';
+      }
       for (const pair of result.backup.pairs) this.normalizePair(pair);
       for (const hook of result.notifications.webhooks) if (hook.enabled === undefined) hook.enabled = true;
       this.config = result;
@@ -572,6 +619,7 @@ function app() {
       draft.backup.rclone_args = this.rcloneArgsText.split('\n').map((value) => value.trim()).filter(Boolean);
       draft.web.allowed_hosts = this.allowedHostsText.split('\n').map((value) => value.trim()).filter(Boolean);
       draft.web.local_browse_roots = this.browseRootsText.split('\n').map((value) => value.trim()).filter(Boolean);
+      for (const target of (draft.pbs?.targets || [])) delete target.pathsText;
       return draft;
     },
 
@@ -740,6 +788,7 @@ function app() {
     },
 
     async saveConfig() {
+      this.syncPbsTargets();
       const result = await this.api('PUT', '/api/config', { config: this.configPayload() });
       if (!result?.ok) return false;
       this.config = result.config || this.config;

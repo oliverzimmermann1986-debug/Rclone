@@ -31,7 +31,12 @@ router = APIRouter(
 )
 
 _PLACEHOLDER = "***SET***"
-_SENSITIVE = (("web", "secret_key"), ("web", "password_hash"), ("web", "password"))
+_SENSITIVE = (
+    ("web", "secret_key"),
+    ("web", "password_hash"),
+    ("web", "password"),
+    ("pbs", "password"),
+)
 _MAX_FILTER_BYTES = 2 * 1024 * 1024
 
 

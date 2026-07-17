@@ -244,6 +244,14 @@ else
 fi
 cat <<EOF
 
+Proxmox Backup Server (optional):
+  Für PBS-Backups aus der GUI muss proxmox-backup-client installiert sein:
+    echo "deb http://download.proxmox.com/debian/pbs-client bookworm main" \
+      > /etc/apt/sources.list.d/pbs-client.list
+    curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg \
+      -o /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg
+    apt update && apt install proxmox-backup-client
+
 Sicherheitshinweis (Transportverschlüsselung):
   Die Web-UI lauscht unverschlüsselt auf 0.0.0.0:8001. Login-Passwort und
   Session-Cookie sind im LAN mitlesbar. Empfohlen: Reverse-Proxy mit TLS
