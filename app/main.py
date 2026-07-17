@@ -170,15 +170,19 @@ def _same_origin(request: Request) -> bool:
     # bei völlig normalen same-origin Formular-POSTs. Sec-Fetch-Site ist in dem
     # Fall die verlässlichere Angabe.
     if origin == "null":
+        # Ablehnen nur bei ausdrücklich cross-origin gemeldeter Herkunft.
+        # Fehlt Sec-Fetch-Site (ältere Browser, Webviews, Privacy-Extensions,
+        # die Header strippen), bleibt der Double-Submit-CSRF-Schutz mit
+        # SameSite=strict-Cookies die maßgebliche Verteidigung — wie vor 1.7.1.
         sec_fetch_site = request.headers.get("sec-fetch-site", "").strip().lower()
-        allowed = sec_fetch_site in {"same-origin", "none"}
-        if not allowed:
+        if sec_fetch_site in {"cross-site", "same-site"}:
             logger.warning(
                 "Origin-Prüfung: Origin=null abgelehnt (Sec-Fetch-Site=%r, path=%s)",
-                sec_fetch_site or None,
+                sec_fetch_site,
                 request.url.path,
             )
-        return allowed
+            return False
+        return True
     try:
         from urllib.parse import urlsplit
 

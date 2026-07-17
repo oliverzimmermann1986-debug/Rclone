@@ -78,17 +78,41 @@ def test_origin_null_cross_site_is_rejected(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch) as client:
         _login(client)
         csrf = client.cookies.get("rclone_sync_csrf")
-        for headers in (
-            {"Origin": "null", "Sec-Fetch-Site": "cross-site"},
-            {"Origin": "null"},  # alte Browser ohne Sec-Fetch-Site
-        ):
-            response = client.post(
-                "/logout",
-                headers={**headers, "X-CSRF-Token": csrf or ""},
-                follow_redirects=False,
-            )
-            assert response.status_code == 403
-            assert "Origin" in response.json()["detail"]
+        response = client.post(
+            "/logout",
+            headers={
+                "Origin": "null",
+                "Sec-Fetch-Site": "cross-site",
+                "X-CSRF-Token": csrf or "",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 403
+        assert "Origin" in response.json()["detail"]
+
+
+def test_origin_null_without_sec_fetch_site_is_allowed(tmp_path, monkeypatch):
+    """Alte Browser/Webviews/Privacy-Extensions: Origin=null ohne Sec-Fetch-Site.
+
+    Der Double-Submit-CSRF-Schutz mit SameSite=strict bleibt die maßgebliche
+    Verteidigung; die Origin-Prüfung darf legitime Logins nicht blockieren.
+    """
+    with _client(tmp_path, monkeypatch) as client:
+        login_page = client.get("/login")
+        match = re.search(r'name="login_csrf" value="([^"]+)"', login_page.text)
+        assert match
+        response = client.post(
+            "/login",
+            data={
+                "username": "admin",
+                "password": "very-secure-password",
+                "login_csrf": match.group(1),
+            },
+            headers={"Origin": "null"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/"
 
 
 def test_origin_null_same_origin_login_still_works(tmp_path, monkeypatch):
