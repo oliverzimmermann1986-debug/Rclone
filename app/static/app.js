@@ -948,6 +948,7 @@ function app() {
     },
 
     openQuickPicker(mode) { this.openPicker(mode, -1); },
+    openPbsPicker(index) { this.openPicker('pbs-target', index); },
 
     async loadPicker(path) {
       this.picker.loading = true;
@@ -969,6 +970,18 @@ function app() {
 
     pickPath(path) {
       const { mode, idx } = this.picker;
+      if (mode === 'pbs-target') {
+        const target = this.config.pbs?.targets?.[idx];
+        if (target) {
+          const lines = (target.pathsText || '').split('\n').map(v => v.trim()).filter(Boolean);
+          if (!lines.includes(path)) lines.push(path);
+          target.pathsText = lines.join('\n');
+          this.markConfigDirty();
+        }
+        this.picker.show = false;
+        this.showToast(`Pfad hinzugefügt: ${path}`);
+        return;
+      }
       if (idx === -1) {
         if (mode === 'remote') this.quick.remote = path;
         else this.quick.local = path;

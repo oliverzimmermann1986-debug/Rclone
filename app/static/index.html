@@ -725,7 +725,7 @@
                 <template x-for="(target, index) in config.pbs.targets" :key="index">
                   <div class="form-grid three" style="align-items:start; border-top:1px solid var(--border, #ddd); padding-top:0.8rem;">
                     <label class="field"><span>Name</span><input x-model="target.name" placeholder="dokumente"></label>
-                    <label class="field"><span>Pfade · einer pro Zeile</span><textarea class="mono" rows="3" x-model="target.pathsText" placeholder="/mnt/nas/dokumente"></textarea></label>
+                    <label class="field"><span>Pfade · einer pro Zeile</span><textarea class="mono" rows="3" x-model="target.pathsText" placeholder="/mnt/nas/dokumente"></textarea><button type="button" class="button secondary" style="margin-top:0.4rem;" @click="openPbsPicker(index)">Ordner auswählen</button></label>
                     <label class="field"><span>Zeitplan (cron oder manual)</span><input class="mono" x-model="target.schedule" placeholder="0 2 * * *"><button type="button" class="button secondary" style="margin-top:0.4rem;" @click="removePbsTarget(index)">Entfernen</button></label>
                   </div>
                 </template>
