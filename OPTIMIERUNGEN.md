@@ -1,6 +1,11 @@
-# Audit und Optimierungen – rclone-sync-container 1.8.0
+# Audit und Optimierungen – rclone-sync-container 1.8.1
 
 Stand: 17.07.2026
+
+
+## 1.8.1
+
+- PBS-Target-Editor: „Ordner auswählen"-Button öffnet den vorhandenen lokalen Datei-Browser (beschränkt auf web.local_browse_roots) und hängt den gewählten Pfad an die Pfadliste an — eingebundene Festplatten unter /mnt lassen sich damit anklicken statt abtippen.
 
 
 ## Feature 1.8.0 — Proxmox-Backup-Server-Integration
