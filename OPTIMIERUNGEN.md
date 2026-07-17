@@ -3,6 +3,10 @@
 Stand: 17.07.2026
 
 
+## 1.8.3
+
+- Richtungs-Beschreibungen neutral formuliert („Remote-Pfad → Lokaler Pfad" statt „Remote → Lokal"), damit sie auch für lokal→lokal-Pairs stimmen; Vorlagen-Dropdown angeglichen.
+
 ## 1.8.2
 
 - Frontend-Cache-Busting repariert: Die Asset-Version in index.html war auf 1.7.0 festgenagelt, Browser hielten daher nach Updates am alten app.js fest — neue GUI-Bereiche (z. B. der PBS-Tab) erschienen nicht ohne Hard-Reload. Die Version wird jetzt beim Ausliefern aus der App-Version injiziert.
