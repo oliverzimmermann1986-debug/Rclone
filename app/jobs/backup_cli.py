@@ -66,10 +66,7 @@ def main() -> int:
             summary = run_job(
                 dry_run=args.dry_run, pairs_filter=pairs_filter, trigger="cli"
             )
-            if summary.get("cancelled"):
-                status = "cancelled"
-            else:
-                status = "ok" if summary.get("ok") else "error"
+            status = "ok" if summary.get("ok") else "error"
             db.job_finish(job_id, status, summary)
             logger.info(
                 "Fertig: %s",

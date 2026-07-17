@@ -1,7 +1,7 @@
 function app() {
   const emptyQuick = () => ({
     remote: '', local: '', direction: 'bisync', mode: 'bisync', dry_run: true,
-    allow_delete: false, max_delete: 100,
+    allow_delete: false, max_delete: 100, new_target: false,
   });
 
   return {
@@ -44,6 +44,9 @@ function app() {
     filterFile: { content: '', path: '', revision: '', loading: false, dirty: false },
     pwChange: { current: '', new: '', confirm: '' },
     snapshots: { loading: false, items: [], max: 30, restoreName: '', password: '' },
+    schedulerControl: { loading: false, paused: false, until: null, remaining_seconds: null, reason: '', enabled: true },
+    schedulerPause: { minutes: 60, reason: 'Wartungsfenster' },
+    audit: { loading: false, items: [], eventType: '' },
 
     quickModal: { show: false },
     quick: emptyQuick(),
@@ -113,6 +116,7 @@ function app() {
         this.loadOverview(true),
         this.refreshStatus(true),
         this.loadRecent(true),
+        this.loadSchedulerState(true),
       ]);
       if (this.busy() || this.progress?.running) await this.loadProgress(true);
       this.lastUpdated = Date.now();
@@ -139,9 +143,9 @@ function app() {
       } else if (page === 'jobs') {
         this.loadJobs(true);
       } else if (page === 'doctor') {
-        this.loadOverview(true); this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots();
+        this.loadOverview(true); this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadSchedulerState(true);
       } else if (page === 'settings') {
-        this.loadConfig(); this.loadFilterFile();
+        this.loadConfig(); this.loadFilterFile(); this.loadSchedulerState(true);
       }
     },
 
@@ -264,6 +268,49 @@ function app() {
       return !!result;
     },
 
+    async loadSchedulerState(silent = false) {
+      this.schedulerControl.loading = true;
+      const result = await this.api('GET', '/api/jobs/scheduler/state', undefined, { silent });
+      if (result) this.schedulerControl = { ...this.schedulerControl, ...result, loading: false };
+      else this.schedulerControl.loading = false;
+      return result;
+    },
+
+    async pauseScheduler(minutes = null, until = null) {
+      const reason = String(this.schedulerPause.reason || 'Wartungsfenster').trim();
+      const body = { reason };
+      if (until) body.until = until;
+      else body.minutes = Number(minutes || this.schedulerPause.minutes || 60);
+      const result = await this.api('POST', '/api/jobs/scheduler/pause', body);
+      if (result) {
+        this.schedulerControl = { ...this.schedulerControl, ...result, loading: false };
+        this.showToast('Automatische Zeitpläne pausiert', 'warn');
+        this.loadOverview(true); this.loadAudit();
+      }
+    },
+
+    pauseSchedulerUntilTomorrow() {
+      const target = new Date();
+      target.setDate(target.getDate() + 1);
+      target.setHours(6, 0, 0, 0);
+      this.pauseScheduler(null, target.getTime() / 1000);
+    },
+
+    async resumeScheduler() {
+      const result = await this.api('POST', '/api/jobs/scheduler/resume', {});
+      if (result) {
+        this.schedulerControl = { ...this.schedulerControl, ...result, loading: false };
+        this.showToast('Automatische Zeitpläne fortgesetzt');
+        this.loadOverview(true); this.loadAudit();
+      }
+    },
+
+    schedulerControlLabel() {
+      if (this.config.backup?.enabled === false || !this.schedulerControl.enabled) return 'Automatik deaktiviert';
+      if (!this.schedulerControl.paused) return 'Automatik aktiv';
+      return this.schedulerControl.until ? `Pausiert bis ${this.formatDateTime(this.schedulerControl.until)}` : 'Pausiert';
+    },
+
     async refreshStatus(silent = false) {
       const result = await this.api('GET', '/api/jobs/status/current', undefined, { silent });
       if (result) this.status = result;
@@ -382,7 +429,9 @@ function app() {
         }
         if (!confirm(`${this.quick.mode.toUpperCase()} kann bis zu ${this.quick.max_delete} Einträge löschen. Wirklich starten?`)) return;
       }
-      const result = await this.api('POST', '/api/jobs/backup/quick', this.quick);
+      const payload = { ...this.quick, min_local_files: this.quick.new_target ? 0 : 1 };
+      delete payload.new_target;
+      const result = await this.api('POST', '/api/jobs/backup/quick', payload);
       if (result?.ok) {
         this.showToast('Quick-Sync gestartet');
         this.quickModal.show = false;
@@ -424,27 +473,11 @@ function app() {
     },
 
     async copyLog() {
-      const text = this.filteredLog();
       try {
-        if (navigator.clipboard && window.isSecureContext) {
-          await navigator.clipboard.writeText(text);
-        } else {
-          // Fallback für HTTP: navigator.clipboard existiert nur in Secure Contexts.
-          const area = document.createElement('textarea');
-          area.value = text;
-          area.setAttribute('readonly', '');
-          area.style.position = 'fixed';
-          area.style.opacity = '0';
-          document.body.appendChild(area);
-          area.select();
-          area.setSelectionRange(0, area.value.length);
-          const ok = document.execCommand('copy');
-          document.body.removeChild(area);
-          if (!ok) throw new Error('execCommand copy fehlgeschlagen');
-        }
+        await navigator.clipboard.writeText(this.filteredLog());
         this.showToast('Log kopiert');
       } catch (_) {
-        this.showToast('Kopieren blockiert — Download-Button nutzen', 'err');
+        this.showToast('Log konnte nicht kopiert werden', 'err');
       }
     },
 
@@ -473,6 +506,7 @@ function app() {
       result.web.hsts_seconds ??= 0;
       result.backup ||= {};
       result.backup.pairs ||= [];
+      result.backup.enabled ??= true;
       result.backup.rclone_args ||= [];
       result.backup.tuning ||= {};
       result.backup.tuning.transfers ??= 4;
@@ -517,6 +551,7 @@ function app() {
       if (pair.min_local_files === undefined) pair.min_local_files = 1;
       if (pair.min_remote_files === undefined) pair.min_remote_files = 0;
       if (pair.min_free_gb === undefined) pair.min_free_gb = 0;
+      if (pair.max_success_age_hours === undefined) pair.max_success_age_hours = 0;
       if (pair.allow_delete === undefined) pair.allow_delete = false;
       if (pair.require_mountpoint === undefined) pair.require_mountpoint = false;
       pair.mountpoint ||= '';
@@ -729,7 +764,7 @@ function app() {
         direction: selected.direction, mode: selected.mode, min_local_files: 1,
         exclude: '.DS_Store\nThumbs.db', include: '', filter: '', rclone_args: '',
         transfers: '', checkers: '', max_delete: 100, allow_delete: false,
-        min_remote_files: 0, min_free_gb: 0, require_mountpoint: false,
+        min_remote_files: 0, min_free_gb: 0, max_success_age_hours: 0, require_mountpoint: false,
         mountpoint: '', sentinel_file: '',
       };
       this.config.backup.pairs.push(pair);
@@ -813,14 +848,23 @@ function app() {
       const health = this.pairLastRun(pair);
       if (health?.last_status === 'stale') return health.error || 'Letzter Lauf blieb unvollständig';
       if (health?.last_status === 'error') return health.error || 'Letzter Lauf fehlgeschlagen';
+      if (health?.overdue) {
+        if (!health.last_success) return `Noch kein erfolgreicher Lauf (Frist ${health.max_success_age_hours} Std.)`;
+        return `Letzter Erfolg ist ${Math.round(health.success_age_hours || 0)} Std. alt`;
+      }
       return '';
+    },
+
+    pairRuntimeIssueLevel(pair) {
+      const health = this.pairLastRun(pair);
+      return health?.last_status === 'error' || health?.last_status === 'stale' ? 'error' : 'warn';
     },
 
     pairStatus(pair) {
       const health = this.pairLastRun(pair);
       if (!pair.enabled) return 'disabled';
       if (health?.last_status === 'error' || health?.last_status === 'stale') return 'error';
-      if (this.pairIssues(pair).length) return 'warn';
+      if (health?.overdue || this.pairIssues(pair).length) return 'warn';
       if (health?.last_status === 'ok') return 'ok';
       return 'pending';
     },
@@ -978,6 +1022,24 @@ function app() {
 
     downloadSupportBundle() { window.location.assign('/api/maintenance/support-bundle'); },
     downloadRedactedConfig() { window.location.assign('/api/maintenance/config/export'); },
+
+    async loadAudit() {
+      this.audit.loading = true;
+      const suffix = this.audit.eventType ? `?limit=100&event_type=${encodeURIComponent(this.audit.eventType)}` : '?limit=100';
+      const result = await this.api('GET', `/api/maintenance/audit${suffix}`, undefined, { silent: true });
+      if (result?.events) this.audit.items = result.events;
+      this.audit.loading = false;
+    },
+
+    auditLabel(type) {
+      return ({
+        scheduler_paused: 'Scheduler pausiert', scheduler_resumed: 'Scheduler fortgesetzt',
+        config_saved: 'Konfiguration gespeichert', filter_saved: 'Filter gespeichert',
+        password_changed: 'Passwort geändert', config_snapshot_created: 'Snapshot erstellt',
+        config_snapshot_restored: 'Snapshot wiederhergestellt', backup_requested: 'Backup angefordert',
+        check_requested: 'Check angefordert', quicksync_requested: 'Quick-Sync angefordert',
+      })[type] || type;
+    },
 
     async loadFilterFile() {
       this.filterFile.loading = true;

@@ -134,3 +134,17 @@ def test_job_search_matches_summary_log_and_exact_id(tmp_path: Path):
     assert [job["id"] for job in database.job_list(query="100%")] == [literal]
     assert database.job_count(query="remote offline") == 1
     assert database.job_count(kind="backup", status="error", query="fotos") == 1
+
+
+def test_runtime_settings_and_audit_are_persistent(tmp_path):
+    database = Database(tmp_path / "events.db")
+    database.runtime_set("feature", {"enabled": True})
+    event_id = database.audit_add("config_saved", actor="admin", details={"pairs": 3})
+
+    reopened = Database(tmp_path / "events.db")
+    assert reopened.runtime_get("feature") == {"enabled": True}
+    events = reopened.audit_list(limit=5)
+    assert events[0]["id"] == event_id
+    assert events[0]["actor"] == "admin"
+    assert events[0]["details"] == {"pairs": 3}
+    assert reopened.stats()["audit_events"] == 1

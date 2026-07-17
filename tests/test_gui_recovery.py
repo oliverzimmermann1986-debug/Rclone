@@ -11,7 +11,7 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
-from app import config_store, db
+from app import __version__ as app_version, config_store, db
 from app.config_store import Config
 from app.db import Database
 from app.routes import api_maintenance
@@ -151,8 +151,7 @@ def test_support_bundle_is_redacted_and_contains_diagnostics(tmp_path, monkeypat
     assert store.get("web", "secret_key") not in redacted
     assert "private-webhook-token" not in redacted
     assert "***REDACTED***" in redacted
-    from app import __version__
-    assert diagnostics["app_version"] == __version__
+    assert diagnostics["app_version"] == app_version
     assert diagnostics["database"]["integrity"]["ok"] is True
     assert diagnostics["recent_jobs"][0]["id"] == job_id
     assert diagnostics["log_inventory"]["logs"][0]["path"] == "job.log"

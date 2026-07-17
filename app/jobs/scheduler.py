@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
+from ..utils import bounded_int as _bounded_int
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +18,6 @@ DEFAULT_TIMEZONE = "Europe/Berlin"
 DISABLED_VALUES = {"", "off", "manual", "disabled", "none"}
 
 
-def _bounded_int(value, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        parsed = default
-    return max(minimum, min(parsed, maximum))
 
 
 def _is_disabled(schedule: Optional[str]) -> bool:

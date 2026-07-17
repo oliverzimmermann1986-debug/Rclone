@@ -1,6 +1,33 @@
-# Audit und Optimierungen – rclone-sync-container 1.6.0
+# Audit und Optimierungen – rclone-sync-container 1.7.1
 
-Stand: 14.07.2026
+Stand: 17.07.2026
+
+
+## Härtung und Fehlerkorrekturen in 1.7.1
+
+- Zwei in der 1.7.0-Dev-Lieferung verlorene Stände aus dem Repository reintegriert: der Baseline-Resync beim allerersten bisync-Lauf (`auto_resync_first_run`, v1.5.3) und die Lock-Freigabe, wenn `job_start` beim Anlegen eines Web-Jobs fehlschlägt (sonst dauerhaft HTTP 409 bis zum Neustart). Beide Regressionstests sind wieder enthalten.
+
+- Quick-Sync kann jetzt bewusst in ein neues, leeres lokales Ziel laufen: neues Feld `min_local_files` in der Quick-API plus GUI-Checkbox „Neues leeres Ziel"; das Verzeichnis wird nach bestandenem Precheck wie bei regulären Pairs angelegt.
+- `Origin: null` wird bei state-changing Requests nicht mehr als same-origin akzeptiert (sandboxed iframes/Redirect-Ketten); das Double-Submit-CSRF bleibt als zweite Schicht bestehen.
+- Logout erhöht die Session-Version und widerruft damit alle ausgestellten Session-Tokens serverseitig (Single-Admin-Modell); nur Cookies zu löschen ließ kopierte Tokens gültig.
+- 500-Antworten des globalen Exception-Handlers erhalten jetzt ebenfalls die Security-Header und `Cache-Control: no-store` (der Handler läuft außerhalb der Security-Middleware).
+- Cancel-Webhooks werden in einem Hintergrund-Thread verschickt und blockieren den Abbruch-Request nicht mehr (Webhook-Timeout bis 60 s).
+- Doppelte Implementierungen zusammengeführt: `bounded_int`/`bounded_number` in `app/utils.py`, gemeinsames `read_log_tail`/`parse_final_stats` in `app/jobs/rclone_sync.py` (zuvor leicht abweichende Stats-Regexe in Web-API und Sync-Kern).
+- Installer weist am Ende ausdrücklich auf fehlende Transportverschlüsselung hin und empfiehlt Reverse-Proxy mit TLS, `secure_cookie: auto`, HSTS und enge `allowed_hosts`.
+
+
+
+## Scheduler-Betrieb, Frischeüberwachung und Audit in 1.7.0
+
+- Automatische Scheduler-Läufe können persistent für 30 Minuten bis 31 Tage pausiert werden; nach Ablauf wird automatisch fortgesetzt.
+- Dauerhafte globale Scheduler-Deaktivierung über `backup.enabled` wird im Scheduler jetzt tatsächlich beachtet.
+- Dashboard und Einstellungsseite zeigen den Unterschied zwischen aktiv, temporär pausiert und dauerhaft deaktiviert verständlich an.
+- Schnelle Wartungsaktionen für eine Stunde oder bis zum nächsten Morgen erleichtern Proxmox-Backups und NAS-Neustarts.
+- Pairs können mit `max_success_age_hours` überwacht werden; fehlende oder zu alte erfolgreiche Läufe erscheinen als Warnung.
+- Lokales SQLite-Auditprotokoll erfasst Scheduler-, Konfigurations-, Start-, Passwort- und Recovery-Aktionen ohne Secrets.
+- Auditdaten werden in Support-Bundles aufgenommen und gemeinsam mit der Historie kontrolliert aufbewahrt.
+- Neuer `/readyz`-Endpunkt prüft Datenbank und beschreibbares Datenverzeichnis ohne sensible Details; der Installer verwendet ihn für den Upgrade-Healthcheck.
+- GUI für Desktop und Mobil um Scheduler-Wartungsfenster, Frischewarnungen und Aktivitätsprotokoll erweitert.
 
 
 ## Präzisere Einstellungen und Scheduler-Assistent in 1.6.0
@@ -16,24 +43,6 @@ Stand: 14.07.2026
 - Aufbewahrung als eigener verständlicher Abschnitt mit Einheiten und automatischer Wartung neu gestaltet.
 - Pair-Zeitpläne können den globalen Standard jetzt ausdrücklich übernehmen; Karten zeigen die tatsächlich wirksame Planung verständlich an.
 - Mobile Darstellung für Zeitplan-Auswahl, Erklärungskarten, Leistungsprofile und Live-Vorschau optimiert.
-
-
-## Neu und behoben in 1.5.3
-
-- **Neu:** Baseline-Resync beim Erstlauf eines bisync-Pairs läuft automatisch (`auto_resync_first_run`, Standard an, pro Pair abschaltbar). Gilt ausschließlich, solange das Pair noch nie erfolgreich gelaufen ist — spätere Resync-Verlangen bleiben wie bisher gesperrt, bis `auto_resync` bewusst gesetzt wird. Bei DB-Fehlern bleibt der Resync fail-closed gesperrt. Vier neue Tests.
-- **Behoben:** „Log kopieren" schlug über HTTP immer fehl, weil `navigator.clipboard` nur in Secure Contexts existiert. Jetzt Textarea-Fallback; die Fehlermeldung verweist auf den Download-Button.
-
-
-## Bugfixes in 1.5.2
-
-- **Behoben:** Der Remote-Pre-Check rief `rclone lsjson` mit dem nicht existierenden Flag `--no-size` auf — jeder Pair-Lauf mit Remote-Pfad scheiterte sofort mit „unknown flag". Das Flag existiert in keiner rclone-Version (lsjson kennt nur `--no-mimetype`/`--no-modtime`, siehe https://rclone.org/commands/rclone_lsjson/); es wurde entfernt.
-- **Hinweis:** Die bisync-Flags der App (`--resilient`, `--recover`, `--conflict-resolve`) benötigen rclone ≥ 1.66. Debian-Paketstände (z. B. 1.60.1 in Debian 13) reichen nicht; aktuelles rclone von rclone.org installieren.
-
-
-## Bugfixes in 1.5.1
-
-- **Behoben:** Lock-Leak in der Jobs-API. Schlug `job_start()` nach dem Erwerb des In-Prozess-Locks fehl (z. B. gesperrte SQLite-DB, volle Platte), blieb der Lock dauerhaft belegt und jeder weitere Sync/Check/Quick-Lauf lieferte bis zum Service-Neustart HTTP 409 „Backup läuft bereits". Der Lock wird jetzt bei Anlage-Fehlern zuverlässig freigegeben; zwei Regressionstests sichern das Verhalten ab (`tests/test_job_lock_release.py`).
-- **Behoben:** Manuell abgebrochene Läufe über `backup_cli` und `scheduler_cli` wurden als `error` statt `cancelled` in der Jobhistorie gespeichert. CLI und Scheduler persistieren den Status jetzt konsistent zur Web-Route.
 
 
 ## GUI-, Recovery- und Betriebs-Ausbau in 1.5.0

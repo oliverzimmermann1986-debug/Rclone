@@ -15,6 +15,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from .config_store import get_config
 from .db import get_db
+from .utils import bounded_int as _bounded_int
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +30,6 @@ _login_failures: dict[str, deque[float]] = defaultdict(deque)
 _login_blocked_until: dict[str, float] = {}
 
 
-def _bounded_int(value, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        parsed = default
-    return max(minimum, min(parsed, maximum))
 
 
 def _login_policy() -> tuple[int, int, int]:

@@ -457,6 +457,14 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         pair["min_free_gb"] = float(
             _number(pair.get("min_free_gb", 0), default=0, minimum=0, maximum=1_000_000)
         )
+        pair["max_success_age_hours"] = float(
+            _number(
+                pair.get("max_success_age_hours", 0),
+                default=0,
+                minimum=0,
+                maximum=8760,
+            )
+        )
         pair["require_mountpoint"] = _boolean(pair.get("require_mountpoint", False))
         mountpoint = str(pair.get("mountpoint") or "").strip()
         if mountpoint:

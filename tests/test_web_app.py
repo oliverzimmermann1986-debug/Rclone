@@ -6,7 +6,7 @@ import bcrypt
 import yaml
 from fastapi.testclient import TestClient
 
-from app import config_store, db
+from app import __version__ as app_version, config_store, db
 from app.config_store import Config
 from app.db import Database
 from app.jobs import runtime_state
@@ -118,11 +118,14 @@ def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeyp
         )
         assert filter_conflict.status_code == 409
 
+        ready = client.get("/readyz")
+        assert ready.status_code == 200
+        assert ready.json()["version"] == app_version
+
         overview = client.get("/api/diagnostics/overview")
         assert overview.status_code == 200
         overview_data = overview.json()
-        from app import __version__
-        assert overview_data["app"]["version"] == __version__
+        assert overview_data["app"]["version"] == app_version
         assert "system" in overview_data
         assert "stats_24h" in overview_data["jobs"]
 

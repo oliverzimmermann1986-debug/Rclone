@@ -218,7 +218,7 @@ systemctl restart rclone-sync-web.service
 sleep 1
 systemctl is-active --quiet rclone-sync-web.service
 systemctl is-active --quiet sync-scheduler.timer
-curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8001/healthz >/dev/null
+curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8001/readyz >/dev/null
 
 # Erst nach erfolgreichem Healthcheck wird die alte Python-Umgebung verworfen.
 [[ -z "$VENV_ROLLBACK" ]] || rm -rf "$VENV_ROLLBACK"
@@ -243,6 +243,13 @@ else
   printf '%-30s %s\n' "Passwort ändern:" "sudo -u $APP_USER $APP_DIR/venv/bin/python -m app.cli set-password"
 fi
 cat <<EOF
+
+Sicherheitshinweis (Transportverschlüsselung):
+  Die Web-UI lauscht unverschlüsselt auf 0.0.0.0:8001. Login-Passwort und
+  Session-Cookie sind im LAN mitlesbar. Empfohlen: Reverse-Proxy mit TLS
+  (z. B. Caddy/nginx auf 127.0.0.1:8001 weiterleiten), danach in der
+  Konfiguration web.secure_cookie: auto und web.hsts_seconds setzen sowie
+  web.allowed_hosts auf den Proxy-Hostnamen begrenzen.
 
 Nächste Schritte:
   1. sudo -u $APP_USER -H rclone config

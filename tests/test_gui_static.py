@@ -83,9 +83,27 @@ def test_template_direct_calls_exist_in_alpine_component():
 def test_gui_assets_reference_current_cache_version():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     login = (STATIC / "login.html").read_text(encoding="utf-8")
-    from app import __version__
-
-    assert f"/static/style.css?v={__version__}" in html
-    assert f"/static/app.js?v={__version__}" in html
+    assert "/static/style.css?v=1.7.0" in html
+    assert "/static/app.js?v=1.7.0" in html
     assert "Proxmox Backup Console" in login
     assert 'class="shell"' in login
+
+
+def test_scheduler_settings_explain_cron_and_offer_presets():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    for text in (
+        "Wann sollen automatische Läufe starten?",
+        "In verständlicher Form",
+        "Nächste Standard-Termine",
+        "Nachholfenster",
+        "Leistungsprofil wählen",
+    ):
+        assert text in html
+    for method in (
+        "applyScheduleMode",
+        "loadSchedulePreview",
+        "setPerformancePreset",
+        "schedulerRiskLevel",
+    ):
+        assert f"{method}(" in javascript

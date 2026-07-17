@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .auth import (
     LOGIN_CSRF_COOKIE,
+    bump_session_version,
     SESSION_COOKIE,
     clear_login_failures,
     create_session,
@@ -34,6 +35,7 @@ from .config_store import get_config
 from .db import get_db
 from .rclone_args import rclone_subprocess_env
 from .security import CSRF_COOKIE, new_csrf_token, require_csrf
+from .utils import bounded_number as _bounded_number
 from .routes import (
     api_browse,
     api_config,
@@ -55,14 +57,6 @@ MAX_API_BODY_BYTES = 2 * 1024 * 1024
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
-def _bounded_number(value, *, default: float, minimum: float, maximum: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError):
-        parsed = default
-    if parsed != parsed:  # NaN
-        parsed = default
-    return max(minimum, min(parsed, maximum))
 
 
 def _sd_notify(message: str) -> None:
@@ -144,7 +138,7 @@ app = FastAPI(
 
 def _host_allowed(request: Request) -> bool:
     # Lokale Healthchecks bleiben unabhängig von einer engen Host-Allowlist möglich.
-    if request.url.path == "/healthz" and request.client:
+    if request.url.path in {"/healthz", "/readyz"} and request.client:
         try:
             client_ip = ipaddress.ip_address(request.client.host.split("%", 1)[0])
             if client_ip.is_loopback and str(request.url.hostname or "").casefold() in {
@@ -169,8 +163,12 @@ def _host_allowed(request: Request) -> bool:
 
 def _same_origin(request: Request) -> bool:
     origin = request.headers.get("origin")
-    if not origin or origin == "null":
+    if not origin:
         return True
+    # "null" senden u. a. sandboxed iframes und manche Redirect-Ketten; für
+    # state-changing Requests ist das keine vertrauenswürdige Same-Origin-Angabe.
+    if origin == "null":
+        return False
     try:
         from urllib.parse import urlsplit
 
@@ -379,6 +377,12 @@ def logout_get():
 
 @app.post("/logout", dependencies=[Depends(require_auth), Depends(require_csrf)])
 def logout():
+    # Stateless Tokens lassen sich nur über die Session-Version widerrufen.
+    # Beim Single-Admin-Konto ist "alle Sessions beenden" das erwartete Verhalten.
+    try:
+        bump_session_version()
+    except Exception:
+        logger.exception("Session-Version konnte beim Logout nicht erhöht werden")
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie(SESSION_COOKIE, path="/")
     response.delete_cookie(CSRF_COOKIE, path="/")
@@ -402,15 +406,38 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception(
         "Unbehandelter Fehler request_id=%s path=%s", request_id, request.url.path
     )
-    return JSONResponse(
+    response = JSONResponse(
         status_code=500,
         content={"detail": "Interner Serverfehler", "request_id": request_id},
     )
+    # Der generische Exception-Handler läuft in Starlettes äußerster
+    # ServerErrorMiddleware und damit außerhalb der security_middleware.
+    # Fehlerantworten dürfen unabhängig vom Pfad nie gecacht werden.
+    response.headers["Cache-Control"] = "no-store"
+    return _apply_security_headers(response, request, request_id)
 
 
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "version": __version__}
+
+
+@app.get("/readyz")
+def readyz():
+    """Kompakter Readiness-Check für systemd/Uptime Kuma ohne sensible Details."""
+    try:
+        cfg = get_config()
+        paths = cfg.get("paths", default={}) or {}
+        with get_db().conn() as connection:
+            connection.execute("SELECT 1").fetchone()
+        data_dir = Path(str(paths.get("data_dir") or "/opt/rclone-sync/data"))
+        ready = data_dir.exists() and os.access(data_dir, os.R_OK | os.W_OK)
+    except Exception:
+        ready = False
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"ok": ready, "version": __version__},
+    )
 
 
 @app.get("/healthz/deep")

@@ -69,6 +69,19 @@ def prune_logs(
     return prune_log_files(days=days, dry_run=dry_run)
 
 
+@router.get("/audit")
+def audit_events(
+    limit: int = Query(100, ge=1, le=1000),
+    event_type: str = Query("", max_length=80),
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "events": get_db().audit_list(
+            limit=limit, event_type=event_type.strip() or None
+        ),
+    }
+
+
 @router.get("/database")
 def database_status() -> dict[str, Any]:
     db = get_db()
@@ -83,11 +96,13 @@ def prune_database(
     db = get_db()
     deleted = db.jobs_prune(days, keep_latest)
     auth_deleted = db.auth_prune(7)
+    audit_deleted = db.audit_prune(max(days, 365), max(keep_latest, 1000))
     db.checkpoint()
     return {
         "ok": True,
         "deleted_jobs": deleted,
         "deleted_auth_rows": auth_deleted,
+        "deleted_audit_events": audit_deleted,
         "stats": db.stats(),
     }
 
@@ -239,6 +254,9 @@ def create_config_snapshot() -> dict[str, Any]:
             {"message": "Aktuelle Konfiguration ist ungültig", "errors": exc.errors},
         )
     entry = _write_snapshot(normalized, revision)
+    get_db().audit_add(
+        "config_snapshot_created", actor="web", details={"name": entry["name"]}
+    )
     return {"ok": True, "snapshot": entry}
 
 
@@ -313,6 +331,11 @@ def restore_config_snapshot(
         new_revision = store.replace(normalized, expected_revision=revision)
     except ConfigConflictError:
         raise HTTPException(409, "Konfiguration wurde parallel geändert")
+    get_db().audit_add(
+        "config_snapshot_restored",
+        actor=user,
+        details={"name": body.name, "revision": new_revision},
+    )
     return {
         "ok": True,
         "warnings": warnings,
@@ -335,6 +358,7 @@ def support_bundle() -> Response:
         ),
         "database": {"stats": db.stats(), "integrity": db.integrity_check()},
         "recent_jobs": db.job_list(limit=100),
+        "recent_audit_events": db.audit_list(limit=100),
         "log_inventory": logs,
     }
     payload = io.BytesIO()

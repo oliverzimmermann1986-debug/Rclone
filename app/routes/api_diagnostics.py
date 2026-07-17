@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from ..db import get_db
 from ..jobs.rclone_sync import _count_files_up_to, _is_remote, build_job_plan
 from ..jobs.scheduler import DISABLED_VALUES, next_run_after
 from ..rclone_args import rclone_subprocess_env
+from ..scheduler_control import scheduler_state
 from ..security import require_csrf
 from ..system_info import system_snapshot
 
@@ -472,6 +474,25 @@ def overview() -> dict[str, Any]:
                 )
             except Exception:
                 next_run = None
+        last_success_at = (
+            float(latest_success.get("ended_at"))
+            if latest_success and latest_success.get("ended_at")
+            else None
+        )
+        max_success_age_hours = float(pair.get("max_success_age_hours") or 0)
+        success_age_hours = (
+            max(0.0, (now - last_success_at) / 3600.0)
+            if last_success_at is not None
+            else None
+        )
+        overdue = bool(
+            max_success_age_hours > 0
+            and (
+                last_success_at is None
+                or success_age_hours is None
+                or success_age_hours > max_success_age_hours
+            )
+        )
         pair_health.append(
             {
                 "name": name,
@@ -482,18 +503,42 @@ def overview() -> dict[str, Any]:
                 "last_status": latest.get("status") if latest else None,
                 "last_run": latest.get("ended_at") if latest else None,
                 "job_id": latest.get("job_id") if latest else None,
-                "last_success": latest_success.get("ended_at")
-                if latest_success
+                "last_success": last_success_at,
+                "success_age_hours": round(success_age_hours, 1)
+                if success_age_hours is not None
                 else None,
+                "max_success_age_hours": max_success_age_hours,
+                "overdue": overdue,
                 "error": ((latest.get("pair") or {}).get("error") if latest else None),
             }
         )
 
     scheduler_enabled, scheduler_active = _systemctl_state("sync-scheduler.timer")
+    scheduler_control = scheduler_state(db, now=now)
     web_enabled, web_active = _systemctl_state("rclone-sync-web.service")
     system = system_snapshot(str(paths.get("data_dir") or "/opt/rclone-sync/data"))
     alerts: list[dict[str, str]] = []
-    if scheduler_active != "active":
+    if not bool(backup.get("enabled", True)):
+        alerts.append(
+            {
+                "level": "info",
+                "message": "Automatische Zeitpläne sind in der Konfiguration deaktiviert",
+            }
+        )
+    elif scheduler_control.get("paused"):
+        until = scheduler_control.get("until")
+        alerts.append(
+            {
+                "level": "info",
+                "message": "Scheduler ist für ein Wartungsfenster pausiert"
+                + (
+                    f" bis {datetime.fromtimestamp(float(until)).strftime('%d.%m. %H:%M')}"
+                    if until
+                    else ""
+                ),
+            }
+        )
+    elif scheduler_active != "active":
         alerts.append(
             {"level": "warn", "message": "Per-Pair-Scheduler ist nicht aktiv"}
         )
@@ -508,6 +553,17 @@ def overview() -> dict[str, Any]:
                 "message": "Mindestens ein Mirror-/Bi-Sync-Pair ist noch nicht für Löschungen freigegeben",
             }
         )
+    overdue_pairs = [item for item in pair_health if item.get("overdue")]
+    if overdue_pairs:
+        names = ", ".join(str(item.get("name")) for item in overdue_pairs[:3])
+        suffix = " …" if len(overdue_pairs) > 3 else ""
+        alerts.append(
+            {
+                "level": "warn",
+                "message": f"{len(overdue_pairs)} Pair(s) ohne frischen erfolgreichen Lauf: {names}{suffix}",
+            }
+        )
+
     if system.get("memory", {}).get("percent_used", 0) >= 90:
         alerts.append(
             {
@@ -542,6 +598,8 @@ def overview() -> dict[str, Any]:
             "scheduler": {
                 "enabled": scheduler_enabled,
                 "active": scheduler_active,
+                "configured_enabled": bool(backup.get("enabled", True)),
+                "control": scheduler_control,
             },
         },
         "pairs": {

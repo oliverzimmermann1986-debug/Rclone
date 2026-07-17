@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ..config_store import get_config
 from ..db import get_db
+from ..scheduler_control import scheduler_state
 from .locks import file_lock_or_none
 from .rclone_sync import run_job
 from .scheduler import find_due_pairs
@@ -31,6 +32,24 @@ def _configure_logging(log_file: Path | None = None) -> None:
 def main() -> int:
     cfg = get_config()
     db = get_db()
+    backup = cfg.get("backup", default={}) or {}
+    if not bool(backup.get("enabled", True)):
+        _configure_logging(None)
+        logging.getLogger("scheduler_cli").info(
+            "Automatischer Scheduler ist in der Konfiguration deaktiviert"
+        )
+        return 0
+
+    control = scheduler_state(db)
+    if control.get("paused"):
+        _configure_logging(None)
+        logging.getLogger("scheduler_cli").info(
+            "Automatischer Scheduler pausiert bis %s (%s)",
+            control.get("until"),
+            control.get("reason") or "ohne Grund",
+        )
+        return 0
+
     due, status = find_due_pairs(cfg, db)
 
     if not due:
@@ -61,10 +80,7 @@ def main() -> int:
         job_id = db.job_start("backup", log_file=str(log_file))
         try:
             summary = run_job(dry_run=False, pairs_filter=due, trigger="scheduler")
-            if summary.get("cancelled"):
-                status_name = "cancelled"
-            else:
-                status_name = "ok" if summary.get("ok") else "error"
+            status_name = "ok" if summary.get("ok") else "error"
             db.job_finish(job_id, status_name, summary)
             logger.info(
                 "Scheduler-Run fertig: %s",
