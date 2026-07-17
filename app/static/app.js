@@ -186,7 +186,10 @@ function app() {
           const err = await response.json().catch(() => ({}));
           const rawDetail = err.detail || response.statusText;
           let detail = rawDetail;
-          if (typeof detail === 'object') detail = detail.message || (detail.errors || []).join(' · ') || JSON.stringify(detail);
+          if (typeof detail === 'object') {
+            const parts = [detail.message, ...(detail.errors || [])].filter(Boolean);
+            detail = parts.join(' · ') || JSON.stringify(detail);
+          }
           if (options.captureError) return { __error: true, status: response.status, detail: rawDetail };
           if (!options.silent) {
             if (response.status === 409 && (url === '/api/config' || url === '/api/config/filter-file')) {
