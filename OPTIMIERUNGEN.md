@@ -1,4 +1,4 @@
-# Audit und Optimierungen – rclone-sync-container 1.7.2
+# Audit und Optimierungen – rclone-sync-container 1.7.4
 
 Stand: 17.07.2026
 
