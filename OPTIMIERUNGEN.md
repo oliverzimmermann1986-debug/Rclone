@@ -3,6 +3,10 @@
 Stand: 17.07.2026
 
 
+## Hotfix 1.7.4
+
+- `Origin: null` ohne `Sec-Fetch-Site`-Header wird wieder akzeptiert (ältere Browser, Webviews und Privacy-Extensions, die Fetch-Metadata strippen, blieben sonst vom Login ausgesperrt). Abgelehnt wird nur noch, wenn `Sec-Fetch-Site` die Anfrage ausdrücklich als cross-/same-site meldet. Der Double-Submit-CSRF-Schutz mit SameSite=strict-Cookies bleibt wie vor 1.7.1 die maßgebliche Verteidigung.
+
 ## Hotfix 1.7.3
 
 - Origin-Prüfung vergleicht nur noch Host:Port statt Schema+Host: Hinter TLS-Reverse-Proxys, deren `X-Forwarded-Proto` uvicorn nicht vertraut, sendet der Browser `https://…`, während die App `http` sieht — das blockierte Logins fälschlich. Der Host im Origin-Header ist nicht fälschbar; die Schutzwirkung bleibt erhalten.
