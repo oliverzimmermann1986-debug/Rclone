@@ -3,6 +3,10 @@
 Stand: 17.07.2026
 
 
+## 1.8.4
+
+- Fehlermeldungen beim Speichern zeigen jetzt die konkreten Validierungsfehler an („Konfiguration ungültig · pbs.targets[0].name ist ungültig · …") statt nur der generischen Meldung — ein ||-Kurzschluss im Frontend hatte die Details verschluckt.
+
 ## 1.8.3
 
 - Richtungs-Beschreibungen neutral formuliert („Remote-Pfad → Lokaler Pfad" statt „Remote → Lokal"), damit sie auch für lokal→lokal-Pairs stimmen; Vorlagen-Dropdown angeglichen.
