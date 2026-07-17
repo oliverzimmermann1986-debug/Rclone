@@ -50,6 +50,22 @@ CREATE TABLE IF NOT EXISTS auth_failures (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_auth_failures_updated ON auth_failures(updated_at);
+
+CREATE TABLE IF NOT EXISTS runtime_settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'system',
+    created_at REAL NOT NULL,
+    details_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_type_created ON audit_events(event_type, created_at DESC);
 """
 
 
@@ -589,6 +605,99 @@ class Database:
             )
             return int(cursor.rowcount or 0)
 
+    def runtime_get(self, key: str, default: Any = None) -> Any:
+        if not key or len(key) > 128:
+            raise ValueError("Ungültiger Runtime-Key")
+        with self.conn() as connection:
+            row = connection.execute(
+                "SELECT value_json FROM runtime_settings WHERE key=?", (key,)
+            ).fetchone()
+        if not row:
+            return default
+        try:
+            return json.loads(row["value_json"])
+        except (json.JSONDecodeError, TypeError):
+            return default
+
+    def runtime_set(self, key: str, value: Any) -> None:
+        if not key or len(key) > 128:
+            raise ValueError("Ungültiger Runtime-Key")
+        payload = json.dumps(value, ensure_ascii=False, default=str)
+        if len(payload.encode("utf-8")) > 64 * 1024:
+            raise ValueError("Runtime-Wert ist zu groß")
+        now = time.time()
+        with self.conn() as connection:
+            connection.execute(
+                "INSERT INTO runtime_settings(key, value_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
+                (key, payload, now),
+            )
+
+    def runtime_delete(self, key: str) -> None:
+        with self.conn() as connection:
+            connection.execute("DELETE FROM runtime_settings WHERE key=?", (key,))
+
+    def audit_add(
+        self,
+        event_type: str,
+        *,
+        actor: str = "system",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        event = str(event_type or "").strip()
+        if not event or len(event) > 80:
+            raise ValueError("Ungültiger Audit-Ereignistyp")
+        actor_value = str(actor or "system").strip()[:128] or "system"
+        payload = json.dumps(details or {}, ensure_ascii=False, default=str)
+        if len(payload.encode("utf-8")) > 128 * 1024:
+            payload = json.dumps(
+                {"note": "Details wegen Größe verworfen"}, ensure_ascii=False
+            )
+        with self.conn() as connection:
+            cursor = connection.execute(
+                "INSERT INTO audit_events(event_type, actor, created_at, details_json) VALUES (?, ?, ?, ?)",
+                (event, actor_value, time.time(), payload),
+            )
+            return int(cursor.lastrowid)
+
+    def audit_list(
+        self, *, limit: int = 100, event_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit or 100), 1000))
+        params: list[Any] = []
+        where = ""
+        if event_type:
+            where = " WHERE event_type=?"
+            params.append(str(event_type))
+        params.append(limit)
+        with self.conn() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM audit_events{where} ORDER BY created_at DESC, id DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["details"] = json.loads(item.get("details_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                item["details"] = {}
+            item.pop("details_json", None)
+            result.append(item)
+        return result
+
+    def audit_prune(self, older_than_days: int = 365, keep_latest: int = 1000) -> int:
+        days = max(1, min(int(older_than_days), 3650))
+        keep = max(100, min(int(keep_latest), 100000))
+        cutoff = time.time() - days * 86400
+        with self.conn() as connection:
+            cursor = connection.execute(
+                "DELETE FROM audit_events WHERE created_at < ? AND id NOT IN "
+                "(SELECT id FROM audit_events ORDER BY created_at DESC LIMIT ?)",
+                (cutoff, keep),
+            )
+            return int(cursor.rowcount or 0)
+
     def integrity_check(self) -> Dict[str, Any]:
         with self.conn() as connection:
             result = str(connection.execute("PRAGMA quick_check").fetchone()[0])
@@ -613,6 +722,14 @@ class Database:
                     "SELECT COUNT(*) FROM jobs WHERE status='running'"
                 ).fetchone()[0]
             )
+            audit = int(
+                connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+            )
+            runtime = int(
+                connection.execute("SELECT COUNT(*) FROM runtime_settings").fetchone()[
+                    0
+                ]
+            )
         try:
             size = self.path.stat().st_size
         except OSError:
@@ -622,6 +739,8 @@ class Database:
             "pair_runs": pairs,
             "auth_failures": auth,
             "running": running,
+            "audit_events": audit,
+            "runtime_settings": runtime,
             "bytes": size,
         }
 

@@ -9,14 +9,9 @@ from typing import Any, Iterator
 from .config_store import get_config
 from .db import get_db
 from .security import is_relative_to
+from .utils import bounded_int as _bounded_int
 
 
-def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        parsed = default
-    return max(minimum, min(parsed, maximum))
 
 
 def logs_root() -> Path:
@@ -90,12 +85,16 @@ def run_automatic_maintenance() -> dict[str, Any]:
     )
     deleted_jobs = get_db().jobs_prune(retention_days, keep_latest)
     deleted_auth = get_db().auth_prune(7)
+    deleted_audit = get_db().audit_prune(
+        max(retention_days, 365), max(keep_latest, 1000)
+    )
     logs = prune_logs(days=log_days, dry_run=False, limit_details=0)
     get_db().checkpoint()
     return {
         "enabled": True,
         "deleted_jobs": deleted_jobs,
         "deleted_auth_rows": deleted_auth,
+        "deleted_audit_events": deleted_audit,
         "deleted_logs": logs["deleted"],
         "deleted_log_bytes": logs["bytes_deleted"],
     }

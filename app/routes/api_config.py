@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from ..auth import require_auth, verify_password
 from ..config_store import ConfigConflictError, get_config
 from ..config_validation import ConfigValidationError, validate_config
+from ..db import get_db
 from ..security import ensure_within, require_csrf
 
 router = APIRouter(
@@ -193,6 +194,15 @@ def update_config(body: ConfigUpdate) -> dict[str, Any]:
         raise HTTPException(
             500, f"Konfiguration konnte nicht gespeichert werden: {exc}"
         )
+    get_db().audit_add(
+        "config_saved",
+        actor="web",
+        details={
+            "revision": revision,
+            "pair_count": len((normalized.get("backup") or {}).get("pairs") or []),
+            "warning_count": len(warnings),
+        },
+    )
     return {
         "ok": True,
         "warnings": warnings,
@@ -310,6 +320,7 @@ def change_password(
         (data_dir / ".initial-password").unlink(missing_ok=True)
     except (OSError, ValueError) as exc:
         raise HTTPException(500, f"Passwort konnte nicht gespeichert werden: {exc}")
+    get_db().audit_add("password_changed", actor=user, details={})
     return {"ok": True, "message": "Passwort geändert", "reauthenticate": True}
 
 
@@ -412,11 +423,17 @@ def save_filter_file(body: FilterPayload) -> dict[str, Any]:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
             finally:
                 os.close(lock_fd)
+        revision = _filter_revision(path, encoded)
+        get_db().audit_add(
+            "filter_saved",
+            actor="web",
+            details={"bytes": len(encoded), "revision": revision},
+        )
         return {
             "ok": True,
             "path": str(path),
             "bytes": len(encoded),
-            "revision": _filter_revision(path, encoded),
+            "revision": revision,
         }
     except HTTPException:
         raise

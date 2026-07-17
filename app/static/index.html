@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#111827">
   <title>rclone-sync</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.6.0">
-  <script defer src="/static/alpine.min.js?v=1.6.0"></script>
+  <link rel="stylesheet" href="/static/style.css?v=1.7.0">
+  <script defer src="/static/alpine.min.js?v=1.7.0"></script>
 </head>
 <body x-data="app()" x-init="init()" @keydown.escape.window="closeOverlays()">
   <div class="app-shell">
@@ -50,7 +50,7 @@
         </div>
         <div class="sidebar-meta">
           <span x-text="overview.data?.system?.virtualization || '—'"></span>
-          <span x-text="'v' + (overview.data?.app?.version || '1.6.0')"></span>
+          <span x-text="'v' + (overview.data?.app?.version || '1.7.0')"></span>
         </div>
       </div>
     </aside>
@@ -100,6 +100,18 @@
               </div>
             </template>
           </div>
+
+          <article class="scheduler-control-strip" :class="schedulerControl.paused ? 'paused' : (schedulerControl.enabled ? 'active' : 'disabled')">
+            <div class="scheduler-control-copy">
+              <span class="scheduler-control-icon" aria-hidden="true" x-text="schedulerControl.paused ? 'Ⅱ' : (schedulerControl.enabled ? '▶' : '○')"></span>
+              <div><strong x-text="schedulerControlLabel()"></strong><small x-show="schedulerControl.paused" x-text="schedulerControl.reason || 'Wartungsfenster'"></small><small x-show="!schedulerControl.paused && schedulerControl.enabled">Geplante Pairs werden zu ihren nächsten Terminen automatisch gestartet.</small><small x-show="!schedulerControl.enabled">Manuelle Läufe bleiben weiterhin möglich.</small></div>
+            </div>
+            <div class="scheduler-control-actions">
+              <button class="button secondary" x-show="!schedulerControl.paused && schedulerControl.enabled" @click="pauseScheduler(60)">1 Std. pausieren</button>
+              <button class="button secondary" x-show="!schedulerControl.paused && schedulerControl.enabled" @click="pauseSchedulerUntilTomorrow()">Bis morgen 06:00</button>
+              <button class="button primary" x-show="schedulerControl.paused" @click="resumeScheduler()">Jetzt fortsetzen</button>
+            </div>
+          </article>
 
           <div class="metric-grid">
             <article class="metric-card">
@@ -305,7 +317,7 @@
 
                 <div class="pair-warning-row" x-show="pairIssues(pair).length || pairRuntimeIssue(pair)">
                   <template x-for="issue in pairIssues(pair)" :key="issue"><span class="issue-chip" x-text="issue"></span></template>
-                  <span class="issue-chip error" x-show="pairRuntimeIssue(pair)" x-text="pairRuntimeIssue(pair)"></span>
+                  <span class="issue-chip" :class="pairRuntimeIssueLevel(pair)" x-show="pairRuntimeIssue(pair)" x-text="pairRuntimeIssue(pair)"></span>
                 </div>
 
                 <div class="pair-quick-actions">
@@ -343,10 +355,11 @@
                   <details class="disclosure">
                     <summary>Mount-, Mindestbestands- und Filterregeln</summary>
                     <div class="disclosure-body">
-                      <div class="form-grid three">
+                      <div class="form-grid four">
                         <label class="field"><span>Min. lokale Dateien</span><input type="number" min="0" x-model.number="pair.min_local_files"></label>
                         <label class="field"><span>Min. Remote-Dateien</span><input type="number" min="0" x-model.number="pair.min_remote_files"></label>
                         <label class="field"><span>Min. freier Speicher (GiB)</span><input type="number" min="0" step="0.1" x-model.number="pair.min_free_gb"></label>
+                        <label class="field"><span>Erfolg spätestens nach</span><div class="number-with-unit"><input type="number" min="0" max="8760" step="1" x-model.number="pair.max_success_age_hours"><span>Std.</span></div><small>0 deaktiviert die Überfällig-Warnung.</small></label>
                       </div>
                       <div class="form-grid two">
                         <label class="field"><span>Erwarteter Mountpoint</span><input class="mono" x-model="pair.mountpoint" placeholder="/mnt/media-nas"></label>
@@ -427,7 +440,7 @@
           <div class="metric-grid">
             <article class="metric-card"><div class="metric-head"><span>Virtualisierung</span></div><strong class="metric-value text" x-text="overview.data?.system?.virtualization || '—'"></strong><span class="metric-sub" x-text="overview.data?.system?.hostname || '—'"></span></article>
             <article class="metric-card"><div class="metric-head"><span>Webdienst</span></div><strong class="metric-value text" x-text="overview.data?.services?.web?.active || '—'"></strong><span class="metric-sub" x-text="overview.data?.services?.web?.enabled || '—'"></span></article>
-            <article class="metric-card"><div class="metric-head"><span>Scheduler</span></div><strong class="metric-value text" x-text="overview.data?.services?.scheduler?.active || '—'"></strong><span class="metric-sub" x-text="overview.data?.services?.scheduler?.enabled || '—'"></span></article>
+            <article class="metric-card"><div class="metric-head"><span>Scheduler</span></div><strong class="metric-value text" x-text="schedulerControlLabel()"></strong><span class="metric-sub" x-text="(overview.data?.services?.scheduler?.active || '—') + ' · Timer ' + (overview.data?.services?.scheduler?.enabled || '—')"></span></article>
             <article class="metric-card"><div class="metric-head"><span>Datenbank</span></div><strong class="metric-value text" x-text="maintenance.database?.integrity?.ok ? 'Konsistent' : 'Nicht geprüft'"></strong><span class="metric-sub"><span x-text="maintenance.database?.stats?.jobs || 0"></span> Jobs</span></article>
           </div>
 
@@ -464,6 +477,14 @@
               <div class="maintenance-card"><strong>Logdateien</strong><dl><div><dt>Gefunden</dt><dd x-text="maintenance.logs.length"></dd></div><div><dt>Aufbewahrung</dt><dd><span x-text="config.maintenance?.log_retention_days || 90"></span> Tage</dd></div><div><dt>Prune-Test</dt><dd x-text="maintenance.prune ? (maintenance.prune.matched + ' betroffen') : '—'"></dd></div></dl><div class="button-stack"><button class="button secondary" @click="pruneLogs(true)">Prune testen</button><button class="button danger ghost" @click="if(confirm('Alte Logs wirklich löschen?')) pruneLogs(false)">Alte Logs löschen</button></div></div>
             </div>
             <details class="disclosure" x-show="maintenance.logs.length"><summary>Gefundene Logdateien anzeigen</summary><div class="disclosure-body"><label class="search-field"><span>⌕</span><input x-model="maintenance.logQuery" @keyup.enter="loadLogs()" placeholder="Logdateien filtern"></label><div class="log-file-list"><template x-for="log in maintenance.logs" :key="log.path"><div><span class="mono" x-text="log.path"></span><span x-text="formatBytes(log.size)"></span><span x-text="formatTs(log.mtime)"></span></div></template></div></div></details>
+          </article>
+
+          <article class="panel audit-panel">
+            <div class="panel-head"><div><span class="section-kicker">Nachvollziehbarkeit</span><h3>Aktivitätsprotokoll</h3><p>Wichtige Bedien- und Konfigurationsaktionen – ohne Passwörter, Tokens oder Webhook-URLs.</p></div><button class="button secondary" @click="loadAudit()" :disabled="audit.loading">Aktualisieren</button></div>
+            <div class="audit-list" x-show="audit.items.length">
+              <template x-for="event in audit.items" :key="event.id"><div class="audit-row"><span class="audit-mark"></span><div><strong x-text="auditLabel(event.event_type)"></strong><small><span x-text="event.actor"></span> · <span x-text="formatDateTime(event.created_at)"></span></small></div><code x-text="Object.keys(event.details || {}).length ? summaryShort(event.details) : '—'"></code></div></template>
+            </div>
+            <div class="empty-state compact" x-show="!audit.loading && !audit.items.length"><strong>Noch keine protokollierten Aktionen</strong><span>Neue Scheduler-, Konfigurations- und Recovery-Aktionen erscheinen hier.</span></div>
           </article>
 
           <article class="panel recovery-panel">
@@ -525,6 +546,17 @@
               <article class="scheduler-settings" x-show="settingsTab==='scheduler'" @input="markConfigDirty()" @change="markConfigDirty()">
                 <div class="scheduler-layout">
                   <div class="scheduler-main">
+                    <section class="settings-section scheduler-operation-section">
+                      <div class="settings-section-head"><div><span class="section-kicker">Betriebssteuerung</span><h3>Automatische Läufe ein- und aussetzen</h3><p>Für Proxmox-Wartung, NAS-Neustarts oder größere Umbauten kannst du ausschließlich die Automatik pausieren. Manuelle Dry-Runs und Starts bleiben verfügbar.</p></div><span class="badge" :class="schedulerControl.paused ? 'skipped' : (config.backup.enabled ? 'ok' : 'neutral')" x-text="schedulerControlLabel()"></span></div>
+                      <label class="check-row feature-check"><input type="checkbox" x-model="config.backup.enabled"><span><strong>Automatische Zeitpläne grundsätzlich aktivieren</strong><small>Steuert den Scheduler dauerhaft. Der systemd-Timer darf dabei weiter aktiv bleiben.</small></span></label>
+                      <div class="scheduler-pause-card">
+                        <div><strong>Temporäres Wartungsfenster</strong><small x-show="!schedulerControl.paused">Pausiert nur geplante Starts und läuft nach Ablauf automatisch weiter.</small><small x-show="schedulerControl.paused" x-text="(schedulerControl.reason || 'Wartungsfenster') + ' · ' + schedulerControlLabel()"></small></div>
+                        <label class="field compact-field" x-show="!schedulerControl.paused"><span>Dauer</span><select x-model.number="schedulerPause.minutes"><option :value="30">30 Minuten</option><option :value="60">1 Stunde</option><option :value="240">4 Stunden</option><option :value="720">12 Stunden</option><option :value="1440">24 Stunden</option></select></label>
+                        <label class="field pause-reason" x-show="!schedulerControl.paused"><span>Grund</span><input x-model="schedulerPause.reason" maxlength="300" placeholder="z. B. Proxmox-Backup / NAS-Wartung"></label>
+                        <div class="button-stack horizontal"><button type="button" class="button secondary" x-show="!schedulerControl.paused" @click="pauseScheduler()" :disabled="!config.backup.enabled">Pausieren</button><button type="button" class="button secondary" x-show="!schedulerControl.paused" @click="pauseSchedulerUntilTomorrow()" :disabled="!config.backup.enabled">Bis morgen 06:00</button><button type="button" class="button primary" x-show="schedulerControl.paused" @click="resumeScheduler()">Automatik fortsetzen</button></div>
+                      </div>
+                    </section>
+
                     <section class="settings-section schedule-section">
                       <div class="settings-section-head">
                         <div><span class="section-kicker">Zeitplanung</span><h3>Wann sollen automatische Läufe starten?</h3><p>Wähle einen verständlichen Zeitplan. Die Cron-Angabe wird automatisch erzeugt und bleibt für Sonderfälle editierbar.</p></div>
@@ -603,6 +635,7 @@
                     <div class="summary-card-head"><span class="section-kicker">Live-Vorschau</span><h3>So arbeitet der Scheduler</h3><p>Aus dem aktuellen, noch nicht gespeicherten Entwurf.</p></div>
                     <div class="summary-primary" :class="schedulePreview.valid === false ? 'error' : (scheduleEditor.mode === 'manual' ? 'manual' : 'active')"><span>Standard-Zeitplan</span><strong x-text="humanCron(config.backup.default_schedule)"></strong><code x-text="config.backup.default_schedule || 'manual'"></code></div>
                     <dl class="scheduler-facts">
+                      <div><dt>Automatik</dt><dd x-text="schedulerControlLabel()"></dd></div>
                       <div><dt>Zeitzone</dt><dd x-text="config.backup.timezone || 'Europe/Berlin'"></dd></div>
                       <div><dt>Parallel</dt><dd><span x-text="config.backup.max_parallel || 1"></span> Pair(s)</dd></div>
                       <div><dt>Timeout</dt><dd><span x-text="config.backup.timeout_hours || 4"></span> Stunden</dd></div>
@@ -691,6 +724,7 @@
         <div class="alert info"><span class="alert-icon">i</span><span>Quick-Sync ist für einmalige Aufgaben. Dauerhafte Synchronisationen gehören als Pair in die Konfiguration.</span></div>
         <label class="field"><span>Remote-Pfad</span><div class="input-action"><input class="mono" x-model="quick.remote" placeholder="pcloud:/Backup"><button @click="openQuickPicker('remote')">Ordner</button></div></label>
         <label class="field"><span>Lokaler Pfad</span><div class="input-action"><input class="mono" x-model="quick.local" placeholder="/mnt/backup"><button @click="openQuickPicker('local')">Ordner</button></div></label>
+        <label class="check-row"><input type="checkbox" x-model="quick.new_target"><span><strong>Neues leeres Ziel</strong><small>Legt den lokalen Pfad an und deaktiviert dafür den Mount-Schutz (min_local_files=0). Nur setzen, wenn das Ziel bewusst neu ist.</small></span></label>
         <div class="form-grid two"><label class="field"><span>Richtung</span><select x-model="quick.direction" @change="if(quick.direction==='bisync')quick.mode='bisync';else if(quick.mode==='bisync')quick.mode='copy'"><option value="pull">Remote → Lokal</option><option value="push">Lokal → Remote</option><option value="bisync">Bidirektional</option></select></label><label class="field"><span>Modus</span><select x-model="quick.mode" :disabled="quick.direction==='bisync'"><option value="copy">Copy – ohne Löschen</option><option value="sync">Sync – Mirror</option><option value="bisync" x-show="quick.direction==='bisync'">Bi-Sync</option></select></label></div>
         <label class="check-row"><input type="checkbox" x-model="quick.dry_run"><span><strong>Dry-Run</strong><small>Nur anzeigen, welche Änderungen ausgeführt würden.</small></span></label>
         <div class="safety-box" x-show="['sync','bisync'].includes(quick.mode) && !quick.dry_run"><div><strong>Löschschutz erforderlich</strong><span>Produktive Mirror-Läufe benötigen eine Freigabe und feste Obergrenze.</span></div><label class="field compact-field"><span>Max. Löschungen</span><input type="number" min="0" max="10000000" x-model.number="quick.max_delete"></label><label class="switch"><input type="checkbox" x-model="quick.allow_delete"><span></span><em>Freigeben</em></label></div>
@@ -734,6 +768,6 @@
   </div>
 
   <div class="toast" :class="toast.type" x-show="toast.show" x-transition.opacity x-text="toast.msg" role="status" aria-live="polite" x-cloak></div>
-  <script src="/static/app.js?v=1.6.0"></script>
+  <script src="/static/app.js?v=1.7.0"></script>
 </body>
 </html>

@@ -74,3 +74,19 @@ def test_example_config_is_valid_and_examples_are_disabled():
     assert warnings == []
     assert normalized["backup"]["pairs"]
     assert all(pair["enabled"] is False for pair in normalized["backup"]["pairs"])
+
+
+def test_pair_success_age_is_bounded(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [
+        {
+            "name": "Freshness",
+            "remote": "cloud:/data",
+            "local": str(tmp_path / "data"),
+            "direction": "pull",
+            "mode": "copy",
+            "max_success_age_hours": 99999,
+        }
+    ]
+    normalized, _ = validate_config(cfg)
+    assert normalized["backup"]["pairs"][0]["max_success_age_hours"] == 8760

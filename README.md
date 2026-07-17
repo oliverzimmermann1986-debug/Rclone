@@ -1,10 +1,12 @@
 # rclone-sync-container
 
-**Version 1.6.0** – Web- und Scheduler-Dienst für sichere `rclone bisync`, `copy`- und `sync`-Läufe zwischen Cloud-Remotes und lokalen NAS-/Storage-Pfaden. Ausgelegt für einen Debian-/Ubuntu-LXC mit systemd.
+**Version 1.7.1** – Web- und Scheduler-Dienst für sichere `rclone bisync`, `copy`- und `sync`-Läufe zwischen Cloud-Remotes und lokalen NAS-/Storage-Pfaden. Ausgelegt für einen Debian-/Ubuntu-LXC mit systemd.
 
 ## Kernfunktionen
 
 - Mehrere Sync-Pairs mit Cron-Zeitplan, manuellen Läufen und begrenzter Parallelität
+- Persistente Scheduler-Wartungsfenster mit automatischer Fortsetzung
+- Frischeüberwachung pro Pair für zu alte oder fehlende erfolgreiche Läufe
 - `bisync`, `pull` und `push`; einseitig wahlweise `copy` oder `sync`
 - Prozessübergreifende Locks, Laufzeitstatus und Abbruch für Web, CLI und Scheduler
 - Mount-, Sentinel-, Mindestdatei-, Freiplatz- und Remote-Prüfungen vor jedem Lauf
@@ -18,9 +20,11 @@
 - Responsive Proxmox-Betriebskonsole mit Desktop-Sidebar und mobiler Bottom-Navigation
 - Ressourcenübersicht für LXC/VM einschließlich cgroup-CPU/RAM/PID-Limits, Servicezustände, Pair-Gesundheit und 24-Stunden-Statistik
 - Filterbare/paginierte Jobhistorie mit Detailansicht, Logsuche und Auto-Aktualisierung
+- Lokales Auditprotokoll für Scheduler-, Konfigurations-, Start- und Recovery-Aktionen
+- Kompakter `/readyz`-Endpunkt für Uptime Kuma und Readiness-Prüfungen
 
 
-## Weboberfläche 1.6
+## Weboberfläche 1.7
 
 Die Oberfläche ist als Betriebszentrale statt als reine Konfigurationsmaske aufgebaut:
 
@@ -33,6 +37,9 @@ Die Oberfläche ist als Betriebszentrale statt als reine Konfigurationsmaske auf
 - **System:** Doctor-Prüfung, Servicezustände, Speicherübersicht, redigiertes Support-Bundle sowie kontrollierte Log-/Datenbankwartung
 - **Recovery:** lokale, vollständige Konfigurations-Snapshots mit SHA-256-Prüfung, Pre-Restore-Sicherung, Revisionsschutz und erzwungener Neuanmeldung nach Restore
 - **Einstellungen:** klar beschriftete Bereiche mit Änderungsstatus, Validierung und kurzen fachlichen Erklärungen
+- **Scheduler-Betriebssteuerung:** Automatik dauerhaft deaktivieren oder für Wartungsfenster von 30 Minuten bis 31 Tage pausieren; manuelle Läufe bleiben möglich
+- **Frischeüberwachung:** pro Pair optional festlegen, nach wie vielen Stunden ohne Erfolg eine Warnung erscheint
+- **Audit:** wichtige Aktionen werden ohne Secrets lokal und filterbar protokolliert
 - **Scheduler-Assistent:** verständliche Auswahl für manuell, täglich, werktags, wöchentlich oder Intervalle; Cron wird automatisch erzeugt, übersetzt und mit den nächsten fünf Terminen in der gewählten Zeitzone geprüft
 - **Leistungsprofile:** „Schonend“, „Ausgewogen“ und „Schnell“ setzen rclone-Parallelität gemeinsam; eine Lastwarnung berücksichtigt aktive Pairs, Transfers und Checkers
 - **Pair-Zeitpläne:** können den globalen Standard ausdrücklich übernehmen oder weiterhin einen eigenen verständlichen Zeitplan verwenden
@@ -348,7 +355,8 @@ Wichtige Endpunkte:
 - `GET|POST /api/maintenance/config/snapshots`
 - `POST /api/maintenance/config/snapshots/restore`
 - `GET /api/maintenance/support-bundle`
-- `GET /healthz`
+- `GET /healthz` – Prozess-Liveness
+- `GET /readyz` – DB-/Datenverzeichnis-Readiness für Uptime Kuma/systemd
 - `GET /healthz/deep` – authentifiziert
 
 ## Wartung und Wiederherstellung

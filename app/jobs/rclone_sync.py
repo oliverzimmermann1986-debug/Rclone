@@ -24,6 +24,7 @@ from ..rclone_args import (
     validate_rclone_args,
 )
 from . import runtime_state
+from ..utils import bounded_number as _bounded_number
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,8 @@ def _rclone_cache_args(verb: Optional[str] = None) -> list[str]:
     return args
 
 
-def _read_tail(path: Path, max_bytes: int = 1024 * 1024) -> str:
+def read_log_tail(path: Path, max_bytes: int = 1024 * 1024) -> str:
+    """Liest speicherschonend das Ende einer Logdatei (gemeinsame Implementierung)."""
     try:
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -148,12 +150,20 @@ def cancel_job() -> dict[str, Any]:
     for proc in local_procs:
         if proc.poll() is None:
             _terminate_proc(proc, graceful_sec=2)
-    try:
-        from ..notifications import notify
+    def _notify_cancelled() -> None:
+        try:
+            from ..notifications import notify
 
-        notify("cancelled", "Sync abgebrochen", f"{killed} rclone-Prozess(e) beendet")
-    except Exception:
-        pass
+            notify(
+                "cancelled", "Sync abgebrochen", f"{killed} rclone-Prozess(e) beendet"
+            )
+        except Exception:
+            logger.exception("Cancel-Benachrichtigung fehlgeschlagen")
+
+    # Webhooks (bis zu 60s Timeout) dürfen den Cancel-Request nicht blockieren.
+    threading.Thread(
+        target=_notify_cancelled, name="notify-cancelled", daemon=True
+    ).start()
     return {"ok": True, "killed": killed}
 
 
@@ -166,16 +176,6 @@ def reset_cancel() -> None:
     runtime_state.reset_cancel_marker()
 
 
-def _bounded_number(
-    value: Any, *, default: float, minimum: float, maximum: float
-) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError):
-        parsed = default
-    if parsed != parsed:
-        parsed = default
-    return max(minimum, min(parsed, maximum))
 
 
 def _is_remote(path: str) -> bool:
@@ -459,6 +459,7 @@ def _remote_reachable(
                     "--stat",
                     "--no-mimetype",
                     "--no-modtime",
+                    "--no-size",
                     *_rclone_cache_args(),
                     "--",
                     path,
@@ -741,7 +742,8 @@ def _precheck_pair(pair: dict[str, Any]) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _parse_final_stats(log_tail: str) -> dict[str, Any]:
+def parse_final_stats(log_tail: str) -> dict[str, Any]:
+    """Parst die letzte rclone-'Transferred:'-Zeile aus einem Log-Ausschnitt."""
     for line in reversed(log_tail.splitlines()):
         match = _STATS_RE.search(line)
         if match:
@@ -861,7 +863,7 @@ def _sync_pair(
             return summary
 
         rc = _run_rclone_command(cmd, log_file, timeout_sec=timeout_sec, pair_name=name)
-        log_tail = _read_tail(log_file)
+        log_tail = read_log_tail(log_file)
         needs_resync = (
             verb == "bisync" and rc != 0 and bool(_RESYNC_RE.search(log_tail))
         )
@@ -898,12 +900,12 @@ def _sync_pair(
                 pair_name=name,
             )
             summary["resync_return_code"] = rc
-            log_tail = _read_tail(log_file)
+            log_tail = read_log_tail(log_file)
         elif needs_resync:
             summary["resync_required"] = True
 
         summary["return_code"] = rc
-        summary.update(_parse_final_stats(log_tail))
+        summary.update(parse_final_stats(log_tail))
         summary["cancelled"] = is_cancelled() or rc == 130
         summary["ok"] = rc == 0 and not summary["cancelled"]
         if not summary["ok"]:
@@ -1249,7 +1251,7 @@ def run_pair_check(
                 "cancelled": is_cancelled(),
             }
         )
-        result.update(_parse_final_stats(_read_tail(log_file)))
+        result.update(parse_final_stats(read_log_tail(log_file)))
         if not result["ok"]:
             result["error"] = (
                 "Abgebrochen" if result["cancelled"] else f"rclone check exit {rc}"
@@ -1273,15 +1275,20 @@ def run_quick(
     extra_args: Optional[list[str] | str] = None,
     allow_delete: bool = False,
     max_delete: Optional[int] = None,
+    min_local_files: int = 1,
 ) -> dict[str, Any]:
     cfg = get_config()
+    try:
+        min_local_files_i = max(0, int(min_local_files))
+    except (TypeError, ValueError):
+        min_local_files_i = 1
     pair = {
         "name": "quick",
         "remote": remote_path,
         "local": local_path,
         "direction": direction,
         "mode": mode,
-        "min_local_files": 1,
+        "min_local_files": min_local_files_i,
         "allow_delete": bool(allow_delete),
         "max_delete": max_delete,
     }
@@ -1294,6 +1301,11 @@ def run_quick(
             "remote": remote_path,
             "local": local_path,
         }
+
+    # Wie in _sync_pair: Ein bewusst neues lokales Ziel (min_local_files=0 hat den
+    # Mount-Schutz passiert) wird vor dem Lauf angelegt; bisync verlangt es sogar.
+    if not _is_remote(local_path) and not Path(local_path).exists():
+        Path(local_path).mkdir(parents=True, exist_ok=True)
 
     reset_cancel()
     log_dir = (
@@ -1339,7 +1351,7 @@ def run_quick(
         rc = _run_rclone_command(
             cmd, log_file, timeout_sec=timeout_sec, pair_name="quick"
         )
-        tail = _read_tail(log_file)
+        tail = read_log_tail(log_file)
         needs_resync = verb == "bisync" and rc != 0 and bool(_RESYNC_RE.search(tail))
         if needs_resync:
             summary["resync_required"] = True
@@ -1350,7 +1362,7 @@ def run_quick(
                 "ok": rc == 0 and not is_cancelled(),
             }
         )
-        summary.update(_parse_final_stats(tail))
+        summary.update(parse_final_stats(tail))
         if not summary["ok"]:
             summary["error"] = (
                 "Abgebrochen"
