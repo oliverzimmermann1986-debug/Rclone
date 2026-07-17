@@ -1010,6 +1010,7 @@ function app() {
     openPbsPicker(index) { this.openPicker('pbs-target', index); },
 
     async loadPicker(path) {
+      if (path === 'pbs:') { this.pickPath('pbs:'); return; }
       this.picker.loading = true;
       this.picker.current = path;
       const endpoint = this.picker.mode.endsWith('-remote') || this.picker.mode === 'remote' ? '/api/browse/rclone' : '/api/browse/local';
@@ -1019,6 +1020,13 @@ function app() {
         this.picker.parent = result.parent;
         this.picker.entries = result.entries || [];
         this.picker.current = result.path || path || '';
+        const cloudRoot = (this.picker.mode.endsWith('-remote') || this.picker.mode === 'remote') && !this.picker.current;
+        if (cloudRoot && this.config?.pbs?.enabled) {
+          this.picker.entries = [
+            { name: 'Proxmox Backup Server', path: 'pbs:', pbs: true },
+            ...this.picker.entries,
+          ];
+        }
       }
       this.picker.loading = false;
     },
@@ -1030,6 +1038,12 @@ function app() {
 
     pickPath(path) {
       const { mode, idx } = this.picker;
+      if (path === 'pbs:') {
+        this.picker.show = false;
+        if (mode.startsWith('target-') && idx >= 0) { this.convertPairToPbs(idx); return; }
+        this.showToast('PBS ist als Quelle nicht syncbar: Der Datastore ist ein deduplizierter Chunk-Store, einzelne Container/VMs lassen sich daraus nicht als Dateien herauskopieren. Für Cloud-Replikation den PBS-eigenen S3-Sync nutzen oder vzdump-Dateien als Quelle syncen.', 'warn');
+        return;
+      }
       if (mode === 'pbs-target') {
         const target = this.config.pbs?.targets?.[idx];
         if (target) {
