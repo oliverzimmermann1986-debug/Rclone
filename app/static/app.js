@@ -804,6 +804,13 @@ function app() {
     },
 
     addPair(preset = this.newPairPreset || 'push-copy') {
+      if (preset === 'pbs') {
+        this.addPbsTarget();
+        const idx = this.config.pbs.targets.length - 1;
+        this.showToast(this.config.pbs?.enabled ? 'PBS-Backup angelegt – Name und Pfade setzen' : 'PBS-Backup angelegt – Verbindung unter Einstellungen → Proxmox Backup einrichten', this.config.pbs?.enabled ? 'ok' : 'warn');
+        this.$nextTick(() => document.querySelectorAll('[x-for]')); // Layout aktualisiert sich über Alpine
+        return;
+      }
       const templates = {
         'push-copy': { direction: 'push', mode: 'copy' },
         'pull-copy': { direction: 'pull', mode: 'copy' },

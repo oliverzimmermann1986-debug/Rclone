@@ -298,7 +298,7 @@
             <select x-model="pairFilter" aria-label="Pair-Filter">
               <option value="all">Alle Pairs</option><option value="enabled">Nur aktiv</option><option value="disabled">Nur deaktiviert</option><option value="issues">Mit Hinweisen</option><option value="destructive">Mirror / Bi-Sync</option>
             </select>
-            <div class="pair-template-action"><select x-model="newPairPreset" aria-label="Vorlage für neues Pair"><option value="push-copy">Backup: Lokaler Pfad → Remote-Pfad (Copy)</option><option value="pull-copy">Restore: Remote-Pfad → Lokaler Pfad (Copy)</option><option value="bisync">Bidirektional (Bi-Sync)</option><option value="push-sync">Mirror: Lokaler Pfad → Remote-Pfad (Sync)</option></select><button class="button secondary small" @click="addPair(newPairPreset)">Aus Vorlage</button></div>
+            <div class="pair-template-action"><select x-model="newPairPreset" aria-label="Vorlage für neues Pair"><option value="push-copy">Backup: Lokaler Pfad → Remote-Pfad (Copy)</option><option value="pull-copy">Restore: Remote-Pfad → Lokaler Pfad (Copy)</option><option value="bisync">Bidirektional (Bi-Sync)</option><option value="push-sync">Mirror: Lokaler Pfad → Remote-Pfad (Sync)</option><option value="pbs">Backup: Lokale Pfade → Proxmox Backup Server</option></select><button class="button secondary small" @click="addPair(newPairPreset)">Aus Vorlage</button></div>
             <div class="toolbar-actions"><button class="button ghost small" @click="setAllPairsOpen(true)">Alle öffnen</button><button class="button ghost small" @click="setAllPairsOpen(false)">Alle schließen</button></div>
             <div class="toolbar-meta"><span x-text="visiblePairCount()"></span> von <span x-text="config.backup.pairs.length"></span></div>
           </div>
@@ -401,6 +401,22 @@
                     <div><button class="button ghost" @click="clonePair(idx)">Duplizieren</button><button class="button danger ghost" @click="removePair(idx)">Entfernen</button></div>
                   </div>
                 </div>
+              </article>
+            </template>
+
+            <div class="panel-head" x-show="config.pbs?.enabled || (config.pbs?.targets || []).length"><div><span class="section-kicker">Proxmox Backup Server</span><h3>PBS-Backups · Snapshots statt Kopie</h3></div><span class="badge neutral" x-text="(config.pbs?.targets || []).length + ' Targets'"></span></div>
+            <template x-for="(target, index) in (config.pbs?.targets || [])" :key="index">
+              <article class="panel">
+                <div class="panel-head">
+                  <div><span class="badge ok">PBS</span> <strong x-text="target.name || 'Neues PBS-Backup'"></strong><small> · Lokale Pfade → Datastore-Snapshot (Versionierung, Dedup und Aufbewahrung übernimmt der PBS)</small></div>
+                  <button class="button secondary small" @click="runPbs(target.name)" :disabled="!target.name || configDirty" :title="configDirty ? 'Erst speichern' : 'Jetzt sichern'">Sichern</button>
+                </div>
+                <div class="form-grid three" style="align-items:start;">
+                  <label class="field"><span>Name</span><input x-model="target.name" @input="markConfigDirty()" placeholder="dokumente"></label>
+                  <label class="field"><span>Pfade · einer pro Zeile</span><textarea class="mono" rows="3" x-model="target.pathsText" @input="markConfigDirty()" placeholder="/mnt/nas/dokumente"></textarea><button type="button" class="button secondary" style="margin-top:0.4rem;" @click="openPbsPicker(index)">Ordner auswählen</button></label>
+                  <label class="field"><span>Zeitplan (cron oder manual)</span><input class="mono" x-model="target.schedule" @input="markConfigDirty()" placeholder="0 2 * * *"><button type="button" class="button danger ghost" style="margin-top:0.4rem;" @click="removePbsTarget(index)">Entfernen</button></label>
+                </div>
+                <div class="inherit-note" x-show="!config.pbs?.enabled"><strong>Hinweis:</strong> PBS ist deaktiviert — Verbindung unter Einstellungen → Proxmox Backup einrichten.</div>
               </article>
             </template>
           </div>
@@ -721,14 +737,7 @@
                   <label class="field"><span>Keep daily / weekly</span><div class="number-with-unit compact"><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_daily"><span>/</span><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_weekly"></div><small>0 = kein automatisches Prune.</small></label>
                   <label class="field"><span>Keep monthly / yearly</span><div class="number-with-unit compact"><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_monthly"><span>/</span><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_yearly"></div></label>
                 </div>
-                <div class="panel-head"><div><h3>Targets</h3></div><button type="button" class="button secondary" @click="addPbsTarget()">Target hinzufügen</button></div>
-                <template x-for="(target, index) in config.pbs.targets" :key="index">
-                  <div class="form-grid three" style="align-items:start; border-top:1px solid var(--border, #ddd); padding-top:0.8rem;">
-                    <label class="field"><span>Name</span><input x-model="target.name" placeholder="dokumente"></label>
-                    <label class="field"><span>Pfade · einer pro Zeile</span><textarea class="mono" rows="3" x-model="target.pathsText" placeholder="/mnt/nas/dokumente"></textarea><button type="button" class="button secondary" style="margin-top:0.4rem;" @click="openPbsPicker(index)">Ordner auswählen</button></label>
-                    <label class="field"><span>Zeitplan (cron oder manual)</span><input class="mono" x-model="target.schedule" placeholder="0 2 * * *"><button type="button" class="button secondary" style="margin-top:0.4rem;" @click="removePbsTarget(index)">Entfernen</button></label>
-                  </div>
-                </template>
+                <div class="inherit-note"><strong>Targets:</strong> PBS-Backups legst du im Pair-Konfigurator an (Seite „Pairs" → Vorlage „Backup: Lokale Pfade → Proxmox Backup Server").</div>
                 <div class="inherit-note" x-show="pbs.status && !pbs.status.client_available"><strong>Hinweis:</strong> proxmox-backup-client ist im Container nicht installiert. Installationsbefehle stehen in config.example.yaml bzw. am Ende von scripts/install.sh.</div>
               </article>
 
