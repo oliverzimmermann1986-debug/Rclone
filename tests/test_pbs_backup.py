@@ -196,3 +196,22 @@ def test_find_due_pbs_targets_uses_pair_runs(tmp_path, monkeypatch):
     config_store._config = Config(tmp_path / "config.yaml")
     due, status = scheduler.find_due_pbs_targets(config_store._config, db)
     assert due == [] and status == []
+
+
+def test_local_to_local_pair_and_overlap_rejected(tmp_path):
+    base = _base_config(tmp_path, {"enabled": False, "targets": []})
+    base["backup"]["pairs"] = [
+        {
+            "name": "usb",
+            "remote": "/mnt/nas/fotos",
+            "local": "/mnt/usb1/fotos",
+            "direction": "push",
+            "mode": "copy",
+        }
+    ]
+    cfg, _ = validate_config(base)
+    assert cfg["backup"]["pairs"][0]["remote"] == "/mnt/nas/fotos"
+
+    base["backup"]["pairs"][0]["local"] = "/mnt/nas/fotos/unterordner"
+    with pytest.raises(ConfigValidationError, match="ineinander"):
+        validate_config(base)

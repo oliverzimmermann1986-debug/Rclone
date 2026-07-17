@@ -1,6 +1,12 @@
-# Audit und Optimierungen – rclone-sync-container 1.8.1
+# Audit und Optimierungen – rclone-sync-container 1.8.2
 
 Stand: 17.07.2026
+
+
+## 1.8.2
+
+- Frontend-Cache-Busting repariert: Die Asset-Version in index.html war auf 1.7.0 festgenagelt, Browser hielten daher nach Updates am alten app.js fest — neue GUI-Bereiche (z. B. der PBS-Tab) erschienen nicht ohne Hard-Reload. Die Version wird jetzt beim Ausliefern aus der App-Version injiziert.
+- Lokal→lokal-Sync freigeschaltet: Das Remote-Feld akzeptiert in Pairs und Quick-Sync jetzt auch absolute lokale Pfade (Quick-Sync beschränkt auf die Browser-Wurzeln). Neuer „Lokal"-Button am Remote-Feld öffnet den lokalen Ordner-Browser. Ineinanderliegende lokale Pfade werden als Fehler abgewiesen (Endlos-Kopien).
 
 
 ## 1.8.1
