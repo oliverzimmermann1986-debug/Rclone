@@ -168,22 +168,59 @@ def _same_origin(request: Request) -> bool:
     # "Origin: null" senden sandboxed iframes und Redirect-Ketten — aber wegen
     # unserer Referrer-Policy "no-referrer" auch manche Browser (v. a. Firefox)
     # bei völlig normalen same-origin Formular-POSTs. Sec-Fetch-Site ist in dem
-    # Fall die verlässlichere Angabe: "same-origin" (Navigation/Fetch von der
-    # eigenen Seite) und "none" (direkte Nutzeraktion) sind legitim, alles
-    # andere — inklusive fehlendem Header bei Origin null — wird abgelehnt.
+    # Fall die verlässlichere Angabe.
     if origin == "null":
         sec_fetch_site = request.headers.get("sec-fetch-site", "").strip().lower()
-        return sec_fetch_site in {"same-origin", "none"}
+        allowed = sec_fetch_site in {"same-origin", "none"}
+        if not allowed:
+            logger.warning(
+                "Origin-Prüfung: Origin=null abgelehnt (Sec-Fetch-Site=%r, path=%s)",
+                sec_fetch_site or None,
+                request.url.path,
+            )
+        return allowed
     try:
         from urllib.parse import urlsplit
 
         parsed = urlsplit(origin)
-        return (
-            parsed.scheme.casefold() == request.url.scheme.casefold()
-            and parsed.netloc.casefold() == request.url.netloc.casefold()
-        )
     except ValueError:
         return False
+    # Nur der Host:Port zählt. Das Schema weicht legitim ab, wenn ein
+    # TLS-Reverse-Proxy davor liegt, dessen X-Forwarded-Proto uvicorn nicht
+    # vertraut (--forwarded-allow-ips) — der Browser sendet dann https, die
+    # App sieht http. Ein Angreifer kann den Host im Origin nicht fälschen.
+    if parsed.netloc.casefold() == request.url.netloc.casefold():
+        return True
+    # Proxys, die den Host-Header nicht durchreichen (z. B. auf die
+    # Upstream-Adresse umschreiben), erzeugen einen Netloc-Mismatch. Explizit
+    # konfigurierte allowed_hosts gelten dann als vertrauenswürdige Origins —
+    # der Wildcard-Default "*" bewusst nicht.
+    origin_host = str(parsed.hostname or "").casefold()
+    configured = get_config().get("web", "allowed_hosts", default=["*"]) or ["*"]
+    if isinstance(configured, str):
+        configured = [configured]
+    explicit = {
+        str(item).casefold().strip()
+        for item in configured
+        if str(item).strip() and str(item).strip() != "*"
+    }
+    if origin_host and (
+        origin_host in explicit
+        or any(
+            rule.startswith("*.") and origin_host.endswith(rule[1:])
+            for rule in explicit
+        )
+    ):
+        return True
+    logger.warning(
+        "Origin-Prüfung fehlgeschlagen: Origin=%r, erwartet Host=%r, path=%s "
+        "(hinter einem Proxy: Host-Header durchreichen oder Host in "
+        "web.allowed_hosts eintragen)",
+        origin,
+        request.url.netloc,
+        request.url.path,
+    )
+    return False
 
 
 def _apply_security_headers(response, request: Request, request_id: str):
