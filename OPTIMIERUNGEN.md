@@ -3,6 +3,12 @@
 Stand: 17.07.2026
 
 
+## Hotfix 1.7.3
+
+- Origin-Prüfung vergleicht nur noch Host:Port statt Schema+Host: Hinter TLS-Reverse-Proxys, deren `X-Forwarded-Proto` uvicorn nicht vertraut, sendet der Browser `https://…`, während die App `http` sieht — das blockierte Logins fälschlich. Der Host im Origin-Header ist nicht fälschbar; die Schutzwirkung bleibt erhalten.
+- Explizit konfigurierte `web.allowed_hosts` (nicht der Wildcard-Default) gelten zusätzlich als vertrauenswürdige Origins, falls ein Proxy den Host-Header umschreibt.
+- Fehlgeschlagene Origin-Prüfungen werden jetzt mit Origin, erwartetem Host und Pfad ins Journal geloggt (`journalctl -u rclone-sync-web`), inklusive Handlungshinweis.
+
 ## Hotfix 1.7.2
 
 - Login-Regression aus 1.7.1 behoben: Wegen `Referrer-Policy: no-referrer` senden manche Browser (v. a. Firefox) auch bei same-origin Formular-POSTs `Origin: null`; die harte Ablehnung blockierte den Login mit „Origin-Prüfung fehlgeschlagen". `Origin: null` wird jetzt über `Sec-Fetch-Site` entschieden: `same-origin`/`none` sind erlaubt, `cross-site`/fehlend bleibt abgelehnt.

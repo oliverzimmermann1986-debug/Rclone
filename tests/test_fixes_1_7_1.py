@@ -223,3 +223,28 @@ def test_run_quick_keeps_mount_protection_by_default(tmp_path, monkeypatch):
     assert not result["ok"]
     assert result.get("skipped")
     assert not target.exists()
+
+
+def test_origin_scheme_mismatch_behind_tls_proxy_is_allowed(tmp_path, monkeypatch):
+    """TLS-Proxy ohne vertrauenswürdiges X-Forwarded-Proto: https-Origin, http-Backend."""
+    with _client(tmp_path, monkeypatch) as client:
+        _login(client)
+        csrf = client.cookies.get("rclone_sync_csrf")
+        response = client.post(
+            "/logout",
+            headers={"Origin": "https://testserver", "X-CSRF-Token": csrf or ""},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+
+
+def test_origin_foreign_host_is_still_rejected(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        _login(client)
+        csrf = client.cookies.get("rclone_sync_csrf")
+        response = client.post(
+            "/logout",
+            headers={"Origin": "https://evil.example", "X-CSRF-Token": csrf or ""},
+            follow_redirects=False,
+        )
+        assert response.status_code == 403
