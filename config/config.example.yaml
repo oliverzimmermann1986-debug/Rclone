@@ -197,7 +197,7 @@ maintenance:
 
 # Proxmox Backup Server: dateibasierte Backups per proxmox-backup-client.
 # Voraussetzung im LXC: apt install proxmox-backup-client
-# (Repo: deb http://download.proxmox.com/debian/pbs-client bookworm main)
+# (Repo: deb http://download.proxmox.com/debian/pbs-client <debian-codename> main)
 pbs:
   enabled: false
   # user@realm!tokenname@pbs-host:datastore  (API-Token empfohlen)
