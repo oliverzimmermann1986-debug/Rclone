@@ -3,6 +3,10 @@
 Stand: 17.07.2026
 
 
+## 1.9.1
+
+- PBS erscheint im Cloud-Browser als virtueller Eintrag „Proxmox Backup Server" auf oberster Ebene (wenn die Integration aktiviert ist). Als Ziel gewählt wird das Pair automatisch in ein PBS-Backup umgewandelt; als Quelle wird die Auswahl mit Begründung abgelehnt (Chunk-Store, kein selektiver Datei-Export) und auf PBS-S3-Sync bzw. vzdump-Quellen verwiesen.
+
 ## 1.9.0 — Quelle/Ziel-Modell im Pair-Konfigurator
 
 - Pairs werden jetzt als Quelle → Ziel konfiguriert statt Remote/Lokal + Richtung. Beide Seiten akzeptieren lokale Pfade oder Cloud-Remotes (lokal→lokal, Cloud→Cloud, gemischt); je Seite gibt es „Cloud"- und „Lokal"-Browser-Buttons. Sync-Art: Einweg oder Bidirektional.
