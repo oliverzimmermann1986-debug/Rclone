@@ -245,11 +245,13 @@ fi
 cat <<EOF
 
 Proxmox Backup Server (optional):
-  Für PBS-Backups aus der GUI muss proxmox-backup-client installiert sein:
-    echo "deb http://download.proxmox.com/debian/pbs-client bookworm main" \
+  Für PBS-Backups aus der GUI muss proxmox-backup-client installiert sein
+  (Repo muss zum Debian-Release passen, sonst scheitert libfuse3):
+    CODENAME=\$(. /etc/os-release && echo \$VERSION_CODENAME)
+    echo "deb http://download.proxmox.com/debian/pbs-client \$CODENAME main" \
       > /etc/apt/sources.list.d/pbs-client.list
-    curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg \
-      -o /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg
+    curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-\$CODENAME.gpg \
+      -o /etc/apt/trusted.gpg.d/proxmox-release-\$CODENAME.gpg
     apt update && apt install proxmox-backup-client
 
 Sicherheitshinweis (Transportverschlüsselung):
