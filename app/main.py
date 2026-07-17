@@ -165,10 +165,15 @@ def _same_origin(request: Request) -> bool:
     origin = request.headers.get("origin")
     if not origin:
         return True
-    # "null" senden u. a. sandboxed iframes und manche Redirect-Ketten; für
-    # state-changing Requests ist das keine vertrauenswürdige Same-Origin-Angabe.
+    # "Origin: null" senden sandboxed iframes und Redirect-Ketten — aber wegen
+    # unserer Referrer-Policy "no-referrer" auch manche Browser (v. a. Firefox)
+    # bei völlig normalen same-origin Formular-POSTs. Sec-Fetch-Site ist in dem
+    # Fall die verlässlichere Angabe: "same-origin" (Navigation/Fetch von der
+    # eigenen Seite) und "none" (direkte Nutzeraktion) sind legitim, alles
+    # andere — inklusive fehlendem Header bei Origin null — wird abgelehnt.
     if origin == "null":
-        return False
+        sec_fetch_site = request.headers.get("sec-fetch-site", "").strip().lower()
+        return sec_fetch_site in {"same-origin", "none"}
     try:
         from urllib.parse import urlsplit
 

@@ -74,17 +74,41 @@ def _login(client: TestClient) -> None:
     assert response.headers["location"] == "/"
 
 
-def test_origin_null_is_rejected_for_state_changing_requests(tmp_path, monkeypatch):
+def test_origin_null_cross_site_is_rejected(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch) as client:
         _login(client)
         csrf = client.cookies.get("rclone_sync_csrf")
+        for headers in (
+            {"Origin": "null", "Sec-Fetch-Site": "cross-site"},
+            {"Origin": "null"},  # alte Browser ohne Sec-Fetch-Site
+        ):
+            response = client.post(
+                "/logout",
+                headers={**headers, "X-CSRF-Token": csrf or ""},
+                follow_redirects=False,
+            )
+            assert response.status_code == 403
+            assert "Origin" in response.json()["detail"]
+
+
+def test_origin_null_same_origin_login_still_works(tmp_path, monkeypatch):
+    """Firefox sendet bei Referrer-Policy no-referrer auch same-origin Origin: null."""
+    with _client(tmp_path, monkeypatch) as client:
+        login_page = client.get("/login")
+        match = re.search(r'name="login_csrf" value="([^"]+)"', login_page.text)
+        assert match
         response = client.post(
-            "/logout",
-            headers={"Origin": "null", "X-CSRF-Token": csrf or ""},
+            "/login",
+            data={
+                "username": "admin",
+                "password": "very-secure-password",
+                "login_csrf": match.group(1),
+            },
+            headers={"Origin": "null", "Sec-Fetch-Site": "same-origin"},
             follow_redirects=False,
         )
-        assert response.status_code == 403
-        assert "Origin" in response.json()["detail"]
+        assert response.status_code == 303
+        assert response.headers["location"] == "/"
 
 
 def test_logout_invalidates_existing_session_tokens(tmp_path, monkeypatch):
