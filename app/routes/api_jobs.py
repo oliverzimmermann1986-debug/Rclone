@@ -383,8 +383,29 @@ class QuickSyncPayload(BaseModel):
 def _validate_quick_paths(payload: QuickSyncPayload) -> None:
     if any(char in payload.remote + payload.local for char in ("\x00", "\n", "\r")):
         raise HTTPException(400, "Pfad enthält ungültige Zeichen")
-    if ":" not in payload.remote or payload.remote.startswith((":", "/", "-")):
-        raise HTTPException(400, "Remote muss ein konfigurierter rclone-Pfad sein")
+    remote_is_local = payload.remote.startswith("/")
+    if not remote_is_local and (
+        ":" not in payload.remote or payload.remote.startswith((":", "-"))
+    ):
+        raise HTTPException(
+            400,
+            "Remote muss ein konfigurierter rclone-Pfad oder ein absoluter "
+            "lokaler Pfad sein",
+        )
+    if remote_is_local:
+        roots_for_remote = parse_browse_roots(
+            get_config().get(
+                "web",
+                "local_browse_roots",
+                default=["/mnt", "/media", "/srv", "/opt/rclone-sync/data"],
+            )
+        )
+        if not roots_for_remote:
+            raise HTTPException(503, "Keine lokalen Quick-Sync-Wurzeln konfiguriert")
+        ensure_within(Path(payload.remote), roots_for_remote)
+        if Path(payload.remote.rstrip("/")) == Path(payload.local.rstrip("/")):
+            raise HTTPException(400, "Quelle und Ziel sind identisch")
+        return _finish_quick_validation(payload)
     try:
         result = subprocess.run(
             ["rclone", "listremotes"],
@@ -415,6 +436,10 @@ def _validate_quick_paths(payload: QuickSyncPayload) -> None:
     if not roots:
         raise HTTPException(503, "Keine lokalen Quick-Sync-Wurzeln konfiguriert")
     ensure_within(Path(payload.local), roots)
+    _finish_quick_validation(payload)
+
+
+def _finish_quick_validation(payload: QuickSyncPayload) -> None:
     if payload.direction == "bisync" and payload.mode != "bisync":
         raise HTTPException(400, "Bei direction=bisync muss mode=bisync sein")
     if payload.direction != "bisync" and payload.mode == "bisync":

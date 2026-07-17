@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#111827">
   <title>rclone-sync</title>
-  <link rel="stylesheet" href="/static/style.css?v=1.7.0">
+  <link rel="stylesheet" href="/static/style.css?v=__APP_VERSION__">
   <script defer src="/static/alpine.min.js?v=1.7.0"></script>
 </head>
 <body x-data="app()" x-init="init()" @keydown.escape.window="closeOverlays()">
@@ -355,7 +355,7 @@
                   </div>
 
                   <div class="form-grid two">
-                    <label class="field"><span>Remote-Pfad</span><div class="input-action"><input class="mono" x-model="pair.remote" placeholder="pcloud:/Backup/Fotos"><button @click.prevent="openPicker('remote', idx)" title="Remote durchsuchen">Ordner</button></div></label>
+                    <label class="field"><span>Remote-Pfad · rclone-Remote oder lokaler Pfad</span><div class="input-action"><input class="mono" x-model="pair.remote" placeholder="pcloud:/Backup/Fotos oder /mnt/usb1/fotos"><button @click.prevent="openPicker('remote', idx)" title="Remote durchsuchen">Remote</button><button @click.prevent="openPicker('remote-local', idx)" title="Lokalen Ordner als Quelle wählen (lokal→lokal)">Lokal</button></div></label>
                     <label class="field"><span>Lokaler Pfad</span><div class="input-action"><input class="mono" x-model="pair.local" placeholder="/mnt/backup/Fotos"><button @click.prevent="openPicker('local', idx)" title="Lokal durchsuchen">Ordner</button></div></label>
                   </div>
 
@@ -769,7 +769,7 @@
       <div class="modal-head"><div><span class="section-kicker">Ad-hoc</span><h3>Quick-Sync</h3></div><button class="icon-button" @click="quickModal.show=false" aria-label="Schließen">×</button></div>
       <div class="modal-content">
         <div class="alert info"><span class="alert-icon">i</span><span>Quick-Sync ist für einmalige Aufgaben. Dauerhafte Synchronisationen gehören als Pair in die Konfiguration.</span></div>
-        <label class="field"><span>Remote-Pfad</span><div class="input-action"><input class="mono" x-model="quick.remote" placeholder="pcloud:/Backup"><button @click="openQuickPicker('remote')">Ordner</button></div></label>
+        <label class="field"><span>Remote-Pfad · rclone-Remote oder lokaler Pfad</span><div class="input-action"><input class="mono" x-model="quick.remote" placeholder="pcloud:/Backup oder /mnt/usb1"><button @click="openQuickPicker('remote')">Remote</button><button @click="openQuickPicker('remote-local')">Lokal</button></div></label>
         <label class="field"><span>Lokaler Pfad</span><div class="input-action"><input class="mono" x-model="quick.local" placeholder="/mnt/backup"><button @click="openQuickPicker('local')">Ordner</button></div></label>
         <label class="check-row"><input type="checkbox" x-model="quick.new_target"><span><strong>Neues leeres Ziel</strong><small>Legt den lokalen Pfad an und deaktiviert dafür den Mount-Schutz (min_local_files=0). Nur setzen, wenn das Ziel bewusst neu ist.</small></span></label>
         <div class="form-grid two"><label class="field"><span>Richtung</span><select x-model="quick.direction" @change="if(quick.direction==='bisync')quick.mode='bisync';else if(quick.mode==='bisync')quick.mode='copy'"><option value="pull">Remote → Lokal</option><option value="push">Lokal → Remote</option><option value="bisync">Bidirektional</option></select></label><label class="field"><span>Modus</span><select x-model="quick.mode" :disabled="quick.direction==='bisync'"><option value="copy">Copy – ohne Löschen</option><option value="sync">Sync – Mirror</option><option value="bisync" x-show="quick.direction==='bisync'">Bi-Sync</option></select></label></div>
@@ -815,6 +815,6 @@
   </div>
 
   <div class="toast" :class="toast.type" x-show="toast.show" x-transition.opacity x-text="toast.msg" role="status" aria-live="polite" x-cloak></div>
-  <script src="/static/app.js?v=1.7.0"></script>
+  <script src="/static/app.js?v=__APP_VERSION__"></script>
 </body>
 </html>

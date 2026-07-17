@@ -398,9 +398,10 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         except ValueError as exc:
             errors.append(f"{label} Pfad {exc}")
             remote = local = ""
-        if not _is_remote(remote):
+        if not _is_remote(remote) and not remote.startswith("/"):
             errors.append(
-                f"{label}.remote muss ein rclone-Pfad wie remote:/ordner sein"
+                f"{label}.remote muss ein rclone-Pfad (remote:/ordner) "
+                "oder ein absoluter lokaler Pfad sein"
             )
         if not local:
             errors.append(f"{label}.local fehlt")
@@ -408,6 +409,13 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             errors.append(f"{label}.local muss absolut sein")
         if remote and local and remote.rstrip("/") == local.rstrip("/"):
             errors.append(f"{label}: Quelle und Ziel sind identisch")
+        elif remote.startswith("/") and local.startswith("/") and _paths_overlap(
+            remote, local
+        ):
+            errors.append(
+                f"{label}: Lokale Pfade dürfen nicht ineinander liegen "
+                "(Endlos-Kopien)"
+            )
         pair["remote"] = remote
         pair["local"] = local
 

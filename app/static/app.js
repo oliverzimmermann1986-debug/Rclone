@@ -954,6 +954,7 @@ function app() {
       this.picker.loading = true;
       this.picker.current = path;
       const endpoint = this.picker.mode === 'remote' ? '/api/browse/rclone' : '/api/browse/local';
+      // 'remote-local': lokaler Browser, Auswahl landet im Remote-Feld (lokal→lokal-Sync)
       const result = await this.api('GET', endpoint + (path ? `?path=${encodeURIComponent(path)}` : ''));
       if (result) {
         this.picker.parent = result.parent;
@@ -983,10 +984,10 @@ function app() {
         return;
       }
       if (idx === -1) {
-        if (mode === 'remote') this.quick.remote = path;
+        if (mode === 'remote' || mode === 'remote-local') this.quick.remote = path;
         else this.quick.local = path;
       } else {
-        if (mode === 'remote') this.config.backup.pairs[idx].remote = path;
+        if (mode === 'remote' || mode === 'remote-local') this.config.backup.pairs[idx].remote = path;
         else this.config.backup.pairs[idx].local = path;
         this.configDirty = true;
       }

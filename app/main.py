@@ -442,7 +442,11 @@ def index(request: Request):
     token = request.cookies.get(SESSION_COOKIE, "")
     if not session_user(token):
         return RedirectResponse(url="/login", status_code=303)
-    response = HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    # Cache-Busting: Query-Version an app.js/style.css folgt der App-Version,
+    # sonst hängen Browser nach Updates auf altem Frontend (fehlende GUI-Features).
+    html = html.replace("?v=__APP_VERSION__", f"?v={__version__}")
+    response = HTMLResponse(html)
     if not request.cookies.get(CSRF_COOKIE):
         _set_csrf_cookie(response, request, new_csrf_token())
     return response
