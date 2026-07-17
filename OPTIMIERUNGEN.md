@@ -3,6 +3,13 @@
 Stand: 17.07.2026
 
 
+## 1.9.0 — Quelle/Ziel-Modell im Pair-Konfigurator
+
+- Pairs werden jetzt als Quelle → Ziel konfiguriert statt Remote/Lokal + Richtung. Beide Seiten akzeptieren lokale Pfade oder Cloud-Remotes (lokal→lokal, Cloud→Cloud, gemischt); je Seite gibt es „Cloud"- und „Lokal"-Browser-Buttons. Sync-Art: Einweg oder Bidirektional.
+- Intern bleibt das Datenmodell remote/local/direction unverändert; die GUI mappt beim Laden und Speichern. Bei Cloud→lokalem Ziel wird pull erzeugt, sonst push — damit der Mount-Schutz (min_local_files) immer die lokale Seite bewacht, die es zu schützen gilt. Bestehende Pairs werden verlustfrei angezeigt.
+- Am Ziel-Feld gibt es einen „PBS"-Button: wandelt das Pair in ein PBS-Backup um (Name, Quelle und Zeitplan werden übernommen).
+- Karten-Kopf zeigt jetzt Quelle → Ziel; Plausibilitätsprüfungen (Quelle/Ziel fehlt/ungültig/identisch) entsprechend umgestellt.
+
 ## 1.8.5
 
 - PBS-Backups werden jetzt im Pair-Konfigurator verwaltet: eigene Karten unter den rclone-Pairs (Name, Pfade mit Ordner-Browser, Zeitplan, Sichern-Button), neue Vorlage „Backup: Lokale Pfade → Proxmox Backup Server" im Vorlagen-Dropdown. Der Target-Editor im Einstellungs-Tab ist durch einen Verweis ersetzt; dort verbleiben nur die Verbindungsdaten (Repository, Token, Fingerprint, Retention).
