@@ -3,6 +3,15 @@
 Stand: 17.07.2026
 
 
+## Nächste Version
+
+- Überlappende Pair-Pfade serialisieren nicht mehr den vollständigen Lauf. Ein konfliktbasierter Ausführungsplan hält nur betroffene Pairs auseinander und nutzt freie Worker weiterhin für unabhängige Pairs.
+- Jeder Job arbeitet mit einem konsistenten Konfigurations-Snapshot. Laufende Pairs sehen dadurch nicht mehr versehentlich unterschiedliche Konfigurationsstände und vermeiden wiederholte Config-Dateiprüfungen.
+- Die häufig abgefragte Fortschrittsanzeige liest Log-Tails inkrementell und hält höchstens 64 begrenzte Einträge im Speicher, statt pro Poll bis zu 1 MiB je aktivem Pair erneut einzulesen.
+- Pair-Planung und Log-Tail-Verarbeitung sind als eigenständig getestete Module aus dem zentralen rclone-Runner herausgelöst.
+- Advisory File-Locks laufen über eine gemeinsame Abstraktion: Linux behält unverändert `flock` mit Shared-/Exclusive-/Nonblocking-Semantik; Windows nutzt für Entwicklung und Tests einen exklusiven `msvcrt`-Fallback. Pfadvalidierung, Verzeichnis-Fsync und CPU-Affinität besitzen ebenfalls plattformneutrale Fallbacks.
+
+
 ## 1.9.1
 
 - PBS erscheint im Cloud-Browser als virtueller Eintrag „Proxmox Backup Server" auf oberster Ebene (wenn die Integration aktiviert ist). Als Ziel gewählt wird das Pair automatisch in ein PBS-Backup umgewandelt; als Quelle wird die Auswahl mit Begründung abgelehnt (Chunk-Store, kein selektiver Datei-Export) und auf PBS-S3-Sync bzw. vzdump-Quellen verwiesen.

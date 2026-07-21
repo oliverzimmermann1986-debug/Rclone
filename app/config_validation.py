@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 import uuid
 from pathlib import Path
@@ -67,7 +68,18 @@ def _clean_path(value: Any) -> str:
 
 
 def _is_remote(path: str) -> bool:
-    return bool(path and _REMOTE_RE.match(path) and not path.startswith("-"))
+    return bool(
+        path
+        and not Path(path).is_absolute()
+        and _REMOTE_RE.match(path)
+        and not path.startswith("-")
+    )
+
+
+def _is_absolute_local(path: str) -> bool:
+    # Accept deployment-style POSIX paths even when validating a config from a
+    # Windows development host; also accept native absolute paths for tests.
+    return path.startswith("/") or (os.name == "nt" and Path(path).is_absolute())
 
 
 def _normalize_string_list(value: Any) -> list[str]:
@@ -196,7 +208,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     for root in roots:
         try:
             root = _clean_path(root)
-            if not root.startswith("/"):
+            if not _is_absolute_local(root):
                 errors.append(f"Browser-Root muss absolut sein: {root}")
             else:
                 clean_roots.append(root.rstrip("/") or "/")
@@ -215,7 +227,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     ):
         try:
             value = _clean_path(paths.get(key, default)) or default
-            if not value.startswith("/"):
+            if not _is_absolute_local(value):
                 errors.append(f"paths.{key} muss absolut sein")
             paths[key] = value
         except ValueError as exc:
@@ -352,8 +364,9 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     filter_file = str(backup.get("filter_file") or "").strip()
     if filter_file:
         try:
-            filter_path = Path(_clean_path(filter_file)).expanduser()
-            if not filter_path.is_absolute():
+            clean_filter_file = _clean_path(filter_file)
+            filter_path = Path(clean_filter_file).expanduser()
+            if not _is_absolute_local(clean_filter_file):
                 errors.append("backup.filter_file muss absolut sein")
             elif not backup["allow_external_filter_files"]:
                 data_root = (
@@ -398,23 +411,24 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         except ValueError as exc:
             errors.append(f"{label} Pfad {exc}")
             remote = local = ""
-        if not _is_remote(remote) and not remote.startswith("/"):
+        if not _is_remote(remote) and not _is_absolute_local(remote):
             errors.append(
                 f"{label}.remote muss ein rclone-Pfad (remote:/ordner) "
                 "oder ein absoluter lokaler Pfad sein"
             )
         if not local:
             errors.append(f"{label}.local fehlt")
-        elif not _is_remote(local) and not local.startswith("/"):
+        elif not _is_remote(local) and not _is_absolute_local(local):
             errors.append(f"{label}.local muss absolut sein")
         if remote and local and remote.rstrip("/") == local.rstrip("/"):
             errors.append(f"{label}: Quelle und Ziel sind identisch")
-        elif remote.startswith("/") and local.startswith("/") and _paths_overlap(
-            remote, local
+        elif (
+            _is_absolute_local(remote)
+            and _is_absolute_local(local)
+            and _paths_overlap(remote, local)
         ):
             errors.append(
-                f"{label}: Lokale Pfade dürfen nicht ineinander liegen "
-                "(Endlos-Kopien)"
+                f"{label}: Lokale Pfade dürfen nicht ineinander liegen (Endlos-Kopien)"
             )
         pair["remote"] = remote
         pair["local"] = local
@@ -478,7 +492,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         if mountpoint:
             try:
                 mountpoint = _clean_path(mountpoint)
-                if not mountpoint.startswith("/"):
+                if not _is_absolute_local(mountpoint):
                     errors.append(f"{label}.mountpoint muss absolut sein")
                 elif local and not _is_remote(local):
                     try:
@@ -501,7 +515,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         if sentinel:
             sentinel_path = Path(sentinel)
             if (
-                sentinel_path.is_absolute()
+                _is_absolute_local(str(sentinel_path))
                 or ".." in sentinel_path.parts
                 or any(ch in sentinel for ch in ("\x00", "\r", "\n"))
             ):
@@ -531,8 +545,9 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             file_value = str(pair.get(file_key) or "").strip()
             if file_value:
                 try:
-                    candidate = Path(_clean_path(file_value)).expanduser()
-                    if not candidate.is_absolute():
+                    clean_file_value = _clean_path(file_value)
+                    candidate = Path(clean_file_value).expanduser()
+                    if not _is_absolute_local(clean_file_value):
                         errors.append(f"{label}.{file_key} muss absolut sein")
                     elif not backup["allow_external_filter_files"]:
                         data_root = (
@@ -714,7 +729,9 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     repository = str(pbs.get("repository") or "").strip()
     if pbs["enabled"] and not repository:
         errors.append("pbs.repository ist erforderlich, wenn pbs.enabled gesetzt ist")
-    if repository and not re.match(r"^[^\s@]+@[^\s@!]+(?:![^\s@:]+)?@[^\s:]+:\S+$", repository):
+    if repository and not re.match(
+        r"^[^\s@]+@[^\s@!]+(?:![^\s@:]+)?@[^\s:]+:\S+$", repository
+    ):
         warnings.append(
             "pbs.repository sieht ungewöhnlich aus — erwartet user@realm[!token]@host:datastore"
         )
@@ -722,7 +739,9 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     pbs["namespace"] = str(pbs.get("namespace") or "").strip()
     pbs["backup_id"] = str(pbs.get("backup_id") or "").strip()
     fingerprint = str(pbs.get("fingerprint") or "").strip()
-    if fingerprint and not re.match(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){31}$", fingerprint):
+    if fingerprint and not re.match(
+        r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){31}$", fingerprint
+    ):
         errors.append("pbs.fingerprint muss ein SHA-256-Fingerprint (aa:bb:…) sein")
     pbs["fingerprint"] = fingerprint
     pbs["password"] = str(pbs.get("password") or "")
@@ -737,7 +756,13 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(keep, dict):
         errors.append("pbs.keep muss ein Mapping sein")
         keep = pbs["keep"] = {}
-    for key in ("keep_last", "keep_daily", "keep_weekly", "keep_monthly", "keep_yearly"):
+    for key in (
+        "keep_last",
+        "keep_daily",
+        "keep_weekly",
+        "keep_monthly",
+        "keep_yearly",
+    ):
         if keep.get(key) in (None, ""):
             keep[key] = 0
             continue
@@ -765,7 +790,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         if not paths:
             errors.append(f"{label}.paths braucht mindestens einen Pfad")
         for path_value in paths:
-            if not path_value.startswith("/"):
+            if not _is_absolute_local(path_value):
                 errors.append(f"{label}: Pfad muss absolut sein: {path_value}")
         target["paths"] = paths
         schedule = str(target.get("schedule") or "manual").strip()

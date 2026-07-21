@@ -26,9 +26,7 @@ def test_cgroup_v2_memory_limit_is_parsed(tmp_path):
 def test_cgroup_v2_cpu_quota_limits_capacity(tmp_path, monkeypatch):
     (tmp_path / "cpu.max").write_text("50000 100000", encoding="utf-8")
     monkeypatch.setattr("app.system_info.os.cpu_count", lambda: 8)
-    monkeypatch.setattr(
-        "app.system_info.os.sched_getaffinity", lambda _pid: set(range(4))
-    )
+    monkeypatch.setattr("app.system_info._sched_getaffinity", lambda: set(range(4)))
     count, capacity, source = _cpu_capacity(tmp_path)
     assert count == 1
     assert capacity == 0.5

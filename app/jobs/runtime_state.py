@@ -47,7 +47,7 @@ def _atomic_json(path: Path, data: dict[str, Any]) -> None:
             pass
         os.replace(tmp, path)
         try:
-            dir_fd = os.open(path.parent, os.O_DIRECTORY)
+            dir_fd = os.open(path.parent, getattr(os, "O_DIRECTORY", 0))
             try:
                 os.fsync(dir_fd)
             finally:

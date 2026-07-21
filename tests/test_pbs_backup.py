@@ -166,9 +166,7 @@ def test_find_due_pbs_targets_uses_pair_runs(tmp_path, monkeypatch):
             ],
         },
     )
-    monkeypatch.setattr(
-        "app.jobs.pbs_backup.client_path", lambda: "/usr/bin/pbc"
-    )
+    monkeypatch.setattr("app.jobs.pbs_backup.client_path", lambda: "/usr/bin/pbc")
     db = Database(tmp_path / "app.db")
 
     # Erfolg vor 1h -> */5-Plan ist fällig; "manual" nie.
@@ -176,7 +174,10 @@ def test_find_due_pbs_targets_uses_pair_runs(tmp_path, monkeypatch):
     db.job_finish(
         job_id,
         "ok",
-        {"ok": True, "pairs": [{"name": "pbs:docs", "ok": True, "trigger": "scheduler"}]},
+        {
+            "ok": True,
+            "pairs": [{"name": "pbs:docs", "ok": True, "trigger": "scheduler"}],
+        },
     )
     # job_finish stempelt mit "jetzt" — für den Test eine Stunde zurückdatieren.
     with db.conn() as connection:

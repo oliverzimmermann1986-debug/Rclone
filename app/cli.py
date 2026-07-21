@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import getpass
 import json
 import os
@@ -22,6 +21,8 @@ import yaml
 from .config_store import get_config
 from .config_validation import ConfigValidationError, validate_config
 from .db import get_db
+from .file_lock import acquire as acquire_file_lock
+from .file_lock import release as release_file_lock
 from .maintenance import prune_logs
 
 
@@ -166,11 +167,11 @@ def _config_file_lock(path: Path) -> Iterator[None]:
         if not stat.S_ISREG(info.st_mode):
             raise OSError("Config-Lock ist keine reguläre Datei")
         os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        acquire_file_lock(fd)
         yield
     finally:
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            release_file_lock(fd)
         finally:
             os.close(fd)
 
@@ -235,7 +236,9 @@ def cmd_restore_config_backup(args) -> int:
                 os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
                 os.replace(tmp, primary)
                 try:
-                    directory_fd = os.open(primary.parent, os.O_DIRECTORY)
+                    directory_fd = os.open(
+                        primary.parent, getattr(os, "O_DIRECTORY", 0)
+                    )
                     try:
                         os.fsync(directory_fd)
                     finally:

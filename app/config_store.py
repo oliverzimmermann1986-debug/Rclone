@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import fcntl
 import hashlib
 import os
 import stat
@@ -14,6 +13,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 import yaml
+
+from .file_lock import acquire as acquire_file_lock
+from .file_lock import release as release_file_lock
 
 _CONFIG_PATH = Path(
     os.getenv("RCLONE_SYNC_CONFIG", "/opt/rclone-sync/data/config.yaml")
@@ -49,11 +51,11 @@ class Config:
         fd = os.open(self.lock_path, flags, stat.S_IRUSR | stat.S_IWUSR)
         os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            acquire_file_lock(fd, exclusive=exclusive)
             yield
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                release_file_lock(fd)
             finally:
                 os.close(fd)
 
@@ -218,7 +220,7 @@ class Config:
 
         self._atomic_write_bytes(self.path, raw)
         try:
-            dir_fd = os.open(self.path.parent, os.O_DIRECTORY)
+            dir_fd = os.open(self.path.parent, getattr(os, "O_DIRECTORY", 0))
             try:
                 os.fsync(dir_fd)
             finally:
