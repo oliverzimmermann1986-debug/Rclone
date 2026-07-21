@@ -5,6 +5,7 @@ Stand: 17.07.2026
 
 ## Nächste Version
 
+- Remote-Prechecks verwenden bei `rclone lsjson --stat` nicht mehr das dort inkompatible Flag `--no-size`; dadurch funktionieren Dry-Runs wieder mit den unterstützten rclone-Versionen.
 - Überlappende Pair-Pfade serialisieren nicht mehr den vollständigen Lauf. Ein konfliktbasierter Ausführungsplan hält nur betroffene Pairs auseinander und nutzt freie Worker weiterhin für unabhängige Pairs.
 - Jeder Job arbeitet mit einem konsistenten Konfigurations-Snapshot. Laufende Pairs sehen dadurch nicht mehr versehentlich unterschiedliche Konfigurationsstände und vermeiden wiederholte Config-Dateiprüfungen.
 - Die häufig abgefragte Fortschrittsanzeige liest Log-Tails inkrementell und hält höchstens 64 begrenzte Einträge im Speicher, statt pro Poll bis zu 1 MiB je aktivem Pair erneut einzulesen.
