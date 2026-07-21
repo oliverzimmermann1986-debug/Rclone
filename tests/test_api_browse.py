@@ -1,0 +1,39 @@
+import pytest
+from fastapi import HTTPException
+
+from app.routes import api_browse
+
+
+def test_pcloud_crypto_folder_is_hidden_from_remote_browser(monkeypatch):
+    monkeypatch.setattr(api_browse, "_rclone_remotes", lambda: ["pcloud:"])
+    monkeypatch.setattr(
+        api_browse,
+        "_rclone_directories",
+        lambda _path: (["Crypto Folder", "Photos", "RcloneVault"], False),
+    )
+    monkeypatch.setattr(
+        api_browse,
+        "_hidden_remote_paths",
+        lambda: {"pcloud:/crypto folder"},
+    )
+
+    result = api_browse.browse_rclone("pcloud:")
+
+    assert [entry["name"] for entry in result["entries"]] == [
+        "Photos",
+        "RcloneVault",
+    ]
+
+
+def test_hidden_remote_path_cannot_be_opened_directly(monkeypatch):
+    monkeypatch.setattr(api_browse, "_rclone_remotes", lambda: ["pcloud:"])
+    monkeypatch.setattr(
+        api_browse,
+        "_hidden_remote_paths",
+        lambda: {"pcloud:/crypto folder"},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        api_browse.browse_rclone("pcloud:/Crypto Folder")
+
+    assert exc.value.status_code == 403

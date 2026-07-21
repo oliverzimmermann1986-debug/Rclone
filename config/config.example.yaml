@@ -4,6 +4,9 @@
 # ============================================================
 
 web:
+  # Native pCloud-Crypto-Ordner sind über die normale pCloud-API nicht beschreibbar.
+  hidden_remote_paths:
+    - "pcloud:/Crypto Folder"
   username: admin
   # Installer/CLI setzen ausschließlich password_hash. Kein Klartextpasswort
   # in produktiven Konfigurationen speichern.
