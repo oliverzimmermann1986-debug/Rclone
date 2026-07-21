@@ -1,3 +1,5 @@
+import pytest
+
 from app import cli
 
 
@@ -54,7 +56,10 @@ def test_restore_config_backup_rejects_symlink(tmp_path, monkeypatch):
     primary.write_text("value: 1\n", encoding="utf-8")
     external = tmp_path / "external.yaml"
     external.write_text("value: 2\n", encoding="utf-8")
-    (tmp_path / "config.yaml.bak").symlink_to(external)
+    try:
+        (tmp_path / "config.yaml.bak").symlink_to(external)
+    except OSError:
+        pytest.skip("Symlinks require Windows Developer Mode or elevated privileges")
     monkeypatch.setenv("RCLONE_SYNC_CONFIG", str(primary))
 
     assert cli.cmd_restore_config_backup(type("Args", (), {"yes": True})()) == 1

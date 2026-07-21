@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import stat
 import zipfile
 from pathlib import Path
@@ -81,7 +82,8 @@ def test_snapshot_restore_keeps_identity_and_invalidates_sessions(
     snapshot = created["snapshot"]
     snapshot_path = tmp_path / "data" / "config-snapshots" / snapshot["name"]
     assert snapshot_path.is_file()
-    assert stat.S_IMODE(snapshot_path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(snapshot_path.stat().st_mode) == 0o600
     assert len(snapshot["sha256"]) == 64
 
     def mutate(data):

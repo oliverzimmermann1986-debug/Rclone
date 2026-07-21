@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 import re
@@ -10,6 +9,9 @@ import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Iterator, Optional, Union
+
+from ..file_lock import acquire as acquire_file_lock
+from ..file_lock import release as release_file_lock
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +71,11 @@ def file_lock_or_none(name: Union[str, Path]) -> Iterator[Optional[IO[str]]]:
             return
 
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire_file_lock(fh.fileno(), blocking=False)
             acquired = True
             fh.seek(0)
-            fh.truncate()
             fh.write(f"{os.getpid()}\n")
+            fh.truncate()
             fh.flush()
             try:
                 os.fsync(fh.fileno())
@@ -94,7 +96,7 @@ def file_lock_or_none(name: Union[str, Path]) -> Iterator[Optional[IO[str]]]:
         if fh is not None:
             if acquired:
                 try:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    release_file_lock(fh.fileno())
                 except OSError:
                     pass
             try:

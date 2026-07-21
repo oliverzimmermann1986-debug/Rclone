@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from app.jobs import runtime_state
 
 
@@ -28,7 +30,10 @@ def test_cancel_marker_replaces_symlink_without_touching_target(
     monkeypatch.setattr(runtime_state, "PROCS_DIR", tmp_path / "processes")
     target = tmp_path / "target.txt"
     target.write_text("unchanged", encoding="utf-8")
-    runtime_state.CANCEL_FILE.symlink_to(target)
+    try:
+        runtime_state.CANCEL_FILE.symlink_to(target)
+    except OSError:
+        pytest.skip("Symlinks require Windows Developer Mode or elevated privileges")
 
     runtime_state.request_cancel_marker()
 

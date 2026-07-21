@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import fcntl
 import hashlib
 import os
 import stat
@@ -20,6 +19,8 @@ from pydantic import BaseModel, Field
 
 from ..auth import require_auth, verify_password
 from ..config_store import ConfigConflictError, get_config
+from ..file_lock import acquire as acquire_file_lock
+from ..file_lock import release as release_file_lock
 from ..config_validation import ConfigValidationError, validate_config
 from ..db import get_db
 from ..security import ensure_within, require_csrf
@@ -375,7 +376,7 @@ def save_filter_file(body: FilterPayload) -> dict[str, Any]:
         lock_fd = os.open(lock_path, lock_flags, stat.S_IRUSR | stat.S_IWUSR)
         os.fchmod(lock_fd, stat.S_IRUSR | stat.S_IWUSR)
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            acquire_file_lock(lock_fd)
             previous = path.read_bytes() if path.exists() else b""
             current_revision = _filter_revision(path, previous)
             if body.revision != current_revision:
@@ -414,7 +415,7 @@ def save_filter_file(body: FilterPayload) -> dict[str, Any]:
                 os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
                 os.replace(tmp, path)
                 try:
-                    dir_fd = os.open(path.parent, os.O_DIRECTORY)
+                    dir_fd = os.open(path.parent, getattr(os, "O_DIRECTORY", 0))
                     try:
                         os.fsync(dir_fd)
                     finally:
@@ -425,7 +426,7 @@ def save_filter_file(body: FilterPayload) -> dict[str, Any]:
                 tmp.unlink(missing_ok=True)
         finally:
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                release_file_lock(lock_fd)
             finally:
                 os.close(lock_fd)
         revision = _filter_revision(path, encoded)

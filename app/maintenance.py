@@ -12,8 +12,6 @@ from .security import is_relative_to
 from .utils import bounded_int as _bounded_int
 
 
-
-
 def logs_root() -> Path:
     return Path(
         get_config().get("paths", "logs_dir", default="/opt/rclone-sync/logs")

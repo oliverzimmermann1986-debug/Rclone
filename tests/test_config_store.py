@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,8 @@ def test_config_store_returns_copies_and_saves_atomically(tmp_path: Path):
     store.update(lambda data: data["backup"].update({"enabled": True}))
     loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert loaded["backup"]["enabled"] is True
-    assert path.stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o077 == 0
 
 
 def test_config_store_reloads_external_changes(tmp_path: Path):
@@ -56,7 +58,8 @@ def test_config_store_keeps_one_secure_previous_version(tmp_path: Path):
 
     backup = tmp_path / "config.yaml.bak"
     assert yaml.safe_load(backup.read_text(encoding="utf-8")) == {"value": 1}
-    assert backup.stat().st_mode & 0o077 == 0
+    if os.name != "nt":
+        assert backup.stat().st_mode & 0o077 == 0
 
 
 def test_set_save_detects_external_change(tmp_path: Path):

@@ -30,8 +30,6 @@ _login_failures: dict[str, deque[float]] = defaultdict(deque)
 _login_blocked_until: dict[str, float] = {}
 
 
-
-
 def _login_policy() -> tuple[int, int, int]:
     web = get_config().get("web", default={}) or {}
     return (

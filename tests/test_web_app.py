@@ -43,9 +43,14 @@ def _config(password: str) -> dict:
 
 def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        yaml.safe_dump(_config("very-secure-password")), encoding="utf-8"
-    )
+    config_data = _config("very-secure-password")
+    config_data["paths"] = {
+        "data_dir": str(tmp_path),
+        "logs_dir": str(tmp_path),
+        "temp_dir": str(tmp_path),
+    }
+    config_data["web"]["local_browse_roots"] = [str(tmp_path)]
+    config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
     store = Config(config_path)
     store.update(
         lambda data: data["backup"].update(
@@ -323,7 +328,7 @@ def test_gui_validation_job_exports_snapshots_and_support_bundle(
 
         downloaded_log = client.get(f"/api/jobs/{job_id}/log/download")
         assert downloaded_log.status_code == 200
-        assert downloaded_log.text == "Fotos synchronisiert\n"
+        assert downloaded_log.text.replace("\r\n", "\n") == "Fotos synchronisiert\n"
         assert "attachment;" in downloaded_log.headers["content-disposition"]
 
         snapshot = client.post(

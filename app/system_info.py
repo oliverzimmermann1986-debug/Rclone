@@ -107,10 +107,15 @@ def _cgroup_pids(root: Path = Path("/sys/fs/cgroup")) -> dict[str, Any]:
     }
 
 
+def _sched_getaffinity() -> set[int]:
+    getter = getattr(os, "sched_getaffinity", None)
+    return set(getter(0)) if getter else set(range(max(1, os.cpu_count() or 1)))
+
+
 def _cpu_capacity(root: Path = Path("/sys/fs/cgroup")) -> tuple[int, float, str]:
     host_count = max(1, os.cpu_count() or 1)
     try:
-        affinity_count = max(1, len(os.sched_getaffinity(0)))
+        affinity_count = max(1, len(_sched_getaffinity()))
     except (AttributeError, OSError):
         affinity_count = host_count
     capacity = float(min(host_count, affinity_count))

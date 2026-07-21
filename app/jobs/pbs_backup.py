@@ -71,9 +71,7 @@ def _base_args(settings: dict[str, Any], target: dict[str, Any]) -> list[str]:
     return args
 
 
-def build_backup_command(
-    settings: dict[str, Any], target: dict[str, Any]
-) -> list[str]:
+def build_backup_command(settings: dict[str, Any], target: dict[str, Any]) -> list[str]:
     client = client_path()
     if not client:
         raise RuntimeError("proxmox-backup-client ist nicht installiert")

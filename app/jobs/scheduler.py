@@ -18,8 +18,6 @@ DEFAULT_TIMEZONE = "Europe/Berlin"
 DISABLED_VALUES = {"", "off", "manual", "disabled", "none"}
 
 
-
-
 def _is_disabled(schedule: Optional[str]) -> bool:
     return not schedule or schedule.strip().lower() in DISABLED_VALUES
 
@@ -206,9 +204,7 @@ def find_due_pbs_targets(
     if not bool(settings.get("enabled", False)):
         return [], []
     if not client_path():
-        return [], [
-            {"name": "pbs", "due": False, "reason": "client_not_installed"}
-        ]
+        return [], [{"name": "pbs", "due": False, "reason": "client_not_installed"}]
 
     backup = cfg.get("backup") or {}
     timezone_name = str(backup.get("timezone") or DEFAULT_TIMEZONE)

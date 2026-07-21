@@ -24,6 +24,8 @@ from ..rclone_args import (
     validate_rclone_args,
 )
 from . import runtime_state
+from .log_tail import read_tail
+from .pair_planner import execution_waves, has_overlapping_pairs, paths_overlap
 from ..utils import bounded_number as _bounded_number
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,23 @@ _ACTIVE_PROCS: list[subprocess.Popen] = []
 _ACTIVE_PROCS_LOCK = threading.Lock()
 _ACTIVE_PAIR_LOGS: dict[str, str] = {}
 _ACTIVE_PAIR_LOGS_LOCK = threading.Lock()
+
+
+class _SnapshotConfig:
+    """Read-only Config-compatible view over one job's configuration snapshot."""
+
+    def __init__(self, data: dict[str, Any]):
+        self.data = data
+
+    def get(self, *keys: str, default: Any = None) -> Any:
+        current: Any = self.data
+        for key in keys:
+            if not isinstance(current, dict) or key not in current:
+                return default
+            current = current[key]
+        return current
+
+
 _CANCEL_EVENT = threading.Event()
 
 _RESYNC_RE = re.compile(
@@ -64,15 +83,7 @@ def _rclone_cache_args(verb: Optional[str] = None) -> list[str]:
 
 
 def read_log_tail(path: Path, max_bytes: int = 1024 * 1024) -> str:
-    """Liest speicherschonend das Ende einer Logdatei (gemeinsame Implementierung)."""
-    try:
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - max(1024, max_bytes)))
-            return handle.read().decode("utf-8", errors="ignore")
-    except OSError:
-        return ""
+    return read_tail(path, max_bytes=max_bytes)
 
 
 def get_active_pair_logs() -> dict[str, str]:
@@ -150,6 +161,7 @@ def cancel_job() -> dict[str, Any]:
     for proc in local_procs:
         if proc.poll() is None:
             _terminate_proc(proc, graceful_sec=2)
+
     def _notify_cancelled() -> None:
         try:
             from ..notifications import notify
@@ -176,10 +188,13 @@ def reset_cancel() -> None:
     runtime_state.reset_cancel_marker()
 
 
-
-
 def _is_remote(path: str) -> bool:
-    return bool(path and not path.startswith(("/", "-")) and ":" in path)
+    return bool(
+        path
+        and not Path(path).is_absolute()
+        and not path.startswith("-")
+        and ":" in path
+    )
 
 
 def _safe_name(value: str, fallback: str = "pair") -> str:
@@ -532,38 +547,27 @@ def _pair_stats(path: str) -> tuple[int, str]:
 
 
 def _paths_overlap(a: str, b: str) -> bool:
-    if not a or not b or _is_remote(a) != _is_remote(b):
-        return False
-    if _is_remote(a):
-        aa, bb = a.rstrip("/"), b.rstrip("/")
-        return aa == bb or aa.startswith(bb + "/") or bb.startswith(aa + "/")
-    try:
-        pa, pb = Path(a).resolve(), Path(b).resolve()
-        return pa == pb or pa.is_relative_to(pb) or pb.is_relative_to(pa)
-    except (OSError, RuntimeError, ValueError):
-        return False
+    return paths_overlap(a, b)
 
 
 def _has_overlapping_pairs(pairs: list[dict[str, Any]]) -> bool:
-    for index, first in enumerate(pairs):
-        for second in pairs[index + 1 :]:
-            if _paths_overlap(
-                str(first.get("local") or ""), str(second.get("local") or "")
-            ):
-                return True
-            if _paths_overlap(
-                str(first.get("remote") or ""), str(second.get("remote") or "")
-            ):
-                return True
-    return False
+    return has_overlapping_pairs(pairs)
 
 
 def _build_pair_command(
-    pair: dict[str, Any], base_args: list[str], dry_run: bool
+    pair: dict[str, Any],
+    base_args: list[str],
+    dry_run: bool,
+    *,
+    config_snapshot: Optional[dict[str, Any]] = None,
 ) -> tuple[list[str], str, str, str]:
     remote = str(pair["remote"])
     local = str(pair["local"])
-    cfg = get_config()
+    cfg = (
+        _SnapshotConfig(config_snapshot)
+        if config_snapshot is not None
+        else get_config()
+    )
     backup = cfg.get("backup", default={}) or {}
 
     direction = str(pair.get("direction") or "bisync").lower().strip()
@@ -786,6 +790,7 @@ def _sync_pair(
     dry_run: bool,
     timeout_sec: int,
     run_id: str,
+    config_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
     name = str(pair["name"])
     remote = str(pair["remote"])
@@ -828,11 +833,8 @@ def _sync_pair(
         run_id, name, "running", log_file=str(log_file), started_at=time.time()
     )
 
-    collect_stats = bool(
-        (get_config().get("backup", default={}) or {}).get(
-            "collect_pre_post_stats", False
-        )
-    )
+    backup = config_snapshot.get("backup") or {}
+    collect_stats = bool(backup.get("collect_pre_post_stats", False))
     if collect_stats:
         cloud_files, cloud_size = _pair_stats(remote)
         local_files_before, local_size_before = _pair_stats(local)
@@ -846,7 +848,9 @@ def _sync_pair(
         )
 
     try:
-        cmd, verb, direction, mode = _build_pair_command(pair, args, dry_run)
+        cmd, verb, direction, mode = _build_pair_command(
+            pair, args, dry_run, config_snapshot=config_snapshot
+        )
         summary.update(
             {
                 "verb": verb,
@@ -868,7 +872,6 @@ def _sync_pair(
         needs_resync = (
             verb == "bisync" and rc != 0 and bool(_RESYNC_RE.search(log_tail))
         )
-        backup = get_config().get("backup", default={}) or {}
         auto_resync = bool(pair.get("auto_resync", backup.get("auto_resync", False)))
         first_run_resync = False
         if needs_resync and not auto_resync:
@@ -970,7 +973,8 @@ def run_job(
 ) -> dict[str, Any]:
     trigger = str(trigger or "manual").strip().lower()[:32] or "manual"
     cfg = get_config()
-    backup = cfg.get("backup", default={}) or {}
+    config_snapshot = cfg.snapshot()
+    backup = config_snapshot.get("backup") or {}
     if not backup.get("enabled", True):
         return {"enabled": False, "ok": True}
 
@@ -1036,10 +1040,10 @@ def run_job(
             )
         except Exception:
             logger.exception("Start-Benachrichtigung fehlgeschlagen")
-    if max_parallel > 1 and _has_overlapping_pairs(pairs):
-        max_parallel = 1
+    waves = execution_waves(pairs, max_parallel)
+    if len(waves) > 1 and _has_overlapping_pairs(pairs):
         warnings.append(
-            "Überlappende Pair-Pfade erkannt; Ausführung wurde automatisch serialisiert."
+            "Überlappende Pair-Pfade erkannt; nur betroffene Pairs wurden serialisiert."
         )
 
     logger.info("Starte Sync mit %d Worker(n) für %d Pair(s)", max_parallel, len(pairs))
@@ -1049,25 +1053,33 @@ def run_job(
         with ThreadPoolExecutor(
             max_workers=max_parallel, thread_name_prefix="rclone-pair"
         ) as executor:
-            futures = {
-                executor.submit(
-                    _sync_pair, pair, base_args, log_dir, dry_run, timeout_sec, run_id
-                ): pair
-                for pair in pairs
-            }
-            for future in as_completed(futures):
-                pair = futures[future]
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    logger.exception("Pair-Worker fehlgeschlagen")
-                    result = {
-                        "name": pair.get("name", "?"),
-                        "ok": False,
-                        "error": str(exc),
-                    }
-                result.setdefault("trigger", trigger)
-                results_by_name[str(pair.get("name"))] = result
+            for wave in waves:
+                futures = {
+                    executor.submit(
+                        _sync_pair,
+                        pair,
+                        base_args,
+                        log_dir,
+                        dry_run,
+                        timeout_sec,
+                        run_id,
+                        config_snapshot,
+                    ): pair
+                    for pair in wave
+                }
+                for future in as_completed(futures):
+                    pair = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        logger.exception("Pair-Worker fehlgeschlagen")
+                        result = {
+                            "name": pair.get("name", "?"),
+                            "ok": False,
+                            "error": str(exc),
+                        }
+                    result.setdefault("trigger", trigger)
+                    results_by_name[str(pair.get("name"))] = result
     except BaseException as exc:
         runtime_state.finish_run(run_id, "error", error=str(exc))
         raise

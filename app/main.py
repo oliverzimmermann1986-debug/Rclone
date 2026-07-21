@@ -58,8 +58,6 @@ MAX_API_BODY_BYTES = 2 * 1024 * 1024
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
-
-
 def _sd_notify(message: str) -> None:
     socket_path = os.getenv("NOTIFY_SOCKET")
     if not socket_path:
