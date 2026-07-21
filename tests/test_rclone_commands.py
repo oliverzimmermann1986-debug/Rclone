@@ -3,6 +3,25 @@ from pathlib import Path
 from app.jobs import rclone_sync
 
 
+def test_remote_precheck_uses_supported_lsjson_flags(monkeypatch):
+    captured = []
+
+    class Result:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def fake_run(command, **_kwargs):
+        captured.append(command)
+        return Result()
+
+    monkeypatch.setattr(rclone_sync.subprocess, "run", fake_run)
+
+    assert rclone_sync._remote_reachable("pcloud:/folder") == (True, "ok")
+    assert captured[0][:3] == ["rclone", "lsjson", "--stat"]
+    assert "--no-size" not in captured[0]
+
+
 class FakeConfig:
     def __init__(self, data):
         self.data = data
