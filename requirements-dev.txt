@@ -8,5 +8,5 @@ pluggy==1.6.0
 Pygments==2.20.0
 pytest==8.4.2
 ruff==0.15.22
-tomli==2.2.1; python_version < "3.11"
+tomli==2.4.1; python_version < "3.11"
 tzdata==2026.3
