@@ -5,13 +5,44 @@ def test_run_single_pair_forwards_dry_run(monkeypatch):
     monkeypatch.setattr(api_jobs, "_known_pair_names", lambda: {"Fotos"})
     captured = {}
 
-    def fake_run_backup(*, dry_run, pairs):
-        captured.update(dry_run=dry_run, pairs=pairs)
+    def fake_queue_backup(*, dry_run, pairs_filter):
+        captured.update(dry_run=dry_run, pairs_filter=pairs_filter)
         return {"ok": True}
 
-    monkeypatch.setattr(api_jobs, "run_backup", fake_run_backup)
+    monkeypatch.setattr(api_jobs, "_queue_backup", fake_queue_backup)
     assert api_jobs.run_single_pair("Fotos", dry_run=True) == {"ok": True}
-    assert captured == {"dry_run": True, "pairs": "Fotos"}
+    assert captured == {"dry_run": True, "pairs_filter": ["Fotos"]}
+
+
+def test_pbs_process_lock_contention_returns_409_without_leaking_web_lock(
+    monkeypatch,
+):
+    from fastapi import HTTPException
+
+    from app.routes import api_pbs
+
+    settings = {
+        "enabled": True,
+        "targets": [{"name": "Daten", "paths": ["/srv/data"]}],
+    }
+    monkeypatch.setattr(api_pbs.pbs_backup, "pbs_settings", lambda: settings)
+    monkeypatch.setattr(api_pbs.pbs_backup, "client_path", lambda: "/usr/bin/pbc")
+    monkeypatch.setattr(
+        api_pbs.pbs_backup,
+        "pbs_targets",
+        lambda _settings: settings["targets"],
+    )
+    monkeypatch.setattr(api_pbs, "try_file_lock", lambda _scope: None)
+
+    for _ in range(2):
+        try:
+            api_pbs.pbs_run(api_pbs.PbsRunPayload())
+        except HTTPException as exc:
+            assert exc.status_code == 409
+        else:
+            raise AssertionError("process lock contention must be rejected")
+
+    assert api_pbs._lock.locked() is False
 
 
 def test_unsaved_pair_connection_test_uses_inline_draft(tmp_path, monkeypatch):

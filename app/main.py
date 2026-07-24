@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import socket
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -47,7 +48,13 @@ from .routes import (
     api_test,
 )
 from .maintenance import run_automatic_maintenance
-from .jobs.runtime_state import recover_stale_run_state
+from .jobs import runtime_state
+from .jobs.job_lifecycle import (
+    BACKUP_KINDS,
+    PBS_KINDS,
+    reconcile_locked_scope,
+)
+from .jobs.locks import file_lock_or_none
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -93,32 +100,48 @@ def _set_csrf_cookie(response, request: Request, token: str) -> None:
     )
 
 
-@asynccontextmanager
-async def _lifespan(_app):
-    db = get_db()
-    backup = get_config().get("backup", default={}) or {}
-    timeout_hours = _bounded_number(
-        backup.get("timeout_hours", 4), default=4, minimum=0.1, maximum=168
-    )
-    stale_after = max(900, int(timeout_hours * 3600) + 900)
-    recovered_runtime = recover_stale_run_state()
-    if recovered_runtime:
-        logger.warning("Verwaisten Laufzeitstatus als stale markiert")
-        recovered = db.jobs_mark_all_running_stale(
-            reason="Besitzerprozess des Laufzeitstatus ist beendet"
-        )
-    else:
-        recovered = db.jobs_mark_stale(stale_after)
-    if recovered:
-        logger.warning("%d verwaiste laufende Job(s) als stale markiert", recovered)
+def _run_startup_maintenance() -> None:
     try:
         maintenance = run_automatic_maintenance()
         if maintenance.get("enabled"):
             logger.info("Automatische Wartung: %s", maintenance)
     except Exception:
         logger.exception("Automatische Wartung fehlgeschlagen")
+
+
+@asynccontextmanager
+async def _lifespan(_app):
+    db = get_db()
+    recovered = 0
+    for scope, kinds in (
+        (runtime_state.DEFAULT_CANCEL_SCOPE, BACKUP_KINDS),
+        ("pbs", PBS_KINDS),
+    ):
+        with file_lock_or_none(scope) as got_lock:
+            if got_lock is None:
+                logger.info(
+                    "Startup-Recovery für %s übersprungen: Job-Lock belegt",
+                    scope,
+                )
+                continue
+            result = reconcile_locked_scope(db, scope=scope, kinds=kinds)
+            recovered += int(result.get("recovered_jobs") or 0)
+            if not result.get("safe"):
+                logger.error(
+                    "Startup-Recovery für %s blockiert: %s aktiver "
+                    "registrierter Unterprozess(e)",
+                    scope,
+                    result.get("active_processes", 0),
+                )
+    if recovered:
+        logger.warning("%d verwaiste laufende Job(s) als stale markiert", recovered)
     _sd_notify("READY=1")
     logger.info("rclone-sync app ready")
+    threading.Thread(
+        target=_run_startup_maintenance,
+        name="startup-maintenance",
+        daemon=True,
+    ).start()
     try:
         yield
     finally:
@@ -399,6 +422,15 @@ def login_submit(
         return RedirectResponse(url="/login?error=1", status_code=303)
 
     clear_login_failures(key)
+    try:
+        data_dir = Path(
+            get_config().get("paths", "data_dir", default="/opt/rclone-sync/data")
+        )
+        (data_dir / ".initial-password").unlink(missing_ok=True)
+    except OSError:
+        logger.exception(
+            "Initialpasswort-Datei konnte nach dem Login nicht entfernt werden"
+        )
     token = create_session(username)
     csrf = new_csrf_token()
     response = RedirectResponse(url="/", status_code=303)

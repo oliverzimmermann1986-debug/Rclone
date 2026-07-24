@@ -34,10 +34,32 @@ def iter_logs(root: Path | None = None) -> Iterator[Path]:
 def prune_logs(*, days: int, dry_run: bool, limit_details: int = 200) -> dict[str, Any]:
     root = logs_root()
     cutoff = time.time() - max(1, int(days)) * 86400
+    active_logs: set[Path] = set()
+    try:
+        for job in get_db().job_list(status="running", limit=2000):
+            raw = str(job.get("log_file") or "").strip()
+            if raw:
+                active_logs.add(Path(raw).resolve())
+    except Exception:
+        # Bei unklarem DB-Zustand wird fail-safe gar nicht destruktiv bereinigt.
+        if not dry_run:
+            return {
+                "ok": False,
+                "dry_run": dry_run,
+                "days": days,
+                "matched": 0,
+                "deleted": 0,
+                "bytes_deleted": 0,
+                "files": [],
+                "truncated": False,
+                "error": "Aktive Job-Logs konnten nicht bestimmt werden",
+            }
     candidates: list[dict[str, Any]] = []
     matched = deleted = bytes_deleted = 0
     for path in iter_logs(root):
         try:
+            if path in active_logs:
+                continue
             stat_result = path.stat()
             if stat_result.st_mtime >= cutoff:
                 continue

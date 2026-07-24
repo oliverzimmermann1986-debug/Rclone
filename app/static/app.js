@@ -3,26 +3,62 @@ function app() {
     remote: '', local: '', direction: 'bisync', mode: 'bisync', dry_run: true,
     allow_delete: false, max_delete: 100, new_target: false,
   });
+  const requestControllers = new Map();
+  const requestRevisions = new Map();
+  const dialogFocusStack = [];
+  const staleResponse = Object.freeze({ __stale: true });
+  let currentPasswordResolver = null;
+  const safeStoredValue = (key, allowed, fallback) => {
+    try {
+      const value = localStorage.getItem(key);
+      return allowed.includes(value) ? value : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  };
 
   return {
     page: 'dashboard',
     pages: ['dashboard', 'pairs', 'jobs', 'doctor', 'settings'],
+    settingsTabs: ['general', 'scheduler', 'security', 'notifications', 'filters', 'account', 'pbs'],
     navOpen: false,
     online: navigator.onLine,
+    connectionState: navigator.onLine ? 'checking' : 'offline',
+    connectionMessage: navigator.onLine ? 'Verbindung wird geprüft' : 'Netzwerkverbindung ist offline',
     theme: 'system',
     lastUpdated: null,
     requestTimeoutMs: 30000,
+    refreshing: false,
+    configLoading: true,
+    configLoaded: false,
+    configError: '',
+    pending: {
+      backup: false, plan: false, quick: false, pbs: false, pbsCancel: false,
+      save: false, validate: false, filter: false, password: false,
+    },
+    currentPasswordDialog: { show: false, password: '', error: '' },
 
     overview: { loading: false, data: null },
-    status: { backup: null, check: null, quicksync: null },
+    status: { backup: null, check: null, quicksync: null, pbs: null },
     progress: null,
     recentJobs: [],
     jobs: {
       loading: false, items: [], total: 0, offset: 0, limit: 25,
-      kind: '', status: '', q: '',
+      kind: '', status: '', q: '', error: '',
     },
 
-    config: { web: {}, paths: {}, backup: { pairs: [], rclone_args: [], tuning: {} }, notifications: { webhooks: [] }, maintenance: {} },
+    config: {
+      web: {}, paths: {},
+      backup: { pairs: [], rclone_args: [], tuning: {} },
+      notifications: { webhooks: [] },
+      maintenance: {},
+      pbs: {
+        enabled: false, repository: '', password: '', fingerprint: '',
+        namespace: '', backup_id: '', timeout_hours: 4,
+        keep: { keep_last: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 0 },
+        targets: [],
+      },
+    },
     rcloneArgsText: '',
     allowedHostsText: '',
     browseRootsText: '',
@@ -53,7 +89,7 @@ function app() {
     quick: emptyQuick(),
     picker: {
       show: false, mode: null, idx: null, current: '', parent: null,
-      entries: [], loading: false, search: '',
+      entries: [], loading: false, search: '', error: '',
     },
     jobModal: {
       show: false, job: null, log: '', loading: false, logLoading: false,
@@ -61,17 +97,28 @@ function app() {
     },
     toast: { show: false, msg: '', type: 'ok', timer: null },
 
-    init() {
-      this.theme = localStorage.getItem('rclone-sync-theme') || 'system';
-      this.settingsTab = localStorage.getItem('rclone-sync-settings-tab') || 'general';
-      this.pairFilter = localStorage.getItem('rclone-sync-pair-filter') || 'all';
-      this.jobs.kind = localStorage.getItem('rclone-sync-job-kind') || '';
-      this.jobs.status = localStorage.getItem('rclone-sync-job-status') || '';
+    async init() {
+      this.theme = safeStoredValue('rclone-sync-theme', ['system', 'dark', 'light'], 'system');
+      this.settingsTab = safeStoredValue('rclone-sync-settings-tab', this.settingsTabs, 'general');
+      this.pairFilter = safeStoredValue(
+        'rclone-sync-pair-filter',
+        ['all', 'enabled', 'disabled', 'issues', 'destructive'],
+        'all',
+      );
+      this.jobs.kind = safeStoredValue('rclone-sync-job-kind', ['', 'backup', 'check', 'quicksync', 'pbs'], '');
+      this.jobs.status = safeStoredValue(
+        'rclone-sync-job-status',
+        ['', 'running', 'ok', 'error', 'skipped', 'cancelled', 'stale'],
+        '',
+      );
       this.applyTheme();
-      this.$watch('settingsTab', (value) => localStorage.setItem('rclone-sync-settings-tab', value));
-      this.$watch('pairFilter', (value) => localStorage.setItem('rclone-sync-pair-filter', value));
-      this.$watch('jobs.kind', (value) => localStorage.setItem('rclone-sync-job-kind', value));
-      this.$watch('jobs.status', (value) => localStorage.setItem('rclone-sync-job-status', value));
+      const store = (key, value) => {
+        try { localStorage.setItem(key, value); } catch (_) { /* Storage kann blockiert sein. */ }
+      };
+      this.$watch('settingsTab', (value) => store('rclone-sync-settings-tab', value));
+      this.$watch('pairFilter', (value) => store('rclone-sync-pair-filter', value));
+      this.$watch('jobs.kind', (value) => store('rclone-sync-job-kind', value));
+      this.$watch('jobs.status', (value) => store('rclone-sync-job-status', value));
       window.addEventListener('keydown', (event) => {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
           event.preventDefault();
@@ -86,42 +133,86 @@ function app() {
       });
       const hashPage = window.location.hash.replace('#', '');
       this.page = this.pages.includes(hashPage) ? hashPage : 'dashboard';
-      window.addEventListener('hashchange', () => {
+      const applyHistoryPage = () => {
         const next = window.location.hash.replace('#', '');
         if (this.pages.includes(next) && next !== this.page) this.navigate(next, false);
+      };
+      window.addEventListener('hashchange', applyHistoryPage);
+      window.addEventListener('popstate', applyHistoryPage);
+      window.addEventListener('online', () => {
+        this.setConnectionState('checking', 'Verbindung wird erneut geprüft');
+        this.refreshAll(true);
       });
-      window.addEventListener('online', () => { this.online = true; this.refreshAll(true); });
-      window.addEventListener('offline', () => { this.online = false; });
+      window.addEventListener('offline', () => {
+        this.setConnectionState('offline', 'Netzwerkverbindung ist offline');
+      });
       window.addEventListener('beforeunload', (event) => {
         if (this.configDirty || this.filterFile.dirty) {
           event.preventDefault();
           event.returnValue = '';
         }
       });
-      this.refreshAll(false);
-      if (this.page === 'dashboard') this.loadStorage(false);
-      else this.loadPage(this.page);
-      setInterval(() => {
-        if (!document.hidden) this.refreshAll(false);
-      }, 15000);
-      setInterval(() => {
-        if (!document.hidden && (this.busy() || this.progress?.running)) this.loadProgress(true);
-        if (!document.hidden && this.jobModal.show && this.jobModal.autoRefresh && this.jobModal.job?.status === 'running') {
-          this.refreshJobModal();
-        }
-      }, 2000);
+      await this.loadConfig(true);
+      await this.refreshAll(false);
+      if (this.page === 'dashboard') await this.loadStorage(false);
+      else this.loadPage(this.page, true);
+      this.startPolling();
     },
 
     async refreshAll(showToast = false) {
-      const results = await Promise.all([
-        this.loadOverview(true),
-        this.refreshStatus(true),
-        this.loadRecent(true),
-        this.loadSchedulerState(true),
-      ]);
-      if (this.busy() || this.progress?.running) await this.loadProgress(true);
-      this.lastUpdated = Date.now();
-      if (showToast && results.some(Boolean)) this.showToast('Ansicht aktualisiert');
+      if (this.refreshing) return false;
+      this.refreshing = true;
+      try {
+        const tasks = [
+          this.loadOverview(true),
+          this.refreshStatus(true),
+        ];
+        if (this.page === 'dashboard') {
+          tasks.push(this.loadRecent(true), this.loadSchedulerState(true));
+          if (this.config.pbs?.enabled) tasks.push(this.loadPbsStatus(true));
+        } else if (this.page === 'doctor' || this.page === 'settings') {
+          tasks.push(this.loadSchedulerState(true));
+        }
+        const results = await Promise.all(tasks);
+        if (this.rcloneBusy() || this.progress?.running) await this.loadProgress(true);
+        this.lastUpdated = Date.now();
+        const failed = results.filter((result) => result === false).length;
+        if (failed) {
+          this.setConnectionState('degraded', `${failed} Bereich(e) konnten nicht aktualisiert werden`);
+          if (showToast) this.showToast('Ansicht nur teilweise aktualisiert', 'err');
+        } else if (results.some(Boolean)) {
+          this.setConnectionState('online', 'Mit dem Server verbunden');
+          if (showToast) this.showToast('Ansicht aktualisiert');
+        }
+        return failed === 0;
+      } finally {
+        this.refreshing = false;
+      }
+    },
+
+    startPolling() {
+      const refreshLoop = async () => {
+        try {
+          if (!document.hidden) await this.refreshAll(false);
+        } finally {
+          window.setTimeout(refreshLoop, 15000);
+        }
+      };
+      const activityLoop = async () => {
+        try {
+          if (!document.hidden) {
+            if (this.rcloneBusy() || this.progress?.running) await this.loadProgress(true);
+            if (this.status?.pbs || this.pbs.status?.running) await this.loadPbsStatus(true);
+            if (this.jobModal.show && this.jobModal.autoRefresh && this.jobModal.job?.status === 'running') {
+              await this.refreshJobModal();
+            }
+          }
+        } finally {
+          window.setTimeout(activityLoop, 2000);
+        }
+      };
+      window.setTimeout(refreshLoop, 15000);
+      window.setTimeout(activityLoop, 2000);
     },
 
     navigate(next, updateHash = true) {
@@ -131,23 +222,24 @@ function app() {
       }
       this.page = next;
       this.navOpen = false;
-      if (updateHash) history.replaceState(null, '', `#${next}`);
+      if (updateHash && window.location.hash !== `#${next}`) history.pushState(null, '', `#${next}`);
       this.loadPage(next);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
 
-    loadPage(page) {
+    loadPage(page, configAlreadyLoaded = false) {
       if (page === 'dashboard') {
         this.loadOverview(true); this.loadRecent(true); this.loadStorage(false);
+        if (!configAlreadyLoaded && !this.configLoaded) this.loadConfig(true);
         if (this.config?.pbs?.enabled) this.loadPbsStatus();
       } else if (page === 'pairs') {
-        this.loadConfig();
+        if (!configAlreadyLoaded) this.loadConfig();
       } else if (page === 'jobs') {
         this.loadJobs(true);
       } else if (page === 'doctor') {
-        this.loadOverview(true); this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadSchedulerState(true);
+        this.loadOverview(true); if (!configAlreadyLoaded) this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadSchedulerState(true);
       } else if (page === 'settings') {
-        this.loadConfig(); this.loadFilterFile(); this.loadSchedulerState(true);
+        if (!configAlreadyLoaded) this.loadConfig(); this.loadFilterFile(); this.loadSchedulerState(true);
       }
     },
 
@@ -164,7 +256,41 @@ function app() {
       return '';
     },
 
+    setConnectionState(state, message = '') {
+      this.connectionState = state;
+      this.connectionMessage = message || ({
+        online: 'Mit dem Server verbunden',
+        checking: 'Verbindung wird geprüft',
+        degraded: 'Server nur teilweise erreichbar',
+        offline: 'Keine Verbindung zum Server',
+      })[state] || '';
+      this.online = state === 'online';
+    },
+
+    connectionLabel() {
+      return ({
+        online: 'Verbunden',
+        checking: 'Prüfe',
+        degraded: 'Eingeschränkt',
+        offline: 'Offline',
+      })[this.connectionState] || 'Unbekannt';
+    },
+
+    isStale(result) {
+      return Boolean(result?.__stale);
+    },
+
     async api(method, url, body, options = {}) {
+      const requestKey = options.requestKey || '';
+      let revision = 0;
+      if (requestKey) {
+        requestControllers.get(requestKey)?.abort();
+        revision = (requestRevisions.get(requestKey) || 0) + 1;
+        requestRevisions.set(requestKey, revision);
+      }
+      const controller = new AbortController();
+      if (requestKey) requestControllers.set(requestKey, controller);
+      let timedOut = false;
       try {
         const upper = String(method || 'GET').toUpperCase();
         const opts = { method: upper, credentials: 'include', headers: {} };
@@ -175,20 +301,28 @@ function app() {
           opts.headers['Content-Type'] = 'application/json';
           opts.body = JSON.stringify(body);
         }
-        const controller = new AbortController();
         opts.signal = controller.signal;
-        const timeout = setTimeout(() => controller.abort(), options.timeoutMs || this.requestTimeoutMs);
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, options.timeoutMs || this.requestTimeoutMs);
         let response;
         try { response = await fetch(url, opts); } finally { clearTimeout(timeout); }
-        this.online = true;
+        if (requestKey && requestRevisions.get(requestKey) !== revision) return staleResponse;
         if (!response.ok) {
           if (response.status === 401) { window.location = '/login'; return null; }
           const err = await response.json().catch(() => ({}));
+          if (requestKey && requestRevisions.get(requestKey) !== revision) return staleResponse;
           const rawDetail = err.detail || response.statusText;
           let detail = rawDetail;
           if (typeof detail === 'object') {
             const parts = [detail.message, ...(detail.errors || [])].filter(Boolean);
             detail = parts.join(' · ') || JSON.stringify(detail);
+          }
+          if (response.status >= 500) {
+            this.setConnectionState('degraded', `Serverfehler ${response.status}: ${detail}`);
+          } else {
+            this.setConnectionState('online', 'Server erreichbar');
           }
           if (options.captureError) return { __error: true, status: response.status, detail: rawDetail };
           if (!options.silent) {
@@ -200,13 +334,31 @@ function app() {
           }
           return null;
         }
-        return response.headers.get('content-type')?.includes('json') ? await response.json() : await response.text();
+        const result = response.headers.get('content-type')?.includes('json') ? await response.json() : await response.text();
+        if (requestKey && requestRevisions.get(requestKey) !== revision) return staleResponse;
+        this.setConnectionState('online', 'Mit dem Server verbunden');
+        return result;
       } catch (error) {
-        if (error.name !== 'AbortError') this.online = navigator.onLine;
+        const superseded = requestKey && requestRevisions.get(requestKey) !== revision;
+        if (superseded) return staleResponse;
+        if (error.name === 'AbortError' && !timedOut) return staleResponse;
+        const offline = !navigator.onLine;
+        const detail = timedOut
+          ? 'Zeitüberschreitung bei der Serveranfrage'
+          : (offline ? 'Netzwerkverbindung ist offline' : `Server nicht erreichbar: ${error.message}`);
+        this.setConnectionState(
+          offline ? 'offline' : 'degraded',
+          detail,
+        );
+        if (options.captureError) return { __error: true, status: 0, detail };
         if (!options.silent) {
-          this.showToast(error.name === 'AbortError' ? 'Zeitüberschreitung bei der Anfrage' : `Netzwerkfehler: ${error.message}`, 'err');
+          this.showToast(timedOut ? 'Zeitüberschreitung bei der Anfrage' : `Netzwerkfehler: ${error.message}`, 'err');
         }
         return null;
+      } finally {
+        if (requestKey && requestControllers.get(requestKey) === controller) {
+          requestControllers.delete(requestKey);
+        }
       }
     },
 
@@ -218,7 +370,7 @@ function app() {
 
     setTheme(theme) {
       this.theme = theme;
-      localStorage.setItem('rclone-sync-theme', theme);
+      try { localStorage.setItem('rclone-sync-theme', theme); } catch (_) { /* optional */ }
       this.applyTheme();
     },
 
@@ -236,17 +388,30 @@ function app() {
     },
 
     busy() {
-      return !!(this.status?.backup || this.status?.check || this.status?.quicksync);
+      return Boolean(
+        this.pending.backup || this.pending.quick || this.pending.pbs ||
+        this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.pbs,
+      );
+    },
+
+    rcloneBusy() {
+      return Boolean(
+        this.pending.backup || this.pending.quick ||
+        this.status?.backup || this.status?.check || this.status?.quicksync,
+      );
     },
 
     runningJob() {
-      return this.status?.backup || this.status?.check || this.status?.quicksync || null;
+      return this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.pbs || null;
     },
 
     runningKind() {
+      if (this.pending.pbs || this.status?.pbs) return 'PBS-Backup';
       if (this.status?.backup) return 'Backup';
       if (this.status?.check) return 'Check';
       if (this.status?.quicksync) return 'Quick-Sync';
+      if (this.pending.backup) return 'Backup';
+      if (this.pending.quick) return 'Quick-Sync';
       return '';
     },
 
@@ -267,7 +432,8 @@ function app() {
 
     async loadOverview(silent = false) {
       this.overview.loading = !silent;
-      const result = await this.api('GET', '/api/diagnostics/overview', undefined, { silent });
+      const result = await this.api('GET', '/api/diagnostics/overview', undefined, { silent, requestKey: 'overview' });
+      if (this.isStale(result)) return undefined;
       if (result) this.overview.data = result;
       this.overview.loading = false;
       return !!result;
@@ -275,10 +441,11 @@ function app() {
 
     async loadSchedulerState(silent = false) {
       this.schedulerControl.loading = true;
-      const result = await this.api('GET', '/api/jobs/scheduler/state', undefined, { silent });
+      const result = await this.api('GET', '/api/jobs/scheduler/state', undefined, { silent, requestKey: 'scheduler-state' });
+      if (this.isStale(result)) return undefined;
       if (result) this.schedulerControl = { ...this.schedulerControl, ...result, loading: false };
       else this.schedulerControl.loading = false;
-      return result;
+      return !!result;
     },
 
     async pauseScheduler(minutes = null, until = null) {
@@ -317,13 +484,15 @@ function app() {
     },
 
     async refreshStatus(silent = false) {
-      const result = await this.api('GET', '/api/jobs/status/current', undefined, { silent });
-      if (result) this.status = result;
+      const result = await this.api('GET', '/api/jobs/status/current', undefined, { silent, requestKey: 'current-status' });
+      if (this.isStale(result)) return undefined;
+      if (result) this.status = { ...this.status, ...result };
       return !!result;
     },
 
     async loadRecent(silent = false) {
-      const result = await this.api('GET', '/api/jobs/list?limit=8', undefined, { silent });
+      const result = await this.api('GET', '/api/jobs/list?limit=8', undefined, { silent, requestKey: 'recent-jobs' });
+      if (this.isStale(result)) return undefined;
       if (result) this.recentJobs = result;
       return !!result;
     },
@@ -335,10 +504,14 @@ function app() {
       if (this.jobs.kind) params.set('kind', this.jobs.kind);
       if (this.jobs.status) params.set('status', this.jobs.status);
       if (this.jobs.q.trim()) params.set('q', this.jobs.q.trim());
-      const result = await this.api('GET', `/api/jobs/search?${params}`);
+      this.jobs.error = '';
+      const result = await this.api('GET', `/api/jobs/search?${params}`, undefined, { requestKey: 'jobs' });
+      if (this.isStale(result)) return;
       if (result) {
         this.jobs.items = result.items || [];
         this.jobs.total = result.total || 0;
+      } else {
+        this.jobs.error = 'Jobhistorie konnte nicht geladen werden.';
       }
       this.jobs.loading = false;
     },
@@ -357,7 +530,8 @@ function app() {
     },
 
     async loadProgress(silent = false) {
-      const result = await this.api('GET', '/api/jobs/backup/progress', undefined, { silent });
+      const result = await this.api('GET', '/api/jobs/backup/progress', undefined, { silent, requestKey: 'backup-progress' });
+      if (this.isStale(result)) return null;
       if (result) {
         this.progress = result;
         if (!result.running) {
@@ -373,12 +547,18 @@ function app() {
     },
 
     async runBackup(dryRun) {
+      if (this.pending.backup) return;
       if (!(await this.ensureConfigSavedForRun())) return;
       if (!dryRun && !confirm('Produktiven Lauf für alle aktiven Pairs starten? Prüfe vorher möglichst den Plan oder einen Dry-Run.')) return;
-      const result = await this.api('POST', `/api/jobs/backup/run?dry_run=${dryRun}`);
-      if (result?.ok) {
-        this.showToast(dryRun ? 'Dry-Run gestartet' : 'Backup gestartet');
-        setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
+      this.pending.backup = true;
+      try {
+        const result = await this.api('POST', `/api/jobs/backup/run?dry_run=${dryRun}`);
+        if (result?.ok) {
+          this.showToast(dryRun ? 'Dry-Run gestartet' : 'Backup gestartet');
+          setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
+        }
+      } finally {
+        this.pending.backup = false;
       }
     },
 
@@ -390,41 +570,59 @@ function app() {
     },
 
     async runSinglePair(name, dryRun = true) {
-      if (!name) return;
+      if (!name || this.pending.backup) return;
       if (!(await this.ensureConfigSavedForRun())) return;
       if (!dryRun && !confirm(`Pair „${name}“ produktiv starten?`)) return;
-      const result = await this.api('POST', `/api/jobs/backup/run-pair/${encodeURIComponent(name)}?dry_run=${dryRun}`);
-      if (result?.ok) {
-        this.showToast(dryRun ? `Dry-Run für „${name}“ gestartet` : `„${name}“ gestartet`);
-        setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
+      this.pending.backup = true;
+      try {
+        const result = await this.api('POST', `/api/jobs/backup/run-pair/${encodeURIComponent(name)}?dry_run=${dryRun}`);
+        if (result?.ok) {
+          this.showToast(dryRun ? `Dry-Run für „${name}“ gestartet` : `„${name}“ gestartet`);
+          setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
+        }
+      } finally {
+        this.pending.backup = false;
       }
     },
 
     async checkPair(name) {
-      if (!name) return;
+      if (!name || this.pending.backup) return;
       if (!(await this.ensureConfigSavedForRun())) return;
-      const result = await this.api('POST', `/api/jobs/backup/check/${encodeURIComponent(name)}`);
-      if (result?.ok) {
-        this.showToast(`Read-only Check für „${name}“ gestartet`);
-        setTimeout(() => { this.refreshStatus(true); this.loadJobs(true); }, 400);
+      this.pending.backup = true;
+      try {
+        const result = await this.api('POST', `/api/jobs/backup/check/${encodeURIComponent(name)}`);
+        if (result?.ok) {
+          this.showToast(`Read-only Check für „${name}“ gestartet`);
+          setTimeout(() => { this.refreshStatus(true); this.loadJobs(true); }, 400);
+        }
+      } finally {
+        this.pending.backup = false;
       }
     },
 
     async loadPlan(dryRun = true) {
+      if (this.pending.plan) return;
       if (!(await this.ensureConfigSavedForRun())) return;
+      this.pending.plan = true;
       this.plan.loading = true;
       this.plan.dry_run = dryRun;
-      const result = await this.api('GET', `/api/jobs/backup/plan?dry_run=${dryRun}`);
-      if (result) this.plan.data = result;
+      const result = await this.api('GET', `/api/jobs/backup/plan?dry_run=${dryRun}`, undefined, { requestKey: 'backup-plan' });
+      if (!this.isStale(result) && result) {
+        this.plan.data = result;
+        this.openDialog('planDialog');
+      }
       this.plan.loading = false;
+      this.pending.plan = false;
     },
 
     openQuick() {
       this.quick = emptyQuick();
       this.quickModal.show = true;
+      this.openDialog('quickDialog');
     },
 
     async runQuickSync() {
+      if (this.pending.quick) return;
       if (!this.quick.remote || !this.quick.local) {
         this.showToast('Remote und lokaler Pfad müssen gesetzt sein', 'err'); return;
       }
@@ -436,35 +634,48 @@ function app() {
       }
       const payload = { ...this.quick, min_local_files: this.quick.new_target ? 0 : 1 };
       delete payload.new_target;
-      const result = await this.api('POST', '/api/jobs/backup/quick', payload);
-      if (result?.ok) {
-        this.showToast('Quick-Sync gestartet');
-        this.quickModal.show = false;
-        setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
+      this.pending.quick = true;
+      try {
+        const result = await this.api('POST', '/api/jobs/backup/quick', payload);
+        if (result?.ok) {
+          this.showToast('Quick-Sync gestartet');
+          this.closeQuick();
+          setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
+        }
+      } finally {
+        this.pending.quick = false;
       }
     },
 
     async showJob(job) {
+      if (!job?.id) return;
+      const jobId = job.id;
       this.jobModal = { show: true, job: job || null, log: '', loading: true, logLoading: true, logSearch: '', autoRefresh: true };
-      const detail = await this.api('GET', `/api/jobs/${job.id}`);
+      this.openDialog('jobDialog');
+      const detail = await this.api('GET', `/api/jobs/${jobId}`, undefined, { requestKey: 'job-detail' });
+      if (this.isStale(detail) || !this.jobModal.show || this.jobModal.job?.id !== jobId) return;
       if (detail) this.jobModal.job = detail;
-      await this.loadJobLog();
+      await this.loadJobLog(false, jobId);
       this.jobModal.loading = false;
     },
 
-    async loadJobLog(silent = false) {
-      if (!this.jobModal.job?.id) return;
+    async loadJobLog(silent = false, requestedJobId = null) {
+      const jobId = requestedJobId || this.jobModal.job?.id;
+      if (!jobId) return;
       this.jobModal.logLoading = !silent;
-      const result = await this.api('GET', `/api/jobs/${this.jobModal.job.id}/log?tail=5000`, undefined, { silent });
+      const result = await this.api('GET', `/api/jobs/${jobId}/log?tail=5000`, undefined, { silent, requestKey: 'job-log' });
+      if (this.isStale(result) || !this.jobModal.show || this.jobModal.job?.id !== jobId) return;
       if (result) this.jobModal.log = result.log || '';
       this.jobModal.logLoading = false;
     },
 
     async refreshJobModal() {
-      if (!this.jobModal.job?.id) return;
-      const detail = await this.api('GET', `/api/jobs/${this.jobModal.job.id}`, undefined, { silent: true });
+      const jobId = this.jobModal.job?.id;
+      if (!jobId) return;
+      const detail = await this.api('GET', `/api/jobs/${jobId}`, undefined, { silent: true, requestKey: 'job-detail' });
+      if (this.isStale(detail) || !this.jobModal.show || this.jobModal.job?.id !== jobId) return;
       if (detail) this.jobModal.job = detail;
-      await this.loadJobLog(true);
+      await this.loadJobLog(true, jobId);
       if (detail?.status !== 'running') {
         this.loadJobs(false); this.loadRecent(true); this.loadOverview(true);
       }
@@ -499,20 +710,57 @@ function app() {
       }
     },
 
-    async loadPbsStatus() {
+    async loadPbsStatus(silent = false) {
       this.pbs.loading = true;
-      const result = await this.api('GET', '/api/pbs/status');
+      const wasRunning = Boolean(this.pbs.status?.running || this.status?.pbs);
+      const result = await this.api('GET', '/api/pbs/status', undefined, { silent, requestKey: 'pbs-status' });
+      if (this.isStale(result)) return undefined;
       this.pbs.loading = false;
-      if (result) this.pbs.status = result;
+      if (result) {
+        this.pbs.status = result;
+        this.status.pbs = result.running
+          ? (result.running_job || { kind: 'pbs', status: 'running', started_at: Date.now() / 1000 })
+          : null;
+        if (wasRunning && !result.running) {
+          this.loadRecent(true);
+          this.loadOverview(true);
+          if (this.page === 'jobs') this.loadJobs(false);
+          this.showToast('PBS-Backup abgeschlossen');
+        }
+      }
+      return Boolean(result);
     },
     async runPbs(target = null) {
-      const result = await this.api('POST', '/api/pbs/run', target ? { target } : {});
-      if (result?.ok) {
-        this.showToast(`PBS-Backup gestartet (${(result.targets || []).join(', ')})`);
-        setTimeout(() => { this.loadPbsStatus(); this.loadJobs(); }, 1200);
+      if (this.pending.pbs || this.pbs.status?.running) return;
+      this.pending.pbs = true;
+      try {
+        const result = await this.api('POST', '/api/pbs/run', target ? { target } : {});
+        if (result?.ok) {
+          this.status.pbs = { id: result.job_id, kind: 'pbs', status: 'running', started_at: Date.now() / 1000 };
+          this.showToast(`PBS-Backup gestartet (${(result.targets || []).join(', ')})`);
+          setTimeout(() => { this.loadPbsStatus(); this.loadJobs(); }, 500);
+        }
+      } finally {
+        this.pending.pbs = false;
+      }
+    },
+    async cancelPbs() {
+      if (this.pending.pbsCancel || !this.pbs.status?.running) return;
+      if (!confirm('Laufendes PBS-Backup kontrolliert abbrechen?')) return;
+      this.pending.pbsCancel = true;
+      try {
+        const result = await this.api('POST', '/api/pbs/cancel');
+        if (result?.ok) {
+          this.showToast('PBS-Abbruch angefordert', 'warn');
+          setTimeout(() => this.loadPbsStatus(), 400);
+        }
+      } finally {
+        this.pending.pbsCancel = false;
       }
     },
     addPbsTarget() {
+      this.config.pbs ||= { enabled: false, targets: [], keep: {} };
+      this.config.pbs.targets ||= [];
       this.config.pbs.targets.push({ name: '', paths: [], pathsText: '', schedule: 'manual', namespace: '', backup_id: '' });
       this.markConfigDirty();
     },
@@ -525,9 +773,16 @@ function app() {
         target.paths = (target.pathsText || '').split('\n').map(v => v.trim()).filter(Boolean);
       }
     },
-    async loadConfig() {
-      const result = await this.api('GET', '/api/config');
-      if (!result) return;
+    async loadConfig(silent = false) {
+      this.configLoading = true;
+      this.configError = '';
+      const result = await this.api('GET', '/api/config', undefined, { silent, requestKey: 'config' });
+      if (this.isStale(result)) return null;
+      if (!result) {
+        this.configLoading = false;
+        this.configError = 'Konfiguration konnte nicht geladen werden. Bearbeitung bleibt gesperrt.';
+        return false;
+      }
       result.web ||= {};
       result.paths ||= {};
       result.web.allowed_hosts ||= ['*'];
@@ -594,8 +849,12 @@ function app() {
       this.syncScheduleEditorFromCron();
       this.performancePreset = this.detectPerformancePreset();
       this.configDirty = false;
+      this.configLoaded = true;
+      this.configLoading = false;
+      this.configError = '';
       this.configValidation = { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true };
-      this.refreshSchedulePreview();
+      if (this.page === 'settings' && this.settingsTab === 'scheduler') this.refreshSchedulePreview();
+      return true;
     },
 
     normalizePair(pair) {
@@ -624,6 +883,9 @@ function app() {
     configPayload() {
       const draft = JSON.parse(JSON.stringify(this.config));
       draft.backup ||= {}; draft.web ||= {};
+      for (const key of ['password', 'password_hash', 'secret_key', 'session_version']) {
+        delete draft.web[key];
+      }
       draft.backup.rclone_args = this.rcloneArgsText.split('\n').map((value) => value.trim()).filter(Boolean);
       draft.web.allowed_hosts = this.allowedHostsText.split('\n').map((value) => value.trim()).filter(Boolean);
       draft.web.local_browse_roots = this.browseRootsText.split('\n').map((value) => value.trim()).filter(Boolean);
@@ -714,7 +976,13 @@ function app() {
       const expression = String(this.config.backup?.default_schedule || 'manual').trim();
       const timezone = String(this.config.backup?.timezone || 'Europe/Berlin').trim();
       this.schedulePreview = { ...this.schedulePreview, loading: true, valid: null, error: '', nextRuns: [] };
-      const result = await this.api('POST', '/api/config/schedule-preview', { expression, timezone, count: 5 }, { captureError: true, silent: true });
+      const result = await this.api(
+        'POST',
+        '/api/config/schedule-preview',
+        { expression, timezone, count: 5 },
+        { captureError: true, silent: true, requestKey: 'schedule-preview' },
+      );
+      if (this.isStale(result)) return;
       if (result?.__error) {
         const raw = result.detail;
         const error = typeof raw === 'string' ? raw : (raw?.message || raw?.detail || 'Zeitplan ungültig');
@@ -801,6 +1069,8 @@ function app() {
     },
 
     async validateConfigDraft() {
+      if (this.pending.validate || this.configLoading || !this.configLoaded) return false;
+      this.pending.validate = true;
       this.configValidation = { loading: true, ok: null, warnings: [], errors: [], revisionMatches: true };
       const result = await this.api('POST', '/api/config/validate', { config: this.configPayload() }, { captureError: true, silent: true });
       if (result?.__error) {
@@ -808,24 +1078,63 @@ function app() {
         const errors = Array.isArray(detail?.errors) ? detail.errors : [detail?.message || String(detail || 'Validierung fehlgeschlagen')];
         this.configValidation = { loading: false, ok: false, warnings: [], errors, revisionMatches: result.status !== 409 };
         this.showToast(`${errors.length} Konfigurationsfehler gefunden`, 'err');
+        this.pending.validate = false;
+        return false;
+      }
+      if (!result) {
+        this.configValidation = { loading: false, ok: false, warnings: [], errors: ['Validierung konnte nicht ausgeführt werden'], revisionMatches: true };
+        this.pending.validate = false;
         return false;
       }
       this.configValidation = { loading: false, ok: true, warnings: result?.warnings || [], errors: [], revisionMatches: result?.revision_matches !== false };
       this.showToast(result?.warnings?.length ? `Gültig mit ${result.warnings.length} Hinweis(en)` : 'Konfiguration ist gültig', result?.warnings?.length ? 'warn' : 'ok');
+      this.pending.validate = false;
       return true;
     },
 
     async saveConfig() {
+      if (this.pending.save || this.configLoading || !this.configLoaded) return false;
+      this.pending.save = true;
       this.syncPbsTargets();
-      const result = await this.api('PUT', '/api/config', { config: this.configPayload() });
-      if (!result?.ok) return false;
-      this.config = result.config || this.config;
-      this.configDirty = false;
-      if (result.warnings?.length) this.showToast(`Gespeichert: ${result.warnings.join(' · ')}`, 'warn');
-      else this.showToast('Einstellungen gespeichert');
-      await this.loadConfig();
-      this.loadOverview(true);
-      return true;
+      try {
+        const payload = { config: this.configPayload() };
+        let result = await this.api('PUT', '/api/config', payload, { captureError: true, silent: true });
+        if (result?.__error && result.status === 403) {
+          const currentPassword = await this.requestCurrentPassword(
+            typeof result.detail === 'string'
+              ? result.detail
+              : 'Diese sicherheitsrelevante Änderung benötigt dein aktuelles Passwort.',
+          );
+          if (!currentPassword) return false;
+          try {
+            result = await this.api(
+              'PUT',
+              '/api/config',
+              { ...payload, current_password: currentPassword },
+              { captureError: true, silent: true },
+            );
+          } finally {
+            this.currentPasswordDialog.password = '';
+          }
+        }
+        if (result?.__error) {
+          const detail = typeof result.detail === 'string'
+            ? result.detail
+            : (result.detail?.message || 'Einstellungen konnten nicht gespeichert werden');
+          this.showToast(detail, 'err');
+          return false;
+        }
+        if (!result?.ok) return false;
+        this.config = result.config || this.config;
+        this.configDirty = false;
+        if (result.warnings?.length) this.showToast(`Gespeichert: ${result.warnings.join(' · ')}`, 'warn');
+        else this.showToast('Einstellungen gespeichert');
+        await this.loadConfig();
+        this.loadOverview(true);
+        return true;
+      } finally {
+        this.pending.save = false;
+      }
     },
 
     syncPairDirection(pair) {
@@ -837,6 +1146,8 @@ function app() {
     },
     convertPairToPbs(idx) {
       const pair = this.config.backup.pairs[idx];
+      this.config.pbs ||= { enabled: false, targets: [], keep: {} };
+      this.config.pbs.targets ||= [];
       const paths = (pair.source || '').startsWith('/') ? [pair.source] : [];
       this.config.pbs.targets.push({
         name: pair.name || '', paths, pathsText: paths.join('\n'),
@@ -881,6 +1192,7 @@ function app() {
     clonePair(idx) {
       const source = this.config.backup.pairs[idx] || {};
       const clone = JSON.parse(JSON.stringify(source));
+      delete clone.id;
       clone.name = `${clone.name || 'Pair'}_Kopie`;
       clone.enabled = false;
       clone.schedule = 'manual';
@@ -1002,7 +1314,8 @@ function app() {
     storagePairs() { return this.overview.data?.storage_pairs || []; },
 
     openPicker(mode, idx) {
-      this.picker = { show: true, mode, idx, current: '', parent: null, entries: [], loading: true, search: '' };
+      this.picker = { show: true, mode, idx, current: '', parent: null, entries: [], loading: true, search: '', error: '' };
+      this.openDialog('pickerDialog');
       this.loadPicker('');
     },
 
@@ -1012,14 +1325,22 @@ function app() {
     async loadPicker(path) {
       if (path === 'pbs:') { this.pickPath('pbs:'); return; }
       this.picker.loading = true;
+      this.picker.error = '';
       this.picker.current = path;
       const endpoint = this.picker.mode.endsWith('-remote') || this.picker.mode === 'remote' ? '/api/browse/rclone' : '/api/browse/local';
       // 'remote-local': lokaler Browser, Auswahl landet im Remote-Feld (lokal→lokal-Sync)
-      const result = await this.api('GET', endpoint + (path ? `?path=${encodeURIComponent(path)}` : ''));
+      const result = await this.api(
+        'GET',
+        endpoint + (path ? `?path=${encodeURIComponent(path)}` : ''),
+        undefined,
+        { requestKey: 'picker' },
+      );
+      if (this.isStale(result)) return;
       if (result) {
         this.picker.parent = result.parent;
         this.picker.entries = result.entries || [];
         this.picker.current = result.path || path || '';
+        this.picker.error = result.error || '';
         const cloudRoot = (this.picker.mode.endsWith('-remote') || this.picker.mode === 'remote') && !this.picker.current;
         if (cloudRoot && this.config?.pbs?.enabled) {
           this.picker.entries = [
@@ -1027,6 +1348,9 @@ function app() {
             ...this.picker.entries,
           ];
         }
+      } else {
+        this.picker.entries = [];
+        this.picker.error = 'Verzeichnis konnte nicht geladen werden.';
       }
       this.picker.loading = false;
     },
@@ -1039,7 +1363,7 @@ function app() {
     pickPath(path) {
       const { mode, idx } = this.picker;
       if (path === 'pbs:') {
-        this.picker.show = false;
+        this.closePicker();
         if (mode.startsWith('target-') && idx >= 0) { this.convertPairToPbs(idx); return; }
         this.showToast('PBS ist als Quelle nicht syncbar: Der Datastore ist ein deduplizierter Chunk-Store, einzelne Container/VMs lassen sich daraus nicht als Dateien herauskopieren. Für Cloud-Replikation den PBS-eigenen S3-Sync nutzen oder vzdump-Dateien als Quelle syncen.', 'warn');
         return;
@@ -1052,7 +1376,7 @@ function app() {
           target.pathsText = lines.join('\n');
           this.markConfigDirty();
         }
-        this.picker.show = false;
+        this.closePicker();
         this.showToast(`Pfad hinzugefügt: ${path}`);
         return;
       }
@@ -1070,13 +1394,14 @@ function app() {
         else this.config.backup.pairs[idx].local = path;
         this.configDirty = true;
       }
-      this.picker.show = false;
+      this.closePicker();
       this.showToast(`Pfad gesetzt: ${path}`);
     },
 
     async loadDoctor() {
       this.doctor.loading = true;
-      const result = await this.api('GET', '/api/diagnostics/doctor', undefined, { timeoutMs: 120000 });
+      const result = await this.api('GET', '/api/diagnostics/doctor', undefined, { timeoutMs: 120000, requestKey: 'doctor' });
+      if (this.isStale(result)) return;
       if (result) this.doctor.data = result;
       this.doctor.loading = false;
     },
@@ -1094,7 +1419,8 @@ function app() {
     async loadLogs() {
       this.maintenance.loading = true;
       const query = this.maintenance.logQuery ? `&query=${encodeURIComponent(this.maintenance.logQuery)}` : '';
-      const result = await this.api('GET', `/api/maintenance/logs?limit=200${query}`);
+      const result = await this.api('GET', `/api/maintenance/logs?limit=200${query}`, undefined, { requestKey: 'maintenance-logs' });
+      if (this.isStale(result)) return;
       if (result?.logs) this.maintenance.logs = result.logs;
       this.maintenance.loading = false;
     },
@@ -1110,7 +1436,8 @@ function app() {
     },
 
     async loadDatabaseStatus() {
-      const result = await this.api('GET', '/api/maintenance/database');
+      const result = await this.api('GET', '/api/maintenance/database', undefined, { requestKey: 'database-status' });
+      if (this.isStale(result)) return;
       if (result) this.maintenance.database = result;
     },
 
@@ -1128,7 +1455,8 @@ function app() {
 
     async loadSnapshots() {
       this.snapshots.loading = true;
-      const result = await this.api('GET', '/api/maintenance/config/snapshots', undefined, { silent: true });
+      const result = await this.api('GET', '/api/maintenance/config/snapshots', undefined, { silent: true, requestKey: 'snapshots' });
+      if (this.isStale(result)) return;
       if (result?.snapshots) {
         this.snapshots.items = result.snapshots;
         this.snapshots.max = result.max_snapshots || 30;
@@ -1168,7 +1496,8 @@ function app() {
     async loadAudit() {
       this.audit.loading = true;
       const suffix = this.audit.eventType ? `?limit=100&event_type=${encodeURIComponent(this.audit.eventType)}` : '?limit=100';
-      const result = await this.api('GET', `/api/maintenance/audit${suffix}`, undefined, { silent: true });
+      const result = await this.api('GET', `/api/maintenance/audit${suffix}`, undefined, { silent: true, requestKey: 'audit' });
+      if (this.isStale(result)) return;
       if (result?.events) this.audit.items = result.events;
       this.audit.loading = false;
     },
@@ -1185,7 +1514,8 @@ function app() {
 
     async loadFilterFile() {
       this.filterFile.loading = true;
-      const result = await this.api('GET', '/api/config/filter-file');
+      const result = await this.api('GET', '/api/config/filter-file', undefined, { requestKey: 'filter-file' });
+      if (this.isStale(result)) return;
       if (result) {
         this.filterFile.content = result.content || '';
         this.filterFile.path = result.path || '';
@@ -1196,11 +1526,19 @@ function app() {
     },
 
     async saveFilterFile() {
-      const result = await this.api('PUT', '/api/config/filter-file', { content: this.filterFile.content, revision: this.filterFile.revision });
-      if (result?.ok) {
-        this.filterFile.revision = result.revision || this.filterFile.revision;
-        this.filterFile.dirty = false;
-        this.showToast(`Filter gespeichert (${result.bytes} B)`);
+      if (this.pending.filter) return false;
+      this.pending.filter = true;
+      try {
+        const result = await this.api('PUT', '/api/config/filter-file', { content: this.filterFile.content, revision: this.filterFile.revision });
+        if (result?.ok) {
+          this.filterFile.revision = result.revision || this.filterFile.revision;
+          this.filterFile.dirty = false;
+          this.showToast(`Filter gespeichert (${result.bytes} B)`);
+          return true;
+        }
+        return false;
+      } finally {
+        this.pending.filter = false;
       }
     },
 
@@ -1230,12 +1568,18 @@ function app() {
     },
 
     async changePassword() {
+      if (this.pending.password) return;
       if (this.pwChange.new !== this.pwChange.confirm) { this.showToast('Passwortwiederholung stimmt nicht überein', 'err'); return; }
       if (this.pwChange.new.length < 12) { this.showToast('Mindestens 12 Zeichen erforderlich', 'err'); return; }
-      const result = await this.api('POST', '/api/config/change-password', { current_password: this.pwChange.current, new_password: this.pwChange.new });
-      if (result?.ok) {
-        this.showToast('Passwort geändert – bitte neu anmelden');
-        setTimeout(() => { window.location = '/login'; }, 800);
+      this.pending.password = true;
+      try {
+        const result = await this.api('POST', '/api/config/change-password', { current_password: this.pwChange.current, new_password: this.pwChange.new });
+        if (result?.ok) {
+          this.showToast('Passwort geändert – bitte neu anmelden');
+          setTimeout(() => { window.location = '/login'; }, 800);
+        }
+      } finally {
+        this.pending.password = false;
       }
     },
 
@@ -1245,12 +1589,143 @@ function app() {
       if (result !== null) window.location = '/login';
     },
 
+    focusableElements(dialog) {
+      if (!dialog) return [];
+      return [...dialog.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
+        'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )].filter((element) => !element.hidden && element.offsetParent !== null);
+    },
+
+    openDialog(refName) {
+      dialogFocusStack.push(document.activeElement);
+      this.$nextTick(() => {
+        const dialog = this.$refs[refName];
+        const target = dialog?.querySelector('[data-dialog-initial-focus]') || this.focusableElements(dialog)[0] || dialog;
+        target?.focus();
+      });
+    },
+
+    restoreDialogFocus() {
+      const target = dialogFocusStack.pop();
+      this.$nextTick(() => {
+        if (target?.isConnected) target.focus();
+      });
+    },
+
+    activeDialog() {
+      if (this.currentPasswordDialog.show) return this.$refs.currentPasswordDialog;
+      if (this.jobModal.show) return this.$refs.jobDialog;
+      if (this.picker.show) return this.$refs.pickerDialog;
+      if (this.quickModal.show) return this.$refs.quickDialog;
+      if (this.plan.data) return this.$refs.planDialog;
+      return null;
+    },
+
+    requestCurrentPassword(message = '') {
+      if (currentPasswordResolver) currentPasswordResolver(null);
+      this.currentPasswordDialog = { show: true, password: '', error: message };
+      this.openDialog('currentPasswordDialog');
+      return new Promise((resolve) => {
+        currentPasswordResolver = resolve;
+      });
+    },
+
+    submitCurrentPassword() {
+      const password = String(this.currentPasswordDialog.password || '');
+      if (!password) {
+        this.currentPasswordDialog.error = 'Aktuelles Passwort ist erforderlich.';
+        return;
+      }
+      const resolve = currentPasswordResolver;
+      currentPasswordResolver = null;
+      this.currentPasswordDialog.show = false;
+      this.currentPasswordDialog.password = '';
+      this.restoreDialogFocus();
+      resolve?.(password);
+    },
+
+    cancelCurrentPassword() {
+      const resolve = currentPasswordResolver;
+      currentPasswordResolver = null;
+      this.currentPasswordDialog = { show: false, password: '', error: '' };
+      this.restoreDialogFocus();
+      resolve?.(null);
+    },
+
+    trapDialogFocus(event) {
+      const dialog = this.activeDialog();
+      if (!dialog) return;
+      const focusable = this.focusableElements(dialog);
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!dialog.contains(document.activeElement)) {
+        event.preventDefault();
+        first.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    },
+
+    closePlan() {
+      if (!this.plan.data) return;
+      this.plan.data = null;
+      this.restoreDialogFocus();
+    },
+
+    closeQuick() {
+      if (!this.quickModal.show) return;
+      this.quickModal.show = false;
+      this.restoreDialogFocus();
+    },
+
+    closePicker() {
+      if (!this.picker.show) return;
+      this.picker.show = false;
+      requestControllers.get('picker')?.abort();
+      this.restoreDialogFocus();
+    },
+
+    closeJob() {
+      if (!this.jobModal.show) return;
+      this.jobModal.show = false;
+      requestControllers.get('job-detail')?.abort();
+      requestControllers.get('job-log')?.abort();
+      this.restoreDialogFocus();
+    },
+
     closeOverlays() {
-      if (this.jobModal.show) this.jobModal.show = false;
-      else if (this.picker.show) this.picker.show = false;
-      else if (this.quickModal.show) this.quickModal.show = false;
-      else if (this.plan.data) this.plan.data = null;
+      if (this.currentPasswordDialog.show) this.cancelCurrentPassword();
+      else if (this.jobModal.show) this.closeJob();
+      else if (this.picker.show) this.closePicker();
+      else if (this.quickModal.show) this.closeQuick();
+      else if (this.plan.data) this.closePlan();
       else this.navOpen = false;
+    },
+
+    selectSettingsTab(tab, focus = false) {
+      if (!this.settingsTabs.includes(tab)) return;
+      this.settingsTab = tab;
+      if (tab === 'scheduler') this.refreshSchedulePreview();
+      if (tab === 'pbs') this.loadPbsStatus();
+      if (focus) {
+        this.$nextTick(() => document.getElementById(`settings-tab-${tab}`)?.focus());
+      }
+    },
+
+    moveSettingsTab(delta) {
+      const current = Math.max(0, this.settingsTabs.indexOf(this.settingsTab));
+      const next = (current + delta + this.settingsTabs.length) % this.settingsTabs.length;
+      this.selectSettingsTab(this.settingsTabs[next], true);
     },
 
     markConfigDirty() {
@@ -1344,7 +1819,7 @@ function app() {
     },
 
     kindLabel(kind) {
-      return ({ backup: 'Backup', check: 'Check', quicksync: 'Quick-Sync' })[kind] || kind || 'Job';
+      return ({ backup: 'Backup', check: 'Check', quicksync: 'Quick-Sync', pbs: 'PBS-Backup' })[kind] || kind || 'Job';
     },
 
     directionLabel(pair) {

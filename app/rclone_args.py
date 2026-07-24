@@ -8,6 +8,7 @@ Server überschreiben. Diese Flags bleiben standardmäßig der Anwendung vorbeha
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from typing import Any
 
@@ -74,6 +75,49 @@ _BLOCKED_PREFIXES = (
     "--sftp-key-file=",
     "--sftp-known-hosts-file=",
 )
+_REDACTED = "***REDACTED***"
+_SENSITIVE_FLAG = (
+    r"--(?=[A-Za-z0-9-]*(?:password|passwd|secret|token|credential|"
+    r"access-key|private-key|customer-key|encryption-key|sas-url|header|key))"
+    r"[A-Za-z0-9][A-Za-z0-9-]*"
+)
+_SENSITIVE_FLAG_VALUE_RE = re.compile(
+    rf"(?P<flag>{_SENSITIVE_FLAG})"
+    rf"(?P<separator>\s*=\s*|\s+)"
+    rf"(?P<value>\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;\]\)}}\"']+)",
+    re.IGNORECASE,
+)
+_SENSITIVE_FLAG_NAME_RE = re.compile(rf"^{_SENSITIVE_FLAG}$", re.IGNORECASE)
+_URL_PASSWORD_RE = re.compile(
+    r"(?P<prefix>://[^/\s:@]+:)(?P<password>[^@\s/]+)(?=@)",
+    re.IGNORECASE,
+)
+
+
+def redact_command_text(text: str) -> str:
+    """Maskiert Zugangsdaten in bereits formatierten rclone-Kommandos.
+
+    Die Funktion arbeitet auch auf eingebetteten Command-Strings in JSON, CSV
+    oder Webhook-Payloads und deckt sowohl ``--flag=value`` als auch
+    ``--flag value`` ab. Der Flag-Name bleibt für die Diagnose sichtbar.
+    """
+
+    value = str(text or "")
+
+    def replace_flag(match: re.Match[str]) -> str:
+        raw_value = match.group("value")
+        if raw_value.startswith('"') and raw_value.endswith('"'):
+            replacement = f'"{_REDACTED}"'
+        elif raw_value.startswith("'") and raw_value.endswith("'"):
+            replacement = f"'{_REDACTED}'"
+        else:
+            replacement = _REDACTED
+        return f"{match.group('flag')}{match.group('separator')}{replacement}"
+
+    value = _SENSITIVE_FLAG_VALUE_RE.sub(replace_flag, value)
+    return _URL_PASSWORD_RE.sub(
+        lambda match: f"{match.group('prefix')}{_REDACTED}", value
+    )
 
 
 def rclone_subprocess_env() -> dict[str, str]:
@@ -131,6 +175,17 @@ def validate_parsed_rclone_args(
             raise ValueError("Leeres oder zu langes rclone-Argument")
         if any(char in token for char in ("\x00", "\r", "\n")):
             raise ValueError("rclone-Argument enthält Steuerzeichen")
+    credential_flags = [
+        token.split("=", 1)[0]
+        for token in normalized
+        if _SENSITIVE_FLAG_NAME_RE.fullmatch(token.split("=", 1)[0])
+    ]
+    if credential_flags:
+        raise UnsafeRcloneArgument(
+            "Zugangsdaten-Flags sind auch im Expertenmodus nicht erlaubt; "
+            "Secrets müssen über rclone.conf oder geschützte Umgebungsvariablen "
+            "bereitgestellt werden: " + ", ".join(dict.fromkeys(credential_flags))
+        )
     blocked = blocked_arguments(normalized)
     if blocked and not allow_unsafe:
         raise UnsafeRcloneArgument(

@@ -173,6 +173,9 @@ def verify_password(username: str, password: str) -> bool:
     cfg_user = str(cfg.get("web", "username", default="admin") or "admin")
     user_ok = secrets.compare_digest(username.casefold(), cfg_user.casefold())
     hashed = str(cfg.get("web", "password_hash", default="") or "")
+    encoded_password = password.encode("utf-8")
+    if len(encoded_password) > 72:
+        return False
 
     if not hashed:
         plain = str(cfg.get("web", "password", default="") or "")
@@ -180,9 +183,13 @@ def verify_password(username: str, password: str) -> bool:
             return False
         password_ok = secrets.compare_digest(password, plain)
         if user_ok and password_ok:
-            new_hash = bcrypt.hashpw(
-                password.encode("utf-8"), bcrypt.gensalt(rounds=12)
-            ).decode("ascii")
+            try:
+                new_hash = bcrypt.hashpw(
+                    encoded_password, bcrypt.gensalt(rounds=12)
+                ).decode("ascii")
+            except ValueError:
+                logger.exception("Klartext-Passwort konnte nicht migriert werden")
+                return False
 
             def updater(data: dict) -> None:
                 web = data.setdefault("web", {})
@@ -197,7 +204,7 @@ def verify_password(username: str, password: str) -> bool:
         return False
 
     try:
-        password_ok = bcrypt.checkpw(password.encode("utf-8"), hashed.encode("ascii"))
+        password_ok = bcrypt.checkpw(encoded_password, hashed.encode("ascii"))
         return bool(user_ok and password_ok)
     except (ValueError, TypeError, UnicodeError):
         logger.warning("Ungültiger bcrypt-Hash in der Konfiguration")

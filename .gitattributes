@@ -1,0 +1,6 @@
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+requirements*.txt text eol=lf
+.github/*.yml text eol=lf
+.github/workflows/*.yml text eol=lf
