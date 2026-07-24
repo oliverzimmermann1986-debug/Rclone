@@ -16,9 +16,16 @@ from .rclone_args import UnsafeRcloneArgument, validate_rclone_args
 
 _DISABLED_SCHEDULES = {"", "off", "manual", "disabled", "none"}
 _NAME_RE = re.compile(r"^[^\x00-\x1f/\\]{1,80}$")
+_STABLE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_PBS_BACKUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DURATION_RE = re.compile(r"^\d+(?:\.\d+)?(?:ms|s|m|h|d|w)?$")
 _REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,127}:.*$")
 _WEBHOOK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_MAX_PAIRS = 256
+_MAX_PBS_TARGETS = 128
+_MAX_WEBHOOKS = 64
+_MAX_PBS_PATHS = 64
+CONFIG_SCHEMA_VERSION = 2
 _NOTIFICATION_EVENTS = {
     "sync_started",
     "sync_ok",
@@ -109,6 +116,11 @@ def _paths_overlap(a: str, b: str) -> bool:
         return False
 
 
+def _valid_cron(expression: str) -> bool:
+    """Only accept the five-field minute-based format used by the systemd timer."""
+    return len(expression.split()) == 5 and croniter.is_valid(expression)
+
+
 def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(data, dict):
         raise ConfigValidationError(["Config-Root muss ein Mapping sein"])
@@ -116,6 +128,16 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     cfg = copy.deepcopy(data)
     errors: list[str] = []
     warnings: list[str] = []
+    try:
+        schema_version = int(cfg.get("schema_version", 1) or 1)
+    except (TypeError, ValueError):
+        schema_version = 0
+    if schema_version < 1 or schema_version > CONFIG_SCHEMA_VERSION:
+        errors.append(
+            f"schema_version {schema_version} wird nicht unterstützt "
+            f"(erwartet 1 bis {CONFIG_SCHEMA_VERSION})"
+        )
+    cfg["schema_version"] = CONFIG_SCHEMA_VERSION
 
     web = cfg.setdefault("web", {})
     if not isinstance(web, dict):
@@ -318,7 +340,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     backup["timezone"] = timezone
 
     default_schedule = str(backup.get("default_schedule") or "manual").strip()
-    if default_schedule.lower() not in _DISABLED_SCHEDULES and not croniter.is_valid(
+    if default_schedule.lower() not in _DISABLED_SCHEDULES and not _valid_cron(
         default_schedule
     ):
         errors.append(f"backup.default_schedule ist ungültig: {default_schedule}")
@@ -387,8 +409,12 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(pairs, list):
         errors.append("backup.pairs muss eine Liste sein")
         pairs = []
+    elif len(pairs) > _MAX_PAIRS:
+        errors.append(f"backup.pairs darf höchstens {_MAX_PAIRS} Einträge enthalten")
+        pairs = pairs[:_MAX_PAIRS]
     normalized_pairs: list[dict[str, Any]] = []
     seen_names: set[str] = set()
+    seen_pair_ids: set[str] = set()
     for idx, raw in enumerate(pairs):
         label = f"backup.pairs[{idx}]"
         if not isinstance(raw, dict):
@@ -398,12 +424,23 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         name = str(pair.get("name") or "").strip()
         if not _NAME_RE.match(name):
             errors.append(f"{label}.name fehlt oder ist ungültig")
+        elif "," in name or name.casefold().startswith("pbs:"):
+            errors.append(
+                f"{label}.name darf weder Kommas enthalten noch mit 'pbs:' beginnen"
+            )
         folded = name.casefold()
         if folded in seen_names:
             errors.append(f"Doppelter Pair-Name: {name}")
         seen_names.add(folded)
         pair["name"] = name
         pair["enabled"] = _boolean(pair.get("enabled", True), default=True)
+
+        legacy_options = pair.pop("options", None)
+        if legacy_options not in (None, {}):
+            errors.append(
+                f"{label}.options wird nicht mehr unterstützt; "
+                "Werte müssen als explizite Pair-Felder konfiguriert werden"
+            )
 
         try:
             remote = _clean_path(pair.get("remote"))
@@ -449,12 +486,24 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             mode = "copy"
         pair["direction"] = direction
         pair["mode"] = mode
+        pair_id = str(pair.get("id") or "").strip().lower()
+        if not pair_id:
+            identity = "\0".join(
+                ("rclone", name.casefold(), remote, local, direction, mode)
+            )
+            pair_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
+        elif not _STABLE_ID_RE.fullmatch(pair_id):
+            errors.append(f"{label}.id ist ungültig")
+        if pair_id in seen_pair_ids:
+            errors.append(f"{label}.id ist doppelt")
+        seen_pair_ids.add(pair_id)
+        pair["id"] = pair_id
 
         schedule = str(pair.get("schedule") or "").strip()
         if (
             schedule
             and schedule.lower() not in _DISABLED_SCHEDULES
-            and not croniter.is_valid(schedule)
+            and not _valid_cron(schedule)
         ):
             errors.append(f"{label}.schedule ist ungültig: {schedule}")
         pair["schedule"] = schedule
@@ -476,6 +525,16 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
                 integer=True,
             )
         )
+        if (
+            pair["enabled"]
+            and _is_absolute_local(remote)
+            and direction in {"push", "bisync"}
+            and pair["min_remote_files"] == 0
+        ):
+            warnings.append(
+                f"{name}: lokales Ziel im remote-Feld ist ohne "
+                "min_remote_files nicht gegen einen Mount-Drop geschützt."
+            )
         pair["min_free_gb"] = float(
             _number(pair.get("min_free_gb", 0), default=0, minimum=0, maximum=1_000_000)
         )
@@ -533,6 +592,58 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
                     integer=True,
                 )
             )
+        for unsafe_key in ("ignore_errors", "allow_unsafe_flags"):
+            if _boolean(pair.pop(unsafe_key, False)):
+                errors.append(
+                    f"{label}.{unsafe_key} ist nicht als strukturierte Pair-Option erlaubt"
+                )
+        for key, low, high in (
+            ("transfers", 1, 128),
+            ("checkers", 1, 256),
+            ("retries", 0, 100),
+            ("low_level_retries", 0, 1000),
+            ("tpslimit", 0, 1_000_000),
+            ("tpslimit_burst", 0, 1_000_000),
+        ):
+            if pair.get(key) not in (None, ""):
+                pair[key] = int(
+                    _number(
+                        pair.get(key),
+                        default=low,
+                        minimum=low,
+                        maximum=high,
+                        integer=True,
+                    )
+                )
+        for key in (
+            "delete_excluded",
+            "fast_list",
+            "track_renames",
+            "metadata",
+            "create_empty_src_dirs",
+            "ignore_existing",
+            "drive_acknowledge_abuse",
+        ):
+            if key in pair:
+                pair[key] = _boolean(pair.get(key))
+        for key in (
+            "max_transfer",
+            "max_duration",
+            "contimeout",
+            "timeout",
+            "bwlimit",
+            "max_delete_size",
+        ):
+            if key in pair:
+                value = str(pair.get(key) or "").strip()
+                if len(value) > 64 or any(ch in value for ch in "\x00\r\n"):
+                    errors.append(f"{label}.{key} ist ungültig")
+                pair[key] = value
+        if "log_level" in pair:
+            log_level = str(pair.get("log_level") or "").strip().upper()
+            if log_level not in {"DEBUG", "INFO", "NOTICE", "ERROR"}:
+                errors.append(f"{label}.log_level ist ungültig")
+            pair["log_level"] = log_level
         try:
             pair["rclone_args"] = _normalize_string_list(pair.get("rclone_args"))
             validate_rclone_args(
@@ -600,15 +711,25 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
 
     for i, first in enumerate(normalized_pairs):
         for second in normalized_pairs[i + 1 :]:
-            for key in ("local", "remote"):
-                if _paths_overlap(
-                    str(first.get(key) or ""), str(second.get(key) or "")
-                ):
-                    warnings.append(
-                        f"Pairs '{first.get('name')}' und '{second.get('name')}' überlappen bei {key}; "
-                        "sie werden zur Sicherheit seriell ausgeführt."
+            conflict = next(
+                (
+                    (first_key, second_key)
+                    for first_key in ("local", "remote")
+                    for second_key in ("local", "remote")
+                    if _paths_overlap(
+                        str(first.get(first_key) or ""),
+                        str(second.get(second_key) or ""),
                     )
-                    break
+                ),
+                None,
+            )
+            if conflict:
+                first_key, second_key = conflict
+                warnings.append(
+                    f"Pairs '{first.get('name')}' und '{second.get('name')}' "
+                    f"überlappen bei {first_key}/{second_key}; "
+                    "sie werden zur Sicherheit seriell ausgeführt."
+                )
 
     notifications = cfg.setdefault("notifications", {})
     if not isinstance(notifications, dict):
@@ -622,6 +743,11 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(hooks, list):
         errors.append("notifications.webhooks muss eine Liste sein")
         hooks = []
+    elif len(hooks) > _MAX_WEBHOOKS:
+        errors.append(
+            f"notifications.webhooks darf höchstens {_MAX_WEBHOOKS} Einträge enthalten"
+        )
+        hooks = hooks[:_MAX_WEBHOOKS]
     seen_hook_ids: set[str] = set()
     normalized_hooks: list[dict[str, Any]] = []
     for idx, hook in enumerate(hooks):
@@ -738,6 +864,12 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     pbs["repository"] = repository
     pbs["namespace"] = str(pbs.get("namespace") or "").strip()
     pbs["backup_id"] = str(pbs.get("backup_id") or "").strip()
+    if pbs["backup_id"] and not _PBS_BACKUP_ID_RE.fullmatch(pbs["backup_id"]):
+        errors.append(
+            "pbs.backup_id muss mit einem Buchstaben oder einer Ziffer beginnen "
+            "und darf nur Buchstaben, Ziffern, Punkt, Unterstrich und Bindestrich "
+            "enthalten (maximal 80 Zeichen)"
+        )
     fingerprint = str(pbs.get("fingerprint") or "").strip()
     if fingerprint and not re.match(
         r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){31}$", fingerprint
@@ -773,7 +905,13 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(targets, list):
         errors.append("pbs.targets muss eine Liste sein")
         targets = pbs["targets"] = []
+    elif len(targets) > _MAX_PBS_TARGETS:
+        errors.append(
+            f"pbs.targets darf höchstens {_MAX_PBS_TARGETS} Einträge enthalten"
+        )
+        targets = pbs["targets"] = targets[:_MAX_PBS_TARGETS]
     seen_targets: set[str] = set()
+    seen_target_ids: set[str] = set()
     for index, target in enumerate(targets):
         label = f"pbs.targets[{index}]"
         if not isinstance(target, dict):
@@ -782,25 +920,131 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         name = str(target.get("name") or "").strip()
         if not name or not _NAME_RE.match(name):
             errors.append(f"{label}.name ist ungültig")
-        elif name in seen_targets:
+        elif "," in name:
+            errors.append(f"{label}.name darf kein Komma enthalten")
+        folded_name = name.casefold()
+        if folded_name in seen_targets:
             errors.append(f"{label}.name ist doppelt: {name}")
-        seen_targets.add(name)
+        seen_targets.add(folded_name)
         target["name"] = name
-        paths = _normalize_string_list(target.get("paths"))
+        try:
+            paths = _normalize_string_list(target.get("paths"))
+        except ValueError:
+            errors.append(f"{label}.paths muss Text oder Liste sein")
+            paths = []
         if not paths:
             errors.append(f"{label}.paths braucht mindestens einen Pfad")
+        elif len(paths) > _MAX_PBS_PATHS:
+            errors.append(
+                f"{label}.paths darf höchstens {_MAX_PBS_PATHS} Pfade enthalten"
+            )
+            paths = paths[:_MAX_PBS_PATHS]
+        clean_paths: list[str] = []
         for path_value in paths:
+            try:
+                path_value = _clean_path(path_value)
+            except ValueError as exc:
+                errors.append(f"{label}: Pfad {exc}")
+                continue
             if not _is_absolute_local(path_value):
                 errors.append(f"{label}: Pfad muss absolut sein: {path_value}")
+            clean_paths.append(path_value)
+        paths = clean_paths
         target["paths"] = paths
-        schedule = str(target.get("schedule") or "manual").strip()
-        if schedule.lower() not in _DISABLED_SCHEDULES and not croniter.is_valid(
-            schedule
-        ):
-            errors.append(f"{label}.schedule ist ungültig: {schedule}")
-        target["schedule"] = schedule
         target["namespace"] = str(target.get("namespace") or "").strip()
         target["backup_id"] = str(target.get("backup_id") or "").strip()
+        if target["backup_id"] and not _PBS_BACKUP_ID_RE.fullmatch(target["backup_id"]):
+            errors.append(
+                f"{label}.backup_id muss mit einem Buchstaben oder einer Ziffer "
+                "beginnen und darf nur Buchstaben, Ziffern, Punkt, Unterstrich "
+                "und Bindestrich enthalten (maximal 80 Zeichen)"
+            )
+        target_id = str(target.get("id") or "").strip().lower()
+        if not target_id:
+            identity = "\0".join(
+                (
+                    "pbs",
+                    repository,
+                    str(target["namespace"] or pbs.get("namespace") or "").strip(),
+                    str(target["backup_id"] or pbs.get("backup_id") or "").strip(),
+                    *sorted(paths),
+                )
+            )
+            target_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
+        elif not _STABLE_ID_RE.fullmatch(target_id):
+            errors.append(f"{label}.id ist ungültig")
+        if target_id in seen_target_ids:
+            errors.append(f"{label}.id ist doppelt")
+        seen_target_ids.add(target_id)
+        target["id"] = target_id
+        schedule = str(target.get("schedule") or "manual").strip()
+        if schedule.lower() not in _DISABLED_SCHEDULES and not _valid_cron(schedule):
+            errors.append(f"{label}.schedule ist ungültig: {schedule}")
+        target["schedule"] = schedule
+        target["require_mountpoint"] = _boolean(target.get("require_mountpoint", False))
+        mountpoint = str(target.get("mountpoint") or "").strip()
+        if mountpoint:
+            try:
+                mountpoint = _clean_path(mountpoint)
+                if not _is_absolute_local(mountpoint):
+                    errors.append(f"{label}.mountpoint muss absolut sein")
+                else:
+                    mount_resolved = Path(mountpoint).expanduser().resolve()
+                    for path_value in paths:
+                        if not _is_absolute_local(path_value):
+                            continue
+                        path_resolved = Path(path_value).expanduser().resolve()
+                        if (
+                            path_resolved != mount_resolved
+                            and not path_resolved.is_relative_to(mount_resolved)
+                        ):
+                            errors.append(
+                                f"{label}.mountpoint muss alle PBS-Pfade enthalten: "
+                                f"{path_value}"
+                            )
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"{label}.mountpoint ist nicht prüfbar: {exc}")
+        target["mountpoint"] = mountpoint
+        sentinel = str(target.get("sentinel_file") or "").strip()
+        sentinel_path = Path(sentinel)
+        if sentinel and (
+            _is_absolute_local(sentinel)
+            or ".." in sentinel_path.parts
+            or any(ch in sentinel for ch in "\x00\r\n")
+        ):
+            errors.append(
+                f"{label}.sentinel_file muss ein sicherer relativer Pfad sein"
+            )
+        target["sentinel_file"] = sentinel
+        target["min_files"] = int(
+            _number(
+                target.get("min_files", 1),
+                default=1,
+                minimum=0,
+                maximum=10_000_000,
+                integer=True,
+            )
+        )
+    if len(targets) > 1:
+        seen_backup_ids: set[str] = set()
+        for index, target in enumerate(targets):
+            if not isinstance(target, dict):
+                continue
+            label = f"pbs.targets[{index}]"
+            backup_id = str(target.get("backup_id") or "").strip()
+            if not backup_id:
+                errors.append(
+                    f"{label}.backup_id ist bei mehreren PBS-Targets explizit "
+                    "erforderlich"
+                )
+                continue
+            folded_backup_id = backup_id.casefold()
+            if folded_backup_id in seen_backup_ids:
+                errors.append(
+                    f"{label}.backup_id ist bei mehreren PBS-Targets nicht eindeutig: "
+                    f"{backup_id}"
+                )
+            seen_backup_ids.add(folded_backup_id)
     if pbs["enabled"] and not targets:
         warnings.append("pbs.enabled ohne pbs.targets — es wird nichts gesichert")
 

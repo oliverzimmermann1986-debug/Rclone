@@ -1,17 +1,23 @@
-# Audit und Optimierungen – rclone-sync-container 1.8.2
+# Audit und Optimierungen – rclone-sync-container 2.0.0
 
-Stand: 17.07.2026
+Stand: 24.07.2026
 
 
-## Nächste Version
+## 2.0.0 – Stabilität, Sicherheit, Performance und UI
 
 - Der Remote-Browser blendet standardmäßig `pcloud:/Crypto Folder` aus und verweigert die direkte Navigation dorthin. Weitere nicht auswählbare Ziele können über `web.hidden_remote_paths` konfiguriert werden; rclone-`crypt`-Remotes bleiben normal nutzbar.
 - Remote-Prechecks verwenden bei `rclone lsjson --stat` nicht mehr das dort inkompatible Flag `--no-size`; dadurch funktionieren Dry-Runs wieder mit den unterstützten rclone-Versionen.
 - Überlappende Pair-Pfade serialisieren nicht mehr den vollständigen Lauf. Ein konfliktbasierter Ausführungsplan hält nur betroffene Pairs auseinander und nutzt freie Worker weiterhin für unabhängige Pairs.
 - Jeder Job arbeitet mit einem konsistenten Konfigurations-Snapshot. Laufende Pairs sehen dadurch nicht mehr versehentlich unterschiedliche Konfigurationsstände und vermeiden wiederholte Config-Dateiprüfungen.
-- Die häufig abgefragte Fortschrittsanzeige liest Log-Tails inkrementell und hält höchstens 64 begrenzte Einträge im Speicher, statt pro Poll bis zu 1 MiB je aktivem Pair erneut einzulesen.
+- Die häufig abgefragte Fortschrittsanzeige liest Log-Tails inkrementell; der LRU-Cache ist auf 128 Einträge und insgesamt 16 MiB begrenzt, statt pro Poll große Logs erneut einzulesen.
 - Pair-Planung und Log-Tail-Verarbeitung sind als eigenständig getestete Module aus dem zentralen rclone-Runner herausgelöst.
 - Advisory File-Locks laufen über eine gemeinsame Abstraktion: Linux behält unverändert `flock` mit Shared-/Exclusive-/Nonblocking-Semantik; Windows nutzt für Entwicklung und Tests einen exklusiven `msvcrt`-Fallback. Pfadvalidierung, Verzeichnis-Fsync und CPU-Affinität besitzen ebenfalls plattformneutrale Fallbacks.
+- Prozessübergreifende Job-Reservation, scope-getrennte Abbrüche und PID-Startidentitäten schließen Doppelstarts, verwaiste `running`-Zustände und PID-Reuse-Risiken. DB- und Runtime-Abschlüsse sind Compare-and-set-geschützt.
+- Pair- und PBS-Historien verwenden persistierte, typisierte IDs; Dry-Runs zählen nicht als letzter produktiver Erfolg und Scheduler-Slots verhindern Doppelstarts bei Zeitumstellungen oder konkurrierenden Ticks.
+- Lokale Quellen und PBS-Pfade werden direkt vor dem Prozessstart erneut gegen Mountpoint, Sentinel und Dateiidentität geprüft. Unsichere Legacy-Optionen und Zugangsdaten-Flags werden fail-closed abgewiesen.
+- Sicherheitsrelevante Konfigurationsänderungen benötigen Reauthentifizierung; Exporte, Support-Bundles, Logs und Benachrichtigungen maskieren Zugangsdaten.
+- Die Oberfläche zeigt klarere Lade-, Fehler-, PBS-, Abbruch- und Scheduler-Zustände, bietet Performance-Presets und bleibt auf schmalen Displays besser bedienbar.
+- Installer und CI arbeiten mit gepinnten Abhängigkeiten, atomaren Config-Migrationen, konsistenten SQLite-Sicherungen, sicherer Retention und einer Python-3.10-bis-3.13-Matrix.
 
 
 ## 1.9.1

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
 import os
 import stat
 import tempfile
@@ -31,6 +32,7 @@ router = APIRouter(
     dependencies=[Depends(require_auth), Depends(require_csrf)],
 )
 
+logger = logging.getLogger(__name__)
 _PLACEHOLDER = "***SET***"
 _SENSITIVE = (
     ("web", "secret_key"),
@@ -39,6 +41,13 @@ _SENSITIVE = (
     ("pbs", "password"),
 )
 _MAX_FILTER_BYTES = 2 * 1024 * 1024
+_BCRYPT_MAX_PASSWORD_BYTES = 72
+_SERVER_OWNED_WEB_FIELDS = (
+    "password",
+    "password_hash",
+    "secret_key",
+    "session_version",
+)
 
 
 def _walk_parent(
@@ -114,6 +123,118 @@ def _preserve_sensitive(new_data: dict[str, Any], old_data: dict[str, Any]) -> N
                 old_hook = old_hooks[index]
             hook["url"] = str((old_hook or {}).get("url") or "")
 
+    old_web = old_data.get("web") if isinstance(old_data.get("web"), dict) else {}
+    new_web = new_data.setdefault("web", {})
+    if not isinstance(new_web, dict):
+        return
+    for key in _SERVER_OWNED_WEB_FIELDS:
+        new_web[key] = copy.deepcopy(old_web.get(key, ""))
+
+
+def _audit_best_effort(event: str, *, actor: str, details: dict[str, Any]) -> None:
+    try:
+        get_db().audit_add(event, actor=actor, details=details)
+    except Exception:
+        # Die Aktion ist zu diesem Zeitpunkt bereits atomar persistiert. Ein
+        # Audit-Ausfall darf daher keinen irreführenden HTTP-500 erzeugen.
+        logger.exception("Audit-Ereignis %s konnte nicht gespeichert werden", event)
+
+
+def _semantic_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "ja"}:
+        return True
+    if text in {"0", "false", "no", "off", "nein", ""}:
+        return False
+    return default
+
+
+def _sensitive_config_changed(
+    old_data: dict[str, Any], new_data: dict[str, Any]
+) -> bool:
+    old_web = old_data.get("web") if isinstance(old_data.get("web"), dict) else {}
+    new_web = new_data.get("web") if isinstance(new_data.get("web"), dict) else {}
+    if (
+        str(old_web.get("username") or "").casefold()
+        != str(new_web.get("username") or "").casefold()
+    ):
+        return True
+    if old_web.get("local_browse_roots") != new_web.get("local_browse_roots"):
+        return True
+
+    old_pbs = old_data.get("pbs") if isinstance(old_data.get("pbs"), dict) else {}
+    new_pbs = new_data.get("pbs") if isinstance(new_data.get("pbs"), dict) else {}
+    for key in ("password", "repository", "namespace", "backup_id", "fingerprint"):
+        if str(old_pbs.get(key) or "") != str(new_pbs.get(key) or ""):
+            return True
+
+    def target_routes(section: dict[str, Any]) -> dict[str, tuple[str, str]]:
+        routes: dict[str, tuple[str, str]] = {}
+        for index, target in enumerate(section.get("targets") or []):
+            if not isinstance(target, dict):
+                continue
+            namespace = str(target.get("namespace") or "")
+            backup_id = str(target.get("backup_id") or "")
+            if not namespace and not backup_id:
+                continue
+            identity = str(target.get("id") or "").strip()
+            if not identity:
+                name = str(target.get("name") or "").strip().casefold()
+                identity = f"name:{name}" if name else f"index:{index}"
+            routes[identity] = (namespace, backup_id)
+        return routes
+
+    if target_routes(old_pbs) != target_routes(new_pbs):
+        return True
+
+    old_backup = (
+        old_data.get("backup") if isinstance(old_data.get("backup"), dict) else {}
+    )
+    new_backup = (
+        new_data.get("backup") if isinstance(new_data.get("backup"), dict) else {}
+    )
+    for key in ("allow_unsafe_rclone_args", "allow_external_filter_files"):
+        if not _semantic_bool(old_backup.get(key), default=False) and _semantic_bool(
+            new_backup.get(key), default=False
+        ):
+            return True
+    for key in ("require_delete_confirmation", "require_max_delete_for_sync"):
+        if _semantic_bool(old_backup.get(key), default=True) and not _semantic_bool(
+            new_backup.get(key), default=True
+        ):
+            return True
+
+    old_notifications = (
+        old_data.get("notifications")
+        if isinstance(old_data.get("notifications"), dict)
+        else {}
+    )
+    new_notifications = (
+        new_data.get("notifications")
+        if isinstance(new_data.get("notifications"), dict)
+        else {}
+    )
+    for key in ("allow_http", "allow_private_targets"):
+        if not _semantic_bool(
+            old_notifications.get(key), default=False
+        ) and _semantic_bool(new_notifications.get(key), default=False):
+            return True
+
+    def hook_targets(section: dict[str, Any]) -> dict[str, str]:
+        return {
+            str(hook.get("id") or index): str(hook.get("url") or "")
+            for index, hook in enumerate(section.get("webhooks") or [])
+            if isinstance(hook, dict)
+        }
+
+    return hook_targets(old_notifications) != hook_targets(new_notifications)
+
 
 def _filter_revision(path: Path, raw: bytes | None = None) -> str:
     if raw is None:
@@ -139,6 +260,7 @@ def get_config_endpoint() -> dict[str, Any]:
 
 class ConfigUpdate(BaseModel):
     config: dict[str, Any]
+    current_password: str | None = Field(default=None, min_length=1, max_length=1024)
 
 
 class SchedulePreviewRequest(BaseModel):
@@ -148,7 +270,9 @@ class SchedulePreviewRequest(BaseModel):
 
 
 @router.put("")
-def update_config(body: ConfigUpdate) -> dict[str, Any]:
+def update_config(
+    body: ConfigUpdate, user: str = Depends(require_auth)
+) -> dict[str, Any]:
     store = get_config()
     old_data, current_revision = store.snapshot_with_revision()
     new_data = copy.deepcopy(body.config)
@@ -165,15 +289,25 @@ def update_config(body: ConfigUpdate) -> dict[str, Any]:
     _preserve_sensitive(new_data, old_data)
     old_web = old_data.get("web") if isinstance(old_data.get("web"), dict) else {}
     new_web = new_data.get("web") if isinstance(new_data.get("web"), dict) else {}
-    security_identity_changed = any(
-        str(old_web.get(key) or "") != str(new_web.get(key) or "")
-        for key in ("username", "password_hash", "secret_key")
+    username_changed = (
+        str(old_web.get("username") or "").casefold()
+        != str(new_web.get("username") or "").casefold()
     )
-    if security_identity_changed:
-        try:
-            version = int(
-                new_web.get("session_version", old_web.get("session_version", 1)) or 1
+    if _sensitive_config_changed(old_data, new_data):
+        if not body.current_password or not verify_password(
+            user, body.current_password
+        ):
+            raise HTTPException(
+                403,
+                {
+                    "message": "Für diese sicherheitsrelevante Änderung ist das "
+                    "aktuelle Passwort nötig",
+                    "reauth_required": True,
+                },
             )
+    if username_changed:
+        try:
+            version = int(old_web.get("session_version", 1) or 1)
         except (TypeError, ValueError):
             version = 1
         new_web["session_version"] = max(1, version) + 1
@@ -200,9 +334,9 @@ def update_config(body: ConfigUpdate) -> dict[str, Any]:
         raise HTTPException(
             500, f"Konfiguration konnte nicht gespeichert werden: {exc}"
         )
-    get_db().audit_add(
+    _audit_best_effort(
         "config_saved",
-        actor="web",
+        actor=user,
         details={
             "revision": revision,
             "pair_count": len((normalized.get("backup") or {}).get("pairs") or []),
@@ -254,7 +388,7 @@ def preview_schedule(body: SchedulePreviewRequest) -> dict[str, Any]:
             "next_runs": [],
         }
 
-    if not croniter.is_valid(expression):
+    if len(expression.split()) != 5 or not croniter.is_valid(expression):
         raise HTTPException(422, "Zeitplan ist keine gültige 5-stellige Cron-Angabe")
     try:
         timezone = ZoneInfo(body.timezone)
@@ -302,10 +436,15 @@ def change_password(
         )
     if new == body.current_password:
         raise HTTPException(400, "Neues Passwort muss vom alten abweichen")
+    if len(new.encode("utf-8")) > _BCRYPT_MAX_PASSWORD_BYTES:
+        raise HTTPException(400, "Passwort darf höchstens 72 UTF-8-Bytes lang sein")
 
-    new_hash = bcrypt.hashpw(new.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode(
-        "ascii"
-    )
+    try:
+        new_hash = bcrypt.hashpw(new.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode(
+            "ascii"
+        )
+    except ValueError as exc:
+        raise HTTPException(400, f"Passwort kann nicht verarbeitet werden: {exc}")
 
     def updater(data: dict[str, Any]) -> None:
         web = data.setdefault("web", {})
@@ -326,7 +465,7 @@ def change_password(
         (data_dir / ".initial-password").unlink(missing_ok=True)
     except (OSError, ValueError) as exc:
         raise HTTPException(500, f"Passwort konnte nicht gespeichert werden: {exc}")
-    get_db().audit_add("password_changed", actor=user, details={})
+    _audit_best_effort("password_changed", actor=user, details={})
     return {"ok": True, "message": "Passwort geändert", "reauthenticate": True}
 
 

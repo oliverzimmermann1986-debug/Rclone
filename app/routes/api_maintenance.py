@@ -6,6 +6,7 @@ import hashlib
 import heapq
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -26,6 +27,7 @@ from ..config_store import ConfigConflictError, get_config
 from ..config_validation import ConfigValidationError, validate_config
 from ..db import get_db
 from ..maintenance import iter_logs, logs_root, prune_logs as prune_log_files
+from ..rclone_args import redact_command_text
 from ..security import require_csrf
 from ..system_info import system_snapshot
 
@@ -34,6 +36,42 @@ router = APIRouter(
     tags=["maintenance"],
     dependencies=[Depends(require_auth), Depends(require_csrf)],
 )
+logger = logging.getLogger(__name__)
+_SENSITIVE_EXPORT_KEYS = {
+    "password",
+    "password_hash",
+    "secret",
+    "secret_key",
+    "token",
+    "credential",
+    "credentials",
+    "access_key",
+    "private_key",
+}
+
+
+def _audit_best_effort(event: str, details: dict[str, Any]) -> None:
+    try:
+        get_db().audit_add(event, actor="web", details=details)
+    except Exception:
+        logger.exception("Audit-Ereignis %s konnte nicht gespeichert werden", event)
+
+
+def _redact_diagnostics(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_command_text(value)
+    if isinstance(value, list):
+        return [_redact_diagnostics(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "***REDACTED***"
+                if str(key).casefold() in _SENSITIVE_EXPORT_KEYS
+                else _redact_diagnostics(item)
+            )
+            for key, item in value.items()
+        }
+    return value
 
 
 @router.get("/logs")
@@ -66,7 +104,12 @@ def list_logs(
 def prune_logs(
     days: int = Query(30, ge=1, le=3650), dry_run: bool = True
 ) -> dict[str, Any]:
-    return prune_log_files(days=days, dry_run=dry_run)
+    result = prune_log_files(days=days, dry_run=dry_run)
+    _audit_best_effort(
+        "logs_pruned",
+        {"days": days, "dry_run": dry_run, "deleted": result.get("deleted", 0)},
+    )
+    return result
 
 
 @router.get("/audit")
@@ -98,13 +141,24 @@ def prune_database(
     auth_deleted = db.auth_prune(7)
     audit_deleted = db.audit_prune(max(days, 365), max(keep_latest, 1000))
     db.checkpoint()
-    return {
+    result = {
         "ok": True,
         "deleted_jobs": deleted,
         "deleted_auth_rows": auth_deleted,
         "deleted_audit_events": audit_deleted,
         "stats": db.stats(),
     }
+    _audit_best_effort(
+        "database_pruned",
+        {
+            "days": days,
+            "keep_latest": keep_latest,
+            "deleted_jobs": deleted,
+            "deleted_auth_rows": auth_deleted,
+            "deleted_audit_events": audit_deleted,
+        },
+    )
+    return result
 
 
 def _redacted_export() -> dict[str, Any]:
@@ -114,6 +168,9 @@ def _redacted_export() -> dict[str, Any]:
         for key in ("password", "password_hash", "secret_key"):
             if key in web:
                 web[key] = "***REDACTED***"
+    pbs = config.get("pbs")
+    if isinstance(pbs, dict) and "password" in pbs:
+        pbs["password"] = "***REDACTED***"
     notifications = config.get("notifications")
     if isinstance(notifications, dict):
         hooks = notifications.get("webhooks")
@@ -127,6 +184,7 @@ def _redacted_export() -> dict[str, Any]:
 @router.get("/config/export")
 def export_config() -> Response:
     body = yaml.safe_dump(_redacted_export(), allow_unicode=True, sort_keys=False)
+    _audit_best_effort("config_exported", {"redacted": True})
     return Response(
         body,
         media_type="text/yaml; charset=utf-8",
@@ -350,17 +408,19 @@ def support_bundle() -> Response:
     paths = config.get("paths") if isinstance(config.get("paths"), dict) else {}
     db = get_db()
     logs = list_logs(limit=250, query="")
-    diagnostics = {
-        "generated_at": time.time(),
-        "app_version": __version__,
-        "system": system_snapshot(
-            str(paths.get("data_dir") or "/opt/rclone-sync/data")
-        ),
-        "database": {"stats": db.stats(), "integrity": db.integrity_check()},
-        "recent_jobs": db.job_list(limit=100),
-        "recent_audit_events": db.audit_list(limit=100),
-        "log_inventory": logs,
-    }
+    diagnostics = _redact_diagnostics(
+        {
+            "generated_at": time.time(),
+            "app_version": __version__,
+            "system": system_snapshot(
+                str(paths.get("data_dir") or "/opt/rclone-sync/data")
+            ),
+            "database": {"stats": db.stats(), "integrity": db.integrity_check()},
+            "recent_jobs": db.job_list(limit=100),
+            "recent_audit_events": db.audit_list(limit=100),
+            "log_inventory": logs,
+        }
+    )
     payload = io.BytesIO()
     with zipfile.ZipFile(
         payload, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
@@ -379,6 +439,10 @@ def support_bundle() -> Response:
             json.dumps(diagnostics, ensure_ascii=False, indent=2, default=str),
         )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
+    _audit_best_effort(
+        "support_bundle_created",
+        {"recent_jobs": len(diagnostics["recent_jobs"]), "logs": len(logs)},
+    )
     return Response(
         payload.getvalue(),
         media_type="application/zip",
