@@ -16,17 +16,19 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..auth import require_auth
 from ..config_store import get_config
-from ..db import get_db
+from ..db import JobAlreadyRunningError, get_db
 from ..jobs import rclone_sync as rclone_job
-from ..rclone_args import rclone_subprocess_env
+from ..jobs import runtime_state
+from ..jobs.job_lifecycle import BACKUP_KINDS, reconcile_locked_scope
+from ..jobs.locks import HeldFileLock, try_file_lock
+from ..jobs.scheduler import rclone_history_key
+from ..rclone_args import redact_command_text, rclone_subprocess_env
 from ..scheduler_control import pause_scheduler, resume_scheduler, scheduler_state
-from ..jobs.locks import file_lock_or_none
-from ..jobs.runtime_state import active_processes
 from ..security import ensure_within, is_relative_to, parse_browse_roots, require_csrf
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,34 @@ router = APIRouter(
 )
 
 _locks: dict[str, threading.Lock] = {"backup": threading.Lock()}
+_SENSITIVE_RESULT_KEYS = {
+    "password",
+    "password_hash",
+    "secret",
+    "secret_key",
+    "token",
+    "credential",
+    "credentials",
+    "access_key",
+    "private_key",
+}
+
+
+def _redact_result(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_command_text(value)
+    if isinstance(value, list):
+        return [_redact_result(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "***REDACTED***"
+                if str(key).casefold() in _SENSITIVE_RESULT_KEYS
+                else _redact_result(item)
+            )
+            for key, item in value.items()
+        }
+    return value
 
 
 def _job_log_target() -> logging.Logger:
@@ -73,6 +103,21 @@ def _remove_job_logger(handler: logging.FileHandler | None) -> None:
         logger.exception("Job-Log-Handler konnte nicht geschlossen werden")
 
 
+def _finish_runtime_for_job(
+    job_id: int, status: str, *, error: str | None = None
+) -> None:
+    state = runtime_state.load_run_state() or {}
+    try:
+        state_job_id = int(state.get("job_id") or -1)
+    except (TypeError, ValueError):
+        return
+    if state.get("status") != "running" or state_job_id != job_id:
+        return
+    run_id = str(state.get("run_id") or "")
+    if run_id:
+        runtime_state.finish_run(run_id, status, **({"error": error} if error else {}))
+
+
 def _known_pair_names() -> set[str]:
     pairs = get_config().get("backup", "pairs", default=[]) or []
     return {
@@ -101,61 +146,123 @@ def _finish_status(result: dict[str, Any]) -> str:
 
 
 def _run_backup_thread(
-    job_id: int, dry_run: bool, pairs_filter: Optional[list[str]]
+    job_id: int,
+    dry_run: bool,
+    pairs_filter: Optional[list[str]],
+    history_keys: dict[str, str],
+    scope_lock: HeldFileLock,
 ) -> None:
-    db = get_db()
+    db = None
     handler: logging.FileHandler | None = None
+    worker_error: str | None = None
     try:
-        with file_lock_or_none("backup") as file_lock:
-            if file_lock is None:
-                db.job_finish(
-                    job_id,
-                    "skipped",
-                    {"error": "Ein anderer Sync hält den Prozess-Lock"},
-                )
-                return
-            log_file, handler = _setup_job_logger(job_id, "backup")
-            db.job_set_log_file(job_id, str(log_file))
-            logger.info(
-                "Backup #%s startet (dry_run=%s, pairs=%s)",
-                job_id,
-                dry_run,
-                pairs_filter,
-            )
-            try:
-                summary = rclone_job.run_job(
-                    dry_run=dry_run, pairs_filter=pairs_filter, trigger="web"
-                )
-            except Exception as exc:
-                logger.exception("Backup #%s fehlgeschlagen", job_id)
-                db.job_finish(job_id, "error", {"error": str(exc)})
-                return
-            status = _finish_status(summary)
-            if status == "cancelled":
-                summary.setdefault("error", "Abgebrochen")
-                summary["cancelled"] = True
-            db.job_finish(job_id, status, summary)
-            logger.info("Backup #%s %s", job_id, status)
+        db = get_db()
+        current = db.job_get(job_id) or {}
+        if current.get("status") != "running":
+            return
+        log_file, handler = _setup_job_logger(job_id, "backup")
+        db.job_set_log_file(job_id, str(log_file))
+        logger.info(
+            "Backup #%s startet (dry_run=%s, pairs=%s)",
+            job_id,
+            dry_run,
+            pairs_filter,
+        )
+        summary = rclone_job.run_job(
+            dry_run=dry_run,
+            pairs_filter=pairs_filter,
+            trigger="web",
+            job_id=job_id,
+            defer_runtime_finish=True,
+            reset_cancel_state=False,
+        )
+        summary["history_keys"] = history_keys
+        status = _finish_status(summary)
+        if status == "cancelled":
+            summary.setdefault("error", "Abgebrochen")
+            summary["cancelled"] = True
+        db.job_finish(job_id, status, summary)
+        logger.info("Backup #%s %s", job_id, status)
     except Exception as exc:
+        worker_error = str(exc)
         logger.exception("Backup #%s Setup fehlgeschlagen", job_id)
-        try:
-            db.job_finish(job_id, "error", {"error": f"Setup fehlgeschlagen: {exc}"})
-        except Exception:
-            logger.exception("Jobstatus konnte nicht gespeichert werden")
     finally:
+        final_db = db
+        if final_db is None:
+            try:
+                final_db = get_db()
+            except Exception:
+                logger.exception(
+                    "DB konnte beim Worker-Abschluss nicht geöffnet werden"
+                )
+        if final_db is not None:
+            if worker_error:
+                try:
+                    final_db.job_finish(
+                        job_id,
+                        "error",
+                        {"error": f"Setup fehlgeschlagen: {worker_error}"},
+                    )
+                except Exception:
+                    logger.exception("Jobstatus konnte nicht gespeichert werden")
+            try:
+                actual = final_db.job_get(job_id) or {}
+                actual_status = str(actual.get("status") or "")
+                if actual_status and actual_status != "running":
+                    _finish_runtime_for_job(
+                        job_id,
+                        actual_status,
+                        error=worker_error,
+                    )
+            except Exception:
+                logger.exception("Runtime-Abschluss konnte nicht abgeglichen werden")
         _remove_job_logger(handler)
+        scope_lock.release()
         _locks["backup"].release()
 
 
-def _start_job_or_release(kind: str, log_file: Optional[str] = None) -> int:
-    """Legt den Job an; gibt bei Fehlern den bereits gehaltenen Lock wieder frei.
+def _reserve_backup_job(
+    kind: str,
+    log_file: Optional[str] = None,
+    *,
+    attempts: list[dict[str, Any]] | None = None,
+) -> tuple[int, HeldFileLock]:
+    """Reserviert DB und Prozess-Lock ohne abbrechbares Zwischenfenster."""
 
-    Ohne diese Absicherung bleibt _locks["backup"] nach einer job_start-Exception
-    (DB gesperrt, Platte voll) dauerhaft belegt und jeder weitere Sync liefert 409.
-    """
+    scope_lock = try_file_lock(runtime_state.DEFAULT_CANCEL_SCOPE)
+    if scope_lock is None:
+        _locks["backup"].release()
+        raise HTTPException(409, "Ein anderer Sync hält den Prozess-Lock")
     try:
-        return get_db().job_start(kind, log_file=log_file)
+        db = get_db()
+        reconciliation = reconcile_locked_scope(
+            db,
+            scope=runtime_state.DEFAULT_CANCEL_SCOPE,
+            kinds=BACKUP_KINDS,
+        )
+        if not reconciliation.get("safe"):
+            raise HTTPException(
+                409,
+                "Ein registrierter Sync-Unterprozess ist noch aktiv",
+            )
+        rclone_job.reset_cancel()
+        job_id = db.job_start(
+            kind,
+            log_file=log_file,
+            attempts=attempts,
+            exclusive_scope=True,
+        )
+        return job_id, scope_lock
+    except HTTPException:
+        scope_lock.release()
+        _locks["backup"].release()
+        raise
+    except JobAlreadyRunningError as exc:
+        scope_lock.release()
+        _locks["backup"].release()
+        raise HTTPException(409, str(exc))
     except Exception as exc:
+        scope_lock.release()
         _locks["backup"].release()
         logger.exception("Job (%s) konnte nicht angelegt werden", kind)
         raise HTTPException(500, f"Job konnte nicht angelegt werden: {exc}")
@@ -170,16 +277,27 @@ def _audit_best_effort(event: str, *, actor: str, details: dict) -> None:
 
 
 def _start_thread(
-    target, *, job_id: int, name: str, args: tuple[Any, ...] = ()
+    target,
+    *,
+    job_id: int,
+    name: str,
+    scope_lock: HeldFileLock,
+    args: tuple[Any, ...] = (),
 ) -> None:
     try:
         thread = threading.Thread(target=target, args=args, name=name, daemon=True)
         thread.start()
     except Exception as exc:
+        scope_lock.release()
         _locks["backup"].release()
-        get_db().job_finish(
-            job_id, "error", {"error": f"Thread konnte nicht gestartet werden: {exc}"}
-        )
+        try:
+            get_db().job_finish(
+                job_id,
+                "error",
+                {"error": f"Thread konnte nicht gestartet werden: {exc}"},
+            )
+        except Exception:
+            logger.exception("Thread-Startfehler konnte nicht gespeichert werden")
         raise HTTPException(500, "Job konnte nicht gestartet werden")
 
 
@@ -221,14 +339,33 @@ def resume_scheduler_endpoint(user: str = Depends(require_auth)) -> dict[str, An
     return resume_scheduler(actor=user, db=get_db())
 
 
-@router.post("/backup/run")
-def run_backup(
-    dry_run: bool = Query(False), pairs: Optional[str] = Query(None)
+def _queue_backup(
+    *, dry_run: bool, pairs_filter: Optional[list[str]]
 ) -> dict[str, Any]:
-    pairs_filter = _parse_pair_filter(pairs)
+    configured_pairs = [
+        pair
+        for pair in (get_config().get("backup", "pairs", default=[]) or [])
+        if isinstance(pair, dict)
+        and pair.get("enabled", True)
+        and (not pairs_filter or str(pair.get("name")) in pairs_filter)
+    ]
+    history_keys = {
+        str(pair.get("name")): rclone_history_key(pair)
+        for pair in configured_pairs
+        if str(pair.get("name") or "")
+    }
+    attempts = [
+        {
+            "name": name,
+            "history_key": history_key,
+            "trigger": "web",
+            "dry_run": dry_run,
+        }
+        for name, history_key in history_keys.items()
+    ]
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup läuft bereits")
-    job_id = _start_job_or_release("backup")
+    job_id, scope_lock = _reserve_backup_job("backup", attempts=attempts)
     _audit_best_effort(
         "backup_requested",
         actor="web",
@@ -238,9 +375,17 @@ def run_backup(
         _run_backup_thread,
         job_id=job_id,
         name=f"backup-job-{job_id}",
-        args=(job_id, dry_run, pairs_filter),
+        scope_lock=scope_lock,
+        args=(job_id, dry_run, pairs_filter, history_keys, scope_lock),
     )
     return {"ok": True, "job_id": job_id, "pairs": pairs_filter}
+
+
+@router.post("/backup/run")
+def run_backup(
+    dry_run: bool = Query(False), pairs: Optional[str] = Query(None)
+) -> dict[str, Any]:
+    return _queue_backup(dry_run=dry_run, pairs_filter=_parse_pair_filter(pairs))
 
 
 @router.get("/backup/plan")
@@ -261,7 +406,11 @@ def cancel_backup() -> dict[str, Any]:
         or db.job_running("quicksync")
     )
     state = rclone_job.get_runtime_state() or {}
-    if not running and state.get("status") != "running" and not active_processes():
+    if (
+        not running
+        and state.get("status") != "running"
+        and not runtime_state.active_processes()
+    ):
         return {"ok": False, "error": "Kein laufender Job"}
     return rclone_job.cancel_job()
 
@@ -270,7 +419,7 @@ def cancel_backup() -> dict[str, Any]:
 def run_single_pair(pair_name: str, dry_run: bool = Query(False)) -> dict[str, Any]:
     if pair_name not in _known_pair_names():
         raise HTTPException(404, "Pair nicht gefunden")
-    return run_backup(dry_run=dry_run, pairs=pair_name)
+    return _queue_backup(dry_run=dry_run, pairs_filter=[pair_name])
 
 
 @router.post("/backup/check/{pair_name}")
@@ -283,7 +432,7 @@ def check_pair(
         raise HTTPException(404, "Pair nicht gefunden")
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup/Check läuft bereits")
-    job_id = _start_job_or_release("check")
+    job_id, scope_lock = _reserve_backup_job("check")
     _audit_best_effort(
         "check_requested",
         actor="web",
@@ -291,31 +440,56 @@ def check_pair(
     )
 
     def run_check() -> None:
-        db = get_db()
+        db = None
         handler: logging.FileHandler | None = None
+        worker_error: str | None = None
         try:
-            with file_lock_or_none("backup") as file_lock:
-                if file_lock is None:
-                    db.job_finish(
-                        job_id,
-                        "skipped",
-                        {"error": "Ein anderer Sync hält den Prozess-Lock"},
-                    )
-                    return
-                log_file, handler = _setup_job_logger(job_id, "check")
-                db.job_set_log_file(job_id, str(log_file))
-                result = rclone_job.run_pair_check(
-                    pair_name, one_way=one_way, download=download
-                )
-                db.job_finish(job_id, _finish_status(result), result)
+            db = get_db()
+            current = db.job_get(job_id) or {}
+            if current.get("status") != "running":
+                return
+            log_file, handler = _setup_job_logger(job_id, "check")
+            db.job_set_log_file(job_id, str(log_file))
+            result = rclone_job.run_pair_check(
+                pair_name,
+                one_way=one_way,
+                download=download,
+                reset_cancel_state=False,
+            )
+            db.job_finish(job_id, _finish_status(result), result)
         except Exception as exc:
+            worker_error = str(exc)
             logger.exception("Check #%s fehlgeschlagen", job_id)
-            db.job_finish(job_id, "error", {"error": str(exc)})
         finally:
+            final_db = db
+            if final_db is None:
+                try:
+                    final_db = get_db()
+                except Exception:
+                    logger.exception(
+                        "DB konnte beim Check-Abschluss nicht geöffnet werden"
+                    )
+            if final_db is not None and worker_error:
+                try:
+                    final_db.job_finish(
+                        job_id,
+                        "error",
+                        {"error": worker_error},
+                    )
+                except Exception:
+                    logger.exception(
+                        "Check-Fehlerstatus konnte nicht gespeichert werden"
+                    )
             _remove_job_logger(handler)
+            scope_lock.release()
             _locks["backup"].release()
 
-    _start_thread(run_check, job_id=job_id, name=f"check-job-{job_id}")
+    _start_thread(
+        run_check,
+        job_id=job_id,
+        name=f"check-job-{job_id}",
+        scope_lock=scope_lock,
+    )
     return {"ok": True, "job_id": job_id}
 
 
@@ -338,7 +512,10 @@ def backup_progress() -> dict[str, Any]:
     state = rclone_job.get_runtime_state() or {}
     if not running or state.get("status") != "running":
         last = db.job_list(kind="backup", limit=1)
-        return {"running": False, "last": last[0] if last else None}
+        return {
+            "running": False,
+            "last": _redact_result(last[0]) if last else None,
+        }
 
     started = float(state.get("started_at") or running["started_at"])
     pairs_status: list[dict[str, Any]] = []
@@ -357,15 +534,17 @@ def backup_progress() -> dict[str, Any]:
         pairs_status.append(item)
     pairs_status.sort(key=lambda item: str(item["name"]).casefold())
     finished = {"done", "error", "cancelled", "skipped"}
-    return {
-        "running": True,
-        "job_id": running["id"],
-        "started_at": started,
-        "elapsed_sec": max(0, round(time.time() - started)),
-        "pairs": pairs_status,
-        "total_pairs": len(pairs_status),
-        "done_pairs": sum(1 for pair in pairs_status if pair["status"] in finished),
-    }
+    return _redact_result(
+        {
+            "running": True,
+            "job_id": running["id"],
+            "started_at": started,
+            "elapsed_sec": max(0, round(time.time() - started)),
+            "pairs": pairs_status,
+            "total_pairs": len(pairs_status),
+            "done_pairs": sum(1 for pair in pairs_status if pair["status"] in finished),
+        }
+    )
 
 
 class QuickSyncPayload(BaseModel):
@@ -380,10 +559,24 @@ class QuickSyncPayload(BaseModel):
     min_local_files: int = Field(default=1, ge=0, le=1_000_000)
 
 
-def _validate_quick_paths(payload: QuickSyncPayload) -> None:
+def _validate_quick_paths(payload: QuickSyncPayload) -> tuple[str, str]:
     if any(char in payload.remote + payload.local for char in ("\x00", "\n", "\r")):
         raise HTTPException(400, "Pfad enthält ungültige Zeichen")
-    remote_is_local = payload.remote.startswith("/")
+    if not Path(payload.local).is_absolute():
+        raise HTTPException(400, "Lokaler Pfad muss absolut sein")
+    roots = parse_browse_roots(
+        get_config().get(
+            "web",
+            "local_browse_roots",
+            default=["/mnt", "/media", "/srv", "/opt/rclone-sync/data"],
+        )
+    )
+    if not roots:
+        raise HTTPException(503, "Keine lokalen Quick-Sync-Wurzeln konfiguriert")
+    local_path = ensure_within(Path(payload.local), roots)
+    remote_is_local = (
+        payload.remote.startswith("/") or Path(payload.remote).is_absolute()
+    )
     if not remote_is_local and (
         ":" not in payload.remote or payload.remote.startswith((":", "-"))
     ):
@@ -393,19 +586,15 @@ def _validate_quick_paths(payload: QuickSyncPayload) -> None:
             "lokaler Pfad sein",
         )
     if remote_is_local:
-        roots_for_remote = parse_browse_roots(
-            get_config().get(
-                "web",
-                "local_browse_roots",
-                default=["/mnt", "/media", "/srv", "/opt/rclone-sync/data"],
-            )
-        )
-        if not roots_for_remote:
-            raise HTTPException(503, "Keine lokalen Quick-Sync-Wurzeln konfiguriert")
-        ensure_within(Path(payload.remote), roots_for_remote)
-        if Path(payload.remote.rstrip("/")) == Path(payload.local.rstrip("/")):
-            raise HTTPException(400, "Quelle und Ziel sind identisch")
-        return _finish_quick_validation(payload)
+        remote_path = ensure_within(Path(payload.remote), roots)
+        if (
+            remote_path == local_path
+            or is_relative_to(remote_path, local_path)
+            or is_relative_to(local_path, remote_path)
+        ):
+            raise HTTPException(400, "Lokale Quelle und Ziel dürfen nicht überlappen")
+        _finish_quick_validation(payload)
+        return str(remote_path), str(local_path)
     try:
         result = subprocess.run(
             ["rclone", "listremotes"],
@@ -426,17 +615,8 @@ def _validate_quick_paths(payload: QuickSyncPayload) -> None:
     if remote_name not in remotes:
         raise HTTPException(403, "Remote ist nicht konfiguriert")
 
-    roots = parse_browse_roots(
-        get_config().get(
-            "web",
-            "local_browse_roots",
-            default=["/mnt", "/media", "/srv", "/opt/rclone-sync/data"],
-        )
-    )
-    if not roots:
-        raise HTTPException(503, "Keine lokalen Quick-Sync-Wurzeln konfiguriert")
-    ensure_within(Path(payload.local), roots)
     _finish_quick_validation(payload)
+    return payload.remote, str(local_path)
 
 
 def _finish_quick_validation(payload: QuickSyncPayload) -> None:
@@ -463,10 +643,10 @@ def _finish_quick_validation(payload: QuickSyncPayload) -> None:
 
 @router.post("/backup/quick")
 def run_quick_sync(payload: QuickSyncPayload) -> dict[str, Any]:
-    _validate_quick_paths(payload)
+    remote_path, local_path = _validate_quick_paths(payload)
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup läuft bereits")
-    job_id = _start_job_or_release("quicksync")
+    job_id, scope_lock = _reserve_backup_job("quicksync")
     _audit_best_effort(
         "quicksync_requested",
         actor="web",
@@ -478,39 +658,62 @@ def run_quick_sync(payload: QuickSyncPayload) -> dict[str, Any]:
     )
 
     def run_quick() -> None:
-        db = get_db()
+        db = None
         handler: logging.FileHandler | None = None
+        worker_error: str | None = None
         try:
-            with file_lock_or_none("backup") as file_lock:
-                if file_lock is None:
-                    db.job_finish(
-                        job_id,
-                        "skipped",
-                        {"error": "Ein anderer Sync hält den Prozess-Lock"},
-                    )
-                    return
-                log_file, handler = _setup_job_logger(job_id, "quicksync")
-                db.job_set_log_file(job_id, str(log_file))
-                result = rclone_job.run_quick(
-                    remote_path=payload.remote,
-                    local_path=payload.local,
-                    direction=payload.direction,
-                    mode=payload.mode,
-                    dry_run=payload.dry_run,
-                    extra_args=payload.extra_args,
-                    allow_delete=payload.allow_delete,
-                    max_delete=payload.max_delete,
-                    min_local_files=payload.min_local_files,
-                )
-                db.job_finish(job_id, _finish_status(result), result)
+            db = get_db()
+            current = db.job_get(job_id) or {}
+            if current.get("status") != "running":
+                return
+            log_file, handler = _setup_job_logger(job_id, "quicksync")
+            db.job_set_log_file(job_id, str(log_file))
+            result = rclone_job.run_quick(
+                remote_path=remote_path,
+                local_path=local_path,
+                direction=payload.direction,
+                mode=payload.mode,
+                dry_run=payload.dry_run,
+                extra_args=payload.extra_args,
+                allow_delete=payload.allow_delete,
+                max_delete=payload.max_delete,
+                min_local_files=payload.min_local_files,
+                reset_cancel_state=False,
+            )
+            db.job_finish(job_id, _finish_status(result), result)
         except Exception as exc:
+            worker_error = str(exc)
             logger.exception("QuickSync #%s fehlgeschlagen", job_id)
-            db.job_finish(job_id, "error", {"error": str(exc)})
         finally:
+            final_db = db
+            if final_db is None:
+                try:
+                    final_db = get_db()
+                except Exception:
+                    logger.exception(
+                        "DB konnte beim QuickSync-Abschluss nicht geöffnet werden"
+                    )
+            if final_db is not None and worker_error:
+                try:
+                    final_db.job_finish(
+                        job_id,
+                        "error",
+                        {"error": worker_error},
+                    )
+                except Exception:
+                    logger.exception(
+                        "QuickSync-Fehlerstatus konnte nicht gespeichert werden"
+                    )
             _remove_job_logger(handler)
+            scope_lock.release()
             _locks["backup"].release()
 
-    _start_thread(run_quick, job_id=job_id, name=f"quicksync-job-{job_id}")
+    _start_thread(
+        run_quick,
+        job_id=job_id,
+        name=f"quicksync-job-{job_id}",
+        scope_lock=scope_lock,
+    )
     return {"ok": True, "job_id": job_id}
 
 
@@ -522,19 +725,22 @@ def list_jobs(
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    allowed_kinds = {None, "backup", "check", "quicksync"}
+    allowed_kinds = {None, "backup", "check", "quicksync", "pbs"}
     allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
     if kind not in allowed_kinds:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
         raise HTTPException(400, "Unbekannter Job-Status")
-    return get_db().job_list(
-        kind=kind,
-        status=status,
-        query=q,
-        limit=max(1, min(limit, 500)),
-        offset=max(0, min(offset, 1_000_000)),
-    )
+    return [
+        _redact_result(job)
+        for job in get_db().job_list(
+            kind=kind,
+            status=status,
+            query=q,
+            limit=max(1, min(limit, 500)),
+            offset=max(0, min(offset, 1_000_000)),
+        )
+    ]
 
 
 @router.get("/search")
@@ -545,7 +751,7 @@ def search_jobs(
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    allowed_kinds = {None, "backup", "check", "quicksync"}
+    allowed_kinds = {None, "backup", "check", "quicksync", "pbs"}
     allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
     if kind not in allowed_kinds:
         raise HTTPException(400, "Unbekannter Job-Typ")
@@ -555,13 +761,16 @@ def search_jobs(
     bounded_limit = max(1, min(limit, 200))
     bounded_offset = max(0, min(offset, 1_000_000))
     return {
-        "items": db.job_list(
-            kind=kind,
-            status=status,
-            query=q,
-            limit=bounded_limit,
-            offset=bounded_offset,
-        ),
+        "items": [
+            _redact_result(job)
+            for job in db.job_list(
+                kind=kind,
+                status=status,
+                query=q,
+                limit=bounded_limit,
+                offset=bounded_offset,
+            )
+        ],
         "total": db.job_count(kind=kind, status=status, query=q),
         "limit": bounded_limit,
         "offset": bounded_offset,
@@ -574,48 +783,79 @@ def export_jobs_csv(
     status: Optional[str] = None,
     q: str = Query("", max_length=200),
     limit: int = Query(5000, ge=1, le=10000),
-) -> Response:
-    allowed_kinds = {None, "backup", "check", "quicksync"}
+) -> StreamingResponse:
+    allowed_kinds = {None, "backup", "check", "quicksync", "pbs"}
     allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
     if kind not in allowed_kinds:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
         raise HTTPException(400, "Unbekannter Job-Status")
-    jobs = get_db().job_list(kind=kind, status=status, query=q, limit=limit, offset=0)
-    buffer = io.StringIO(newline="")
-    writer = csv.writer(buffer, dialect="excel")
-    writer.writerow(
-        [
-            "id",
-            "typ",
-            "status",
-            "gestartet",
-            "beendet",
-            "dauer_sekunden",
-            "zusammenfassung",
-        ]
-    )
-    for job in jobs:
-        started = float(job.get("started_at") or 0)
-        ended = float(job.get("ended_at") or 0)
-        writer.writerow(
+
+    def rows():
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer, dialect="excel")
+
+        def emit(row: list[Any]) -> str:
+            buffer.seek(0)
+            buffer.truncate(0)
+            writer.writerow(row)
+            return buffer.getvalue()
+
+        yield "\ufeff" + emit(
             [
-                job.get("id"),
-                job.get("kind"),
-                job.get("status"),
-                datetime.fromtimestamp(started).astimezone().isoformat()
-                if started
-                else "",
-                datetime.fromtimestamp(ended).astimezone().isoformat() if ended else "",
-                round(max(0.0, ended - started), 3) if started and ended else "",
-                json.dumps(
-                    job.get("summary") or {}, ensure_ascii=False, separators=(",", ":")
-                ),
+                "id",
+                "typ",
+                "status",
+                "gestartet",
+                "beendet",
+                "dauer_sekunden",
+                "zusammenfassung",
             ]
         )
+        exported = 0
+        page_size = min(250, limit)
+        while exported < limit:
+            requested = min(page_size, limit - exported)
+            jobs = get_db().job_list(
+                kind=kind,
+                status=status,
+                query=q,
+                limit=requested,
+                offset=exported,
+            )
+            if not jobs:
+                break
+            for job in jobs:
+                started = float(job.get("started_at") or 0)
+                ended = float(job.get("ended_at") or 0)
+                yield emit(
+                    [
+                        job.get("id"),
+                        job.get("kind"),
+                        job.get("status"),
+                        datetime.fromtimestamp(started).astimezone().isoformat()
+                        if started
+                        else "",
+                        datetime.fromtimestamp(ended).astimezone().isoformat()
+                        if ended
+                        else "",
+                        round(max(0.0, ended - started), 3)
+                        if started and ended
+                        else "",
+                        json.dumps(
+                            _redact_result(job.get("summary") or {}),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    ]
+                )
+            exported += len(jobs)
+            if len(jobs) < requested:
+                break
+
     stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-    return Response(
-        "\ufeff" + buffer.getvalue(),
+    return StreamingResponse(
+        rows(),
         media_type="text/csv; charset=utf-8",
         headers={
             "Content-Disposition": f"attachment; filename=rclone-sync-jobs-{stamp}.csv",
@@ -626,17 +866,22 @@ def export_jobs_csv(
 
 @router.post("/cleanup-failed")
 def cleanup_failed_jobs() -> dict[str, Any]:
-    return {"ok": True, "deleted": get_db().jobs_delete_failed()}
+    deleted = get_db().jobs_delete_failed()
+    _audit_best_effort("failed_jobs_cleaned", actor="web", details={"deleted": deleted})
+    return {"ok": True, "deleted": deleted}
 
 
 @router.get("/status/current")
 def status_current() -> dict[str, Any]:
     db = get_db()
-    return {
-        "backup": db.job_running("backup"),
-        "check": db.job_running("check"),
-        "quicksync": db.job_running("quicksync"),
-    }
+    return _redact_result(
+        {
+            "backup": db.job_running("backup"),
+            "check": db.job_running("check"),
+            "quicksync": db.job_running("quicksync"),
+            "pbs": db.job_running("pbs"),
+        }
+    )
 
 
 @router.get("/{job_id}")
@@ -644,7 +889,7 @@ def job_detail(job_id: int) -> dict[str, Any]:
     job = get_db().job_get(job_id)
     if not job:
         raise HTTPException(404, "Nicht gefunden")
-    return job
+    return _redact_result(job)
 
 
 @router.get("/{job_id}/log")
@@ -664,7 +909,9 @@ def job_log(job_id: int, tail: int = 500) -> dict[str, str]:
         return {"log": ""}
     try:
         # Speicher bleibt auch bei sehr großen Logs begrenzt.
-        text = rclone_job.read_log_tail(path, max_bytes=4 * 1024 * 1024)
+        text = redact_command_text(
+            rclone_job.read_log_tail(path, max_bytes=4 * 1024 * 1024)
+        )
         return {"log": "\n".join(text.splitlines()[-tail:]) + ("\n" if text else "")}
     except OSError as exc:
         return {"log": f"<Fehler: {exc}>"}
@@ -685,9 +932,19 @@ def job_log_download(job_id: int) -> Response:
     if not is_relative_to(path, logs_dir) or not path.is_file():
         raise HTTPException(404, "Logdatei nicht gefunden")
     safe_kind = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(job.get("kind") or "job"))
-    return FileResponse(
-        path,
+
+    def sanitized_log():
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                yield redact_command_text(line)
+
+    return StreamingResponse(
+        sanitized_log(),
         media_type="text/plain; charset=utf-8",
-        filename=f"{safe_kind}-job-{job_id}.log",
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": (
+                f'attachment; filename="{safe_kind}-job-{job_id}.log"'
+            ),
+        },
     )

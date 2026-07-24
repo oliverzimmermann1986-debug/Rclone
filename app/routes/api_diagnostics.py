@@ -20,7 +20,7 @@ from ..config_store import get_config
 from ..config_validation import ConfigValidationError, validate_config
 from ..db import get_db
 from ..jobs.rclone_sync import _count_files_up_to, _is_remote, build_job_plan
-from ..jobs.scheduler import DISABLED_VALUES, next_run_after
+from ..jobs.scheduler import DISABLED_VALUES, next_run_after, rclone_history_key
 from ..rclone_args import rclone_subprocess_env
 from ..scheduler_control import scheduler_state
 from ..security import require_csrf
@@ -299,7 +299,7 @@ def doctor() -> dict[str, Any]:
         schedule = str(pair.get("schedule") or "").strip() or default_schedule
         if not schedule or schedule.lower() in DISABLED_VALUES:
             pair_result["schedule"] = {"enabled": False, "message": "manuell/off"}
-        elif croniter.is_valid(schedule):
+        elif len(schedule.split()) == 5 and croniter.is_valid(schedule):
             pair_result["schedule"] = {
                 "enabled": True,
                 "expr": schedule,
@@ -452,20 +452,25 @@ def overview() -> dict[str, Any]:
     now = time.time()
     stats_24h = db.job_statistics(since=now - 86400)
     pair_health = []
-    latest_results = db.pair_last_results()
-    latest_successes = db.pair_last_successes()
+    identities = {
+        rclone_history_key(pair): str(pair.get("name") or "")
+        for pair in enabled
+        if str(pair.get("name") or "")
+    }
+    histories = db.pair_last_history(identities)
     for pair in enabled:
         name = str(pair.get("name") or "")
-        latest = latest_results.get(name) if name else None
-        latest_success = latest_successes.get(name) if name else None
-        # Altinstallationen ohne vollständig migrierte Pair-Tabelle bleiben lesbar.
-        if name and latest is None:
-            latest = db.pair_last_result(name)
-        if name and latest_success is None:
-            latest_success = db.pair_last_success(name)
+        history_key = rclone_history_key(pair)
+        history = histories.get(history_key) or {}
+        latest = history.get("last_result")
+        latest_success = history.get("last_success")
         schedule = str(pair.get("schedule") or "").strip() or default_schedule
         next_run = None
-        if schedule.casefold() not in manual_values and croniter.is_valid(schedule):
+        if (
+            schedule.casefold() not in manual_values
+            and len(schedule.split()) == 5
+            and croniter.is_valid(schedule)
+        ):
             try:
                 next_run = next_run_after(
                     schedule,
@@ -496,6 +501,7 @@ def overview() -> dict[str, Any]:
         pair_health.append(
             {
                 "name": name,
+                "history_key": history_key,
                 "direction": pair.get("direction", "bisync"),
                 "mode": pair.get("mode", "bisync"),
                 "schedule": schedule,

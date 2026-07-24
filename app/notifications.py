@@ -14,6 +14,7 @@ from typing import Any
 
 from . import __version__
 from .config_store import get_config
+from .rclone_args import redact_command_text
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,34 @@ EVENTS = (
 _MAX_RESPONSE_BYTES = 64 * 1024
 _MAX_REQUEST_BYTES = 512 * 1024
 _MAX_REDIRECTS = 4
+_SENSITIVE_PAYLOAD_KEYS = {
+    "password",
+    "password_hash",
+    "secret",
+    "secret_key",
+    "token",
+    "credential",
+    "credentials",
+    "access_key",
+    "private_key",
+}
+
+
+def _redact_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_command_text(value)
+    if isinstance(value, list):
+        return [_redact_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "***REDACTED***"
+                if str(key).casefold() in _SENSITIVE_PAYLOAD_KEYS
+                else _redact_payload(item)
+            )
+            for key, item in value.items()
+        }
+    return value
 
 
 def _notification_policy() -> tuple[bool, bool, float, int]:
@@ -205,6 +234,7 @@ def _post_telegram(url: str, message: str) -> None:
 
 
 def _bounded_payload(payload: dict[str, Any]) -> bytes:
+    payload = _redact_payload(payload)
     body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     if len(body) <= _MAX_REQUEST_BYTES:
         return body
@@ -240,6 +270,9 @@ def notify_one(
         raise ValueError("Webhook URL fehlt")
     if hook.get("enabled", True) is False:
         return
+    title = redact_command_text(title)
+    message = redact_command_text(message)
+    extra = _redact_payload(extra)
     kind = str(hook.get("type") or "generic").lower()
     url = str(hook["url"])
     if kind == "discord":

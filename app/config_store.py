@@ -158,7 +158,14 @@ class Config:
                     "Konfiguration wurde zwischenzeitlich geändert"
                 )
             self._data = copy.deepcopy(data)
-            self._save_unlocked()
+            try:
+                self._save_unlocked()
+            except Exception:
+                # Nach einem Schreibfehler muss der Speicherstand wieder exakt
+                # der tatsächlich persistierten Konfiguration entsprechen.
+                self._load_unlocked()
+                self._dirty_base_revision = None
+                raise
             return self._revision
 
     def update(
@@ -181,7 +188,12 @@ class Config:
                     raise ValueError("Config-Updater muss ein Mapping liefern")
                 working = result
             self._data = working
-            self._save_unlocked()
+            try:
+                self._save_unlocked()
+            except Exception:
+                self._load_unlocked()
+                self._dirty_base_revision = None
+                raise
             return copy.deepcopy(self._data)
 
     def _atomic_write_bytes(self, destination: Path, raw: bytes) -> None:
@@ -244,8 +256,14 @@ class Config:
                 raise ConfigConflictError(
                     "Konfiguration wurde zwischen set() und save() geändert"
                 )
-            self._save_unlocked()
-            self._dirty_base_revision = None
+            try:
+                self._save_unlocked()
+            except Exception:
+                self._load_unlocked()
+                self._dirty_base_revision = None
+                raise
+            else:
+                self._dirty_base_revision = None
 
     def reload(self) -> None:
         with self._lock, self._file_lock(exclusive=False):

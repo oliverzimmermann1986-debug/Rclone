@@ -1,6 +1,6 @@
 # rclone-sync-container
 
-**Version 1.9.1** – Web- und Scheduler-Dienst für sichere `rclone bisync`, `copy`- und `sync`-Läufe zwischen Cloud-Remotes und lokalen NAS-/Storage-Pfaden. Ausgelegt für einen Debian-/Ubuntu-LXC mit systemd.
+**Version 2.0.0** – Web- und Scheduler-Dienst für sichere `rclone bisync`, `copy`- und `sync`-Läufe zwischen Cloud-Remotes und lokalen NAS-/Storage-Pfaden. Ausgelegt für einen Debian-/Ubuntu-LXC mit systemd.
 
 ## Kernfunktionen
 
@@ -24,7 +24,7 @@
 - Kompakter `/readyz`-Endpunkt für Uptime Kuma und Readiness-Prüfungen
 
 
-## Weboberfläche 1.7
+## Weboberfläche
 
 Die Oberfläche ist als Betriebszentrale statt als reine Konfigurationsmaske aufgebaut:
 
@@ -120,13 +120,19 @@ Die mitgelieferte Unit startet absichtlich genau **einen Uvicorn-Worker**. Die z
 In einem frischen Debian-/Ubuntu-LXC als root:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/appear7240/rclone-sync-container/main/scripts/install.sh | bash
+install_script=$(mktemp)
+curl -fsSL https://raw.githubusercontent.com/oliverzimmermann1986-debug/Rclone/main/scripts/install.sh \
+  -o "$install_script"
+less "$install_script"
+bash "$install_script"
+rm -f "$install_script"
 ```
 
-Oder aus einem lokalen Checkout:
+Damit lässt sich der heruntergeladene Root-Installer vor der Ausführung prüfen.
+Alternativ aus einem lokalen Checkout:
 
 ```bash
-git clone https://github.com/appear7240/rclone-sync-container.git /opt/rclone-sync
+git clone https://github.com/oliverzimmermann1986-debug/Rclone.git /opt/rclone-sync
 cd /opt/rclone-sync
 sudo bash scripts/install.sh
 ```
@@ -148,9 +154,15 @@ Danach rclone als Dienstbenutzer konfigurieren:
 sudo -u rclone-sync -H rclone config
 ```
 
-Web-UI: `http://<container-ip>:8001`
+Die Web-UI lauscht standardmäßig ausschließlich lokal auf
+`http://127.0.0.1:8001`. Für Fernzugriff einen HTTPS-Reverse-Proxy oder
+einen SSH-Tunnel verwenden. Ein bewusstes LAN-Binding muss als
+systemd-Drop-in konfiguriert und mit TLS, engen `allowed_hosts` und sicheren
+Cookies abgesichert werden.
 
-Das Initialpasswort steht einmalig in `/opt/rclone-sync/data/.initial-password`. Beim Ändern des Passworts wird die Datei automatisch entfernt.
+Das Initialpasswort steht einmalig in
+`/opt/rclone-sync/data/.initial-password`. Die Datei wird nach dem ersten
+erfolgreichen Login oder beim Ändern des Passworts automatisch entfernt.
 
 ## Upgrade
 
@@ -160,13 +172,16 @@ Normaler Upgrade-Aufruf:
 sudo bash /opt/rclone-sync/scripts/install.sh
 ```
 
-Der Installer bricht bei lokalen Änderungen an getrackten Repository-Dateien ab. Diese vorher committen oder sichern. Nur bewusst kann die Prüfung übergangen werden:
+Der Installer bricht bei lokalen Änderungen an getrackten Repository-Dateien
+immer ab. Diese vorher committen oder außerhalb von `/opt/rclone-sync` sichern.
+Auch ein bereits vorhandenes Verzeichnis `/opt/rclone-sync`, das kein
+Git-Checkout ist, wird niemals automatisch überschrieben oder gelöscht.
 
-```bash
-sudo ALLOW_DIRTY_UPGRADE=1 bash /opt/rclone-sync/scripts/install.sh
-```
-
-Laufzeit-Sicherungen landen standardmäßig unter `/var/backups/rclone-sync/<Zeitstempel>`. Es werden zehn Sicherungen behalten. Anpassung:
+Laufzeit-Sicherungen landen standardmäßig unter
+`/var/backups/rclone-sync/<Zeitstempel>`. Es werden zehn vom Installer erzeugte
+und markierte Sicherungen behalten; fremde Verzeichnisse im Sicherungswurzelpfad
+werden nicht gelöscht. `BACKUP_ROOT` darf nicht innerhalb von
+`/opt/rclone-sync` liegen. Anpassung:
 
 ```bash
 sudo BACKUP_KEEP=20 BACKUP_ROOT=/srv/backups/rclone-sync \
@@ -210,6 +225,7 @@ Wichtige globale Werte:
 
 Wichtige Pair-Werte:
 
+- `id`: stabile, automatisch erzeugte technische Identität; Namen dürfen geändert werden, ohne Historie zu verlieren
 - `enabled`: Beispiel-Pairs sind absichtlich deaktiviert
 - `direction`: `bisync`, `pull` oder `push`
 - `mode`: bei einseitigen Pairs `copy` oder `sync`
@@ -219,6 +235,10 @@ Wichtige Pair-Werte:
 - `require_mountpoint`, `mountpoint`, `sentinel_file`: Mountschutz
 - `min_local_files`, `min_remote_files`, `min_free_gb`: Plausibilitätsgrenzen
 - `rclone_args`: zusätzliche, validierte Argumente
+
+Sicherheitsrelevante Änderungen – etwa Benutzername, PBS-Ziel/Secret,
+Webhook-Ziele, lokale Browser-Wurzeln oder das Abschalten von Schutzschaltern –
+verlangen beim Speichern zusätzlich das aktuelle Webpasswort.
 
 ### Richtungslogik
 
@@ -288,7 +308,13 @@ web:
     - sync.example.org
 ```
 
-Die Unit vertraut Forwarded-Header standardmäßig nur von `127.0.0.1` und `::1`. Läuft der Proxy in einem anderen Container, dessen feste IP gezielt bei `--forwarded-allow-ips` in einem systemd-Drop-in ergänzen. Kein pauschales `*` verwenden.
+Die Unit vertraut Forwarded-Header standardmäßig nur von `127.0.0.1` und `::1`.
+Läuft der Proxy in einem anderen Container, dessen feste IP gezielt bei
+`--forwarded-allow-ips` in einem systemd-Drop-in ergänzen. Kein pauschales `*`
+verwenden. Der Proxy muss eingehende `Forwarded`- und `X-Forwarded-*`-Header
+überschreiben und der lokale Backend-Port darf nicht zusätzlich aus einem
+unvertrauenswürdigen Netz erreichbar sein; sonst können Header-Spoofing,
+Secure-Cookie- und Client-IP-Annahmen umgangen werden.
 
 Ein äußerer MFA-Layer wie Cloudflare Access kann die Webanmeldung zusätzlich absichern.
 
@@ -375,12 +401,17 @@ Fehlt der bisync-State, nicht blind automatisch resyncen. Zuerst beide Seiten, F
 
 ## Tests
 
+CI prüft Python 3.10 bis 3.13. Lokal nach Installation von
+`requirements-dev.txt`:
+
 ```bash
+python -m pip check
 python -m pytest -q
 ruff check .
 ruff format --check .
 python -m compileall -q app tests
 node --check app/static/app.js
 bash -n scripts/install.sh
+shellcheck scripts/install.sh
 git diff --check
 ```

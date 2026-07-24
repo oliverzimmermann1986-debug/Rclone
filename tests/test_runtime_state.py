@@ -5,11 +5,15 @@ import pytest
 from app.jobs import runtime_state
 
 
-def test_stale_runtime_state_is_recovered(tmp_path: Path, monkeypatch):
+def _use_runtime_dir(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(runtime_state, "STATE_DIR", tmp_path)
     monkeypatch.setattr(runtime_state, "RUN_FILE", tmp_path / "current-run.json")
     monkeypatch.setattr(runtime_state, "CANCEL_FILE", tmp_path / "cancel.requested")
     monkeypatch.setattr(runtime_state, "PROCS_DIR", tmp_path / "processes")
+
+
+def test_stale_runtime_state_is_recovered(tmp_path: Path, monkeypatch):
+    _use_runtime_dir(tmp_path, monkeypatch)
     run_id = runtime_state.begin_run(["A"], dry_run=False)
     state = runtime_state.load_run_state()
     state["pid"] = 99999999
@@ -21,13 +25,24 @@ def test_stale_runtime_state_is_recovered(tmp_path: Path, monkeypatch):
     assert recovered["pairs"]["A"]["status"] == "stale"
 
 
+def test_recovery_details_include_database_job_id(tmp_path: Path, monkeypatch):
+    _use_runtime_dir(tmp_path, monkeypatch)
+    run_id = runtime_state.begin_run(["A"], dry_run=False, job_id=42)
+    state = runtime_state.load_run_state()
+    state["pid"] = 99999999
+    runtime_state._atomic_json(runtime_state.RUN_FILE, state)
+
+    recovered = runtime_state.recover_stale_run_details()
+
+    assert recovered["run_id"] == run_id
+    assert recovered["kind"] == "backup"
+    assert recovered["job_id"] == 42
+
+
 def test_cancel_marker_replaces_symlink_without_touching_target(
     tmp_path: Path, monkeypatch
 ):
-    monkeypatch.setattr(runtime_state, "STATE_DIR", tmp_path)
-    monkeypatch.setattr(runtime_state, "RUN_FILE", tmp_path / "current-run.json")
-    monkeypatch.setattr(runtime_state, "CANCEL_FILE", tmp_path / "cancel.requested")
-    monkeypatch.setattr(runtime_state, "PROCS_DIR", tmp_path / "processes")
+    _use_runtime_dir(tmp_path, monkeypatch)
     target = tmp_path / "target.txt"
     target.write_text("unchanged", encoding="utf-8")
     try:
@@ -40,3 +55,109 @@ def test_cancel_marker_replaces_symlink_without_touching_target(
     assert target.read_text(encoding="utf-8") == "unchanged"
     assert runtime_state.CANCEL_FILE.is_symlink() is False
     assert runtime_state.cancel_requested() is True
+
+
+def test_cancel_markers_are_scoped(tmp_path: Path, monkeypatch):
+    _use_runtime_dir(tmp_path, monkeypatch)
+
+    runtime_state.request_cancel_marker("pbs")
+
+    assert runtime_state.cancel_requested("pbs") is True
+    assert runtime_state.cancel_requested("backup") is False
+    runtime_state.reset_cancel_marker("pbs")
+    assert runtime_state.cancel_requested("pbs") is False
+
+
+def test_active_processes_only_returns_requested_scope(tmp_path: Path, monkeypatch):
+    _use_runtime_dir(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        runtime_state, "_is_same_registered_process", lambda _marker: True
+    )
+    runtime_state._atomic_json(
+        runtime_state.PROCS_DIR / "11.json", {"pid": 11, "scope": "backup"}
+    )
+    runtime_state._atomic_json(
+        runtime_state.PROCS_DIR / "12.json", {"pid": 12, "scope": "pbs"}
+    )
+
+    assert [item["pid"] for item in runtime_state.active_processes()] == [11]
+    assert [item["pid"] for item in runtime_state.active_processes("pbs")] == [12]
+    assert {item["pid"] for item in runtime_state.active_processes(None)} == {11, 12}
+
+
+def test_stale_backup_recovery_keeps_pbs_process_marker(tmp_path: Path, monkeypatch):
+    _use_runtime_dir(tmp_path, monkeypatch)
+    run_id = runtime_state.begin_run(["A"], dry_run=False, kind="backup")
+    state = runtime_state.load_run_state()
+    state["pid"] = 99999999
+    runtime_state._atomic_json(runtime_state.RUN_FILE, state)
+    runtime_state._atomic_json(
+        runtime_state.PROCS_DIR / "21.json",
+        {"pid": 21, "owner_pid": 99999999, "scope": "backup", "run_id": run_id},
+    )
+    runtime_state._atomic_json(
+        runtime_state.PROCS_DIR / "22.json",
+        {"pid": 22, "owner_pid": 99999999, "scope": "pbs", "run_id": run_id},
+    )
+
+    assert runtime_state.recover_stale_run_state() is True
+    assert not (runtime_state.PROCS_DIR / "21.json").exists()
+    assert (runtime_state.PROCS_DIR / "22.json").exists()
+
+
+def test_unregister_process_removes_only_exact_unique_marker(
+    tmp_path: Path, monkeypatch
+):
+    _use_runtime_dir(tmp_path, monkeypatch)
+    monkeypatch.setattr(runtime_state, "_proc_start_ticks", lambda _pid: "42")
+    runtime_state._local_process_markers.clear()
+
+    first = runtime_state.register_process(123, executable="rclone")
+    second = runtime_state.register_process(123, executable="rclone")
+
+    runtime_state.unregister_process(123, marker_id=first)
+    assert not (runtime_state.PROCS_DIR / f"123-{first}.json").exists()
+    assert (runtime_state.PROCS_DIR / f"123-{second}.json").exists()
+
+    runtime_state.unregister_process(123)
+    assert not (runtime_state.PROCS_DIR / f"123-{second}.json").exists()
+
+
+def test_process_marker_without_start_identity_is_never_trusted(monkeypatch):
+    monkeypatch.setattr(
+        runtime_state.Path,
+        "read_bytes",
+        lambda _path: b"/usr/bin/rclone\x00sync\x00",
+    )
+
+    assert (
+        runtime_state._is_same_registered_process({"pid": 123, "executable": "rclone"})
+        is False
+    )
+
+
+def test_recovery_keeps_legacy_marker_from_reused_owner_pid(
+    tmp_path: Path, monkeypatch
+):
+    _use_runtime_dir(tmp_path, monkeypatch)
+    run_id = runtime_state.begin_run(["A"], dry_run=False)
+    state = runtime_state.load_run_state()
+    state["pid"] = 777
+    state["owner_start_ticks"] = "old-owner"
+    runtime_state._atomic_json(runtime_state.RUN_FILE, state)
+    marker = runtime_state.PROCS_DIR / "55-old.json"
+    runtime_state._atomic_json(
+        marker,
+        {
+            "pid": 55,
+            "owner_pid": 777,
+            "owner_start_ticks": "new-owner",
+            "scope": "backup",
+            "run_id": "",
+        },
+    )
+
+    recovered = runtime_state.recover_stale_run_details(force=True)
+
+    assert recovered["run_id"] == run_id
+    assert marker.exists()

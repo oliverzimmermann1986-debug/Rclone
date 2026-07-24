@@ -84,6 +84,7 @@ def test_gui_assets_reference_current_cache_version():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     login = (STATIC / "login.html").read_text(encoding="utf-8")
     assert "/static/style.css?v=__APP_VERSION__" in html
+    assert "/static/alpine.min.js?v=__APP_VERSION__" in html
     assert "/static/app.js?v=__APP_VERSION__" in html
     assert "Proxmox Backup Console" in login
     assert 'class="shell"' in login
@@ -107,3 +108,87 @@ def test_scheduler_settings_explain_cron_and_offer_presets():
         "schedulerRiskLevel",
     ):
         assert f"{method}(" in javascript
+
+
+def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert (
+        "status: { backup: null, check: null, quicksync: null, pbs: null }"
+        in javascript
+    )
+    assert "keep: { keep_last: 0, keep_daily: 7, keep_weekly: 4" in javascript
+    assert "await this.loadConfig(true)" in javascript
+    assert "requestKey: 'pbs-status'" in javascript
+    assert "this.status.pbs = result.running" in javascript
+    assert "this.pending.pbs || this.status?.pbs" in javascript
+    assert "if (this.status?.pbs || this.pbs.status?.running)" in javascript
+    assert 'value="pbs">PBS-Backup' in html
+    assert 'class="table-scroll"' in html
+    assert "formatDateTime(target.last_success)" in html
+
+
+def test_gui_requests_are_latest_response_wins_and_poll_page_aware():
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "const requestControllers = new Map()" in javascript
+    assert "const requestRevisions = new Map()" in javascript
+    assert "const controller = new AbortController()" in javascript
+    assert "requestControllers.get(requestKey)?.abort()" in javascript
+    assert "requestRevisions.get(requestKey) !== revision" in javascript
+    for key in ("jobs", "picker", "schedule-preview", "job-detail", "job-log"):
+        assert f"requestKey: '{key}'" in javascript
+    assert "if (this.refreshing) return false" in javascript
+    assert "if (this.page === 'dashboard')" in javascript
+    assert "window.setTimeout(refreshLoop, 15000)" in javascript
+    assert "window.setTimeout(activityLoop, 2000)" in javascript
+    assert "setInterval(" not in javascript
+    assert "history.pushState" in javascript
+    assert "window.addEventListener('popstate'" in javascript
+
+
+def test_dialog_focus_accessibility_and_loading_contracts():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+
+    assert '@keydown.tab.window="trapDialogFocus($event)"' in html
+    for ref_name in (
+        "currentPasswordDialog",
+        "planDialog",
+        "quickDialog",
+        "pickerDialog",
+        "jobDialog",
+    ):
+        assert f'x-ref="{ref_name}"' in html
+    assert html.count('aria-modal="true"') == 5
+    assert "focusableElements(dialog)" in javascript
+    assert "restoreDialogFocus()" in javascript
+    assert "dialogFocusStack.push(document.activeElement)" in javascript
+    assert 'role="tablist"' in html
+    assert 'role="tabpanel"' in html
+    assert ":aria-current=" in html
+    assert 'role="progressbar"' in html
+    assert 'aria-label="Jobhistorie durchsuchen"' in html
+    assert 'aria-label="Sync-Paare nach Name oder Pfad durchsuchen"' in html
+    assert ".skip-link" in css
+    assert ":focus-visible" in css
+    assert ".search-field:focus-within" in css
+    assert ".toast.above-unsaved" in css
+
+
+def test_sensitive_config_save_uses_transient_password_and_strips_web_secrets():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "result.status === 403" in javascript
+    assert "requestCurrentPassword(" in javascript
+    assert "current_password: currentPassword" in javascript
+    assert "this.currentPasswordDialog.password = ''" in javascript
+    for key in ("password", "password_hash", "secret_key", "session_version"):
+        assert f"'{key}'" in javascript
+    assert "delete draft.web[key]" in javascript
+    assert "localStorage.setItem('current_password'" not in javascript
+    assert 'x-model="config.web.username" readonly aria-readonly="true"' in html
+    assert 'autocomplete="current-password"' in html
