@@ -48,6 +48,8 @@ def test_restore_config_backup_uses_valid_secure_backup(tmp_path, monkeypatch):
     assert cli.cmd_restore_config_backup(type("Args", (), {"yes": True})()) == 0
     restored = yaml.safe_load(primary.read_text(encoding="utf-8"))
     assert restored["web"]["username"] == "admin"
+    assert restored["schema_version"] == 2
+    assert restored["backup"]["enabled"] is True
     assert list(tmp_path.glob("config.yaml.invalid-*"))
 
 

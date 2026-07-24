@@ -80,24 +80,127 @@ def test_build_backup_and_prune_commands(monkeypatch):
         "keep": {"keep_daily": 7, "keep_weekly": 0},
     }
     target = {"name": "docs", "paths": ["/mnt/nas/dokumente", "/mnt/nas/fotos"]}
+    backup_id = pbs_backup._target_backup_id(settings, target)
+    assert backup_id == "lxc203"
     cmd = pbs_backup.build_backup_command(settings, target)
     assert cmd[:2] == ["/usr/bin/pbc", "backup"]
     assert "dokumente.pxar:/mnt/nas/dokumente" in cmd
     assert "fotos.pxar:/mnt/nas/fotos" in cmd
     assert cmd[cmd.index("--repository") + 1] == "backup@pbs!tok@host:store"
     assert cmd[cmd.index("--ns") + 1] == "ns1"
-    assert cmd[cmd.index("--backup-id") + 1] == "lxc203"
+    assert cmd[cmd.index("--backup-id") + 1] == backup_id
 
     prune = pbs_backup.build_prune_command(settings, target)
     assert prune is not None
-    assert prune[1:3] == ["prune", "host/lxc203"]
+    assert prune[1:3] == ["prune", f"host/{backup_id}"]
     assert prune[prune.index("--keep-daily") + 1] == "7"
     assert "--keep-weekly" not in prune
+
+
+def test_validation_rejects_ambiguous_multi_target_backup_ids(tmp_path):
+    base = _base_config(
+        tmp_path,
+        {
+            "enabled": True,
+            "repository": "backup@pbs!tok@host:store",
+            "targets": [
+                {"name": "docs", "paths": ["/mnt/docs"]},
+                {"name": "photos", "paths": ["/mnt/photos"]},
+            ],
+        },
+    )
+    with pytest.raises(ConfigValidationError, match="backup_id.*explizit"):
+        validate_config(base)
+
+    base["pbs"]["targets"][0]["backup_id"] = "shared"
+    base["pbs"]["targets"][1]["backup_id"] = "SHARED"
+    with pytest.raises(ConfigValidationError, match="backup_id.*nicht eindeutig"):
+        validate_config(base)
+
+
+def test_validation_accepts_distinct_multi_target_backup_ids(tmp_path):
+    normalized, _ = validate_config(
+        _base_config(
+            tmp_path,
+            {
+                "enabled": True,
+                "repository": "backup@pbs!tok@host:store",
+                "targets": [
+                    {
+                        "name": "docs",
+                        "paths": ["/mnt/docs"],
+                        "backup_id": "docs",
+                    },
+                    {
+                        "name": "photos",
+                        "paths": ["/mnt/photos"],
+                        "backup_id": "photos",
+                    },
+                ],
+            },
+        )
+    )
+    assert [target["backup_id"] for target in normalized["pbs"]["targets"]] == [
+        "docs",
+        "photos",
+    ]
+
+
+def test_validation_rejects_case_insensitive_target_names_and_invalid_ids(tmp_path):
+    base = _base_config(
+        tmp_path,
+        {
+            "enabled": True,
+            "repository": "backup@pbs!tok@host:store",
+            "backup_id": "../invalid",
+            "targets": [
+                {
+                    "name": "Docs",
+                    "paths": ["/mnt/docs"],
+                    "backup_id": "docs",
+                },
+                {
+                    "name": "docs",
+                    "paths": ["/mnt/docs-copy"],
+                    "backup_id": "bad/id",
+                },
+            ],
+        },
+    )
+    with pytest.raises(ConfigValidationError) as raised:
+        validate_config(base)
+    message = str(raised.value)
+    assert "name ist doppelt" in message
+    assert "pbs.backup_id" in message
+    assert "pbs.targets[1].backup_id" in message
+
+
+def test_validation_rejects_pbs_path_outside_mountpoint(tmp_path):
+    mountpoint = tmp_path / "mounted"
+    outside = tmp_path / "outside"
+    base = _base_config(
+        tmp_path,
+        {
+            "enabled": True,
+            "repository": "backup@pbs!tok@host:store",
+            "targets": [
+                {
+                    "name": "docs",
+                    "paths": [str(outside)],
+                    "require_mountpoint": True,
+                    "mountpoint": str(mountpoint),
+                }
+            ],
+        },
+    )
+    with pytest.raises(ConfigValidationError, match="mountpoint.*PBS-Pfade"):
+        validate_config(base)
 
 
 def test_run_pbs_backup_records_targets(tmp_path, monkeypatch):
     data = tmp_path / "quelle"
     data.mkdir()
+    (data / "payload.txt").write_text("data", encoding="utf-8")
     _install_config(
         tmp_path,
         monkeypatch,
@@ -120,8 +223,8 @@ def test_run_pbs_backup_records_targets(tmp_path, monkeypatch):
         return 0
 
     monkeypatch.setattr(pbs_backup, "_run_rclone_command", fake_run)
-    monkeypatch.setattr(pbs_backup, "reset_cancel", lambda: None)
-    monkeypatch.setattr(pbs_backup, "is_cancelled", lambda: False)
+    monkeypatch.setattr(pbs_backup, "reset_cancel", lambda *_args: None)
+    monkeypatch.setattr(pbs_backup, "is_cancelled", lambda *_args: False)
     monkeypatch.setattr(pbs_backup, "_notify_result", lambda summary: None)
 
     summary = pbs_backup.run_pbs_backup(trigger="web")
@@ -150,6 +253,75 @@ def test_run_pbs_backup_records_targets(tmp_path, monkeypatch):
     summary = pbs_backup.run_pbs_backup(trigger="web")
     assert not summary["ok"]
     assert "nicht vorhanden" in summary["pairs"][0]["error"]
+
+
+def test_pbs_source_guard_rejects_unmounted_path(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload").write_text("data", encoding="utf-8")
+    _install_config(
+        tmp_path,
+        monkeypatch,
+        {
+            "enabled": True,
+            "repository": "backup@pbs!tok@host:store",
+            "targets": [
+                {
+                    "name": "guarded",
+                    "paths": [str(source)],
+                    "require_mountpoint": True,
+                    "min_files": 1,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(pbs_backup, "client_path", lambda: "/usr/bin/pbc")
+    monkeypatch.setattr(pbs_backup.os.path, "ismount", lambda _path: False)
+    monkeypatch.setattr(pbs_backup, "reset_cancel", lambda *_args: None)
+    monkeypatch.setattr(pbs_backup, "is_cancelled", lambda *_args: False)
+    monkeypatch.setattr(pbs_backup, "_notify_result", lambda _summary: None)
+    monkeypatch.setattr(
+        pbs_backup,
+        "_run_rclone_command",
+        lambda *_args, **_kwargs: pytest.fail("Backup darf nicht gestartet werden"),
+    )
+
+    summary = pbs_backup.run_pbs_backup(trigger="web")
+
+    assert summary["ok"] is False
+    assert "nicht eingehängt" in summary["pairs"][0]["error"]
+
+
+def test_prune_failure_marks_pbs_run_degraded(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload").write_text("data", encoding="utf-8")
+    _install_config(
+        tmp_path,
+        monkeypatch,
+        {
+            "enabled": True,
+            "repository": "backup@pbs!tok@host:store",
+            "keep": {"keep_daily": 7},
+            "targets": [{"name": "docs", "paths": [str(source)], "min_files": 1}],
+        },
+    )
+    monkeypatch.setattr(pbs_backup, "client_path", lambda: "/usr/bin/pbc")
+    monkeypatch.setattr(pbs_backup, "reset_cancel", lambda *_args: None)
+    monkeypatch.setattr(pbs_backup, "is_cancelled", lambda *_args: False)
+    monkeypatch.setattr(pbs_backup, "_notify_result", lambda _summary: None)
+    returncodes = iter((0, 2))
+    monkeypatch.setattr(
+        pbs_backup,
+        "_run_rclone_command",
+        lambda *_args, **_kwargs: next(returncodes),
+    )
+
+    summary = pbs_backup.run_pbs_backup(trigger="scheduler")
+
+    assert summary["ok"] is False
+    assert summary["pairs"][0]["degraded"] is True
+    assert summary["pairs"][0]["prune_ok"] is False
 
 
 def test_find_due_pbs_targets_uses_pair_runs(tmp_path, monkeypatch):

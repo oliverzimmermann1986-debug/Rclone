@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import tempfile
 import threading
@@ -18,6 +19,25 @@ CANCEL_FILE = STATE_DIR / "cancel.requested"
 PROCS_DIR = STATE_DIR / "processes"
 
 _state_lock = threading.RLock()
+_local_process_markers: dict[int, str] = {}
+DEFAULT_CANCEL_SCOPE = "backup"
+_SCOPE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _scope_name(scope: str | None) -> str:
+    value = str(scope or DEFAULT_CANCEL_SCOPE).strip().lower()
+    if not _SCOPE_RE.fullmatch(value):
+        raise ValueError("Ungültiger Runtime-Scope")
+    return value
+
+
+def _cancel_path(scope: str | None = DEFAULT_CANCEL_SCOPE) -> Path:
+    normalized = _scope_name(scope)
+    if normalized == DEFAULT_CANCEL_SCOPE:
+        # Der historische Pfad bleibt für laufende Installationen und externe
+        # Werkzeuge kompatibel. Weitere Job-Arten erhalten getrennte Marker.
+        return CANCEL_FILE
+    return STATE_DIR / f"cancel.{normalized}.requested"
 
 
 def _ensure_dirs() -> None:
@@ -67,19 +87,20 @@ def _read_json(path: Path) -> Optional[dict[str, Any]]:
         return None
 
 
-def reset_cancel_marker() -> None:
+def reset_cancel_marker(scope: str = DEFAULT_CANCEL_SCOPE) -> None:
     _ensure_dirs()
-    CANCEL_FILE.unlink(missing_ok=True)
+    _cancel_path(scope).unlink(missing_ok=True)
 
 
-def request_cancel_marker() -> None:
+def request_cancel_marker(scope: str = DEFAULT_CANCEL_SCOPE) -> None:
     """Setzt das Cancel-Signal atomar, ohne vorhandenen Symlinks zu folgen."""
     _ensure_dirs()
+    cancel_path = _cancel_path(scope)
     fd = -1
     tmp: Path | None = None
     try:
         fd, name = tempfile.mkstemp(
-            prefix=f".{CANCEL_FILE.name}.", suffix=".tmp", dir=str(STATE_DIR)
+            prefix=f".{cancel_path.name}.", suffix=".tmp", dir=str(STATE_DIR)
         )
         tmp = Path(name)
         os.fchmod(fd, 0o600)
@@ -88,7 +109,7 @@ def request_cancel_marker() -> None:
             handle.write(str(time.time()))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, CANCEL_FILE)
+        os.replace(tmp, cancel_path)
         tmp = None
     except OSError:
         pass
@@ -99,11 +120,17 @@ def request_cancel_marker() -> None:
             tmp.unlink(missing_ok=True)
 
 
-def cancel_requested() -> bool:
-    return CANCEL_FILE.exists()
+def cancel_requested(scope: str = DEFAULT_CANCEL_SCOPE) -> bool:
+    return _cancel_path(scope).exists()
 
 
-def begin_run(pair_names: list[str], *, dry_run: bool, kind: str = "backup") -> str:
+def begin_run(
+    pair_names: list[str],
+    *,
+    dry_run: bool,
+    kind: str = "backup",
+    job_id: int | None = None,
+) -> str:
     run_id = uuid.uuid4().hex
     now = time.time()
     state = {
@@ -120,6 +147,8 @@ def begin_run(pair_names: list[str], *, dry_run: bool, kind: str = "backup") -> 
             for name in pair_names
         },
     }
+    if job_id is not None:
+        state["job_id"] = int(job_id)
     with _state_lock:
         _atomic_json(RUN_FILE, state)
     return run_id
@@ -169,12 +198,14 @@ def _proc_start_ticks(pid: int) -> Optional[str]:
         return None
 
 
-def recover_stale_run_state(*, reason: str = "Prozess nicht mehr aktiv") -> bool:
-    """Markiert einen zurückgelassenen Laufzeitstatus nach Absturz als stale."""
+def recover_stale_run_details(
+    *, reason: str = "Prozess nicht mehr aktiv", force: bool = False
+) -> Optional[dict[str, Any]]:
+    """Markiert einen verwaisten Lauf stale und gibt dessen Metadaten zurück."""
     with _state_lock:
         state = _read_json(RUN_FILE)
         if not state or state.get("status") != "running":
-            return False
+            return None
         try:
             pid = int(state.get("pid"))
         except (TypeError, ValueError):
@@ -183,8 +214,8 @@ def recover_stale_run_state(*, reason: str = "Prozess nicht mehr aktiv") -> bool
         alive = pid > 0 and _proc_start_ticks(pid) is not None
         if alive and expected_ticks and _proc_start_ticks(pid) != expected_ticks:
             alive = False
-        if alive:
-            return False
+        if alive and not force:
+            return None
         now = time.time()
         state.update(
             {"status": "stale", "ended_at": now, "updated_at": now, "error": reason}
@@ -196,44 +227,106 @@ def recover_stale_run_state(*, reason: str = "Prozess nicht mehr aktiv") -> bool
                 "running",
             }:
                 pair.update({"status": "stale", "updated_at": now, "error": reason})
+        current = _read_json(RUN_FILE)
+        if (
+            not current
+            or current.get("status") != "running"
+            or current.get("run_id") != state.get("run_id")
+        ):
+            return None
         _atomic_json(RUN_FILE, state)
+        run_scope = _scope_name(str(state.get("kind") or DEFAULT_CANCEL_SCOPE))
+        run_id = str(state.get("run_id") or "")
+        owner_start_ticks = str(state.get("owner_start_ticks") or "")
         for marker_path in PROCS_DIR.glob("*.json"):
             try:
-                marker_path.unlink(missing_ok=True)
+                marker = _read_json(marker_path)
+                if not marker:
+                    marker_path.unlink(missing_ok=True)
+                    continue
+                marker_scope = _scope_name(
+                    str(marker.get("scope") or DEFAULT_CANCEL_SCOPE)
+                )
+                marker_owner = int(marker.get("owner_pid") or -1)
+                marker_run_id = str(marker.get("run_id") or "")
+                marker_owner_ticks = str(marker.get("owner_start_ticks") or "")
+                same_run = bool(run_id and marker_run_id == run_id)
+                legacy_same_owner = bool(
+                    not marker_run_id
+                    and marker_owner == pid
+                    and owner_start_ticks
+                    and marker_owner_ticks == owner_start_ticks
+                )
+                if marker_scope == run_scope and (same_run or legacy_same_owner):
+                    marker_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        reset_cancel_marker()
-        return True
+            except (TypeError, ValueError):
+                marker_path.unlink(missing_ok=True)
+        reset_cancel_marker(run_scope)
+        return dict(state)
 
 
-def register_process(pid: int, *, pair_name: str = "", log_file: str = "") -> None:
+def recover_stale_run_state(*, reason: str = "Prozess nicht mehr aktiv") -> bool:
+    """Rückwärtskompatibler Bool-Wrapper für die detaillierte Recovery-API."""
+    return recover_stale_run_details(reason=reason) is not None
+
+
+def register_process(
+    pid: int,
+    *,
+    pair_name: str = "",
+    log_file: str = "",
+    scope: str = DEFAULT_CANCEL_SCOPE,
+    executable: str = "rclone",
+    run_id: str = "",
+) -> str:
     _ensure_dirs()
+    marker_id = uuid.uuid4().hex
     marker = {
+        "marker_id": marker_id,
         "pid": int(pid),
         "owner_pid": os.getpid(),
+        "owner_start_ticks": _proc_start_ticks(os.getpid()),
         "pair_name": pair_name,
         "log_file": log_file,
+        "scope": _scope_name(scope),
+        "executable": Path(str(executable or "")).name,
+        "run_id": str(run_id or ""),
         "start_ticks": _proc_start_ticks(pid),
         "registered_at": time.time(),
     }
-    _atomic_json(PROCS_DIR / f"{pid}.json", marker)
+    _atomic_json(PROCS_DIR / f"{pid}-{marker_id}.json", marker)
+    with _state_lock:
+        _local_process_markers[int(pid)] = marker_id
+    return marker_id
 
 
-def unregister_process(pid: int) -> None:
+def unregister_process(pid: int, *, marker_id: str | None = None) -> None:
+    normalized_pid = int(pid)
+    with _state_lock:
+        known_marker = _local_process_markers.get(normalized_pid)
+        if marker_id is None:
+            marker_id = known_marker
+        if marker_id and known_marker == marker_id:
+            _local_process_markers.pop(normalized_pid, None)
+    if not marker_id:
+        return
+    if not re.fullmatch(r"[a-f0-9]{32}", str(marker_id)):
+        return
     try:
-        (PROCS_DIR / f"{int(pid)}.json").unlink(missing_ok=True)
+        (PROCS_DIR / f"{normalized_pid}-{marker_id}.json").unlink(missing_ok=True)
     except OSError:
         pass
 
 
-def _is_same_rclone_process(marker: dict[str, Any]) -> bool:
+def _is_same_registered_process(marker: dict[str, Any]) -> bool:
     try:
         pid = int(marker.get("pid"))
     except (TypeError, ValueError):
         return False
-    if marker.get("start_ticks") and _proc_start_ticks(pid) != marker.get(
-        "start_ticks"
-    ):
+    expected_ticks = str(marker.get("start_ticks") or "")
+    if not expected_ticks or _proc_start_ticks(pid) != expected_ticks:
         return False
     try:
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\x00")
@@ -241,27 +334,43 @@ def _is_same_rclone_process(marker: dict[str, Any]) -> bool:
         return False
     if not cmdline or not cmdline[0]:
         return False
-    return Path(cmdline[0].decode("utf-8", errors="ignore")).name == "rclone"
+    expected = Path(str(marker.get("executable") or "rclone")).name
+    actual = Path(cmdline[0].decode("utf-8", errors="ignore")).name
+    return bool(expected and actual == expected)
 
 
-def active_processes() -> list[dict[str, Any]]:
+def active_processes(
+    scope: str | None = DEFAULT_CANCEL_SCOPE,
+) -> list[dict[str, Any]]:
     _ensure_dirs()
+    normalized_scope = _scope_name(scope) if scope is not None else None
     active: list[dict[str, Any]] = []
     for marker_path in PROCS_DIR.glob("*.json"):
         marker = _read_json(marker_path)
-        if marker and _is_same_rclone_process(marker):
-            active.append(marker)
-        else:
+        if not marker or not _is_same_registered_process(marker):
             marker_path.unlink(missing_ok=True)
+            continue
+        try:
+            marker_scope = _scope_name(str(marker.get("scope") or DEFAULT_CANCEL_SCOPE))
+        except (TypeError, ValueError):
+            marker_path.unlink(missing_ok=True)
+            continue
+        if normalized_scope is None or marker_scope == normalized_scope:
+            active.append(marker)
     return active
 
 
-def terminate_active_processes(graceful_sec: int = 10) -> int:
-    """Beendet registrierte rclone-Prozessgruppen auch aus CLI/Scheduler-Läufen."""
-    request_cancel_marker()
-    markers = active_processes()
+def terminate_active_processes(
+    graceful_sec: int = 10, *, scope: str = DEFAULT_CANCEL_SCOPE
+) -> int:
+    """Beendet nur Prozessgruppen des angeforderten Job-Scopes."""
+    normalized_scope = _scope_name(scope)
+    request_cancel_marker(normalized_scope)
+    markers = active_processes(normalized_scope)
     killed = 0
     for marker in markers:
+        if not _is_same_registered_process(marker):
+            continue
         pid = int(marker["pid"])
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
@@ -271,15 +380,17 @@ def terminate_active_processes(graceful_sec: int = 10) -> int:
 
     deadline = time.monotonic() + max(0, graceful_sec)
     while time.monotonic() < deadline:
-        if not active_processes():
+        if not active_processes(normalized_scope):
             break
         time.sleep(0.2)
 
-    for marker in active_processes():
+    for marker in active_processes(normalized_scope):
+        if not _is_same_registered_process(marker):
+            continue
         pid = int(marker["pid"])
         try:
             os.killpg(os.getpgid(pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             pass
-        unregister_process(pid)
+        unregister_process(pid, marker_id=str(marker.get("marker_id") or ""))
     return killed

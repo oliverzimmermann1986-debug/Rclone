@@ -18,7 +18,7 @@ Environment="RCLONE_CACHE_DIR=/opt/rclone-sync/data/.rclone-cache"
 Environment="RCLONE_CONFIG=/home/rclone-sync/.config/rclone/rclone.conf"
 Environment="RCLONE_ASK_PASSWORD=false"
 ExecStartPre=/bin/mkdir -p /opt/rclone-sync/data/.rclone-cache /opt/rclone-sync/data/runtime /opt/rclone-sync/logs /opt/rclone-sync/temp
-ExecStart=/opt/rclone-sync/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 --proxy-headers --forwarded-allow-ips=127.0.0.1,::1 --workers 1 --no-server-header
+ExecStart=/opt/rclone-sync/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001 --proxy-headers --forwarded-allow-ips=127.0.0.1,::1 --workers 1 --no-server-header
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

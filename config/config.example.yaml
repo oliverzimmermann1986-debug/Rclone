@@ -1,7 +1,9 @@
 # ============================================================
-# rclone-sync-container – Beispielkonfiguration (v1.7)
+# rclone-sync-container – Beispielkonfiguration (v2)
 # Wird bei Neuinstallation nach data/config.yaml kopiert.
 # ============================================================
+
+schema_version: 2
 
 web:
   # Native pCloud-Crypto-Ordner sind über die normale pCloud-API nicht beschreibbar.
@@ -71,6 +73,8 @@ backup:
 
   pairs:
     - name: Serien
+      # Eine stabile ID wird beim ersten validierten Speichern automatisch
+      # ergänzt und trennt Anzeigename von Scheduler-/Historienidentität.
       # Beispiel-Pairs sind absichtlich deaktiviert. Erst Pfade, Mount/Sentinel,
       # Dry-Run und Löschgrenzen prüfen, dann aktivieren.
       enabled: false
@@ -225,3 +229,7 @@ pbs:
   #    paths:
   #      - /mnt/nas/dokumente
   #    schedule: "0 2 * * *"     # cron oder "manual"
+  #    require_mountpoint: true
+  #    mountpoint: /mnt/nas
+  #    sentinel_file: .rclone-sync-ready
+  #    min_files: 1

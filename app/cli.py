@@ -50,9 +50,17 @@ def cmd_set_password(args) -> int:
     if len(password) < 12:
         print("✗ Passwort muss mindestens 12 Zeichen haben")
         return 1
-    password_hash = bcrypt.hashpw(
-        password.encode("utf-8"), bcrypt.gensalt(rounds=12)
-    ).decode("ascii")
+    encoded = password.encode("utf-8")
+    if len(encoded) > 72:
+        print("✗ Passwort darf höchstens 72 UTF-8-Bytes lang sein")
+        return 1
+    try:
+        password_hash = bcrypt.hashpw(encoded, bcrypt.gensalt(rounds=12)).decode(
+            "ascii"
+        )
+    except ValueError as exc:
+        print(f"✗ Passwort kann nicht verarbeitet werden: {exc}")
+        return 1
 
     def updater(data: dict) -> None:
         web = _rotate_sessions(data)
@@ -212,16 +220,12 @@ def cmd_restore_config_backup(args) -> int:
         with _config_file_lock(primary):
             raw = backup.read_bytes()
             parsed = yaml.safe_load(raw.decode("utf-8")) or {}
-            validate_config(parsed)
+            normalized, _warnings = validate_config(parsed)
+            restored_raw = yaml.safe_dump(
+                normalized, allow_unicode=True, sort_keys=False
+            ).encode("utf-8")
 
             primary.parent.mkdir(parents=True, exist_ok=True)
-            invalid = None
-            if primary.exists() or primary.is_symlink():
-                invalid = primary.with_name(
-                    f"{primary.name}.invalid-{time.strftime('%Y%m%d-%H%M%S')}"
-                )
-                os.replace(primary, invalid)
-                os.chmod(invalid, stat.S_IRUSR | stat.S_IWUSR)
             fd, tmp_name = tempfile.mkstemp(
                 prefix=f".{primary.name}.",
                 suffix=".restore.tmp",
@@ -230,10 +234,24 @@ def cmd_restore_config_backup(args) -> int:
             tmp = Path(tmp_name)
             try:
                 with os.fdopen(fd, "wb") as stream:
-                    stream.write(raw)
+                    stream.write(restored_raw)
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+                invalid = None
+                if primary.is_symlink():
+                    raise OSError("Zielkonfiguration darf kein Symlink sein")
+                if primary.exists():
+                    if not primary.is_file():
+                        raise OSError("Zielkonfiguration ist keine reguläre Datei")
+                    invalid = primary.with_name(
+                        f"{primary.name}.invalid-{time.strftime('%Y%m%d-%H%M%S')}"
+                        f"-{secrets.token_hex(2)}"
+                    )
+                    # Der Hardlink bewahrt die alte Datei, ohne die primäre
+                    # Konfiguration vor dem atomaren Replace wegzubewegen.
+                    os.link(primary, invalid, follow_symlinks=False)
+                    os.chmod(invalid, stat.S_IRUSR | stat.S_IWUSR)
                 os.replace(tmp, primary)
                 try:
                     directory_fd = os.open(

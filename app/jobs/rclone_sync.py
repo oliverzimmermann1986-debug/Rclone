@@ -12,27 +12,30 @@ import signal
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from ..config_store import get_config
 from ..rclone_args import (
+    redact_command_text,
     rclone_subprocess_env,
     validate_parsed_rclone_args,
     validate_rclone_args,
 )
 from . import runtime_state
 from .log_tail import read_tail
-from .pair_planner import execution_waves, has_overlapping_pairs, paths_overlap
+from .pair_planner import has_overlapping_pairs, pairs_conflict, paths_overlap
+from .scheduler import rclone_history_key
 from ..utils import bounded_number as _bounded_number
 
 logger = logging.getLogger(__name__)
 
 RCLONE_CACHE_DIR = os.getenv("RCLONE_CACHE_DIR", "/opt/rclone-sync/data/.rclone-cache")
+DEFAULT_CANCEL_SCOPE = runtime_state.DEFAULT_CANCEL_SCOPE
 
-_ACTIVE_PROCS: list[subprocess.Popen] = []
+_ACTIVE_PROCS: list[tuple[subprocess.Popen, str]] = []
 _ACTIVE_PROCS_LOCK = threading.Lock()
 _ACTIVE_PAIR_LOGS: dict[str, str] = {}
 _ACTIVE_PAIR_LOGS_LOCK = threading.Lock()
@@ -54,6 +57,10 @@ class _SnapshotConfig:
 
 
 _CANCEL_EVENT = threading.Event()
+_CANCEL_EVENTS: dict[str, threading.Event] = {
+    DEFAULT_CANCEL_SCOPE: _CANCEL_EVENT,
+}
+_CANCEL_EVENTS_LOCK = threading.Lock()
 
 _RESYNC_RE = re.compile(
     r"(?:must run[^\n]*--resync|requires?[^\n]*--resync)", re.IGNORECASE
@@ -110,19 +117,34 @@ def _set_active_pair_log(name: str, log_file: Optional[Path]) -> None:
 
 
 def _register_proc(
-    proc: subprocess.Popen, *, pair_name: str = "", log_file: str = ""
+    proc: subprocess.Popen,
+    *,
+    pair_name: str = "",
+    log_file: str = "",
+    cancel_scope: str = DEFAULT_CANCEL_SCOPE,
+    run_id: str = "",
 ) -> None:
+    normalized_scope = runtime_state._scope_name(cancel_scope)
     with _ACTIVE_PROCS_LOCK:
-        _ACTIVE_PROCS.append(proc)
-    runtime_state.register_process(proc.pid, pair_name=pair_name, log_file=log_file)
+        _ACTIVE_PROCS.append((proc, normalized_scope))
+    executable = (
+        str(proc.args[0])
+        if isinstance(proc.args, (list, tuple)) and proc.args
+        else "rclone"
+    )
+    runtime_state.register_process(
+        proc.pid,
+        pair_name=pair_name,
+        log_file=log_file,
+        scope=normalized_scope,
+        executable=executable,
+        run_id=run_id,
+    )
 
 
 def _unregister_proc(proc: subprocess.Popen) -> None:
     with _ACTIVE_PROCS_LOCK:
-        try:
-            _ACTIVE_PROCS.remove(proc)
-        except ValueError:
-            pass
+        _ACTIVE_PROCS[:] = [item for item in _ACTIVE_PROCS if item[0] is not proc]
     runtime_state.unregister_process(proc.pid)
 
 
@@ -150,14 +172,25 @@ def _terminate_proc(proc: subprocess.Popen, *, graceful_sec: int = 10) -> None:
             pass
 
 
-def cancel_job() -> dict[str, Any]:
+def _cancel_event(scope: str = DEFAULT_CANCEL_SCOPE) -> threading.Event:
+    normalized_scope = runtime_state._scope_name(scope)
+    with _CANCEL_EVENTS_LOCK:
+        return _CANCEL_EVENTS.setdefault(normalized_scope, threading.Event())
+
+
+def cancel_job(scope: str = DEFAULT_CANCEL_SCOPE) -> dict[str, Any]:
     """Beendet laufende rclone-Prozesse auch aus CLI-/Scheduler-Prozessen."""
-    _CANCEL_EVENT.set()
-    runtime_state.request_cancel_marker()
-    killed = runtime_state.terminate_active_processes(graceful_sec=8)
+    normalized_scope = runtime_state._scope_name(scope)
+    _cancel_event(normalized_scope).set()
+    runtime_state.request_cancel_marker(normalized_scope)
+    killed = runtime_state.terminate_active_processes(
+        graceful_sec=8, scope=normalized_scope
+    )
     # Fallback für einen Marker-Schreibfehler im aktuellen Prozess.
     with _ACTIVE_PROCS_LOCK:
-        local_procs = list(_ACTIVE_PROCS)
+        local_procs = [
+            proc for proc, proc_scope in _ACTIVE_PROCS if proc_scope == normalized_scope
+        ]
     for proc in local_procs:
         if proc.poll() is None:
             _terminate_proc(proc, graceful_sec=2)
@@ -176,16 +209,20 @@ def cancel_job() -> dict[str, Any]:
     threading.Thread(
         target=_notify_cancelled, name="notify-cancelled", daemon=True
     ).start()
-    return {"ok": True, "killed": killed}
+    return {"ok": True, "killed": killed, "scope": normalized_scope}
 
 
-def is_cancelled() -> bool:
-    return _CANCEL_EVENT.is_set() or runtime_state.cancel_requested()
+def is_cancelled(scope: str = DEFAULT_CANCEL_SCOPE) -> bool:
+    normalized_scope = runtime_state._scope_name(scope)
+    return _cancel_event(normalized_scope).is_set() or runtime_state.cancel_requested(
+        normalized_scope
+    )
 
 
-def reset_cancel() -> None:
-    _CANCEL_EVENT.clear()
-    runtime_state.reset_cancel_marker()
+def reset_cancel(scope: str = DEFAULT_CANCEL_SCOPE) -> None:
+    normalized_scope = runtime_state._scope_name(scope)
+    _cancel_event(normalized_scope).clear()
+    runtime_state.reset_cancel_marker(normalized_scope)
 
 
 def _is_remote(path: str) -> bool:
@@ -311,7 +348,8 @@ def _filter_args(cfg, pair: dict[str, Any], verb: str) -> list[str]:
 
 
 def command_to_string(cmd: list[str]) -> str:
-    return " ".join(shlex.quote(str(item)) for item in cmd)
+    rendered = " ".join(shlex.quote(str(item)) for item in cmd)
+    return redact_command_text(rendered)
 
 
 def _pair_warnings(pair: dict[str, Any], *, dry_run: bool) -> list[str]:
@@ -367,7 +405,11 @@ def _run_rclone_command(
     header: Optional[str] = None,
     pair_name: str = "",
     extra_env: Optional[dict[str, str]] = None,
+    cancel_scope: str = DEFAULT_CANCEL_SCOPE,
+    run_id: str = "",
+    pre_spawn_check: Optional[Callable[[], tuple[bool, str]]] = None,
 ) -> int:
+    normalized_scope = runtime_state._scope_name(cancel_scope)
     mode = "a" if append else "w"
     with log_file.open(mode, encoding="utf-8") as handle:
         try:
@@ -377,6 +419,17 @@ def _run_rclone_command(
         if header:
             handle.write(header)
             handle.flush()
+        if is_cancelled(normalized_scope):
+            return 130
+        if pre_spawn_check is not None:
+            check_ok, check_message = pre_spawn_check()
+            if not check_ok:
+                raise RuntimeError(
+                    f"Sicherheits-Recheck direkt vor Prozessstart fehlgeschlagen: "
+                    f"{check_message}"
+                )
+        if is_cancelled(normalized_scope):
+            return 130
         proc = subprocess.Popen(
             cmd,
             stdout=handle,
@@ -386,14 +439,25 @@ def _run_rclone_command(
             close_fds=True,
             env={**rclone_subprocess_env(), **(extra_env or {})},
         )
-        _register_proc(proc, pair_name=pair_name, log_file=str(log_file))
+        try:
+            _register_proc(
+                proc,
+                pair_name=pair_name,
+                log_file=str(log_file),
+                cancel_scope=normalized_scope,
+                run_id=run_id,
+            )
+        except Exception:
+            _terminate_proc(proc, graceful_sec=2)
+            _unregister_proc(proc)
+            raise
         deadline = time.monotonic() + timeout_sec
         try:
             while True:
                 rc = proc.poll()
                 if rc is not None:
                     return int(rc)
-                if is_cancelled():
+                if is_cancelled(normalized_scope):
                     _terminate_proc(proc)
                     return 130
                 if time.monotonic() >= deadline:
@@ -586,7 +650,7 @@ def _build_pair_command(
     )
     effective_args += _global_verb_args(cfg, verb)
     effective_args += _structured_rclone_args(backup.get("tuning") or {}, verb=verb)
-    effective_args += _structured_rclone_args(pair.get("options") or pair, verb=verb)
+    effective_args += _structured_rclone_args(pair, verb=verb)
     effective_args += _filter_args(cfg, pair, verb)
     effective_args += _parse_rclone_args(
         pair.get("rclone_args"), allow_unsafe=allow_unsafe
@@ -636,6 +700,188 @@ def _nearest_existing_path(path: Path) -> Optional[Path]:
     return current if current.exists() else None
 
 
+def _local_endpoint_fields(pair: dict[str, Any]) -> list[tuple[str, Path]]:
+    endpoints: list[tuple[str, Path]] = []
+    for field in ("remote", "local"):
+        value = str(pair.get(field) or "")
+        if value and not _is_remote(value):
+            endpoints.append((field, Path(value)))
+    return endpoints
+
+
+def _endpoint_guard_settings(
+    pair: dict[str, Any], field: str, path: Path
+) -> dict[str, Any]:
+    direction = str(pair.get("direction") or "bisync").lower()
+    if field == "remote":
+        # Mountpoint und Sentinel sind laut Schema relativ zum kanonischen
+        # ``local``-Pfad. Ein zweiter lokaler Endpunkt darf diese Guards nicht
+        # versehentlich erben; für ihn gilt weiterhin min_remote_files.
+        require_mountpoint = False
+        mountpoint = path
+        sentinel = ""
+        min_files = pair.get("min_remote_files", 0)
+        destination = direction in {"push", "bisync"}
+    else:
+        require_mountpoint = bool(pair.get("require_mountpoint", False))
+        mountpoint = Path(str(pair.get("mountpoint") or path))
+        sentinel = str(pair.get("sentinel_file") or "").strip()
+        min_files = pair.get("min_local_files", 1)
+        destination = direction in {"pull", "bisync"}
+    try:
+        min_files_value = max(0, int(min_files if min_files is not None else 0))
+    except (TypeError, ValueError):
+        min_files_value = 0 if field == "remote" else 1
+    if field == "remote":
+        check_min_files = direction in {"pull", "bisync"} or min_files_value > 0
+    else:
+        check_min_files = True
+    return {
+        "require_mountpoint": require_mountpoint,
+        "mountpoint": mountpoint,
+        "sentinel": sentinel,
+        "min_files": min_files_value,
+        "check_min_files": check_min_files,
+        "destination": destination,
+    }
+
+
+def _check_local_endpoint(
+    pair: dict[str, Any],
+    field: str,
+    path: Path,
+    *,
+    include_counts: bool,
+    include_free_space: bool,
+) -> tuple[bool, str]:
+    settings = _endpoint_guard_settings(pair, field, path)
+    label = "Remote-Lokalpfad" if field == "remote" else "Lokaler Pfad"
+    require_mountpoint = bool(settings["require_mountpoint"])
+    mountpoint = settings["mountpoint"]
+
+    if require_mountpoint:
+        if not mountpoint.exists() or not os.path.ismount(mountpoint):
+            return False, f"Erwarteter Mountpoint ist nicht eingehängt: {mountpoint}"
+        try:
+            path.resolve().relative_to(mountpoint.resolve())
+        except (ValueError, OSError, RuntimeError):
+            return False, f"{label} liegt nicht unter dem Mountpoint: {mountpoint}"
+
+    sentinel = str(settings["sentinel"])
+    if sentinel and not (path / sentinel).is_file():
+        return False, f"Sentinel-Datei fehlt: {path / sentinel}"
+
+    if include_free_space and settings["destination"]:
+        try:
+            min_free_gb = max(0.0, float(pair.get("min_free_gb", 0) or 0))
+        except (TypeError, ValueError):
+            min_free_gb = 0.0
+        if min_free_gb > 0:
+            usage_target = _nearest_existing_path(path)
+            if usage_target is None:
+                return False, f"Freier Speicher konnte für {path} nicht bestimmt werden"
+            free_gb = shutil.disk_usage(usage_target).free / (1024**3)
+            if free_gb < min_free_gb:
+                return (
+                    False,
+                    f"Zu wenig freier Speicher unter {usage_target}: "
+                    f"{free_gb:.1f} GiB < {min_free_gb:.1f} GiB",
+                )
+
+    min_files = int(settings["min_files"])
+    if include_counts and settings["check_min_files"] and min_files > 0:
+        if not path.exists():
+            setting_name = (
+                "min_remote_files" if field == "remote" else "min_local_files"
+            )
+            return False, (
+                f"{label} fehlt: {path}. Für ein bewusst neues Ziel "
+                f"{setting_name}=0 setzen; andernfalls wird ein fehlender Mount vermutet."
+            )
+        count = _count_files_up_to(path, min_files)
+        if count < min_files:
+            setting_name = (
+                "min_remote_files" if field == "remote" else "min_local_files"
+            )
+            return False, (
+                f"Nur {count} Dateien unter {path}, {setting_name}={min_files}; "
+                "Mount-Drop vermutet."
+            )
+    return True, "ok"
+
+
+def _path_identity(path: Path) -> dict[str, Any]:
+    resolved = path.resolve(strict=True)
+    info = resolved.stat()
+    return {
+        "resolved": str(resolved),
+        "device": int(info.st_dev),
+        "inode": int(info.st_ino),
+    }
+
+
+def _capture_local_endpoint_guards(
+    pair: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    guards: dict[str, dict[str, Any]] = {}
+    for field, path in _local_endpoint_fields(pair):
+        settings = _endpoint_guard_settings(pair, field, path)
+        guard: dict[str, Any] = {
+            "path": str(path),
+            "identity": _path_identity(path),
+        }
+        if settings["require_mountpoint"]:
+            guard["mountpoint_identity"] = _path_identity(settings["mountpoint"])
+        sentinel = str(settings["sentinel"])
+        if sentinel:
+            guard["sentinel_identity"] = _path_identity(path / sentinel)
+        guards[field] = guard
+    return guards
+
+
+def _prepare_local_destinations(pair: dict[str, Any]) -> None:
+    for field, path in _local_endpoint_fields(pair):
+        settings = _endpoint_guard_settings(pair, field, path)
+        if settings["destination"] and not path.exists():
+            path.mkdir(parents=True, exist_ok=True)
+
+
+def _recheck_local_endpoint_guards(
+    pair: dict[str, Any], guards: dict[str, dict[str, Any]]
+) -> tuple[bool, str]:
+    for field, path in _local_endpoint_fields(pair):
+        ok, message = _check_local_endpoint(
+            pair,
+            field,
+            path,
+            include_counts=False,
+            include_free_space=False,
+        )
+        if not ok:
+            return False, message
+        guard = guards.get(field)
+        if guard is None:
+            return False, f"Kein Identitäts-Snapshot für {field} vorhanden"
+        try:
+            if _path_identity(path) != guard["identity"]:
+                return False, f"Pfadidentität hat sich geändert: {path}"
+            settings = _endpoint_guard_settings(pair, field, path)
+            if settings["require_mountpoint"] and _path_identity(
+                settings["mountpoint"]
+            ) != guard.get("mountpoint_identity"):
+                return False, (
+                    f"Mountpoint-Identität hat sich geändert: {settings['mountpoint']}"
+                )
+            sentinel = str(settings["sentinel"])
+            if sentinel and _path_identity(path / sentinel) != guard.get(
+                "sentinel_identity"
+            ):
+                return False, f"Sentinel-Identität hat sich geändert: {path / sentinel}"
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
+            return False, f"Pfadidentität konnte nicht bestätigt werden: {exc}"
+    return True, "ok"
+
+
 def _remote_file_count(path: str, timeout: int = 120) -> tuple[Optional[int], str]:
     try:
         result = subprocess.run(
@@ -676,7 +922,7 @@ def _precheck_pair(pair: dict[str, Any]) -> tuple[bool, str]:
         )
 
     min_remote_files = max(0, int(pair.get("min_remote_files", 0) or 0))
-    if min_remote_files > 0 and direction in {"pull", "bisync"}:
+    if min_remote_files > 0 and direction in {"pull", "bisync"} and _is_remote(remote):
         remote_count, remote_count_msg = _remote_file_count(remote)
         if remote_count is None:
             return (
@@ -689,60 +935,16 @@ def _precheck_pair(pair: dict[str, Any]) -> tuple[bool, str]:
                 f"Nur {remote_count} Dateien unter {remote}, min_remote_files={min_remote_files}.",
             )
 
-    if not _is_remote(local):
-        local_path = Path(local)
-        mountpoint_value = str(pair.get("mountpoint") or local).strip()
-        if pair.get("require_mountpoint"):
-            mountpoint_path = Path(mountpoint_value)
-            if not mountpoint_path.exists() or not os.path.ismount(mountpoint_path):
-                return (
-                    False,
-                    f"Erwarteter Mountpoint ist nicht eingehängt: {mountpoint_path}",
-                )
-            try:
-                local_path.resolve().relative_to(mountpoint_path.resolve())
-            except (ValueError, OSError, RuntimeError):
-                return (
-                    False,
-                    f"Lokaler Pfad liegt nicht unter dem Mountpoint: {mountpoint_path}",
-                )
-
-        sentinel = str(pair.get("sentinel_file") or "").strip()
-        if sentinel and not (local_path / sentinel).is_file():
-            return False, f"Sentinel-Datei fehlt: {local_path / sentinel}"
-
-        min_free_gb = max(0.0, float(pair.get("min_free_gb", 0) or 0))
-        if min_free_gb > 0 and direction in {"pull", "bisync"}:
-            usage_target = _nearest_existing_path(local_path)
-            if usage_target is None:
-                return (
-                    False,
-                    f"Freier Speicher konnte für {local} nicht bestimmt werden",
-                )
-            free_gb = shutil.disk_usage(usage_target).free / (1024**3)
-            if free_gb < min_free_gb:
-                return (
-                    False,
-                    f"Zu wenig freier Speicher unter {usage_target}: {free_gb:.1f} GiB < {min_free_gb:.1f} GiB",
-                )
-
-        min_files = pair.get("min_local_files", 1)
-        try:
-            min_files_i = max(0, int(min_files if min_files is not None else 1))
-        except (TypeError, ValueError):
-            min_files_i = 1
-        if min_files_i > 0:
-            if not local_path.exists():
-                return False, (
-                    f"Lokaler Pfad fehlt: {local}. Für ein bewusst neues Ziel min_local_files=0 setzen; "
-                    "andernfalls wird ein fehlender Mount vermutet."
-                )
-            count = _count_files_up_to(local_path, min_files_i)
-            if count < min_files_i:
-                return (
-                    False,
-                    f"Nur {count} Dateien unter {local}, min_local_files={min_files_i}; Mount-Drop vermutet.",
-                )
+    for field, path in _local_endpoint_fields(pair):
+        endpoint_ok, endpoint_message = _check_local_endpoint(
+            pair,
+            field,
+            path,
+            include_counts=True,
+            include_free_space=True,
+        )
+        if not endpoint_ok:
+            return False, endpoint_message
     return True, "ok"
 
 
@@ -774,7 +976,13 @@ def _first_run_resync_allowed(
     try:
         from ..db import get_db
 
-        return get_db().pair_last_success(pair_name) is None
+        return (
+            get_db().pair_last_success(
+                pair_name,
+                history_key=rclone_history_key(pair),
+            )
+            is None
+        )
     except Exception:
         logger.exception(
             "[%s] Erststart-Prüfung fehlgeschlagen; Resync bleibt gesperrt", pair_name
@@ -820,8 +1028,18 @@ def _sync_pair(
             pass
         return summary
 
-    if not _is_remote(local) and not Path(local).exists():
-        Path(local).mkdir(parents=True, exist_ok=True)
+    try:
+        _prepare_local_destinations(pair)
+        endpoint_guards = _capture_local_endpoint_guards(pair)
+    except (OSError, RuntimeError, ValueError) as exc:
+        summary.update(
+            {
+                "error": f"Lokale Pfadidentität konnte nicht fixiert werden: {exc}",
+                "skipped": True,
+            }
+        )
+        runtime_state.update_pair(run_id, name, "error", error=summary["error"])
+        return summary
 
     log_file = (
         log_dir / f"sync-{_safe_name(name)}-{datetime.now():%Y%m%d-%H%M%S-%f}.log"
@@ -866,7 +1084,16 @@ def _sync_pair(
             runtime_state.update_pair(run_id, name, "cancelled", error=summary["error"])
             return summary
 
-        rc = _run_rclone_command(cmd, log_file, timeout_sec=timeout_sec, pair_name=name)
+        rc = _run_rclone_command(
+            cmd,
+            log_file,
+            timeout_sec=timeout_sec,
+            pair_name=name,
+            run_id=run_id,
+            pre_spawn_check=lambda: _recheck_local_endpoint_guards(
+                pair, endpoint_guards
+            ),
+        )
         log_tail = read_log_tail(log_file)
         needs_resync = (
             verb == "bisync" and rc != 0 and bool(_RESYNC_RE.search(log_tail))
@@ -901,6 +1128,10 @@ def _sync_pair(
                 append=True,
                 header="\n\n=== AUTO RESYNC ===\n\n",
                 pair_name=name,
+                run_id=run_id,
+                pre_spawn_check=lambda: _recheck_local_endpoint_guards(
+                    pair, endpoint_guards
+                ),
             )
             summary["resync_return_code"] = rc
             log_tail = read_log_tail(log_file)
@@ -964,11 +1195,24 @@ def _selected_pairs(
     return selected
 
 
+def _next_runnable_pair_index(
+    pending: list[dict[str, Any]], running: Iterable[dict[str, Any]]
+) -> Optional[int]:
+    active = list(running)
+    for index, candidate in enumerate(pending):
+        if not any(pairs_conflict(candidate, item) for item in active):
+            return index
+    return None
+
+
 def run_job(
     dry_run: bool = False,
     pairs_filter: Optional[list[str]] = None,
     *,
     trigger: str = "manual",
+    job_id: int | None = None,
+    defer_runtime_finish: bool = False,
+    reset_cancel_state: bool = True,
 ) -> dict[str, Any]:
     trigger = str(trigger or "manual").strip().lower()[:32] or "manual"
     cfg = get_config()
@@ -1024,8 +1268,9 @@ def run_job(
     )
     max_parallel = min(max_parallel, len(pairs))
 
-    reset_cancel()
-    run_id = runtime_state.begin_run(names, dry_run=dry_run)
+    if reset_cancel_state:
+        reset_cancel()
+    run_id = runtime_state.begin_run(names, dry_run=dry_run, job_id=job_id)
     warnings: list[str] = []
 
     if not dry_run:
@@ -1039,10 +1284,10 @@ def run_job(
             )
         except Exception:
             logger.exception("Start-Benachrichtigung fehlgeschlagen")
-    waves = execution_waves(pairs, max_parallel)
-    if len(waves) > 1 and _has_overlapping_pairs(pairs):
+    if _has_overlapping_pairs(pairs):
         warnings.append(
-            "Überlappende Pair-Pfade erkannt; nur betroffene Pairs wurden serialisiert."
+            "Überlappende Pair-Pfade erkannt; nur aktuell kollidierende Pairs "
+            "werden serialisiert."
         )
 
     logger.info("Starte Sync mit %d Worker(n) für %d Pair(s)", max_parallel, len(pairs))
@@ -1052,9 +1297,34 @@ def run_job(
         with ThreadPoolExecutor(
             max_workers=max_parallel, thread_name_prefix="rclone-pair"
         ) as executor:
-            for wave in waves:
-                futures = {
-                    executor.submit(
+            pending = list(pairs)
+            running: dict[Future[dict[str, Any]], dict[str, Any]] = {}
+            while pending or running:
+                if is_cancelled() and pending:
+                    for pair in pending:
+                        name = str(pair.get("name") or "?")
+                        result = {
+                            "name": name,
+                            "ok": False,
+                            "cancelled": True,
+                            "skipped": True,
+                            "error": "Vor Start abgebrochen",
+                            "trigger": trigger,
+                        }
+                        runtime_state.update_pair(
+                            run_id, name, "cancelled", error=result["error"]
+                        )
+                        results_by_name[name] = result
+                    pending.clear()
+
+                while pending and len(running) < max_parallel:
+                    runnable_index = _next_runnable_pair_index(
+                        pending, running.values()
+                    )
+                    if runnable_index is None:
+                        break
+                    pair = pending.pop(runnable_index)
+                    future = executor.submit(
                         _sync_pair,
                         pair,
                         base_args,
@@ -1063,11 +1333,14 @@ def run_job(
                         timeout_sec,
                         run_id,
                         config_snapshot,
-                    ): pair
-                    for pair in wave
-                }
-                for future in as_completed(futures):
-                    pair = futures[future]
+                    )
+                    running[future] = pair
+
+                if not running:
+                    continue
+                done, _not_done = wait(tuple(running), return_when=FIRST_COMPLETED)
+                for future in done:
+                    pair = running.pop(future)
                     try:
                         result = future.result()
                     except Exception as exc:
@@ -1080,7 +1353,8 @@ def run_job(
                     result.setdefault("trigger", trigger)
                     results_by_name[str(pair.get("name"))] = result
     except BaseException as exc:
-        runtime_state.finish_run(run_id, "error", error=str(exc))
+        if not defer_runtime_finish:
+            runtime_state.finish_run(run_id, "error", error=str(exc))
         raise
 
     results = [
@@ -1090,6 +1364,8 @@ def run_job(
         )
         for pair in pairs
     ]
+    for pair, result in zip(pairs, results):
+        result.setdefault("history_key", rclone_history_key(pair))
     duration = time.time() - started
     ok_count = sum(1 for result in results if result.get("ok"))
     cancelled = is_cancelled()
@@ -1108,9 +1384,10 @@ def run_job(
         "trigger": trigger,
     }
 
-    runtime_state.finish_run(
-        run_id, "cancelled" if cancelled else ("ok" if summary["ok"] else "error")
-    )
+    if not defer_runtime_finish:
+        runtime_state.finish_run(
+            run_id, "cancelled" if cancelled else ("ok" if summary["ok"] else "error")
+        )
     if not dry_run:
         try:
             from ..notifications import notify
@@ -1191,7 +1468,11 @@ def build_job_plan(
 
 
 def run_pair_check(
-    pair_name: str, *, one_way: Optional[bool] = None, download: bool = False
+    pair_name: str,
+    *,
+    one_way: Optional[bool] = None,
+    download: bool = False,
+    reset_cancel_state: bool = True,
 ) -> dict[str, Any]:
     cfg = get_config()
     backup = cfg.get("backup", default={}) or {}
@@ -1201,6 +1482,23 @@ def run_pair_check(
     if not matches:
         return {"ok": False, "error": f"Pair nicht gefunden: {pair_name}"}
     pair = matches[0]
+    precheck_ok, precheck_message = _precheck_pair(pair)
+    if not precheck_ok:
+        return {
+            "ok": False,
+            "skipped": True,
+            "error": precheck_message,
+            "pair": pair_name,
+        }
+    try:
+        endpoint_guards = _capture_local_endpoint_guards(pair)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {
+            "ok": False,
+            "skipped": True,
+            "error": f"Lokale Pfadidentität konnte nicht fixiert werden: {exc}",
+            "pair": pair_name,
+        }
     direction = str(pair.get("direction") or "bisync").lower().strip()
     src, dst = (
         (pair.get("local"), pair.get("remote"))
@@ -1210,7 +1508,8 @@ def run_pair_check(
     if one_way is None:
         one_way = direction in {"pull", "push"}
 
-    reset_cancel()
+    if reset_cancel_state:
+        reset_cancel()
     log_dir = (
         Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "rclone"
     )
@@ -1254,7 +1553,13 @@ def run_pair_check(
     }
     try:
         rc = _run_rclone_command(
-            cmd, log_file, timeout_sec=timeout_sec, pair_name=f"check:{pair_name}"
+            cmd,
+            log_file,
+            timeout_sec=timeout_sec,
+            pair_name=f"check:{pair_name}",
+            pre_spawn_check=lambda: _recheck_local_endpoint_guards(
+                pair, endpoint_guards
+            ),
         )
         result.update(
             {
@@ -1288,6 +1593,7 @@ def run_quick(
     allow_delete: bool = False,
     max_delete: Optional[int] = None,
     min_local_files: int = 1,
+    reset_cancel_state: bool = True,
 ) -> dict[str, Any]:
     cfg = get_config()
     try:
@@ -1304,6 +1610,38 @@ def run_quick(
         "allow_delete": bool(allow_delete),
         "max_delete": max_delete,
     }
+    roots = [
+        Path(str(value)).expanduser().resolve()
+        for value in (
+            cfg.get(
+                "web",
+                "local_browse_roots",
+                default=["/mnt", "/media", "/srv", "/opt/rclone-sync/data"],
+            )
+            or []
+        )
+        if str(value).strip()
+    ]
+    try:
+        for field, path in _local_endpoint_fields(pair):
+            resolved = path.expanduser().resolve()
+            if roots and not any(
+                resolved == root or resolved.is_relative_to(root) for root in roots
+            ):
+                raise ValueError(
+                    f"Quick-Sync-{field} liegt außerhalb erlaubter Wurzeln: {resolved}"
+                )
+            pair[field] = str(resolved)
+        remote_path = str(pair["remote"])
+        local_path = str(pair["local"])
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "skipped": True,
+            "remote": remote_path,
+            "local": local_path,
+        }
     ok, message = _precheck_pair(pair)
     if not ok:
         return {
@@ -1314,12 +1652,21 @@ def run_quick(
             "local": local_path,
         }
 
-    # Wie in _sync_pair: Ein bewusst neues lokales Ziel (min_local_files=0 hat den
-    # Mount-Schutz passiert) wird vor dem Lauf angelegt; bisync verlangt es sogar.
-    if not _is_remote(local_path) and not Path(local_path).exists():
-        Path(local_path).mkdir(parents=True, exist_ok=True)
+    # Bewusst neue lokale Ziele werden erst nach bestandenem Precheck angelegt.
+    try:
+        _prepare_local_destinations(pair)
+        endpoint_guards = _capture_local_endpoint_guards(pair)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {
+            "ok": False,
+            "error": f"Lokale Pfadidentität konnte nicht fixiert werden: {exc}",
+            "skipped": True,
+            "remote": remote_path,
+            "local": local_path,
+        }
 
-    reset_cancel()
+    if reset_cancel_state:
+        reset_cancel()
     log_dir = (
         Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "rclone"
     )
@@ -1361,7 +1708,13 @@ def run_quick(
             ),
         )
         rc = _run_rclone_command(
-            cmd, log_file, timeout_sec=timeout_sec, pair_name="quick"
+            cmd,
+            log_file,
+            timeout_sec=timeout_sec,
+            pair_name="quick",
+            pre_spawn_check=lambda: _recheck_local_endpoint_guards(
+                pair, endpoint_guards
+            ),
         )
         tail = read_log_tail(log_file)
         needs_resync = verb == "bisync" and rc != 0 and bool(_RESYNC_RE.search(tail))

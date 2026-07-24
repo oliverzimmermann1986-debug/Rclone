@@ -10,10 +10,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..auth import require_auth
-from ..db import get_db
-from ..jobs import pbs_backup
-from ..jobs.locks import file_lock_or_none
-from ..jobs.scheduler import next_run_after
+from ..config_store import get_config
+from ..db import JobAlreadyRunningError, get_db
+from ..jobs import pbs_backup, rclone_sync, runtime_state
+from ..jobs.job_lifecycle import PBS_KINDS, reconcile_locked_scope
+from ..jobs.locks import HeldFileLock, try_file_lock
+from ..jobs.scheduler import next_run_after, pbs_history_key
 from ..security import require_csrf
 
 logger = logging.getLogger(__name__)
@@ -26,19 +28,33 @@ router = APIRouter(
 _lock = threading.Lock()
 
 
+def _audit_best_effort(event: str, details: dict[str, Any]) -> None:
+    try:
+        get_db().audit_add(event, actor="web", details=details)
+    except Exception:
+        logger.exception("Audit-Ereignis %s konnte nicht gespeichert werden", event)
+
+
 class PbsRunPayload(BaseModel):
     target: Optional[str] = Field(default=None, max_length=120)
 
 
 @router.get("/status")
 def pbs_status() -> dict[str, Any]:
+    cfg = get_config()
     settings = pbs_backup.pbs_settings()
     db = get_db()
     running = db.job_running(pbs_backup.JOB_KIND)
+    timezone_name = str(
+        cfg.get("backup", "timezone", default="Europe/Berlin") or "Europe/Berlin"
+    )
     targets: list[dict[str, Any]] = []
     for target in pbs_backup.pbs_targets(settings):
         name = str(target.get("name"))
-        last = db.pair_last_success(f"{pbs_backup.PAIR_PREFIX}{name}")
+        last = db.pair_last_success(
+            f"{pbs_backup.PAIR_PREFIX}{name}",
+            history_key=pbs_history_key(settings, target),
+        )
         schedule = str(target.get("schedule") or "manual")
         targets.append(
             {
@@ -47,7 +63,10 @@ def pbs_status() -> dict[str, Any]:
                 "schedule": schedule,
                 "namespace": target.get("namespace") or settings.get("namespace") or "",
                 "last_success": (last or {}).get("ended_at"),
-                "next_run": next_run_after(schedule),
+                "next_run": next_run_after(
+                    schedule,
+                    timezone_name=timezone_name,
+                ),
             }
         )
     repository = str(settings.get("repository") or "")
@@ -62,26 +81,51 @@ def pbs_status() -> dict[str, Any]:
     }
 
 
-def _run_thread(job_id: int, targets_filter: Optional[list[str]]) -> None:
-    db = get_db()
+def _run_thread(
+    job_id: int,
+    targets_filter: Optional[list[str]],
+    history_keys: dict[str, str],
+    scope_lock: HeldFileLock,
+) -> None:
+    db = None
+    worker_error: str | None = None
     try:
-        with file_lock_or_none(pbs_backup.JOB_KIND) as got_lock:
-            if got_lock is None:
-                db.job_finish(
-                    job_id,
-                    "skipped",
-                    {"ok": False, "skipped": True, "error": "PBS-Job läuft bereits"},
-                )
-                return
-            summary = pbs_backup.run_pbs_backup(targets_filter, trigger="web")
-            db.job_finish(job_id, "ok" if summary.get("ok") else "error", summary)
+        db = get_db()
+        current = db.job_get(job_id) or {}
+        if current.get("status") != "running":
+            return
+        summary = pbs_backup.run_pbs_backup(
+            targets_filter,
+            trigger="web",
+            reset_cancel_state=False,
+        )
+        summary["history_keys"] = history_keys
+        status = (
+            "cancelled"
+            if summary.get("cancelled")
+            else ("ok" if summary.get("ok") else "error")
+        )
+        db.job_finish(job_id, status, summary)
     except Exception as exc:
+        worker_error = str(exc)
         logger.exception("PBS-Job %s gescheitert", job_id)
-        try:
-            db.job_finish(job_id, "error", {"ok": False, "error": str(exc)})
-        except Exception:
-            logger.exception("PBS-Job %s konnte nicht abgeschlossen werden", job_id)
     finally:
+        final_db = db
+        if final_db is None:
+            try:
+                final_db = get_db()
+            except Exception:
+                logger.exception("PBS-DB konnte beim Abschluss nicht geöffnet werden")
+        if final_db is not None and worker_error:
+            try:
+                final_db.job_finish(
+                    job_id,
+                    "error",
+                    {"ok": False, "error": worker_error},
+                )
+            except Exception:
+                logger.exception("PBS-Job %s konnte nicht abgeschlossen werden", job_id)
+        scope_lock.release()
         _lock.release()
 
 
@@ -96,7 +140,8 @@ def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
             "proxmox-backup-client ist nicht installiert "
             "(apt install proxmox-backup-client)",
         )
-    targets = {str(t.get("name")) for t in pbs_backup.pbs_targets(settings)}
+    configured_targets = pbs_backup.pbs_targets(settings)
+    targets = {str(t.get("name")) for t in configured_targets}
     targets_filter: Optional[list[str]] = None
     if payload.target:
         if payload.target not in targets:
@@ -107,22 +152,94 @@ def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
 
     if not _lock.acquire(blocking=False):
         raise HTTPException(409, "PBS-Backup läuft bereits")
+    selected_targets = [
+        target
+        for target in configured_targets
+        if not targets_filter or str(target.get("name")) in targets_filter
+    ]
+    history_keys = {
+        f"{pbs_backup.PAIR_PREFIX}{target.get('name')}": pbs_history_key(
+            settings, target
+        )
+        for target in selected_targets
+    }
+    attempts = [
+        {
+            "name": name,
+            "history_key": history_key,
+            "trigger": "web",
+        }
+        for name, history_key in history_keys.items()
+    ]
+    scope_lock: HeldFileLock | None = None
     try:
-        job_id = get_db().job_start(pbs_backup.JOB_KIND)
+        scope_lock = try_file_lock(pbs_backup.PBS_CANCEL_SCOPE)
+        if scope_lock is None:
+            raise HTTPException(409, "Ein anderer PBS-Job hält den Prozess-Lock")
+        db = get_db()
+        reconciliation = reconcile_locked_scope(
+            db,
+            scope=pbs_backup.PBS_CANCEL_SCOPE,
+            kinds=PBS_KINDS,
+        )
+        if not reconciliation.get("safe"):
+            raise HTTPException(
+                409,
+                "Ein registrierter PBS-Unterprozess ist noch aktiv",
+            )
+        rclone_sync.reset_cancel(pbs_backup.PBS_CANCEL_SCOPE)
+        job_id = db.job_start(
+            pbs_backup.JOB_KIND,
+            attempts=attempts,
+            exclusive_scope=True,
+        )
+    except HTTPException:
+        if scope_lock is not None:
+            scope_lock.release()
+        _lock.release()
+        raise
+    except JobAlreadyRunningError as exc:
+        if scope_lock is not None:
+            scope_lock.release()
+        _lock.release()
+        raise HTTPException(409, str(exc))
     except Exception as exc:
+        if scope_lock is not None:
+            scope_lock.release()
         _lock.release()
         logger.exception("PBS-Job konnte nicht angelegt werden")
         raise HTTPException(500, f"Job konnte nicht angelegt werden: {exc}")
     try:
         thread = threading.Thread(
             target=_run_thread,
-            args=(job_id, targets_filter),
+            args=(job_id, targets_filter, history_keys, scope_lock),
             name="pbs-backup",
             daemon=True,
         )
         thread.start()
     except Exception as exc:
+        scope_lock.release()
         _lock.release()
-        get_db().job_finish(job_id, "error", {"ok": False, "error": str(exc)})
+        try:
+            get_db().job_finish(job_id, "error", {"ok": False, "error": str(exc)})
+        except Exception:
+            logger.exception("PBS-Thread-Startfehler konnte nicht gespeichert werden")
         raise HTTPException(500, f"PBS-Job konnte nicht gestartet werden: {exc}")
+    _audit_best_effort(
+        "pbs_requested",
+        {"job_id": job_id, "targets": targets_filter or sorted(targets)},
+    )
     return {"ok": True, "job_id": job_id, "targets": targets_filter or sorted(targets)}
+
+
+@router.post("/cancel")
+def pbs_cancel() -> dict[str, Any]:
+    running = get_db().job_running(pbs_backup.JOB_KIND)
+    if not running and not runtime_state.active_processes(pbs_backup.PBS_CANCEL_SCOPE):
+        return {"ok": False, "error": "Kein laufender PBS-Job"}
+    result = rclone_sync.cancel_job(pbs_backup.PBS_CANCEL_SCOPE)
+    _audit_best_effort(
+        "pbs_cancel_requested",
+        {"job_id": (running or {}).get("id"), "killed": result.get("killed", 0)},
+    )
+    return result

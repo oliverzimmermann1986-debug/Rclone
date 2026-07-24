@@ -1,5 +1,12 @@
 -r requirements.txt
-pytest>=8.0,<9.0
-httpx>=0.27,<1.0
-ruff>=0.9,<1.0
-tzdata>=2025.2
+certifi==2026.6.17
+httpcore==1.0.9
+httpx==0.28.1
+iniconfig==2.3.0
+packaging==26.2
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==8.4.2
+ruff==0.15.22
+tomli==2.2.1; python_version < "3.11"
+tzdata==2026.3

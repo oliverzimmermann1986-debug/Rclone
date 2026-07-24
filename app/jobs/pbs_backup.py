@@ -8,23 +8,36 @@ Der Runner nutzt dieselbe Prozess-, Log- und Cancel-Infrastruktur wie rclone.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import socket
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from ..config_store import get_config
-from .rclone_sync import _run_rclone_command, _safe_name, is_cancelled, reset_cancel
+from .rclone_sync import (
+    _run_rclone_command,
+    _safe_name,
+    command_to_string,
+    is_cancelled,
+    reset_cancel,
+)
+from .scheduler import pbs_history_key
 
 logger = logging.getLogger(__name__)
 
 JOB_KIND = "pbs"
 PAIR_PREFIX = "pbs:"
+PBS_CANCEL_SCOPE = "pbs"
 _ARCHIVE_RE = re.compile(r"[^a-z0-9_-]+")
 _KEEP_KEYS = ("keep-last", "keep-daily", "keep-weekly", "keep-monthly", "keep-yearly")
+_NOTIFY_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pbs-notify")
+_NOTIFY_SLOTS = threading.BoundedSemaphore(value=4)
 
 
 def client_path() -> Optional[str]:
@@ -71,6 +84,17 @@ def _base_args(settings: dict[str, Any], target: dict[str, Any]) -> list[str]:
     return args
 
 
+def _target_backup_id(settings: dict[str, Any], target: dict[str, Any]) -> str:
+    backup_id = str(
+        target.get("backup_id") or settings.get("backup_id") or socket.gethostname()
+    ).strip()
+    # Die Backup-ID ist die PBS-Snapshot-Gruppe. Sie darf nicht implizit aus dem
+    # Anzeigenamen des Targets erweitert werden, da das bestehende Snapshot-
+    # Historien und Retention-Gruppen verwaisen würde. Mehrere Targets benötigen
+    # deshalb bereits bei der Config-Validierung explizite, eindeutige IDs.
+    return _safe_name(backup_id, "host")
+
+
 def build_backup_command(settings: dict[str, Any], target: dict[str, Any]) -> list[str]:
     client = client_path()
     if not client:
@@ -84,9 +108,7 @@ def build_backup_command(settings: dict[str, Any], target: dict[str, Any]) -> li
     if not archives:
         raise RuntimeError("Target hat keine Pfade")
     cmd = [client, "backup", *archives, *_base_args(settings, target)]
-    backup_id = str(
-        target.get("backup_id") or settings.get("backup_id") or socket.gethostname()
-    ).strip()
+    backup_id = _target_backup_id(settings, target)
     if backup_id:
         cmd += ["--backup-id", backup_id]
     return cmd
@@ -112,9 +134,7 @@ def build_prune_command(
     client = client_path()
     if not client:
         return None
-    backup_id = str(
-        target.get("backup_id") or settings.get("backup_id") or socket.gethostname()
-    ).strip()
+    backup_id = _target_backup_id(settings, target)
     group = f"host/{backup_id}"
     return [client, "prune", group, *keep_args, *_base_args(settings, target)]
 
@@ -123,8 +143,122 @@ def _target_result(name: str, **extra: Any) -> dict[str, Any]:
     return {"name": f"{PAIR_PREFIX}{name}", "kind": JOB_KIND, **extra}
 
 
+def _count_files_up_to(path: Path, limit: int) -> int:
+    if limit <= 0:
+        return 0
+    count = 0
+    for _root, _dirs, files in os.walk(path):
+        if is_cancelled(PBS_CANCEL_SCOPE):
+            raise RuntimeError("PBS-Backup wurde während des Source-Checks abgebrochen")
+        count += len(files)
+        if count >= limit:
+            return count
+    return count
+
+
+def _target_mountpoint(target: dict[str, Any], source: Path) -> Path:
+    configured = str(target.get("mountpoint") or "").strip()
+    return Path(configured) if configured else source
+
+
+def _check_target_sources(
+    target: dict[str, Any], *, include_counts: bool
+) -> tuple[bool, str]:
+    paths = [Path(str(value)) for value in (target.get("paths") or []) if str(value)]
+    require_mountpoint = bool(target.get("require_mountpoint", False))
+    sentinel = str(target.get("sentinel_file") or "").strip()
+    try:
+        min_files = max(0, int(target.get("min_files", 1)))
+    except (TypeError, ValueError):
+        min_files = 1
+
+    for source in paths:
+        if not source.exists() or not source.is_dir():
+            return False, f"Pfad nicht vorhanden oder kein Verzeichnis: {source}"
+        if require_mountpoint:
+            mountpoint = _target_mountpoint(target, source)
+            if not mountpoint.exists() or not os.path.ismount(mountpoint):
+                return (
+                    False,
+                    f"Erwarteter PBS-Mountpoint ist nicht eingehängt: {mountpoint}",
+                )
+            try:
+                source.resolve().relative_to(mountpoint.resolve())
+            except (OSError, RuntimeError, ValueError):
+                return False, f"PBS-Pfad liegt nicht unter Mountpoint: {source}"
+        if sentinel and not (source / sentinel).is_file():
+            return False, f"PBS-Sentinel-Datei fehlt: {source / sentinel}"
+        if include_counts and min_files > 0:
+            count = _count_files_up_to(source, min_files)
+            if count < min_files:
+                return False, (
+                    f"Nur {count} Dateien unter {source}, min_files={min_files}; "
+                    "Mount-Drop vermutet."
+                )
+    return True, "ok"
+
+
+def _source_identity(path: Path) -> dict[str, Any]:
+    resolved = path.resolve(strict=True)
+    info = resolved.stat()
+    return {
+        "resolved": str(resolved),
+        "device": int(info.st_dev),
+        "inode": int(info.st_ino),
+    }
+
+
+def _capture_target_guards(target: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    guards: dict[str, dict[str, Any]] = {}
+    require_mountpoint = bool(target.get("require_mountpoint", False))
+    sentinel = str(target.get("sentinel_file") or "").strip()
+    for value in target.get("paths") or []:
+        source = Path(str(value))
+        guard: dict[str, Any] = {"identity": _source_identity(source)}
+        if require_mountpoint:
+            guard["mountpoint_identity"] = _source_identity(
+                _target_mountpoint(target, source)
+            )
+        if sentinel:
+            guard["sentinel_identity"] = _source_identity(source / sentinel)
+        guards[str(source)] = guard
+    return guards
+
+
+def _recheck_target_guards(
+    target: dict[str, Any], guards: dict[str, dict[str, Any]]
+) -> tuple[bool, str]:
+    ok, message = _check_target_sources(target, include_counts=False)
+    if not ok:
+        return False, message
+    require_mountpoint = bool(target.get("require_mountpoint", False))
+    sentinel = str(target.get("sentinel_file") or "").strip()
+    for value in target.get("paths") or []:
+        source = Path(str(value))
+        guard = guards.get(str(source))
+        if guard is None:
+            return False, f"Kein Identitäts-Snapshot für PBS-Pfad: {source}"
+        try:
+            if _source_identity(source) != guard["identity"]:
+                return False, f"PBS-Pfadidentität hat sich geändert: {source}"
+            if require_mountpoint and _source_identity(
+                _target_mountpoint(target, source)
+            ) != guard.get("mountpoint_identity"):
+                return False, f"PBS-Mountpoint-Identität hat sich geändert: {source}"
+            if sentinel and _source_identity(source / sentinel) != guard.get(
+                "sentinel_identity"
+            ):
+                return False, f"PBS-Sentinel-Identität hat sich geändert: {source}"
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
+            return False, f"PBS-Pfadidentität konnte nicht bestätigt werden: {exc}"
+    return True, "ok"
+
+
 def run_pbs_backup(
-    targets_filter: Optional[list[str]] = None, *, trigger: str = "web"
+    targets_filter: Optional[list[str]] = None,
+    *,
+    trigger: str = "web",
+    reset_cancel_state: bool = True,
 ) -> dict[str, Any]:
     """Führt PBS-Backups für alle (oder gefilterte) Targets aus.
 
@@ -160,7 +294,8 @@ def run_pbs_backup(
         summary.update(ok=False, error="Keine passenden PBS-Targets konfiguriert")
         return summary
 
-    reset_cancel()
+    if reset_cancel_state:
+        reset_cancel(PBS_CANCEL_SCOPE)
     log_dir = (
         Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "pbs"
     )
@@ -170,7 +305,7 @@ def run_pbs_backup(
 
     for target in targets:
         name = str(target.get("name"))
-        if is_cancelled():
+        if is_cancelled(PBS_CANCEL_SCOPE):
             summary["pairs"].append(
                 _target_result(name, ok=False, cancelled=True, skipped=True)
             )
@@ -183,29 +318,33 @@ def run_pbs_backup(
         )
         entry = _target_result(
             name,
+            history_key=pbs_history_key(settings, target),
             log_file=str(log_file),
             started_at=datetime.fromtimestamp(started).isoformat(timespec="seconds"),
             trigger=trigger,
         )
         try:
-            missing = [
-                str(p)
-                for p in (target.get("paths") or [])
-                if str(p).strip() and not Path(str(p)).exists()
-            ]
-            if missing:
-                raise RuntimeError(
-                    f"Pfad(e) nicht vorhanden (Mount weg?): {', '.join(missing)}"
-                )
+            sources_ok, sources_message = _check_target_sources(
+                target, include_counts=True
+            )
+            if not sources_ok:
+                raise RuntimeError(sources_message)
+            source_guards = _capture_target_guards(target)
             cmd = build_backup_command(settings, target)
+            target_run_id = (
+                f"pbs:{_target_backup_id(settings, target)}:{int(started * 1000)}"
+            )
             rc = _run_rclone_command(
                 cmd,
                 log_file,
                 timeout_sec=timeout_sec,
                 header=f"# PBS-Backup {name} um {datetime.now().isoformat()}\n"
-                f"# {' '.join(cmd)}\n\n",
+                f"# {command_to_string(cmd)}\n\n",
                 pair_name=f"{PAIR_PREFIX}{name}",
                 extra_env=extra_env,
+                cancel_scope=PBS_CANCEL_SCOPE,
+                run_id=target_run_id,
+                pre_spawn_check=lambda: _recheck_target_guards(target, source_guards),
             )
             entry["returncode"] = rc
             if rc == 130:
@@ -215,33 +354,50 @@ def run_pbs_backup(
             else:
                 entry["ok"] = True
                 prune_cmd = build_prune_command(settings, target)
-                if prune_cmd and not is_cancelled():
+                if is_cancelled(PBS_CANCEL_SCOPE):
+                    entry.update(ok=False, cancelled=True, error="Abgebrochen")
+                elif prune_cmd:
                     prune_rc = _run_rclone_command(
                         prune_cmd,
                         log_file,
                         timeout_sec=min(timeout_sec, 1800),
                         append=True,
-                        header=f"\n# Prune: {' '.join(prune_cmd)}\n\n",
+                        header=f"\n# Prune: {command_to_string(prune_cmd)}\n\n",
                         pair_name=f"{PAIR_PREFIX}{name}",
                         extra_env=extra_env,
+                        cancel_scope=PBS_CANCEL_SCOPE,
+                        run_id=target_run_id,
                     )
                     entry["prune_ok"] = prune_rc == 0
-                    if prune_rc != 0:
-                        entry["prune_error"] = f"Prune Exit-Code {prune_rc}"
+                    if prune_rc == 130 and is_cancelled(PBS_CANCEL_SCOPE):
+                        entry.update(ok=False, cancelled=True, error="Abgebrochen")
+                    elif prune_rc != 0:
+                        prune_error = f"Prune Exit-Code {prune_rc}"
+                        entry.update(
+                            ok=False,
+                            degraded=True,
+                            prune_error=prune_error,
+                            error=prune_error,
+                        )
         except Exception as exc:
             logger.exception("[%s] PBS-Backup fehlgeschlagen", name)
             entry.update(ok=False, error=str(exc))
+            if is_cancelled(PBS_CANCEL_SCOPE):
+                entry.update(cancelled=True, error="Abgebrochen")
         entry["duration_sec"] = round(time.time() - started, 1)
         if not entry.get("ok"):
             summary["ok"] = False
         summary["pairs"].append(entry)
 
+    summary["cancelled"] = any(
+        bool(entry.get("cancelled")) for entry in summary["pairs"]
+    )
     summary["ended_at"] = datetime.now().isoformat(timespec="seconds")
     _notify_result(summary)
     return summary
 
 
-def _notify_result(summary: dict[str, Any]) -> None:
+def _notify_result_sync(summary: dict[str, Any]) -> None:
     try:
         from ..notifications import notify
 
@@ -260,3 +416,25 @@ def _notify_result(summary: dict[str, Any]) -> None:
             )
     except Exception:
         logger.exception("PBS-Benachrichtigung fehlgeschlagen")
+
+
+def _notify_result_worker(summary: dict[str, Any]) -> None:
+    try:
+        _notify_result_sync(summary)
+    finally:
+        _NOTIFY_SLOTS.release()
+
+
+def _notify_result(summary: dict[str, Any]) -> None:
+    """Web-Läufe nicht auf externe Notification-I/O warten lassen."""
+    if summary.get("trigger") != "web":
+        _notify_result_sync(summary)
+        return
+    if not _NOTIFY_SLOTS.acquire(blocking=False):
+        logger.warning("PBS-Benachrichtigung verworfen: Warteschlange ist voll")
+        return
+    try:
+        _NOTIFY_EXECUTOR.submit(_notify_result_worker, dict(summary))
+    except RuntimeError:
+        _NOTIFY_SLOTS.release()
+        logger.exception("PBS-Benachrichtigung konnte nicht eingeplant werden")

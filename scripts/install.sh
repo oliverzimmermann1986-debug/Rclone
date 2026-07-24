@@ -5,12 +5,18 @@ set -Eeuo pipefail
 APP_USER="rclone-sync"
 APP_GROUP="rclone-sync"
 APP_DIR="/opt/rclone-sync"
-REPO_URL="${REPO_URL:-https://github.com/appear7240/rclone-sync-container.git}"
+REPO_URL="${REPO_URL:-https://github.com/oliverzimmermann1986-debug/Rclone.git}"
 BRANCH="${BRANCH:-main}"
 BACKUP_ROOT="${BACKUP_ROOT:-/var/backups/rclone-sync}"
 BACKUP_KEEP="${BACKUP_KEEP:-10}"
+BACKUP_MARKER=".rclone-sync-backup-v1"
 WEB_WAS_ACTIVE=0
-SCHEDULER_WAS_ACTIVE=0
+WEB_WAS_ENABLED=0
+SCHEDULER_TIMER_WAS_ACTIVE=0
+SCHEDULER_TIMER_WAS_ENABLED=0
+LEGACY_TIMER_WAS_ACTIVE=0
+LEGACY_TIMER_WAS_ENABLED=0
+UNIT_STATES_CAPTURED=0
 PREVIOUS_GIT_HEAD=""
 SOURCE_UPDATE_STARTED=0
 VENV_ROLLBACK=""
@@ -25,8 +31,30 @@ SYSTEM_TARGETS=(
   /etc/sudoers.d/rclone-sync
 )
 
+restore_enabled_state() {
+  local unit="$1"
+  local was_enabled="$2"
+  if (( was_enabled )); then
+    systemctl enable "$unit" >/dev/null 2>&1 || true
+  else
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+  fi
+}
+
+restore_active_state() {
+  local unit="$1"
+  local was_active="$2"
+  if (( was_active )); then
+    systemctl start "$unit" >/dev/null 2>&1 || true
+  else
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+  fi
+}
+
 on_error() {
   local line="$1"
+  local status="${2:-1}"
+  if (( status == 0 )); then status=1; fi
   trap - ERR
   set +e
   echo "Installation fehlgeschlagen (Zeile $line). Rollback wird versucht." >&2
@@ -49,13 +77,41 @@ on_error() {
   fi
   [[ -z "$SYSTEM_FILES_ROLLBACK" ]] || rm -rf "$SYSTEM_FILES_ROLLBACK"
   systemctl daemon-reload >/dev/null 2>&1 || true
-  if (( WEB_WAS_ACTIVE )); then systemctl start rclone-sync-web.service >/dev/null 2>&1 || true; fi
-  if (( SCHEDULER_WAS_ACTIVE )); then systemctl start sync-scheduler.timer >/dev/null 2>&1 || true; fi
+  if (( UNIT_STATES_CAPTURED )); then
+    restore_enabled_state rclone-sync-web.service "$WEB_WAS_ENABLED"
+    restore_enabled_state sync-scheduler.timer "$SCHEDULER_TIMER_WAS_ENABLED"
+    restore_enabled_state rclone-sync.timer "$LEGACY_TIMER_WAS_ENABLED"
+    restore_active_state rclone-sync-web.service "$WEB_WAS_ACTIVE"
+    restore_active_state sync-scheduler.timer "$SCHEDULER_TIMER_WAS_ACTIVE"
+    restore_active_state rclone-sync.timer "$LEGACY_TIMER_WAS_ACTIVE"
+  fi
+  # Die Scheduler-Oneshot-Unit wird nie direkt neu gestartet: der Timer
+  # übernimmt den nächsten Lauf, ohne einen abgebrochenen Tick zu duplizieren.
+  exit "$status"
 }
-trap 'on_error "$LINENO"' ERR
+trap 'on_error "$LINENO" "$?"' ERR
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "Bitte als root oder mit sudo ausführen" >&2
+  exit 1
+fi
+
+APP_DIR_CANONICAL=$(realpath -m -- "$APP_DIR")
+BACKUP_ROOT_CANONICAL=$(realpath -m -- "$BACKUP_ROOT")
+case "$BACKUP_ROOT_CANONICAL" in
+  "$APP_DIR_CANONICAL"|"$APP_DIR_CANONICAL"/*)
+    echo "Abbruch: BACKUP_ROOT darf nicht innerhalb von APP_DIR liegen." >&2
+    exit 1
+    ;;
+esac
+if [[ "$BACKUP_ROOT_CANONICAL" == "/" ]]; then
+  echo "Abbruch: Das Wurzelverzeichnis ist kein zulässiges BACKUP_ROOT." >&2
+  exit 1
+fi
+
+if [[ -e "$APP_DIR" || -L "$APP_DIR" ]] && [[ ! -d "$APP_DIR/.git" ]]; then
+  echo "Abbruch: APP_DIR existiert, ist aber kein Git-Checkout: $APP_DIR" >&2
+  echo "Den Pfad manuell prüfen, sichern und entfernen oder REPO_URL/APP_DIR korrigieren." >&2
   exit 1
 fi
 
@@ -79,31 +135,90 @@ if ! id "$APP_USER" >/dev/null 2>&1; then
 fi
 
 if systemctl is-active --quiet rclone-sync-web.service 2>/dev/null; then WEB_WAS_ACTIVE=1; fi
-if systemctl is-active --quiet sync-scheduler.timer 2>/dev/null; then SCHEDULER_WAS_ACTIVE=1; fi
+if systemctl is-enabled --quiet rclone-sync-web.service 2>/dev/null; then WEB_WAS_ENABLED=1; fi
+if systemctl is-active --quiet sync-scheduler.timer 2>/dev/null; then SCHEDULER_TIMER_WAS_ACTIVE=1; fi
+if systemctl is-enabled --quiet sync-scheduler.timer 2>/dev/null; then SCHEDULER_TIMER_WAS_ENABLED=1; fi
+if systemctl is-active --quiet rclone-sync.timer 2>/dev/null; then LEGACY_TIMER_WAS_ACTIVE=1; fi
+if systemctl is-enabled --quiet rclone-sync.timer 2>/dev/null; then LEGACY_TIMER_WAS_ENABLED=1; fi
+UNIT_STATES_CAPTURED=1
 
-if [[ -d "$APP_DIR/.git" ]] && [[ "${ALLOW_DIRTY_UPGRADE:-0}" != "1" ]]; then
+if [[ -d "$APP_DIR/.git" ]]; then
   if [[ -n "$(git -c safe.directory="$APP_DIR" -C "$APP_DIR" status --porcelain --untracked-files=no)" ]]; then
     echo "Abbruch: Das bestehende Repository enthält lokale Änderungen." >&2
-    echo "Änderungen committen/sichern oder ALLOW_DIRTY_UPGRADE=1 bewusst setzen." >&2
+    echo "Änderungen vor dem Upgrade committen oder außerhalb von APP_DIR sichern." >&2
     exit 1
   fi
 fi
 
 printf '%s\n' "🛑 Dienste für konsistentes Upgrade stoppen …"
-systemctl stop sync-scheduler.timer rclone-sync-web.service rclone-sync.service >/dev/null 2>&1 || true
+systemctl stop sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service >/dev/null 2>&1 || true
+for unit in sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service; do
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    echo "Abbruch: Dienst $unit konnte vor der Datensicherung nicht gestoppt werden." >&2
+    false
+  fi
+done
 
 printf '%s\n' "💾 Laufzeitdaten sichern …"
 if [[ -d "$APP_DIR/data" || -d "/home/$APP_USER/.config/rclone" ]]; then
   stamp=$(date +%Y%m%d-%H%M%S)
   backup_dir="$BACKUP_ROOT/$stamp"
+  if [[ -e "$backup_dir" || -L "$backup_dir" ]]; then
+    echo "Abbruch: Sicherungsziel existiert bereits: $backup_dir" >&2
+    false
+  fi
   install -d -m 0700 "$backup_dir"
-  [[ ! -d "$APP_DIR/data" ]] || cp -a "$APP_DIR/data" "$backup_dir/data"
+  printf '%s\n' "rclone-sync-backup-v1" > "$backup_dir/$BACKUP_MARKER"
+  chmod 0600 "$backup_dir/$BACKUP_MARKER"
+  if [[ -d "$APP_DIR/data" ]]; then
+    install -d -m 0700 "$backup_dir/data"
+    shopt -s dotglob nullglob
+    data_items=("$APP_DIR/data"/*)
+    shopt -u dotglob nullglob
+    for item in "${data_items[@]}"; do
+      case "$(basename "$item")" in
+        rclone-sync.db|rclone-sync.db-wal|rclone-sync.db-shm) continue ;;
+      esac
+      cp -a -- "$item" "$backup_dir/data/"
+    done
+    if [[ -f "$APP_DIR/data/rclone-sync.db" ]]; then
+      sqlite_backup="$backup_dir/data/rclone-sync.db"
+      if [[ "$sqlite_backup" == *"'"* || "$sqlite_backup" == *$'\n'* ]]; then
+        echo "Backup-Pfad enthält für sqlite3 nicht unterstützte Zeichen." >&2
+        false
+      fi
+      sqlite3 -cmd ".timeout 30000" "$APP_DIR/data/rclone-sync.db" ".backup '$sqlite_backup'"
+      if [[ "$(sqlite3 "$sqlite_backup" "PRAGMA quick_check;")" != "ok" ]]; then
+        echo "SQLite-Sicherung ist inkonsistent." >&2
+        false
+      fi
+      chmod 0600 "$sqlite_backup"
+    fi
+  fi
   [[ ! -d "/home/$APP_USER/.config/rclone" ]] || cp -a "/home/$APP_USER/.config/rclone" "$backup_dir/rclone-config"
   printf '%s\n' "$APP_DIR" > "$backup_dir/source-path.txt"
   chmod -R go-rwx "$backup_dir"
   if [[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] && (( BACKUP_KEEP > 0 )); then
-    mapfile -t old_backups < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r | tail -n +$((BACKUP_KEEP + 1)))
-    for old in "${old_backups[@]}"; do rm -rf -- "$BACKUP_ROOT/$old"; done
+    mapfile -t old_backups < <(
+      find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
+        while IFS= read -r candidate; do
+          if [[ "$candidate" =~ ^[0-9]{8}-[0-9]{6}$ ]] &&
+            [[ -f "$BACKUP_ROOT/$candidate/$BACKUP_MARKER" ]] &&
+            [[ ! -L "$BACKUP_ROOT/$candidate/$BACKUP_MARKER" ]] &&
+            [[ "$(< "$BACKUP_ROOT/$candidate/$BACKUP_MARKER")" == "rclone-sync-backup-v1" ]]; then
+            printf '%s\n' "$candidate"
+          fi
+        done |
+        sort -r |
+        tail -n +$((BACKUP_KEEP + 1))
+    )
+    for old in "${old_backups[@]}"; do
+      [[ "$old" =~ ^[0-9]{8}-[0-9]{6}$ ]] || continue
+      [[ -f "$BACKUP_ROOT/$old/$BACKUP_MARKER" ]] || continue
+      [[ ! -L "$BACKUP_ROOT/$old/$BACKUP_MARKER" ]] || continue
+      [[ "$(< "$BACKUP_ROOT/$old/$BACKUP_MARKER")" == "rclone-sync-backup-v1" ]] || continue
+      rm -rf -- "$BACKUP_ROOT/$old"
+    done
   fi
 fi
 
@@ -113,7 +228,6 @@ if [[ -d "$APP_DIR/.git" ]]; then
   SOURCE_UPDATE_STARTED=1
 fi
 if [[ ! -d "$APP_DIR/.git" ]]; then
-  rm -rf "$APP_DIR"
   git clone --branch "$BRANCH" --single-branch "$REPO_URL" "$APP_DIR"
 else
   git -c safe.directory="$APP_DIR" -C "$APP_DIR" fetch --prune origin "$BRANCH"
@@ -129,13 +243,13 @@ if [[ -d "$APP_DIR/venv" ]]; then
   mv "$APP_DIR/venv" "$VENV_ROLLBACK"
 fi
 python3 -m venv "$APP_DIR/venv"
-"$APP_DIR/venv/bin/pip" install --disable-pip-version-check --upgrade pip wheel
 "$APP_DIR/venv/bin/pip" install --disable-pip-version-check -r "$APP_DIR/requirements.txt"
 
 printf '%s\n' "📁 Laufzeitverzeichnisse …"
 install -d -m 0700 -o "$APP_USER" -g "$APP_GROUP" \
   "$APP_DIR/data" "$APP_DIR/data/.rclone-cache" "$APP_DIR/data/runtime" \
-  "$APP_DIR/logs" "$APP_DIR/temp"
+  "$APP_DIR/logs" "$APP_DIR/temp" \
+  "/home/$APP_USER/.config" "/home/$APP_USER/.config/rclone"
 
 INITIAL_PASSWORD=""
 if [[ ! -f "$APP_DIR/data/config.yaml" ]]; then
@@ -149,17 +263,18 @@ import os
 from pathlib import Path
 
 import bcrypt
-import yaml
+from app.config_store import Config
 
 path = Path(os.environ["CONFIG_PATH"])
-data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+config = Config(path)
+data = config.snapshot()
 web = data.setdefault("web", {})
 password = os.environ["INITIAL_PASSWORD"]
 web["password"] = ""
 web["password_hash"] = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode("ascii")
 web["secret_key"] = os.environ["GEN_SECRET"]
 web["session_version"] = 1
-path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+config.replace(data)
 PY
   printf '%s\n' "$INITIAL_PASSWORD" > "$APP_DIR/data/.initial-password"
 fi
@@ -175,10 +290,16 @@ chmod 0600 "$APP_DIR/data/config.yaml"
 chmod 0600 "$APP_DIR/data/rclone-filters.txt"
 
 printf '%s\n' "🔎 Konfiguration und Python-Dateien prüfen …"
-RCLONE_SYNC_CONFIG="$APP_DIR/data/config.yaml" "$APP_DIR/venv/bin/python" - <<'PY'
+sudo -u "$APP_USER" -H env RCLONE_SYNC_CONFIG="$APP_DIR/data/config.yaml" \
+  "$APP_DIR/venv/bin/python" - <<'PY'
 from app.config_store import get_config
 from app.config_validation import validate_config
-validate_config(get_config().snapshot())
+
+config = get_config()
+normalized, warnings = validate_config(config.snapshot())
+config.replace(normalized)
+for warning in warnings:
+    print(f"Warnung: {warning}")
 print("Konfiguration gültig")
 PY
 "$APP_DIR/venv/bin/python" -m compileall -q "$APP_DIR/app"
@@ -205,7 +326,9 @@ visudo -cf /etc/sudoers.d/rclone-sync >/dev/null
 systemd-analyze verify \
   /etc/systemd/system/rclone-sync-web.service \
   /etc/systemd/system/rclone-sync.service \
-  /etc/systemd/system/sync-scheduler.service >/dev/null
+  /etc/systemd/system/rclone-sync.timer \
+  /etc/systemd/system/sync-scheduler.service \
+  /etc/systemd/system/sync-scheduler.timer >/dev/null
 systemctl daemon-reload
 
 # Nur der Per-Pair-Scheduler darf automatisch laufen. Der Legacy-Timer würde
@@ -228,10 +351,11 @@ SOURCE_UPDATE_STARTED=0
 [[ -z "$SYSTEM_FILES_ROLLBACK" ]] || rm -rf "$SYSTEM_FILES_ROLLBACK"
 SYSTEM_FILES_ROLLBACK=""
 SYSTEM_FILES_STARTED=0
+UNIT_STATES_CAPTURED=0
+trap - ERR
 
-IP=$(hostname -I | awk '{print $1}')
 printf '\n%s\n' "✅ Installation abgeschlossen"
-printf '%-30s %s\n' "Web-UI:" "http://${IP}:8001"
+printf '%-30s %s\n' "Web-UI (lokal):" "http://127.0.0.1:8001"
 printf '%-30s %s\n' "Login:" "admin"
 if [[ -n "${backup_dir:-}" ]]; then
   printf '%-30s %s\n' "Upgrade-Sicherung:" "$backup_dir"
@@ -255,9 +379,8 @@ Proxmox Backup Server (optional):
     apt update && apt install proxmox-backup-client
 
 Sicherheitshinweis (Transportverschlüsselung):
-  Die Web-UI lauscht unverschlüsselt auf 0.0.0.0:8001. Login-Passwort und
-  Session-Cookie sind im LAN mitlesbar. Empfohlen: Reverse-Proxy mit TLS
-  (z. B. Caddy/nginx auf 127.0.0.1:8001 weiterleiten), danach in der
+  Die Web-UI lauscht standardmäßig nur auf 127.0.0.1:8001. Für Zugriff aus
+  dem LAN einen Reverse-Proxy mit TLS (z. B. Caddy/nginx) verwenden, danach in der
   Konfiguration web.secure_cookie: auto und web.hsts_seconds setzen sowie
   web.allowed_hosts auf den Proxy-Hostnamen begrenzen.
 
