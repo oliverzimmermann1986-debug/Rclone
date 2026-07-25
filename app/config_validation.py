@@ -776,7 +776,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
 
     for i, first in enumerate(normalized_pairs):
         for second in normalized_pairs[i + 1 :]:
-            conflict = next(
+            overlap_keys = next(
                 (
                     (first_key, second_key)
                     for first_key in ("local", "remote")
@@ -788,8 +788,8 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
                 ),
                 None,
             )
-            if conflict:
-                first_key, second_key = conflict
+            if overlap_keys:
+                first_key, second_key = overlap_keys
                 warnings.append(
                     f"Pairs '{first.get('name')}' und '{second.get('name')}' "
                     f"überlappen bei {first_key}/{second_key}; "

@@ -344,7 +344,9 @@ def run_pbs_backup(
                 extra_env=extra_env,
                 cancel_scope=PBS_CANCEL_SCOPE,
                 run_id=target_run_id,
-                pre_spawn_check=lambda: _recheck_target_guards(target, source_guards),
+                pre_spawn_check=lambda _target=target, _guards=source_guards: (
+                    _recheck_target_guards(_target, _guards)
+                ),
             )
             entry["returncode"] = rc
             if rc == 130:

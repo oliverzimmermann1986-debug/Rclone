@@ -353,10 +353,10 @@ def update_config(
         raise HTTPException(
             status_code=422,
             detail={"message": "Konfiguration ungültig", "errors": exc.errors},
-        )
+        ) from exc
     try:
         revision = store.replace(normalized, expected_revision=expected_revision)
-    except ConfigConflictError:
+    except ConfigConflictError as exc:
         raise HTTPException(
             409,
             {
@@ -364,11 +364,11 @@ def update_config(
                 "reload_required": True,
                 "current_revision": store.revision,
             },
-        )
+        ) from exc
     except (OSError, ValueError) as exc:
         raise HTTPException(
             500, f"Konfiguration konnte nicht gespeichert werden: {exc}"
-        )
+        ) from exc
     _audit_best_effort(
         "config_saved",
         actor=user,
@@ -432,10 +432,10 @@ def pairs_bulk(body: PairBulkAction, user: str = Depends(require_auth)) -> dict[
         raise HTTPException(
             status_code=422,
             detail={"message": "Konfiguration ungültig", "errors": exc.errors},
-        )
+        ) from exc
     try:
         revision = store.replace(normalized, expected_revision=body.revision)
-    except ConfigConflictError:
+    except ConfigConflictError as exc:
         raise HTTPException(
             409,
             {
@@ -443,11 +443,11 @@ def pairs_bulk(body: PairBulkAction, user: str = Depends(require_auth)) -> dict[
                 "reload_required": True,
                 "current_revision": store.revision,
             },
-        )
+        ) from exc
     except (OSError, ValueError) as exc:
         raise HTTPException(
             500, f"Konfiguration konnte nicht gespeichert werden: {exc}"
-        )
+        ) from exc
 
     _audit_best_effort(
         "pairs_bulk",
@@ -483,7 +483,7 @@ def validate_config_endpoint(body: ConfigUpdate) -> dict[str, Any]:
         raise HTTPException(
             status_code=422,
             detail={"message": "Konfiguration ungültig", "errors": exc.errors},
-        )
+        ) from exc
     return {
         "ok": True,
         "warnings": warnings,
@@ -511,8 +511,8 @@ def preview_schedule(body: SchedulePreviewRequest) -> dict[str, Any]:
         raise HTTPException(422, "Zeitplan ist keine gültige 5-stellige Cron-Angabe")
     try:
         timezone = ZoneInfo(body.timezone)
-    except (ZoneInfoNotFoundError, ValueError):
-        raise HTTPException(422, f"Unbekannte Zeitzone: {body.timezone}")
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(422, f"Unbekannte Zeitzone: {body.timezone}") from exc
 
     now = datetime.now(timezone)
     iterator = croniter(expression, now)
@@ -563,7 +563,7 @@ def change_password(
             "ascii"
         )
     except ValueError as exc:
-        raise HTTPException(400, f"Passwort kann nicht verarbeitet werden: {exc}")
+        raise HTTPException(400, f"Passwort kann nicht verarbeitet werden: {exc}") from exc
 
     def updater(data: dict[str, Any]) -> None:
         web = data.setdefault("web", {})
@@ -583,7 +583,7 @@ def change_password(
         data_dir = Path(store.get("paths", "data_dir", default="/opt/rclone-sync/data"))
         (data_dir / ".initial-password").unlink(missing_ok=True)
     except (OSError, ValueError) as exc:
-        raise HTTPException(500, f"Passwort konnte nicht gespeichert werden: {exc}")
+        raise HTTPException(500, f"Passwort konnte nicht gespeichert werden: {exc}") from exc
     _audit_best_effort("password_changed", actor=user, details={})
     return {"ok": True, "message": "Passwort geändert", "reauthenticate": True}
 
@@ -618,7 +618,7 @@ def get_filter_file() -> dict[str, Any]:
     except HTTPException:
         raise
     except (OSError, UnicodeError) as exc:
-        raise HTTPException(500, f"Lesefehler: {exc}")
+        raise HTTPException(500, f"Lesefehler: {exc}") from exc
 
 
 @router.put("/filter-file")
@@ -702,7 +702,7 @@ def save_filter_file(body: FilterPayload) -> dict[str, Any]:
     except HTTPException:
         raise
     except OSError as exc:
-        raise HTTPException(500, f"Schreibfehler: {exc}")
+        raise HTTPException(500, f"Schreibfehler: {exc}") from exc
 
 
 class WebhookTest(BaseModel):
@@ -742,4 +742,4 @@ def test_webhook(body: WebhookTest) -> dict[str, Any]:
         )
         return {"ok": True}
     except Exception as exc:
-        raise HTTPException(502, f"Webhook-Test fehlgeschlagen: {exc}")
+        raise HTTPException(502, f"Webhook-Test fehlgeschlagen: {exc}") from exc

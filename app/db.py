@@ -321,9 +321,11 @@ class Database:
         try:
             connection.execute("PRAGMA busy_timeout=30000")
             connection.execute("PRAGMA foreign_keys=ON")
+            # synchronous ist verbindungsgebunden (im Gegensatz zum persistenten
+            # journal_mode) und muss daher für jede Verbindung gesetzt werden.
+            connection.execute("PRAGMA synchronous=NORMAL")
             if initialize:
                 connection.execute("PRAGMA journal_mode=WAL")
-                connection.execute("PRAGMA synchronous=NORMAL")
             yield connection
             connection.commit()
         except Exception:
