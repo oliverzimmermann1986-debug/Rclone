@@ -13,6 +13,34 @@ from urllib.parse import urlsplit
 from croniter import croniter
 
 from .rclone_args import UnsafeRcloneArgument, validate_rclone_args
+from .security import (
+    DEFAULT_HIDDEN_REMOTE_PATHS,
+    is_hidden_remote_path,
+    normalize_hidden_remote_paths,
+    normalize_remote_path,
+)
+
+_KNOWN_SECTIONS = frozenset(
+    {"web", "paths", "backup", "notifications", "pbs", "maintenance", "schema_version"}
+)
+_KNOWN_WEB_KEYS = frozenset(
+    {
+        "username",
+        "password",
+        "password_hash",
+        "secret_key",
+        "session_version",
+        "session_max_age_seconds",
+        "allowed_hosts",
+        "local_browse_roots",
+        "hidden_remote_paths",
+        "secure_cookie",
+        "hsts_seconds",
+        "login_window_seconds",
+        "login_max_failures",
+        "login_lock_seconds",
+    }
+)
 
 _DISABLED_SCHEDULES = {"", "off", "manual", "disabled", "none"}
 _NAME_RE = re.compile(r"^[^\x00-\x1f/\\]{1,80}$")
@@ -237,6 +265,23 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         except ValueError as exc:
             errors.append(f"Browser-Root {exc}")
     web["local_browse_roots"] = list(dict.fromkeys(clean_roots))
+
+    hidden_raw = web.get("hidden_remote_paths", list(DEFAULT_HIDDEN_REMOTE_PATHS))
+    try:
+        hidden_list = _normalize_string_list(hidden_raw)
+    except ValueError:
+        errors.append("web.hidden_remote_paths muss Text oder Liste sein")
+        hidden_list = list(DEFAULT_HIDDEN_REMOTE_PATHS)
+    clean_hidden: list[str] = []
+    for entry in hidden_list:
+        if ":" not in entry:
+            errors.append(
+                f"web.hidden_remote_paths braucht 'remote:pfad', nicht {entry!r}"
+            )
+            continue
+        clean_hidden.append(normalize_remote_path(entry))
+    web["hidden_remote_paths"] = list(dict.fromkeys(clean_hidden))
+    hidden_remote_paths = normalize_hidden_remote_paths(web["hidden_remote_paths"])
 
     paths = cfg.setdefault("paths", {})
     if not isinstance(paths, dict):
@@ -527,14 +572,34 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         )
         if (
             pair["enabled"]
+            and hidden_remote_paths
+            and is_hidden_remote_path(remote, hidden_remote_paths)
+        ):
+            warnings.append(
+                f"{name}: Ziel liegt unter einem per web.hidden_remote_paths "
+                "ausgeblendeten Remote-Pfad und ist im Browser nicht auswählbar."
+            )
+        pair["allow_empty_remote_target"] = _boolean(
+            pair.get("allow_empty_remote_target", False)
+        )
+        if (
+            pair["enabled"]
             and _is_absolute_local(remote)
             and direction in {"push", "bisync"}
             and pair["min_remote_files"] == 0
         ):
-            warnings.append(
-                f"{name}: lokales Ziel im remote-Feld ist ohne "
-                "min_remote_files nicht gegen einen Mount-Drop geschützt."
-            )
+            if pair["allow_empty_remote_target"]:
+                warnings.append(
+                    f"{name}: lokales Ziel im remote-Feld ist per "
+                    "allow_empty_remote_target ausdrücklich ohne Mount-Drop-Schutz."
+                )
+            else:
+                pair["min_remote_files"] = 1
+                warnings.append(
+                    f"{name}: lokales Ziel im remote-Feld — min_remote_files auf 1 "
+                    "gesetzt (Mount-Drop-Schutz). Für ein bewusst leeres Ziel "
+                    "allow_empty_remote_target aktivieren."
+                )
         pair["min_free_gb"] = float(
             _number(pair.get("min_free_gb", 0), default=0, minimum=0, maximum=1_000_000)
         )
@@ -1047,6 +1112,22 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             seen_backup_ids.add(folded_backup_id)
     if pbs["enabled"] and not targets:
         warnings.append("pbs.enabled ohne pbs.targets — es wird nichts gesichert")
+
+    # Unbekannte Keys sind kein Fehler — sonst würde jede ältere oder von Hand
+    # erweiterte Config beim Laden scheitern. Ein Tippfehler in einem
+    # Sicherheitsschalter wäre aber sonst wirkungslos und unsichtbar.
+    for key in sorted(k for k in cfg if isinstance(k, str)):
+        if key not in _KNOWN_SECTIONS:
+            warnings.append(
+                f"Unbekannte Konfigurationssektion {key!r} — wird ignoriert, "
+                "bitte auf Tippfehler prüfen."
+            )
+    for key in sorted(k for k in web if isinstance(k, str)):
+        if key not in _KNOWN_WEB_KEYS:
+            warnings.append(
+                f"Unbekannter Schlüssel web.{key} — wird ignoriert, bitte auf "
+                "Tippfehler prüfen."
+            )
 
     if errors:
         raise ConfigValidationError(errors)

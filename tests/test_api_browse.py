@@ -37,3 +37,21 @@ def test_hidden_remote_path_cannot_be_opened_directly(monkeypatch):
         api_browse.browse_rclone("pcloud:/Crypto Folder")
 
     assert exc.value.status_code == 403
+
+
+def test_dot_segments_cannot_bypass_hidden_path(monkeypatch):
+    monkeypatch.setattr(
+        api_browse, "_rclone_remotes", lambda: ["pcloud:"]
+    )
+    monkeypatch.setattr(
+        api_browse,
+        "_hidden_remote_paths",
+        lambda: {"pcloud:/crypto folder"},
+    )
+    for path in ("pcloud:/./Crypto Folder", "pcloud://Crypto Folder"):
+        with pytest.raises(HTTPException) as excinfo:
+            api_browse.browse_rclone(path)
+        assert excinfo.value.status_code == 403
+    with pytest.raises(HTTPException) as excinfo:
+        api_browse.browse_rclone("pcloud:/Fotos/../Crypto Folder")
+    assert excinfo.value.status_code == 400

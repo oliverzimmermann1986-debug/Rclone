@@ -391,6 +391,7 @@
                       <div class="form-grid four">
                         <label class="field"><span>Min. lokale Dateien</span><input type="number" min="0" x-model.number="pair.min_local_files"></label>
                         <label class="field"><span>Min. Remote-Dateien</span><input type="number" min="0" x-model.number="pair.min_remote_files"></label>
+                        <label class="field"><span>Leeres lokales Ziel erlauben</span><input type="checkbox" x-model="pair.allow_empty_remote_target"><small>Nur setzen, wenn das lokale Ziel bewusst leer und nicht gemountet sein darf.</small></label>
                         <label class="field"><span>Min. freier Speicher (GiB)</span><input type="number" min="0" step="0.1" x-model.number="pair.min_free_gb"></label>
                         <label class="field"><span>Erfolg spätestens nach</span><div class="number-with-unit"><input type="number" min="0" max="8760" step="1" x-model.number="pair.max_success_age_hours"><span>Std.</span></div><small>0 deaktiviert die Überfällig-Warnung.</small></label>
                       </div>

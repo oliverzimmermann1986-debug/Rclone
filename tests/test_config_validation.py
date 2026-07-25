@@ -90,3 +90,64 @@ def test_pair_success_age_is_bounded(tmp_path: Path):
     ]
     normalized, _ = validate_config(cfg)
     assert normalized["backup"]["pairs"][0]["max_success_age_hours"] == 8760
+
+
+def test_local_target_gets_mount_guard_by_default(tmp_path: Path):
+    cfg = _base(tmp_path)
+    source = tmp_path / "src"
+    source.mkdir()
+    target = tmp_path / "usb"
+    target.mkdir()
+    cfg["backup"]["pairs"] = [
+        {
+            "name": "LokalZuLokal",
+            "remote": str(target),
+            "local": str(source),
+            "direction": "push",
+            "mode": "sync",
+            "min_remote_files": 0,
+        }
+    ]
+    data, warnings = validate_config(cfg)
+    pair = data["backup"]["pairs"][0]
+    assert pair["min_remote_files"] == 1
+    assert any("min_remote_files auf 1" in warning for warning in warnings)
+
+
+def test_local_target_opt_out_keeps_zero(tmp_path: Path):
+    cfg = _base(tmp_path)
+    source = tmp_path / "src"
+    source.mkdir()
+    target = tmp_path / "usb"
+    target.mkdir()
+    cfg["backup"]["pairs"] = [
+        {
+            "name": "LeeresZiel",
+            "remote": str(target),
+            "local": str(source),
+            "direction": "push",
+            "mode": "sync",
+            "min_remote_files": 0,
+            "allow_empty_remote_target": True,
+        }
+    ]
+    data, warnings = validate_config(cfg)
+    assert data["backup"]["pairs"][0]["min_remote_files"] == 0
+    assert any("allow_empty_remote_target" in warning for warning in warnings)
+
+
+def test_unknown_keys_warn_without_breaking_load(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["web"]["hidden_remote_path"] = ["pcloud:/Crypto Folder"]
+    cfg["bakcup"] = {}
+    data, warnings = validate_config(cfg)
+    assert data["backup"]["pairs"] == []
+    assert any("web.hidden_remote_path" in warning for warning in warnings)
+    assert any("'bakcup'" in warning for warning in warnings)
+
+
+def test_known_example_config_has_no_unknown_key_warnings(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["web"].update({"secure_cookie": "auto", "hsts_seconds": 31536000})
+    _data, warnings = validate_config(cfg)
+    assert not [w for w in warnings if "Unbekannt" in w]

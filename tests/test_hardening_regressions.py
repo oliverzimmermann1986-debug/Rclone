@@ -184,6 +184,65 @@ def test_pbs_target_route_change_requires_reauthentication(
     assert raised.value.detail["reauth_required"] is True
 
 
+@pytest.mark.parametrize(
+    ("field", "new_value"),
+    (
+        ("secure_cookie", False),
+        ("hsts_seconds", 0),
+        ("login_max_failures", 100),
+        ("login_lock_seconds", 60),
+    ),
+)
+def test_transport_and_lockout_changes_require_reauthentication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    new_value: object,
+) -> None:
+    path = tmp_path / "config.yaml"
+    original = _config(tmp_path)
+    original["web"].update(
+        {
+            "secure_cookie": True,
+            "hsts_seconds": 31536000,
+            "login_max_failures": 10,
+            "login_lock_seconds": 900,
+        }
+    )
+    path.write_text(yaml.safe_dump(original), encoding="utf-8")
+    store = Config(path)
+    candidate, revision = store.snapshot_with_revision()
+    candidate["_revision"] = revision
+    candidate["web"][field] = new_value
+    monkeypatch.setattr(api_config, "get_config", lambda: store)
+    monkeypatch.setattr(api_config, "get_db", lambda: _AuditDB())
+
+    with pytest.raises(HTTPException) as raised:
+        api_config.update_config(
+            api_config.ConfigUpdate(config=candidate), user="admin"
+        )
+
+    assert raised.value.status_code == 403
+    assert raised.value.detail["reauth_required"] is True
+
+
+def test_absent_security_fields_are_not_treated_as_change() -> None:
+    """Ein Client, der ein Feld nicht mitschickt, löst keine Reauth aus."""
+    old = {"web": {"secure_cookie": False, "login_max_failures": 10}}
+    new = {"web": {}}
+    assert api_config._sensitive_config_changed(old, new) is False
+    assert (
+        api_config._sensitive_config_changed(
+            old, {"web": {"login_max_failures": "10"}}
+        )
+        is False
+    )
+    assert (
+        api_config._sensitive_config_changed(old, {"web": {"login_max_failures": 50}})
+        is True
+    )
+
+
 def test_bcrypt_byte_limit_is_reported_as_client_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -52,20 +52,3 @@ def has_overlapping_pairs(pairs: list[dict[str, Any]]) -> bool:
         for second in pairs[index + 1 :]
     )
 
-
-def execution_waves(
-    pairs: list[dict[str, Any]], max_parallel: int
-) -> list[list[dict[str, Any]]]:
-    """Group pairs into bounded waves whose members do not conflict."""
-    width = max(1, int(max_parallel))
-    waves: list[list[dict[str, Any]]] = []
-    for pair in pairs:
-        for wave in waves:
-            if len(wave) < width and not any(
-                pairs_conflict(pair, item) for item in wave
-            ):
-                wave.append(pair)
-                break
-        else:
-            waves.append([pair])
-    return waves

@@ -864,6 +864,7 @@ function app() {
       pair.mode ||= pair.direction === 'bisync' ? 'bisync' : 'copy';
       if (pair.min_local_files === undefined) pair.min_local_files = 1;
       if (pair.min_remote_files === undefined) pair.min_remote_files = 0;
+      if (pair.allow_empty_remote_target === undefined) pair.allow_empty_remote_target = false;
       if (pair.min_free_gb === undefined) pair.min_free_gb = 0;
       if (pair.max_success_age_hours === undefined) pair.max_success_age_hours = 0;
       if (pair.allow_delete === undefined) pair.allow_delete = false;
@@ -1178,7 +1179,7 @@ function app() {
         direction: selected.direction, mode: selected.mode, two_way: selected.direction === 'bisync', min_local_files: 1,
         exclude: '.DS_Store\nThumbs.db', include: '', filter: '', rclone_args: '',
         transfers: '', checkers: '', max_delete: 100, allow_delete: false,
-        min_remote_files: 0, min_free_gb: 0, max_success_age_hours: 0, require_mountpoint: false,
+        min_remote_files: 0, allow_empty_remote_target: false, min_free_gb: 0, max_success_age_hours: 0, require_mountpoint: false,
         mountpoint: '', sentinel_file: '',
       };
       this.config.backup.pairs.push(pair);
