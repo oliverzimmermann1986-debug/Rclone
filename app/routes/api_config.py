@@ -298,6 +298,12 @@ class SchedulePreviewRequest(BaseModel):
     count: int = Field(default=5, ge=1, le=10)
 
 
+class PairBulkAction(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=1000)
+    action: str = Field(pattern="^(enable|disable)$")
+    revision: str = Field(min_length=64, max_length=64)
+
+
 @router.put("")
 def update_config(
     body: ConfigUpdate, user: str = Depends(require_auth)
@@ -374,6 +380,90 @@ def update_config(
     )
     return {
         "ok": True,
+        "warnings": warnings,
+        "config": _redact(normalized, revision=revision),
+    }
+
+
+@router.post("/pairs/bulk")
+def pairs_bulk(body: PairBulkAction, user: str = Depends(require_auth)) -> dict[str, Any]:
+    """Aktiviert oder deaktiviert mehrere Pairs atomar anhand ihres Namens.
+
+    Arbeitet auf dem gespeicherten Stand (keine ungespeicherten GUI-Entwürfe)
+    und ist über die Basisrevision gegen parallele Änderungen abgesichert –
+    identisch zur Lost-Update-Prüfung von PUT /api/config.
+    """
+    store = get_config()
+    old_data, current_revision = store.snapshot_with_revision()
+    if body.revision != current_revision:
+        raise HTTPException(
+            409,
+            {
+                "message": "Konfiguration wurde parallel geändert",
+                "reload_required": True,
+                "current_revision": current_revision,
+            },
+        )
+
+    new_data = copy.deepcopy(old_data)
+    backup = new_data.get("backup")
+    pairs = backup.get("pairs") if isinstance(backup, dict) else None
+    if not isinstance(pairs, list):
+        pairs = []
+
+    wanted = {n.strip().casefold() for n in body.names if str(n).strip()}
+    enabled = body.action == "enable"
+    matched = 0
+    changed = 0
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+        if str(pair.get("name") or "").strip().casefold() in wanted:
+            matched += 1
+            if bool(pair.get("enabled", True)) != enabled:
+                pair["enabled"] = enabled
+                changed += 1
+    if matched == 0:
+        raise HTTPException(404, {"message": "Keine passenden Pairs gefunden"})
+
+    try:
+        normalized, warnings = validate_config(new_data)
+    except ConfigValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Konfiguration ungültig", "errors": exc.errors},
+        )
+    try:
+        revision = store.replace(normalized, expected_revision=body.revision)
+    except ConfigConflictError:
+        raise HTTPException(
+            409,
+            {
+                "message": "Konfiguration wurde parallel geändert",
+                "reload_required": True,
+                "current_revision": store.revision,
+            },
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            500, f"Konfiguration konnte nicht gespeichert werden: {exc}"
+        )
+
+    _audit_best_effort(
+        "pairs_bulk",
+        actor=user,
+        details={
+            "action": body.action,
+            "matched": matched,
+            "changed": changed,
+            "revision": revision,
+        },
+    )
+    return {
+        "ok": True,
+        "action": body.action,
+        "matched": matched,
+        "changed": changed,
         "warnings": warnings,
         "config": _redact(normalized, revision=revision),
     }
