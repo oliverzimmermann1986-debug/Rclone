@@ -100,6 +100,26 @@ def _set_csrf_cookie(response, request: Request, token: str) -> None:
     )
 
 
+def _production_security_warnings() -> list[str]:
+    """Erkennt riskante Web-Defaults, ohne lokale HTTP-Installationen zu blockieren."""
+    web = get_config().get("web", default={}) or {}
+    warnings: list[str] = []
+    allowed_hosts = web.get("allowed_hosts", ["*"]) or ["*"]
+    if isinstance(allowed_hosts, str):
+        allowed_hosts = [allowed_hosts]
+    if "*" in {str(item).strip() for item in allowed_hosts}:
+        warnings.append("web.allowed_hosts enthält den Wildcard-Eintrag '*'")
+    if web.get("secure_cookie", False) is False:
+        warnings.append("web.secure_cookie ist deaktiviert")
+    try:
+        hsts_seconds = int(web.get("hsts_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        hsts_seconds = 0
+    if hsts_seconds <= 0:
+        warnings.append("web.hsts_seconds ist deaktiviert")
+    return warnings
+
+
 def _run_startup_maintenance() -> None:
     try:
         maintenance = run_automatic_maintenance()
@@ -135,6 +155,13 @@ async def _lifespan(_app):
                 )
     if recovered:
         logger.warning("%d verwaiste laufende Job(s) als stale markiert", recovered)
+    security_warnings = _production_security_warnings()
+    if security_warnings:
+        logger.warning(
+            "Unsichere Web-Defaults aktiv: %s. Bei externem Zugriff HTTPS, "
+            "Secure-Cookies, HSTS und konkrete allowed_hosts konfigurieren.",
+            "; ".join(security_warnings),
+        )
     _sd_notify("READY=1")
     logger.info("rclone-sync app ready")
     threading.Thread(
@@ -516,9 +543,15 @@ def readyz():
         ready = data_dir.exists() and os.access(data_dir, os.R_OK | os.W_OK)
     except Exception:
         ready = False
+    warnings = _production_security_warnings() if ready else []
     return JSONResponse(
         status_code=200 if ready else 503,
-        content={"ok": ready, "version": __version__},
+        content={
+            "ok": ready,
+            "version": __version__,
+            "warnings": warnings,
+            "secure_configuration": not warnings,
+        },
     )
 
 

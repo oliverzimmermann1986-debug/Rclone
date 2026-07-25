@@ -85,7 +85,9 @@ def test_gui_assets_reference_current_cache_version():
     login = (STATIC / "login.html").read_text(encoding="utf-8")
     assert "/static/style.css?v=__APP_VERSION__" in html
     assert "/static/alpine.min.js?v=__APP_VERSION__" in html
+    assert "/static/ui-helpers.js?v=__APP_VERSION__" in html
     assert "/static/app.js?v=__APP_VERSION__" in html
+    assert html.index("/static/ui-helpers.js") < html.index("/static/app.js")
     assert "Proxmox Backup Console" in login
     assert 'class="shell"' in login
 
@@ -141,8 +143,11 @@ def test_gui_requests_are_latest_response_wins_and_poll_page_aware():
         assert f"requestKey: '{key}'" in javascript
     assert "if (this.refreshing) return false" in javascript
     assert "if (this.page === 'dashboard')" in javascript
-    assert "window.setTimeout(refreshLoop, 15000)" in javascript
-    assert "window.setTimeout(activityLoop, 2000)" in javascript
+    assert "window.setTimeout(refreshLoop, 30000)" in javascript
+    assert "document.addEventListener('visibilitychange'" in javascript
+    assert "if (document.hidden) this.stopPolling()" in javascript
+    assert "busy ? 2000 : 10000" in javascript
+    assert "window.setTimeout(activityLoop, busy ? 2000 : 10000)" in javascript
     assert "setInterval(" not in javascript
     assert "history.pushState" in javascript
     assert "window.addEventListener('popstate'" in javascript

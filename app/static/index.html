@@ -70,6 +70,7 @@
             <span aria-hidden="true"></span><span x-text="connectionLabel()"></span>
           </span>
           <button class="icon-button" @click="refreshAll(true)" :disabled="refreshing" :title="refreshing ? 'Aktualisierung läuft' : 'Aktualisieren'" :aria-label="refreshing ? 'Aktualisierung läuft' : 'Aktualisieren'">↻</button>
+          <button class="theme-button density-button" @click="toggleDensity()" :title="density === 'compact' ? 'Komfortable Ansicht' : 'Kompakte Ansicht'" aria-label="Darstellungsdichte umschalten"><span aria-hidden="true">≡</span><span x-text="density === 'compact' ? 'Kompakt' : 'Komfort'"></span></button>
           <button class="theme-button" @click="cycleTheme()" :title="'Darstellung: ' + themeLabel()">
             <span aria-hidden="true">◐</span><span x-text="themeLabel()"></span>
           </button>
@@ -102,6 +103,11 @@
               <button class="button secondary" @click="openQuick()">Quick-Sync</button>
               <button class="button primary" @click="runBackup(true)" :disabled="busy()" x-text="pending.backup ? 'Startet…' : 'Dry-Run starten'"></button>
             </div>
+          </div>
+
+          <div class="skeleton-grid" x-show="overview.loading && !overview.data" aria-label="Dashboard wird geladen" aria-busy="true" role="status" x-cloak>
+            <span class="sr-only">Dashboard wird geladen…</span>
+            <div class="skeleton-card" aria-hidden="true"></div><div class="skeleton-card" aria-hidden="true"></div><div class="skeleton-card" aria-hidden="true"></div><div class="skeleton-card" aria-hidden="true"></div>
           </div>
 
           <div class="alert-stack" x-show="(overview.data?.alerts || []).length" aria-live="polite">
@@ -463,7 +469,7 @@
           </div>
 
           <article class="panel no-padding">
-            <div class="job-list">
+            <div class="job-list" :aria-busy="jobs.loading">
               <template x-for="job in jobs.items" :key="job.id">
                 <button class="job-row detailed" @click="showJob(job)">
                   <span class="job-status-icon" :class="job.status"><span></span></span>
@@ -475,7 +481,7 @@
               </template>
             </div>
             <div class="empty-state compact" x-show="!jobs.loading && !jobs.error && jobs.items.length===0"><strong>Keine Jobs gefunden</strong><span>Ändere die Filter oder starte einen Dry-Run.</span></div>
-            <div class="loading-state" x-show="jobs.loading" role="status" aria-live="polite">Jobhistorie wird geladen…</div>
+            <div class="job-skeletons" x-show="jobs.loading" role="status" aria-live="polite" x-cloak><span class="sr-only">Jobhistorie wird geladen…</span><div class="skeleton-row" aria-hidden="true"></div><div class="skeleton-row" aria-hidden="true"></div><div class="skeleton-row" aria-hidden="true"></div><div class="skeleton-row" aria-hidden="true"></div></div>
             <div class="inline-error panel-error" x-show="jobs.error && !jobs.loading" role="alert"><span x-text="jobs.error"></span><button class="button secondary small" @click="loadJobs(false)">Erneut versuchen</button></div>
             <div class="pagination"><button class="button secondary" @click="prevJobs()" :disabled="jobs.offset===0">Zurück</button><span><strong x-text="jobPage()"></strong> / <span x-text="jobPages()"></span></span><button class="button secondary" @click="nextJobs()" :disabled="jobs.offset+jobs.limit>=jobs.total">Weiter</button></div>
           </article>
@@ -855,7 +861,8 @@
     <button class="button primary" @click="settingsTab==='filters' && filterFile.dirty ? saveFilterFile() : saveConfig()" :disabled="pending.save || pending.filter" x-text="pending.save || pending.filter ? 'Speichert…' : 'Jetzt speichern'"></button>
   </div>
 
-  <div class="toast" :class="[toast.type, (configDirty || filterFile.dirty) && 'above-unsaved']" x-show="toast.show" x-transition.opacity x-text="toast.msg" :role="toast.type === 'err' ? 'alert' : 'status'" :aria-live="toast.type === 'err' ? 'assertive' : 'polite'" x-cloak></div>
+  <div class="toast" :class="[toast.type, (configDirty || filterFile.dirty) && 'above-unsaved']" x-show="toast.show" x-transition.opacity :role="toast.type === 'err' ? 'alert' : 'status'" :aria-live="toast.type === 'err' ? 'assertive' : 'polite'" x-cloak><span class="toast-symbol" aria-hidden="true" x-text="toast.type === 'err' ? '!' : (toast.type === 'warn' ? '△' : '✓')"></span><span x-text="toast.msg"></span><button @click="dismissToast()" aria-label="Meldung schließen">×</button></div>
+  <script src="/static/ui-helpers.js?v=__APP_VERSION__"></script>
   <script src="/static/app.js?v=__APP_VERSION__"></script>
 </body>
 </html>

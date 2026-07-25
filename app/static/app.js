@@ -8,14 +8,8 @@ function app() {
   const dialogFocusStack = [];
   const staleResponse = Object.freeze({ __stale: true });
   let currentPasswordResolver = null;
-  const safeStoredValue = (key, allowed, fallback) => {
-    try {
-      const value = localStorage.getItem(key);
-      return allowed.includes(value) ? value : fallback;
-    } catch (_) {
-      return fallback;
-    }
-  };
+  const ui = window.RcloneUI;
+  const safeStoredValue = ui.storedChoice;
 
   return {
     page: 'dashboard',
@@ -26,9 +20,11 @@ function app() {
     connectionState: navigator.onLine ? 'checking' : 'offline',
     connectionMessage: navigator.onLine ? 'Verbindung wird geprüft' : 'Netzwerkverbindung ist offline',
     theme: 'system',
+    density: 'comfortable',
     lastUpdated: null,
     requestTimeoutMs: 30000,
     refreshing: false,
+    polling: { active: false, refreshTimer: null, activityTimer: null },
     configLoading: true,
     configLoaded: false,
     configError: '',
@@ -99,6 +95,7 @@ function app() {
 
     async init() {
       this.theme = safeStoredValue('rclone-sync-theme', ['system', 'dark', 'light'], 'system');
+      this.density = safeStoredValue('rclone-sync-density', ['comfortable', 'compact'], ui.prefersCompact() ? 'compact' : 'comfortable');
       this.settingsTab = safeStoredValue('rclone-sync-settings-tab', this.settingsTabs, 'general');
       this.pairFilter = safeStoredValue(
         'rclone-sync-pair-filter',
@@ -112,9 +109,9 @@ function app() {
         '',
       );
       this.applyTheme();
-      const store = (key, value) => {
-        try { localStorage.setItem(key, value); } catch (_) { /* Storage kann blockiert sein. */ }
-      };
+      this.applyDensity();
+      const store = ui.store;
+      this.$watch('density', (value) => { store('rclone-sync-density', value); this.applyDensity(); });
       this.$watch('settingsTab', (value) => store('rclone-sync-settings-tab', value));
       this.$watch('pairFilter', (value) => store('rclone-sync-pair-filter', value));
       this.$watch('jobs.kind', (value) => store('rclone-sync-job-kind', value));
@@ -146,6 +143,13 @@ function app() {
       window.addEventListener('offline', () => {
         this.setConnectionState('offline', 'Netzwerkverbindung ist offline');
       });
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) this.stopPolling();
+        else {
+          this.startPolling();
+          this.refreshAll(false);
+        }
+      });
       window.addEventListener('beforeunload', (event) => {
         if (this.configDirty || this.filterFile.dirty) {
           event.preventDefault();
@@ -163,11 +167,11 @@ function app() {
       if (this.refreshing) return false;
       this.refreshing = true;
       try {
-        const tasks = [
-          this.loadOverview(true),
-          this.refreshStatus(true),
-        ];
+        const tasks = [this.refreshStatus(true)];
+        // Die teure Übersicht ist nur auf dem Dashboard sichtbar. Andere
+        // Bereiche aktualisieren ausschließlich die dort benötigten Daten.
         if (this.page === 'dashboard') {
+          tasks.push(this.loadOverview(true));
           tasks.push(this.loadRecent(true), this.loadSchedulerState(true));
           if (this.config.pbs?.enabled) tasks.push(this.loadPbsStatus(true));
         } else if (this.page === 'doctor' || this.page === 'settings') {
@@ -190,17 +194,38 @@ function app() {
       }
     },
 
+    stopPolling() {
+      this.polling.active = false;
+      if (this.polling.refreshTimer) window.clearTimeout(this.polling.refreshTimer);
+      if (this.polling.activityTimer) window.clearTimeout(this.polling.activityTimer);
+      this.polling.refreshTimer = null;
+      this.polling.activityTimer = null;
+    },
+
     startPolling() {
+      if (this.polling.active || document.hidden) return;
+      this.polling.active = true;
+      const scheduleRefresh = () => {
+        if (!this.polling.active) return;
+        this.polling.refreshTimer = window.setTimeout(refreshLoop, 30000);
+      };
+      const scheduleActivity = () => {
+        if (!this.polling.active) return;
+        const busy = this.rcloneBusy() || this.progress?.running
+          || this.pbs.status?.running
+          || (this.jobModal.show && this.jobModal.autoRefresh && this.jobModal.job?.status === 'running');
+        this.polling.activityTimer = window.setTimeout(activityLoop, busy ? 2000 : 10000);
+      };
       const refreshLoop = async () => {
         try {
-          if (!document.hidden) await this.refreshAll(false);
+          if (this.polling.active && !document.hidden) await this.refreshAll(false);
         } finally {
-          window.setTimeout(refreshLoop, 15000);
+          scheduleRefresh();
         }
       };
       const activityLoop = async () => {
         try {
-          if (!document.hidden) {
+          if (this.polling.active && !document.hidden) {
             if (this.rcloneBusy() || this.progress?.running) await this.loadProgress(true);
             if (this.status?.pbs || this.pbs.status?.running) await this.loadPbsStatus(true);
             if (this.jobModal.show && this.jobModal.autoRefresh && this.jobModal.job?.status === 'running') {
@@ -208,11 +233,11 @@ function app() {
             }
           }
         } finally {
-          window.setTimeout(activityLoop, 2000);
+          scheduleActivity();
         }
       };
-      window.setTimeout(refreshLoop, 15000);
-      window.setTimeout(activityLoop, 2000);
+      scheduleRefresh();
+      scheduleActivity();
     },
 
     navigate(next, updateHash = true) {
@@ -366,6 +391,20 @@ function app() {
       if (this.toast.timer) clearTimeout(this.toast.timer);
       this.toast = { show: true, msg, type, timer: null };
       this.toast.timer = setTimeout(() => { this.toast.show = false; }, 4000);
+    },
+
+    applyDensity() {
+      document.documentElement.dataset.density = this.density;
+    },
+
+    toggleDensity() {
+      this.density = this.density === 'compact' ? 'comfortable' : 'compact';
+      this.showToast(this.density === 'compact' ? 'Kompakte Ansicht aktiviert' : 'Komfortable Ansicht aktiviert');
+    },
+
+    dismissToast() {
+      if (this.toast.timer) clearTimeout(this.toast.timer);
+      this.toast.show = false;
     },
 
     setTheme(theme) {
