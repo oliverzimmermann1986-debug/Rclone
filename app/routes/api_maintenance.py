@@ -310,7 +310,7 @@ def create_config_snapshot() -> dict[str, Any]:
         raise HTTPException(
             422,
             {"message": "Aktuelle Konfiguration ist ungültig", "errors": exc.errors},
-        )
+        ) from exc
     entry = _write_snapshot(normalized, revision)
     get_db().audit_add(
         "config_snapshot_created", actor="web", details={"name": entry["name"]}
@@ -338,10 +338,10 @@ def restore_config_snapshot(
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
-    except FileNotFoundError:
-        raise HTTPException(404, "Snapshot nicht gefunden")
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Snapshot nicht gefunden") from exc
     except OSError as exc:
-        raise HTTPException(400, f"Snapshot konnte nicht geöffnet werden: {exc}")
+        raise HTTPException(400, f"Snapshot konnte nicht geöffnet werden: {exc}") from exc
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_SNAPSHOT_BYTES:
@@ -362,7 +362,7 @@ def restore_config_snapshot(
         normalized, warnings = validate_config(loaded)
     except (UnicodeError, yaml.YAMLError, ConfigValidationError, ValueError) as exc:
         errors = exc.errors if isinstance(exc, ConfigValidationError) else [str(exc)]
-        raise HTTPException(422, {"message": "Snapshot ist ungültig", "errors": errors})
+        raise HTTPException(422, {"message": "Snapshot ist ungültig", "errors": errors}) from exc
 
     store = get_config()
     current, revision = store.snapshot_with_revision()
@@ -387,8 +387,8 @@ def restore_config_snapshot(
     restored_web["session_version"] = max(1, session_version) + 1
     try:
         new_revision = store.replace(normalized, expected_revision=revision)
-    except ConfigConflictError:
-        raise HTTPException(409, "Konfiguration wurde parallel geändert")
+    except ConfigConflictError as exc:
+        raise HTTPException(409, "Konfiguration wurde parallel geändert") from exc
     get_db().audit_add(
         "config_snapshot_restored",
         actor=user,

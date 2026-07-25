@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from . import __version__
 from .auth import (
@@ -183,6 +184,11 @@ app = FastAPI(
     openapi_url=None,
     lifespan=_lifespan,
 )
+
+# Als letzte add_middleware-Registrierung liegt GZip außen und komprimiert die
+# fertige Antwort inklusive der zuvor gesetzten Security-Header-Responses.
+# index.html (~106 KB, no-store) und die Statics schrumpfen damit auf ~20-25 %.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 def _host_allowed(request: Request) -> bool:

@@ -202,13 +202,13 @@ def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
         if scope_lock is not None:
             scope_lock.release()
         _lock.release()
-        raise HTTPException(409, str(exc))
+        raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         if scope_lock is not None:
             scope_lock.release()
         _lock.release()
         logger.exception("PBS-Job konnte nicht angelegt werden")
-        raise HTTPException(500, f"Job konnte nicht angelegt werden: {exc}")
+        raise HTTPException(500, f"Job konnte nicht angelegt werden: {exc}") from exc
     try:
         thread = threading.Thread(
             target=_run_thread,
@@ -224,7 +224,7 @@ def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
             get_db().job_finish(job_id, "error", {"ok": False, "error": str(exc)})
         except Exception:
             logger.exception("PBS-Thread-Startfehler konnte nicht gespeichert werden")
-        raise HTTPException(500, f"PBS-Job konnte nicht gestartet werden: {exc}")
+        raise HTTPException(500, f"PBS-Job konnte nicht gestartet werden: {exc}") from exc
     _audit_best_effort(
         "pbs_requested",
         {"job_id": job_id, "targets": targets_filter or sorted(targets)},

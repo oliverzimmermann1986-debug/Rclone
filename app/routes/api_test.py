@@ -88,7 +88,7 @@ def test_rclone(request: RcloneTest) -> dict[str, Any]:
             except ConfigValidationError as exc:
                 raise HTTPException(
                     422, {"message": "Pair ungültig", "errors": exc.errors}
-                )
+                ) from exc
             pair = (normalized.get("backup") or {}).get("pairs", [None])[0]
             response["tested_unsaved"] = True
             response["warnings"] = warnings

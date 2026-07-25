@@ -261,12 +261,12 @@ def _reserve_backup_job(
     except JobAlreadyRunningError as exc:
         scope_lock.release()
         _locks["backup"].release()
-        raise HTTPException(409, str(exc))
+        raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         scope_lock.release()
         _locks["backup"].release()
         logger.exception("Job (%s) konnte nicht angelegt werden", kind)
-        raise HTTPException(500, f"Job konnte nicht angelegt werden: {exc}")
+        raise HTTPException(500, f"Job konnte nicht angelegt werden: {exc}") from exc
 
 
 def _audit_best_effort(event: str, *, actor: str, details: dict) -> None:
@@ -299,7 +299,7 @@ def _start_thread(
             )
         except Exception:
             logger.exception("Thread-Startfehler konnte nicht gespeichert werden")
-        raise HTTPException(500, "Job konnte nicht gestartet werden")
+        raise HTTPException(500, "Job konnte nicht gestartet werden") from exc
 
 
 class SchedulerPausePayload(BaseModel):
@@ -332,7 +332,7 @@ def pause_scheduler_endpoint(
             db=get_db(),
         )
     except ValueError as exc:
-        raise HTTPException(422, str(exc))
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.post("/scheduler/resume")
@@ -641,7 +641,7 @@ def _validate_quick_paths(payload: QuickSyncPayload) -> tuple[str, str]:
             env=rclone_subprocess_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise HTTPException(503, f"rclone-Remotes konnten nicht geprüft werden: {exc}")
+        raise HTTPException(503, f"rclone-Remotes konnten nicht geprüft werden: {exc}") from exc
     remotes = (
         {line.strip() for line in result.stdout.splitlines() if line.strip()}
         if result.returncode == 0

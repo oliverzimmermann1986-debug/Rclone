@@ -198,10 +198,10 @@ def browse_rclone(path: str = "") -> dict[str, Any]:
             "entries": entries,
             "truncated": truncated,
         }
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "rclone Timeout")
-    except FileNotFoundError:
-        raise HTTPException(500, "rclone nicht installiert")
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "rclone Timeout") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(500, "rclone nicht installiert") from exc
 
 
 @router.get("/local")
@@ -247,10 +247,10 @@ def browse_local(path: str = "") -> dict[str, Any]:
         truncated = len(selected) > _MAX_ENTRIES
         for name, resolved in selected[:_MAX_ENTRIES]:
             entries.append({"name": name, "path": str(resolved), "is_dir": True})
-    except PermissionError:
-        raise HTTPException(403, "Keine Leseberechtigung")
+    except PermissionError as exc:
+        raise HTTPException(403, "Keine Leseberechtigung") from exc
     except OSError as exc:
-        raise HTTPException(500, f"Verzeichnis konnte nicht gelesen werden: {exc}")
+        raise HTTPException(500, f"Verzeichnis konnte nicht gelesen werden: {exc}") from exc
 
     parent_path = target.parent.resolve()
     parent = (
