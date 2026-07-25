@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -54,6 +55,41 @@ def _warn(name: str, message: str, **extra: Any) -> dict[str, Any]:
 
 def _err(name: str, message: str, **extra: Any) -> dict[str, Any]:
     return _item(name, "error", message, **extra)
+
+
+def _rclone_version_check() -> dict[str, Any]:
+    """Prüft die installierte rclone-Version und warnt bei zu alten Builds."""
+    try:
+        result = subprocess.run(
+            ["rclone", "version"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            stdin=subprocess.DEVNULL,
+            env=rclone_subprocess_env(),
+        )
+        out = (result.stdout or "") + (result.stderr or "")
+        match = re.search(r"rclone\s+v?(\d+\.\d+\.\d+)", out, re.IGNORECASE)
+        ver = match.group(1) if match else "unknown"
+        if ver == "unknown":
+            return _warn("rclone-version", "rclone Version konnte nicht geparst werden", version=ver)
+
+        parts = [int(x) for x in ver.split(".")]
+        major = parts[0]
+        minor = parts[1] if len(parts) > 1 else 0
+        # Empfohlen ab 1.70 wegen Drive- und bisync-Verbesserungen
+        if major > 1 or (major == 1 and minor >= 70):
+            return _ok("rclone-version", f"rclone {ver}", version=ver)
+        return _warn(
+            "rclone-version",
+            f"rclone {ver} ist relativ alt – empfohlen ≥ 1.70 "
+            "(bessere Google-Drive- und bisync-Stabilität)",
+            version=ver,
+        )
+    except FileNotFoundError:
+        return _err("rclone-version", "rclone Binary nicht gefunden")
+    except Exception as exc:
+        return _err("rclone-version", f"rclone version fehlgeschlagen: {exc}")
 
 
 def _writable_dir(path: str) -> dict[str, Any]:
@@ -408,6 +444,8 @@ def doctor() -> dict[str, Any]:
         checks.extend(_warn("Plan", warning) for warning in plan.get("warnings", []))
     except Exception as exc:
         checks.append(_err("Plan", f"Plan konnte nicht erstellt werden: {exc}"))
+
+    checks.append(_rclone_version_check())
 
     all_items = checks + [
         check for pair in pair_checks for check in pair.get("checks", [])
