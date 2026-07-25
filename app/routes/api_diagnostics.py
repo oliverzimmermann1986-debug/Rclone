@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import shutil
 import subprocess
@@ -73,6 +74,10 @@ def _writable_dir(path: str) -> dict[str, Any]:
 _SYSTEMCTL_CACHE: dict[str, tuple[float, tuple[str, str]]] = {}
 _SYSTEMCTL_CACHE_LOCK = threading.Lock()
 _SYSTEMCTL_CACHE_TTL = 10.0
+_OVERVIEW_CACHE: tuple[float, dict[str, Any]] | None = None
+_OVERVIEW_CACHE_LOCK = threading.Lock()
+_OVERVIEW_BUILD_LOCK = threading.Lock()
+_OVERVIEW_CACHE_TTL = 8.0
 
 
 def _systemctl_state(unit: str) -> tuple[str, str]:
@@ -420,9 +425,33 @@ def doctor() -> dict[str, Any]:
     }
 
 
+def _cached_overview() -> dict[str, Any] | None:
+    now_monotonic = time.monotonic()
+    with _OVERVIEW_CACHE_LOCK:
+        cached = _OVERVIEW_CACHE
+        if cached and now_monotonic - cached[0] < _OVERVIEW_CACHE_TTL:
+            return copy.deepcopy(cached[1])
+    return None
+
+
 @router.get("/overview")
 def overview() -> dict[str, Any]:
-    """Schnelle Betriebsübersicht ohne teure Remote-Traversierungen."""
+    """Schnelle, gegen parallele Neuberechnung geschützte Betriebsübersicht."""
+    cached = _cached_overview()
+    if cached is not None:
+        return cached
+
+    # Nur ein Request baut den teuren Snapshot. Wartende Requests prüfen den
+    # Cache nach Lock-Erwerb erneut und übernehmen das fertige Ergebnis.
+    with _OVERVIEW_BUILD_LOCK:
+        cached = _cached_overview()
+        if cached is not None:
+            return cached
+        return _build_overview()
+
+
+def _build_overview() -> dict[str, Any]:
+    global _OVERVIEW_CACHE
     cfg = get_config().snapshot()
     backup = cfg.get("backup") or {}
     paths = cfg.get("paths") or {}
@@ -593,7 +622,7 @@ def overview() -> dict[str, Any]:
             }
         )
 
-    return {
+    result = {
         "app": {
             "version": __version__,
             "timezone": backup.get("timezone", "Europe/Berlin"),
@@ -625,3 +654,6 @@ def overview() -> dict[str, Any]:
         "alerts": alerts,
         "generated_at": now,
     }
+    with _OVERVIEW_CACHE_LOCK:
+        _OVERVIEW_CACHE = (time.monotonic(), copy.deepcopy(result))
+    return result

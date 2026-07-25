@@ -274,26 +274,43 @@ class Database:
         count = int(connection.execute("SELECT COUNT(*) FROM pair_runs").fetchone()[0])
         if count:
             return
-        rows = connection.execute(
+        # Cursor-Iteration statt fetchall(): große historische Datenbanken werden
+        # beim Upgrade nicht vollständig in den Arbeitsspeicher geladen. SQLite
+        # liefert die Zeilen intern schrittweise; regelmäßige Savepoints begrenzen
+        # zusätzlich den Umfang einer fehlgeschlagenen Teilmigration.
+        cursor = connection.execute(
             "SELECT id, kind, status, started_at, ended_at, summary_json FROM jobs "
             "WHERE summary_json IS NOT NULL ORDER BY id"
-        ).fetchall()
-        for row in rows:
-            try:
-                summary = json.loads(row["summary_json"] or "{}")
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(summary, dict):
-                continue
-            cls._store_pair_results(
-                connection,
-                int(row["id"]),
-                str(row["status"]),
-                float(row["started_at"]),
-                float(row["ended_at"] or row["started_at"]),
-                summary,
-                job_kind=str(row["kind"]),
-            )
+        )
+        batch_size = 500
+        processed = 0
+        connection.execute("SAVEPOINT pair_runs_backfill")
+        try:
+            for row in cursor:
+                try:
+                    summary = json.loads(row["summary_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(summary, dict):
+                    continue
+                cls._store_pair_results(
+                    connection,
+                    int(row["id"]),
+                    str(row["status"]),
+                    float(row["started_at"]),
+                    float(row["ended_at"] or row["started_at"]),
+                    summary,
+                    job_kind=str(row["kind"]),
+                )
+                processed += 1
+                if processed % batch_size == 0:
+                    connection.execute("RELEASE SAVEPOINT pair_runs_backfill")
+                    connection.execute("SAVEPOINT pair_runs_backfill")
+            connection.execute("RELEASE SAVEPOINT pair_runs_backfill")
+        except Exception:
+            connection.execute("ROLLBACK TO SAVEPOINT pair_runs_backfill")
+            connection.execute("RELEASE SAVEPOINT pair_runs_backfill")
+            raise
 
     @contextmanager
     def conn(self, *, initialize: bool = False) -> Iterator[sqlite3.Connection]:
