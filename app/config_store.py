@@ -8,6 +8,7 @@ import os
 import stat
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
@@ -24,6 +25,18 @@ _CONFIG_PATH = Path(
 
 class ConfigConflictError(RuntimeError):
     """Die Konfiguration wurde seit dem Laden durch einen anderen Prozess geändert."""
+
+
+class ConfigLockTimeoutError(ConfigConflictError):
+    """Der Config-Lock war innerhalb der Wartefrist nicht zu bekommen.
+
+    Erbt bewusst von ``ConfigConflictError``, damit bestehende Aufrufer und die
+    HTTP-Schicht den Fall unverändert als Konflikt behandeln.
+    """
+
+
+_LOCK_TIMEOUT_SEC = 10.0
+_LOCK_RETRY_SEC = 0.05
 
 
 class Config:
@@ -49,9 +62,26 @@ class Config:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(self.lock_path, flags, stat.S_IRUSR | stat.S_IWUSR)
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
         try:
-            acquire_file_lock(fd, exclusive=exclusive)
+            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            # Begrenzte Wartezeit: ein hängender Halter darf keinen Request und
+            # keinen Worker unbegrenzt blockieren.
+            deadline = time.monotonic() + _LOCK_TIMEOUT_SEC
+            while True:
+                try:
+                    acquire_file_lock(fd, exclusive=exclusive, blocking=False)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise ConfigLockTimeoutError(
+                            "Konfigurations-Lock ist seit "
+                            f"{_LOCK_TIMEOUT_SEC:.0f}s belegt: {self.lock_path}"
+                        ) from None
+                    time.sleep(_LOCK_RETRY_SEC)
+        except BaseException:
+            os.close(fd)
+            raise
+        try:
             yield
         finally:
             try:
@@ -64,17 +94,23 @@ class Config:
         return hashlib.sha256(raw).hexdigest()
 
     def _load_unlocked(self) -> None:
-        if self.path.exists():
-            raw = self.path.read_bytes()
+        # Daten und mtime müssen aus demselben Handle stammen. Ein stat() *nach*
+        # dem Lesen könnte die mtime einer zwischenzeitlich per os.replace()
+        # ausgetauschten Datei zu den alten Daten speichern; der Reload-Trigger
+        # wäre damit verbraucht und der Prozess liefe auf veralteter Config.
+        try:
+            with self.path.open("rb") as handle:
+                mtime_ns = os.fstat(handle.fileno()).st_mtime_ns
+                raw = handle.read()
+        except FileNotFoundError:
+            raw = None
+        if raw is not None:
             loaded = yaml.safe_load(raw.decode("utf-8")) or {}
             if not isinstance(loaded, dict):
                 raise ValueError(f"Config-Root muss ein Mapping sein: {self.path}")
             self._data = loaded
             self._revision = self._hash_bytes(raw)
-            try:
-                self._mtime_ns = self.path.stat().st_mtime_ns
-            except OSError:
-                self._mtime_ns = 0
+            self._mtime_ns = mtime_ns
         else:
             self._data = {}
             self._mtime_ns = 0

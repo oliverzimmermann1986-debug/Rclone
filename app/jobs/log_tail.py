@@ -128,6 +128,13 @@ def read_tail(path: Path, max_bytes: int = 1024 * 1024) -> str:
                 and opened_stat.st_size - cached.size <= cached_capacity
             )
             if can_extend and cached is not None:
+                # Grenzbyte prüfen: nach einem In-place-Truncate (logrotate
+                # copytruncate) bleiben Device und Inode gleich und die Datei kann
+                # über die alte Größe hinauswachsen. Ohne diese Probe würde alter
+                # Cache-Inhalt vor die neuen Zeilen gespleißt.
+                handle.seek(cached.size - 1, os.SEEK_SET)
+                can_extend = handle.read(1) == cached.data[-1:]
+            if can_extend and cached is not None:
                 handle.seek(cached.size, os.SEEK_SET)
                 cache_data = (cached.data + handle.read(cached_capacity))[
                     -cached_capacity:

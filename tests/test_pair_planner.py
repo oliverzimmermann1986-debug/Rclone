@@ -1,4 +1,5 @@
-from app.jobs.pair_planner import execution_waves, has_overlapping_pairs, pairs_conflict
+from app.jobs.pair_planner import has_overlapping_pairs, pairs_conflict
+from app.jobs.rclone_sync import _next_runnable_pair_index
 
 
 def _pair(name: str, local: str, remote: str) -> dict:
@@ -11,14 +12,19 @@ def test_only_conflicting_pairs_are_serialized():
         _pair("B", "/srv/a/child", "cloud:b"),
         _pair("C", "/srv/c", "cloud:c"),
     ]
-    waves = execution_waves(pairs, max_parallel=3)
-    assert [[pair["name"] for pair in wave] for wave in waves] == [["A", "C"], ["B"]]
+    # B kollidiert mit A, C ist unabhängig: solange A läuft, ist C der nächste
+    # startbare Kandidat, B wartet.
+    assert _next_runnable_pair_index(pairs[1:], [pairs[0]]) == 1
+    assert _next_runnable_pair_index([pairs[1]], [pairs[0]]) is None
     assert has_overlapping_pairs(pairs)
 
 
 def test_worker_limit_is_respected_without_conflicts():
     pairs = [_pair(str(i), f"/srv/{i}", f"cloud:{i}") for i in range(5)]
-    assert [len(wave) for wave in execution_waves(pairs, 2)] == [2, 2, 1]
+    # Ohne Konflikte ist immer der erste Kandidat startbar; die Obergrenze
+    # kommt allein aus max_parallel im Runner.
+    assert _next_runnable_pair_index(pairs, []) == 0
+    assert _next_runnable_pair_index(pairs, pairs[:2]) == 2
 
 
 def test_remote_overlap_is_detected_across_endpoint_roles_and_slash_spelling():

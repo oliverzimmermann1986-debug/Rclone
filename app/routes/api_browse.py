@@ -13,7 +13,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..auth import require_auth
 from ..config_store import get_config
 from ..rclone_args import rclone_subprocess_env
-from ..security import ensure_within, is_relative_to, parse_browse_roots, require_csrf
+from ..security import (
+    DEFAULT_HIDDEN_REMOTE_PATHS,
+    ensure_within,
+    is_hidden_remote_path as _is_hidden_remote_path,
+    is_relative_to,
+    normalize_hidden_remote_paths,
+    parse_browse_roots,
+    require_csrf,
+)
 
 router = APIRouter(
     prefix="/api/browse",
@@ -23,36 +31,13 @@ router = APIRouter(
 
 _MAX_ENTRIES = 1000
 _BLOCKED_NAMES = {".snapshot", ".zfs", "__pycache__", "$RECYCLE.BIN"}
-_DEFAULT_HIDDEN_REMOTE_PATHS = {"pcloud:/Crypto Folder"}
-
-
-def _normalize_remote_path(path: str) -> str:
-    if ":" not in path:
-        return path.rstrip("/")
-    remote, rest = path.split(":", 1)
-    return f"{remote}:/{rest.strip('/')}" if rest.strip("/") else f"{remote}:"
-
-
 def _hidden_remote_paths() -> set[str]:
-    configured = get_config().get(
-        "web", "hidden_remote_paths", default=sorted(_DEFAULT_HIDDEN_REMOTE_PATHS)
-    )
-    if isinstance(configured, str):
-        configured = [configured]
-    if not isinstance(configured, list):
-        configured = sorted(_DEFAULT_HIDDEN_REMOTE_PATHS)
-    return {
-        _normalize_remote_path(str(item)).casefold()
-        for item in configured
-        if str(item).strip() and ":" in str(item)
-    }
-
-
-def _is_hidden_remote_path(path: str, hidden: set[str]) -> bool:
-    normalized = _normalize_remote_path(path).casefold()
-    return any(
-        normalized == blocked or normalized.startswith(blocked + "/")
-        for blocked in hidden
+    return normalize_hidden_remote_paths(
+        get_config().get(
+            "web",
+            "hidden_remote_paths",
+            default=list(DEFAULT_HIDDEN_REMOTE_PATHS),
+        )
     )
 
 
@@ -185,6 +170,8 @@ def browse_rclone(path: str = "") -> dict[str, Any]:
             raise HTTPException(400, "Pfad enthält ungültige Zeichen")
         if ":" not in path:
             raise HTTPException(400, "Pfad muss 'remote:ordner' sein")
+        if any(segment == ".." for segment in path.split("/")):
+            raise HTTPException(400, "Pfad darf keine '..'-Segmente enthalten")
         remote_name = path.split(":", 1)[0] + ":"
         if remote_name not in remotes:
             raise HTTPException(403, "Remote ist nicht konfiguriert")

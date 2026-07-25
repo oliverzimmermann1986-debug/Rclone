@@ -135,6 +135,9 @@ backup:
       mode: copy
       schedule: manual
       min_local_files: 1
+      # Zeigt remote auf einen lokalen Pfad, wird min_remote_files auf 1
+      # erzwungen (Mount-Drop-Schutz). Bewusst leeres Ziel:
+      # allow_empty_remote_target: true
       min_remote_files: 0
       min_free_gb: 1
       max_success_age_hours: 168

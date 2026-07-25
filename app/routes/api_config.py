@@ -155,6 +155,28 @@ def _semantic_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def _scalar(value: Any) -> str:
+    """Vergleichsform, die 10 und "10" bzw. True und "true" gleich behandelt."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        formatted = f"{float(value):.6f}".rstrip("0").rstrip(".")
+        return formatted or "0"
+    return str(value if value is not None else "").strip().casefold()
+
+
+# Änderungen an Transportschutz und Brute-Force-Bremse sind in beide Richtungen
+# bestätigungspflichtig, analog zu web.username. Die Defaults müssen zu
+# config_validation passen: ein Feld, das der Client gar nicht mitschickt, ist
+# keine Änderung gegenüber dem normalisierten Stand auf der Platte.
+_SENSITIVE_WEB_SCALARS = {
+    "secure_cookie": False,
+    "hsts_seconds": 0,
+    "login_max_failures": 10,
+    "login_lock_seconds": 900,
+}
+
+
 def _sensitive_config_changed(
     old_data: dict[str, Any], new_data: dict[str, Any]
 ) -> bool:
@@ -167,6 +189,13 @@ def _sensitive_config_changed(
         return True
     if old_web.get("local_browse_roots") != new_web.get("local_browse_roots"):
         return True
+    for key, fallback in _SENSITIVE_WEB_SCALARS.items():
+        old_value = old_web.get(key, fallback)
+        new_value = new_web.get(key, fallback)
+        if _scalar(old_value if old_value is not None else fallback) != _scalar(
+            new_value if new_value is not None else fallback
+        ):
+            return True
 
     old_pbs = old_data.get("pbs") if isinstance(old_data.get("pbs"), dict) else {}
     new_pbs = new_data.get("pbs") if isinstance(new_data.get("pbs"), dict) else {}

@@ -72,3 +72,22 @@ def test_cache_respects_strict_global_byte_budget(tmp_path, monkeypatch):
         assert sum(len(entry.data) for entry in log_tail._CACHE.values()) <= 2048
     assert len(log_tail._CACHE) <= 2
     log_tail._clear_cache()
+
+
+def test_inplace_truncate_does_not_splice_stale_tail(tmp_path):
+    log_tail._clear_cache()
+    path = tmp_path / "pair.log"
+    path.write_bytes(b"A" * 4096 + b"alte-zeile\n")
+    first = log_tail.read_tail(path, max_bytes=8192)
+    assert first.endswith("alte-zeile\n")
+
+    # logrotate copytruncate: gleicher Inode, Größe zurück auf 0, danach wächst
+    # die Datei über die alte Größe hinaus.
+    with path.open("r+b") as handle:
+        handle.truncate(0)
+    path.write_bytes(b"B" * 8192 + b"neue-zeile\n")
+
+    second = log_tail.read_tail(path, max_bytes=8192)
+    assert "alte-zeile" not in second
+    assert second.endswith("neue-zeile\n")
+    assert "A" not in second

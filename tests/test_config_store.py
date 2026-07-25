@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -83,3 +84,19 @@ def test_set_save_succeeds_without_conflict(tmp_path: Path):
     store.set("nested", "value", 2)
     store.save()
     assert Config(path).get("nested", "value") == 2
+
+
+def test_file_lock_times_out_instead_of_blocking(tmp_path, monkeypatch):
+    from app import config_store as store
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("web: {}\n", encoding="utf-8")
+    config = store.Config(config_path)
+    monkeypatch.setattr(store, "_LOCK_TIMEOUT_SEC", 0.2)
+
+    with config._file_lock(exclusive=True):
+        blocker = store.Config(config_path)
+        started = time.monotonic()
+        with pytest.raises(store.ConfigLockTimeoutError):
+            blocker.update(lambda data: data)
+        assert time.monotonic() - started < 5

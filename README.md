@@ -113,6 +113,12 @@ Eine Expertenausnahme ist mit `backup.allow_unsafe_rclone_args: true` möglich, 
 - rclone-Unterprozesse erhalten `RCLONE_ASK_PASSWORD=false` und können keine Dienste blockierend nach einem Passwort fragen
 - systemd-Sandbox mit leerem Capability-Set, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectProc=invisible`, deaktiviertem Uvicorn-Serverheader und restriktiven Schreibpfaden
 
+Webhook-Nutzlasten enthalten Pair-Namen, Pfade und Fehlertexte. Enthalten
+Ordnernamen personenbezogene Daten, ist ein Versand an Discord oder Telegram eine
+Drittlandübermittlung (Art. 44 ff. DSGVO); in diesem Fall den generischen
+JSON-Webhook auf ein selbst gehostetes Ziel richten. Zugangsdaten werden in
+Nutzlasten, Logs und Support-Bundles maskiert.
+
 Die mitgelieferte Unit startet absichtlich genau **einen Uvicorn-Worker**. Die zentralen Daten, Locks und Login-Sperren sind prozessübergreifend, aber ein einzelner Worker hält Jobsteuerung und Web-Lebenszyklus eindeutig und vereinfacht den Betrieb.
 
 ## Installation
@@ -234,6 +240,7 @@ Wichtige Pair-Werte:
 - `max_delete`: maximal erlaubte Löschungen
 - `require_mountpoint`, `mountpoint`, `sentinel_file`: Mountschutz
 - `min_local_files`, `min_remote_files`, `min_free_gb`: Plausibilitätsgrenzen
+- `allow_empty_remote_target`: hebt den erzwungenen Mount-Drop-Schutz für ein bewusst leeres lokales Ziel auf (`min_remote_files` bleibt dann bei 0)
 - `rclone_args`: zusätzliche, validierte Argumente
 
 Sicherheitsrelevante Änderungen – etwa Benutzername, PBS-Ziel/Secret,
