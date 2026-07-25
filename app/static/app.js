@@ -37,6 +37,7 @@ function app() {
     overview: { loading: false, data: null },
     status: { backup: null, check: null, quicksync: null, pbs: null },
     progress: null,
+    sse: null,
     recentJobs: [],
     jobs: {
       loading: false, items: [], total: 0, offset: 0, limit: 25,
@@ -194,17 +195,45 @@ function app() {
       }
     },
 
+    startSseProgress() {
+      if (!window.EventSource || this.sse) return;
+      try {
+        this.sse = new EventSource('/api/jobs/progress/stream');
+        this.sse.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data && !data.error) this.progress = data;
+          } catch (_) { /* ignore malformed frame */ }
+        };
+        this.sse.onerror = () => {
+          // Verbindung abbrechen; Polling bleibt aktiver Fallback.
+          this.stopSseProgress();
+        };
+      } catch (_) {
+        this.sse = null;
+      }
+    },
+
+    stopSseProgress() {
+      if (this.sse) {
+        try { this.sse.close(); } catch (_) { /* ignore */ }
+        this.sse = null;
+      }
+    },
+
     stopPolling() {
       this.polling.active = false;
       if (this.polling.refreshTimer) window.clearTimeout(this.polling.refreshTimer);
       if (this.polling.activityTimer) window.clearTimeout(this.polling.activityTimer);
       this.polling.refreshTimer = null;
       this.polling.activityTimer = null;
+      this.stopSseProgress();
     },
 
     startPolling() {
       if (this.polling.active || document.hidden) return;
       this.polling.active = true;
+      this.startSseProgress();
       const scheduleRefresh = () => {
         if (!this.polling.active) return;
         this.polling.refreshTimer = window.setTimeout(refreshLoop, 30000);
@@ -1887,4 +1916,12 @@ function app() {
       return JSON.stringify(value || {}, null, 2);
     },
   };
+}
+
+// PWA: Service Worker best-effort registrieren (nur Secure Context / localhost).
+// Fehler werden bewusst verschluckt – die App funktioniert ohne SW unverändert.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+  });
 }

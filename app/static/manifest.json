@@ -1,0 +1,11 @@
+{
+  "name": "rclone-sync-container",
+  "short_name": "rclone-sync",
+  "description": "Sichere rclone Sync- und Scheduler-Konsole für Proxmox",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#111827",
+  "orientation": "any",
+  "icons": []
+}

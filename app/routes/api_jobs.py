@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -15,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -544,6 +545,41 @@ def backup_progress() -> dict[str, Any]:
             "total_pairs": len(pairs_status),
             "done_pairs": sum(1 for pair in pairs_status if pair["status"] in finished),
         }
+    )
+
+
+@router.get("/progress/stream")
+async def progress_stream(request: Request) -> StreamingResponse:
+    """Server-Sent Events für Live-Progress.
+
+    Der bestehende Polling-Endpoint ``/backup/progress`` bleibt als Fallback
+    erhalten. Der synchrone Snapshot wird im Threadpool erzeugt, damit der
+    einzelne Uvicorn-Worker während des Log-Lesens nicht blockiert.
+    """
+
+    async def event_generator():
+        last_payload = None
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                data = await asyncio.to_thread(backup_progress)
+                payload = json.dumps(data, default=str)
+                if payload != last_payload:
+                    yield f"data: {payload}\n\n"
+                    last_payload = payload
+            except Exception:
+                yield f"data: {json.dumps({'error': 'progress unavailable'})}\n\n"
+            await asyncio.sleep(1.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
