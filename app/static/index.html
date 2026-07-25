@@ -326,6 +326,16 @@
             <div class="toolbar-meta"><span x-text="visiblePairCount()"></span> von <span x-text="config.backup.pairs.length"></span></div>
           </div>
 
+          <div class="toolbar panel slim" x-show="selectedPairCount() > 0" x-cloak>
+            <div class="toolbar-meta"><strong x-text="selectedPairCount()"></strong> ausgewählt</div>
+            <div class="toolbar-actions">
+              <button class="button secondary small" @click="bulkPairAction('enable')" :disabled="configDirty">Ausgewählte aktivieren</button>
+              <button class="button secondary small" @click="bulkPairAction('disable')" :disabled="configDirty">Ausgewählte deaktivieren</button>
+              <button class="button ghost small" @click="clearPairSelection()">Auswahl aufheben</button>
+            </div>
+            <small x-show="configDirty">Ungespeicherte Änderungen zuerst speichern.</small>
+          </div>
+
 
           <div class="config-check" x-show="configValidation.ok !== null" :class="configValidation.ok ? (configValidation.warnings.length ? 'warn' : 'ok') : 'error'" :role="configValidation.ok ? 'status' : 'alert'" :aria-live="configValidation.ok ? 'polite' : 'assertive'" x-cloak>
             <span class="check-symbol" x-text="configValidation.ok ? (configValidation.warnings.length ? '△' : '✓') : '!' "></span>
@@ -344,6 +354,7 @@
             <template x-for="(pair, idx) in config.backup.pairs" :key="idx">
               <article class="pair-card" :id="`pair-${idx}`" x-show="pairVisible(pair)" :class="pairStatus(pair)">
                 <div class="pair-card-top">
+                  <label class="pair-select" title="Für Bulk-Aktion auswählen"><input type="checkbox" :checked="!!pairSelection[pair.name]" @change.stop="togglePairSelection(pair.name)" @input.stop :disabled="!pair.name" aria-label="Pair für Bulk-Aktion auswählen"></label>
                   <button class="pair-expand" @click="pairOpen[idx]=!pairOpen[idx]" :aria-label="(pairOpen[idx] ? 'Details schließen: ' : 'Details öffnen: ') + (pair.name || 'Neues Pair')" :aria-expanded="!!pairOpen[idx]" :aria-controls="`pair-details-${idx}`">
                     <span class="status-dot" :class="pairStatus(pair)"></span>
                     <span class="pair-title">

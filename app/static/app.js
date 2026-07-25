@@ -64,6 +64,7 @@ function app() {
     pairFilter: 'all',
     newPairPreset: 'push-copy',
     pairOpen: {},
+    pairSelection: {},
     settingsTab: 'general',
     testResults: {},
     configValidation: { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true },
@@ -947,6 +948,58 @@ function app() {
       pair.max_delete ??= 100;
       if (Array.isArray(pair.rclone_args)) pair.rclone_args = pair.rclone_args.join('\n');
       else pair.rclone_args ||= '';
+    },
+
+    togglePairSelection(name) {
+      if (!name) return;
+      if (this.pairSelection[name]) delete this.pairSelection[name];
+      else this.pairSelection[name] = true;
+    },
+
+    clearPairSelection() {
+      this.pairSelection = {};
+    },
+
+    selectedPairNames() {
+      return Object.keys(this.pairSelection).filter((name) => this.pairSelection[name]);
+    },
+
+    selectedPairCount() {
+      return this.selectedPairNames().length;
+    },
+
+    async bulkPairAction(action) {
+      const names = this.selectedPairNames();
+      if (!names.length) return;
+      if (this.configDirty) {
+        this.showToast('Bitte zuerst ungespeicherte Änderungen speichern', 'warn');
+        return;
+      }
+      const revision = this.config?._revision;
+      if (!revision) {
+        this.showToast('Konfiguration nicht geladen', 'err');
+        return;
+      }
+      const result = await this.api(
+        'POST', '/api/config/pairs/bulk',
+        { names, action, revision },
+        { captureError: true, silent: true },
+      );
+      if (result?.__error) {
+        const detail = typeof result.detail === 'string'
+          ? result.detail
+          : (result.detail?.message || 'Bulk-Aktion fehlgeschlagen');
+        this.showToast(detail, 'err');
+        if (result.status === 409) await this.loadConfig();
+        return;
+      }
+      if (!result?.ok) return;
+      this.config = result.config || this.config;
+      this.clearPairSelection();
+      const verb = action === 'enable' ? 'aktiviert' : 'deaktiviert';
+      this.showToast(`${result.changed} Pair(e) ${verb}`);
+      await this.loadConfig();
+      this.loadOverview(true);
     },
 
     configPayload() {
