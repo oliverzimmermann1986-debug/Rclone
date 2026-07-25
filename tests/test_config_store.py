@@ -29,6 +29,12 @@ def test_config_store_reloads_external_changes(tmp_path: Path):
     path.write_text("value: 1\n", encoding="utf-8")
     store = Config(path)
     path.write_text("value: 2\n", encoding="utf-8")
+    # Reload wird über st_mtime_ns getriggert. Zwei schnelle Schreibvorgänge
+    # können sich unter Windows denselben mtime-Tick teilen; eine distinkte,
+    # spätere mtime erzwingt den Trigger deterministisch (wie ein echter
+    # externer Edit, der stets eine spätere mtime hat).
+    bumped = os.stat(path).st_mtime_ns + 1_000_000
+    os.utime(path, ns=(bumped, bumped))
     assert store.get("value") == 2
 
 
