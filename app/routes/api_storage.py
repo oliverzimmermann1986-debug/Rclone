@@ -76,6 +76,18 @@ def _rclone_size(remote: str, timeout: int = 45) -> dict[str, Any]:
         return {"remote": remote, "error": str(exc)}
 
 
+def _resolve_endpoints(pair: dict[str, Any]) -> tuple[str, str]:
+    """Löst Quelle/Ziel eines Pairs anhand der Richtung auf (wie die GUI-Anzeige).
+
+    pull: Remote -> lokal (Quelle=Remote, Ziel=lokal). push/bisync: lokal -> Remote.
+    """
+    local = str(pair.get("local") or "")
+    remote = str(pair.get("remote") or "")
+    if str(pair.get("direction") or "").lower() == "pull":
+        return remote, local
+    return local, remote
+
+
 def _last_success_by_pair() -> dict[str, dict[str, Any]]:
     found: dict[str, dict[str, Any]] = {}
     for name, result in get_db().pair_last_successes().items():
@@ -95,10 +107,14 @@ def overview(include_remote: bool = False) -> dict[str, Any]:
     for pair in pairs:
         local = str(pair.get("local") or "")
         name = str(pair.get("name") or "")
+        source, target = _resolve_endpoints(pair)
         info: dict[str, Any] = {
             "name": name,
             "local": local,
             "remote": pair.get("remote"),
+            "direction": pair.get("direction", ""),
+            "source": source,
+            "target": target,
             "schedule": pair.get("schedule", ""),
             "local_disk": _disk_usage(local)
             if local and not _is_remote(local)
@@ -107,22 +123,29 @@ def overview(include_remote: bool = False) -> dict[str, Any]:
         }
         output.append(info)
 
+    # Größen für Quelle UND Ziel jedes Pairs sind teuer (rclone size traversiert
+    # beide Endpunkte). Daher nur auf ausdrückliche Anforderung und parallelisiert.
     if include_remote and output:
-        workers = min(4, max(1, len(output)))
+        tasks: list[tuple[int, str]] = []
+        for index, item in enumerate(output):
+            tasks.append((index, "source"))
+            tasks.append((index, "target"))
+        workers = min(6, max(1, len(tasks)))
         with ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="remote-size"
+            max_workers=workers, thread_name_prefix="pair-size"
         ) as pool:
             futures = {
-                pool.submit(_rclone_size, str(item.get("remote") or "")): index
-                for index, item in enumerate(output)
+                pool.submit(_rclone_size, str(output[index].get(side) or "")): (index, side)
+                for index, side in tasks
             }
             for future in as_completed(futures):
-                index = futures[future]
+                index, side = futures[future]
+                key = f"{side}_size"
                 try:
-                    output[index]["remote_size"] = future.result()
+                    output[index][key] = future.result()
                 except Exception as exc:
-                    output[index]["remote_size"] = {
-                        "remote": output[index].get("remote"),
+                    output[index][key] = {
+                        "path": output[index].get(side),
                         "error": str(exc),
                     }
     return {"pairs": output}

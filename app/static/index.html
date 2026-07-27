@@ -322,7 +322,7 @@
               <option value="all">Alle Pairs</option><option value="enabled">Nur aktiv</option><option value="disabled">Nur deaktiviert</option><option value="issues">Mit Hinweisen</option><option value="destructive">Mirror / Bi-Sync</option>
             </select>
             <div class="pair-template-action"><select x-model="newPairPreset" aria-label="Vorlage für neues Pair"><option value="push-copy">Backup: Lokaler Pfad → Remote-Pfad (Copy)</option><option value="pull-copy">Restore: Remote-Pfad → Lokaler Pfad (Copy)</option><option value="bisync">Bidirektional (Bi-Sync)</option><option value="push-sync">Mirror: Lokaler Pfad → Remote-Pfad (Sync)</option><option value="pbs">Backup: Lokale Pfade → Proxmox Backup Server</option></select><button class="button secondary small" @click="addPair(newPairPreset)">Aus Vorlage</button></div>
-            <div class="toolbar-actions"><button class="button ghost small" @click="setAllPairsOpen(true)">Alle öffnen</button><button class="button ghost small" @click="setAllPairsOpen(false)">Alle schließen</button></div>
+            <div class="toolbar-actions"><button class="button ghost small" @click="setAllPairsOpen(true)">Alle öffnen</button><button class="button ghost small" @click="setAllPairsOpen(false)">Alle schließen</button><button class="button ghost small" @click="loadPairSizes()" :disabled="storageLoading" x-text="storageLoading ? 'Berechne…' : 'Größen berechnen'"></button></div>
             <div class="toolbar-meta"><span x-text="visiblePairCount()"></span> von <span x-text="config.backup.pairs.length"></span></div>
           </div>
 
@@ -370,6 +370,12 @@
                 <div class="pair-warning-row" x-show="pairIssues(pair).length || pairRuntimeIssue(pair)">
                   <template x-for="issue in pairIssues(pair)" :key="issue"><span class="issue-chip" x-text="issue"></span></template>
                   <span class="issue-chip" :class="pairRuntimeIssueLevel(pair)" x-show="pairRuntimeIssue(pair)" x-text="pairRuntimeIssue(pair)"></span>
+                </div>
+
+                <div class="pair-size-row" x-show="pairSize(pair.name)" x-cloak>
+                  <span class="pair-size-cell"><small>Quelle</small><strong x-text="pairSizeText(pair.name, 'source')"></strong></span>
+                  <span class="pair-size-arrow" aria-hidden="true">→</span>
+                  <span class="pair-size-cell"><small>Ziel</small><strong x-text="pairSizeText(pair.name, 'target')"></strong></span>
                 </div>
 
                 <div class="pair-quick-actions">
