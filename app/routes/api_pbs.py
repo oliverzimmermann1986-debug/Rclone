@@ -224,7 +224,9 @@ def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
             get_db().job_finish(job_id, "error", {"ok": False, "error": str(exc)})
         except Exception:
             logger.exception("PBS-Thread-Startfehler konnte nicht gespeichert werden")
-        raise HTTPException(500, f"PBS-Job konnte nicht gestartet werden: {exc}") from exc
+        raise HTTPException(
+            500, f"PBS-Job konnte nicht gestartet werden: {exc}"
+        ) from exc
     _audit_best_effort(
         "pbs_requested",
         {"job_id": job_id, "targets": targets_filter or sorted(targets)},

@@ -9,12 +9,15 @@ from app.routes import api_diagnostics
 def _fake_run(stdout):
     def run(*args, **kwargs):
         return SimpleNamespace(stdout=stdout, stderr="")
+
     return run
 
 
 def test_current_version_is_ok(monkeypatch):
     monkeypatch.setattr(api_diagnostics, "rclone_subprocess_env", lambda: {})
-    monkeypatch.setattr(subprocess, "run", _fake_run("rclone v1.70.0\n- os/version: debian"))
+    monkeypatch.setattr(
+        subprocess, "run", _fake_run("rclone v1.70.0\n- os/version: debian")
+    )
     result = api_diagnostics._rclone_version_check()
     assert result["level"] == "ok"
     assert result["version"] == "1.70.0"
