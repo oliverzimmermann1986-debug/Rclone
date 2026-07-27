@@ -1022,6 +1022,8 @@ html[data-density="compact"] .table th, html[data-density="compact"] .table td {
   gap: 14px;
   margin-bottom: 20px;
 }
+.hero-status > div { flex: 1 1 auto; min-width: 0; }
+.hero-status .section-kicker { margin-bottom: 2px; }
 .hero-status .status-dot.large {
   margin-top: 6px;
 }
@@ -1135,3 +1137,33 @@ html[data-density="compact"] .table th, html[data-density="compact"] .table td {
 .settings-section {
   padding: 24px;
 }
+
+/* ============================================================
+   Phase 2 – Icon-System (Unicode → SVG, Lucide-Stil)
+   ============================================================ */
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15em;
+  height: 1.15em;
+  flex-shrink: 0;
+}
+.icon svg {
+  width: 100%;
+  height: 100%;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.nav-icon .icon,
+.main-nav .icon { width: 18px; height: 18px; }
+.icon-button .icon { width: 18px; height: 18px; }
+.theme-button .icon { width: 16px; height: 16px; }
+.mobile-nav .icon { width: 20px; height: 20px; }
+.action-icon .icon { width: 20px; height: 20px; }
+
+/* Hero-Statuspunkt prominenter */
+.hero-status .status-dot.large { width: 14px; height: 14px; border-radius: 999px; }

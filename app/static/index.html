@@ -26,20 +26,20 @@
 
       <nav class="main-nav" aria-label="Hauptnavigation">
         <button :class="page==='dashboard' && 'active'" :aria-current="page==='dashboard' ? 'page' : null" @click="navigate('dashboard')">
-          <span class="nav-icon">⌂</span><span>Übersicht</span>
+          <span class="nav-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span></span><span>Übersicht</span>
         </button>
         <button :class="page==='pairs' && 'active'" :aria-current="page==='pairs' ? 'page' : null" @click="navigate('pairs')">
-          <span class="nav-icon">⇄</span><span>Sync-Paare</span>
+          <span class="nav-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg></span></span><span>Sync-Paare</span>
           <span class="nav-count" x-text="overview.data?.pairs?.enabled ?? '—'"></span>
         </button>
         <button :class="page==='jobs' && 'active'" :aria-current="page==='jobs' ? 'page' : null" @click="navigate('jobs')">
-          <span class="nav-icon">◷</span><span>Jobhistorie</span>
+          <span class="nav-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></span></span><span>Jobhistorie</span>
         </button>
         <button :class="page==='doctor' && 'active'" :aria-current="page==='doctor' ? 'page' : null" @click="navigate('doctor')">
-          <span class="nav-icon">✚</span><span>System & Diagnose</span>
+          <span class="nav-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span></span><span>System & Diagnose</span>
         </button>
         <button :class="page==='settings' && 'active'" :aria-current="page==='settings' ? 'page' : null" @click="navigate('settings')">
-          <span class="nav-icon">⚙</span><span>Einstellungen</span>
+          <span class="nav-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span></span><span>Einstellungen</span>
         </button>
       </nav>
 
@@ -53,7 +53,7 @@
         </div>
         <div class="sidebar-meta">
           <span x-text="overview.data?.system?.virtualization || '—'"></span>
-          <span x-text="'v' + (overview.data?.app?.version || '2.1.0')"></span>
+          <span x-text="'v' + (overview.data?.app?.version || '2.1.1')"></span>
         </div>
       </div>
     </aside>
@@ -61,7 +61,7 @@
     <div class="workspace">
       <header class="topbar">
         <div class="topbar-left">
-          <button class="icon-button mobile-menu" @click="navOpen=!navOpen" :aria-expanded="navOpen" aria-controls="main-sidebar" :aria-label="navOpen ? 'Navigation schließen' : 'Navigation öffnen'">☰</button>
+          <button class="icon-button mobile-menu" @click="navOpen=!navOpen" :aria-expanded="navOpen" aria-controls="main-sidebar" :aria-label="navOpen ? 'Navigation schließen' : 'Navigation öffnen'"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/></svg></span></button>
           <div>
             <div class="eyebrow">rclone-sync</div>
             <h1 x-text="pageTitle()"></h1>
@@ -71,12 +71,12 @@
           <span class="connection-badge" :class="connectionState" :title="connectionMessage" role="status" aria-live="polite">
             <span aria-hidden="true"></span><span x-text="connectionLabel()"></span>
           </span>
-          <button class="icon-button" @click="refreshAll(true)" :disabled="refreshing" :title="refreshing ? 'Aktualisierung läuft' : 'Aktualisieren'" :aria-label="refreshing ? 'Aktualisierung läuft' : 'Aktualisieren'">↻</button>
-          <button class="theme-button density-button" @click="toggleDensity()" :title="density === 'compact' ? 'Komfortable Ansicht' : 'Kompakte Ansicht'" aria-label="Darstellungsdichte umschalten"><span aria-hidden="true">≡</span><span x-text="density === 'compact' ? 'Kompakt' : 'Komfort'"></span></button>
+          <button class="icon-button" @click="refreshAll(true)" :disabled="refreshing" :title="refreshing ? 'Aktualisierung läuft' : 'Aktualisieren'" :aria-label="refreshing ? 'Aktualisierung läuft' : 'Aktualisieren'"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></span></button>
+          <button class="theme-button density-button" @click="toggleDensity()" :title="density === 'compact' ? 'Komfortable Ansicht' : 'Kompakte Ansicht'" aria-label="Darstellungsdichte umschalten"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></svg></span><span x-text="density === 'compact' ? 'Kompakt' : 'Komfort'"></span></button>
           <button class="theme-button" @click="cycleTheme()" :title="'Darstellung: ' + themeLabel()">
-            <span aria-hidden="true">◐</span><span x-text="themeLabel()"></span>
+            <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20z"/></svg></span><span x-text="themeLabel()"></span>
           </button>
-          <button class="icon-button" @click="logout()" title="Abmelden" aria-label="Abmelden">↪</button>
+          <button class="icon-button" @click="logout()" title="Abmelden" aria-label="Abmelden"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg></span></button>
         </div>
       </header>
 
@@ -178,11 +178,13 @@
           </article>
 
           <div class="dashboard-grid">
-            <article class="panel control-panel">
-              <div class="panel-head">
+            <article class="hero-panel control-panel">
+              <div class="hero-status">
+                <span class="status-dot large" :class="busy() ? 'running' : 'ok'"></span>
                 <div>
                   <span class="section-kicker">Sicherungssteuerung</span>
-                  <h3 x-text="busy() ? (runningKind() + ' läuft') : 'Bereit für den nächsten Lauf'"></h3>
+                  <strong x-text="busy() ? (runningKind() + ' läuft') : 'Bereit für den nächsten Lauf'"></strong>
+                  <small x-text="busy() ? 'Ein Sync läuft — den Fortschritt siehst du unten.' : 'Alle aktiven Pairs folgen ihrem Zeitplan. Du kannst jederzeit manuell starten.'"></small>
                 </div>
                 <span class="badge" :class="busy() ? 'running' : 'ok'" x-text="busy() ? 'Aktiv' : 'Bereit'"></span>
               </div>
@@ -190,15 +192,15 @@
               <template x-if="!busy()">
                 <div class="safe-actions hero-actions">
                   <button class="action-tile recommended" @click="runBackup(true)" :disabled="pending.backup">
-                    <span class="action-icon">✓</span>
+                    <span class="action-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span></span>
                     <span><strong>Dry-Run</strong><small>Änderungen prüfen, nichts schreiben</small></span>
                   </button>
                   <button class="action-tile" @click="loadPlan(true)" :disabled="pending.plan">
-                    <span class="action-icon">≡</span>
+                    <span class="action-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></svg></span></span>
                     <span><strong>Ausführungsplan</strong><small>Befehle und Warnungen ansehen</small></span>
                   </button>
                   <button class="action-tile danger-zone" @click="runBackup(false)" :disabled="pending.backup">
-                    <span class="action-icon">▶</span>
+                    <span class="action-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg></span></span>
                     <span><strong>Produktiv starten</strong><small>Aktive Pairs wirklich ausführen</small></span>
                   </button>
                 </div>
@@ -804,11 +806,11 @@
       </main>
 
       <nav class="mobile-nav" aria-label="Mobile Navigation">
-        <button :class="page==='dashboard' && 'active'" :aria-current="page==='dashboard' ? 'page' : null" @click="navigate('dashboard')"><span aria-hidden="true">⌂</span><small>Übersicht</small></button>
-        <button :class="page==='pairs' && 'active'" :aria-current="page==='pairs' ? 'page' : null" @click="navigate('pairs')"><span aria-hidden="true">⇄</span><small>Pairs</small></button>
-        <button class="mobile-run" @click="runBackup(true)" :disabled="busy()"><span>▶</span><small>Dry-Run</small></button>
-        <button :class="page==='jobs' && 'active'" :aria-current="page==='jobs' ? 'page' : null" @click="navigate('jobs')"><span aria-hidden="true">◷</span><small>Jobs</small></button>
-        <button :class="page==='doctor' && 'active'" :aria-current="page==='doctor' ? 'page' : null" @click="navigate('doctor')"><span aria-hidden="true">✚</span><small>System</small></button>
+        <button :class="page==='dashboard' && 'active'" :aria-current="page==='dashboard' ? 'page' : null" @click="navigate('dashboard')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span><small>Übersicht</small></button>
+        <button :class="page==='pairs' && 'active'" :aria-current="page==='pairs' ? 'page' : null" @click="navigate('pairs')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg></span><small>Pairs</small></button>
+        <button class="mobile-run" @click="runBackup(true)" :disabled="busy()"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg></span><small>Dry-Run</small></button>
+        <button :class="page==='jobs' && 'active'" :aria-current="page==='jobs' ? 'page' : null" @click="navigate('jobs')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></span><small>Jobs</small></button>
+        <button :class="page==='doctor' && 'active'" :aria-current="page==='doctor' ? 'page' : null" @click="navigate('doctor')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span><small>System</small></button>
       </nav>
     </div>
   </div>
