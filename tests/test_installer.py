@@ -65,7 +65,7 @@ def test_installer_fails_closed_for_source_and_backup_paths():
     assert 'BACKUP_MARKER=".rclone-sync-backup-v1"' in script
     assert re.search(r"\^\[0-9\]\{8\}-\[0-9\]\{6\}\$", script)
     assert '[[ ! -L "$BACKUP_ROOT/$old/$BACKUP_MARKER" ]]' in script
-    assert 'rm -rf -- "$BACKUP_ROOT/$old"' in script
+    assert 'rm -rf -- "${BACKUP_ROOT:?}/$old"' in script
 
 
 def test_installer_persists_normalized_config_and_prepares_rclone_directory():

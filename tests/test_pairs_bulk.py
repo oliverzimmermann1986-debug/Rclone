@@ -37,7 +37,9 @@ def test_bulk_disable_only_changes_matching_pairs(tmp_path, monkeypatch):
     store, path = _store(tmp_path, monkeypatch)
     _, revision = store.snapshot_with_revision()
     result = api_config.pairs_bulk(
-        api_config.PairBulkAction(names=["Serien", "Filme"], action="disable", revision=revision),
+        api_config.PairBulkAction(
+            names=["Serien", "Filme"], action="disable", revision=revision
+        ),
         user="admin",
     )
     assert result["ok"] is True
@@ -54,7 +56,9 @@ def test_bulk_enable_counts_only_effective_changes(tmp_path, monkeypatch):
     _, revision = store.snapshot_with_revision()
     # Serien ist bereits enabled -> matched=2, changed=1 (nur Fotos wechselt)
     result = api_config.pairs_bulk(
-        api_config.PairBulkAction(names=["Serien", "Fotos"], action="enable", revision=revision),
+        api_config.PairBulkAction(
+            names=["Serien", "Fotos"], action="enable", revision=revision
+        ),
         user="admin",
     )
     assert result["matched"] == 2
@@ -66,7 +70,9 @@ def test_bulk_rejects_stale_revision(tmp_path, monkeypatch):
     store, _ = _store(tmp_path, monkeypatch)
     with pytest.raises(HTTPException) as exc:
         api_config.pairs_bulk(
-            api_config.PairBulkAction(names=["Serien"], action="disable", revision="0" * 64),
+            api_config.PairBulkAction(
+                names=["Serien"], action="disable", revision="0" * 64
+            ),
             user="admin",
         )
     assert exc.value.status_code == 409
@@ -77,7 +83,9 @@ def test_bulk_unknown_name_is_404(tmp_path, monkeypatch):
     _, revision = store.snapshot_with_revision()
     with pytest.raises(HTTPException) as exc:
         api_config.pairs_bulk(
-            api_config.PairBulkAction(names=["DoesNotExist"], action="disable", revision=revision),
+            api_config.PairBulkAction(
+                names=["DoesNotExist"], action="disable", revision=revision
+            ),
             user="admin",
         )
     assert exc.value.status_code == 404

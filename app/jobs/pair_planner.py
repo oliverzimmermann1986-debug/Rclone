@@ -51,4 +51,3 @@ def has_overlapping_pairs(pairs: list[dict[str, Any]]) -> bool:
         for index, first in enumerate(pairs)
         for second in pairs[index + 1 :]
     )
-

@@ -31,6 +31,8 @@ router = APIRouter(
 
 _MAX_ENTRIES = 1000
 _BLOCKED_NAMES = {".snapshot", ".zfs", "__pycache__", "$RECYCLE.BIN"}
+
+
 def _hidden_remote_paths() -> set[str]:
     return normalize_hidden_remote_paths(
         get_config().get(
@@ -250,7 +252,9 @@ def browse_local(path: str = "") -> dict[str, Any]:
     except PermissionError as exc:
         raise HTTPException(403, "Keine Leseberechtigung") from exc
     except OSError as exc:
-        raise HTTPException(500, f"Verzeichnis konnte nicht gelesen werden: {exc}") from exc
+        raise HTTPException(
+            500, f"Verzeichnis konnte nicht gelesen werden: {exc}"
+        ) from exc
 
     parent_path = target.parent.resolve()
     parent = (

@@ -232,9 +232,7 @@ def test_absent_security_fields_are_not_treated_as_change() -> None:
     new = {"web": {}}
     assert api_config._sensitive_config_changed(old, new) is False
     assert (
-        api_config._sensitive_config_changed(
-            old, {"web": {"login_max_failures": "10"}}
-        )
+        api_config._sensitive_config_changed(old, {"web": {"login_max_failures": "10"}})
         is False
     )
     assert (

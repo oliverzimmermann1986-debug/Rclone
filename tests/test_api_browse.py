@@ -40,9 +40,7 @@ def test_hidden_remote_path_cannot_be_opened_directly(monkeypatch):
 
 
 def test_dot_segments_cannot_bypass_hidden_path(monkeypatch):
-    monkeypatch.setattr(
-        api_browse, "_rclone_remotes", lambda: ["pcloud:"]
-    )
+    monkeypatch.setattr(api_browse, "_rclone_remotes", lambda: ["pcloud:"])
     monkeypatch.setattr(
         api_browse,
         "_hidden_remote_paths",
