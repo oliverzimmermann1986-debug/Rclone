@@ -38,6 +38,7 @@ function app() {
     status: { backup: null, check: null, quicksync: null, pbs: null },
     progress: null,
     sse: null,
+    storageLoading: false,
     recentJobs: [],
     jobs: {
       loading: false, items: [], total: 0, offset: 0, limit: 25,
@@ -1429,11 +1430,44 @@ function app() {
 
     async loadStorage(includeRemote = false) {
       const result = await this.api('GET', `/api/storage/overview${includeRemote ? '?include_remote=true' : ''}`, undefined, { silent: !includeRemote, timeoutMs: includeRemote ? 120000 : 30000 });
-      if (result?.pairs && this.overview.data) this.overview.data.storage_pairs = result.pairs;
+      // storage_pairs auch außerhalb des Dashboards ablegen: overview.data ist auf
+      // der Pairs-Seite noch null (loadOverview läuft nur dort). Alle Leser nutzen
+      // optionales Chaining, ein leeres Objekt ist daher unkritisch.
+      if (result?.pairs) {
+        if (!this.overview.data) this.overview.data = {};
+        this.overview.data.storage_pairs = result.pairs;
+      }
       return result;
     },
 
     storagePairs() { return this.overview.data?.storage_pairs || []; },
+
+    async loadPairSizes() {
+      if (this.storageLoading) return;
+      this.storageLoading = true;
+      try {
+        const result = await this.loadStorage(true);
+        if (result?.pairs) this.showToast('Dateizahl und Größe berechnet');
+        else this.showToast('Größen konnten nicht berechnet werden', 'warn');
+      } finally {
+        this.storageLoading = false;
+      }
+    },
+
+    pairSize(name) {
+      return this.storagePairs().find((entry) => entry.name === name) || null;
+    },
+
+    pairSizeText(name, side) {
+      const entry = this.pairSize(name);
+      if (!entry) return '';
+      const size = entry[`${side}_size`];
+      if (!size) return '—';
+      if (size.error) return 'nicht ermittelbar';
+      const count = size.count ?? null;
+      const files = count === null ? '? Dateien' : `${count} ${count === 1 ? 'Datei' : 'Dateien'}`;
+      return `${files} · ${this.formatBytes(size.bytes || 0)}`;
+    },
 
     openPicker(mode, idx) {
       this.picker = { show: true, mode, idx, current: '', parent: null, entries: [], loading: true, search: '', error: '' };

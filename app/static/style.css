@@ -325,6 +325,11 @@ input[type="checkbox"] { width: 16px; height: 16px; min-height: 0; padding: 0; a
 .pair-card-top { display: flex; align-items: stretch; min-height: 68px; }
 .pair-select { display: flex; flex: 0 0 40px; align-items: center; justify-content: center; cursor: pointer; border-right: 1px solid var(--border); }
 .pair-select input { width: 16px; height: 16px; cursor: pointer; }
+.pair-size-row { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-top: 1px solid var(--border); font-size: 11px; }
+.pair-size-cell { display: flex; flex-direction: column; }
+.pair-size-cell small { color: var(--text-faint); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
+.pair-size-cell strong { color: var(--text-soft); font-size: 12px; }
+.pair-size-arrow { color: var(--text-faint); }
 .pair-expand { display: grid; grid-template-columns: 10px minmax(180px, .65fr) minmax(220px, 1fr) 20px; align-items: center; gap: 13px; flex: 1; min-width: 0; padding: 12px 16px; border: 0; color: var(--text); background: transparent; text-align: left; cursor: pointer; }
 .pair-expand:hover { background: var(--surface-2); }
 .pair-title { min-width: 0; }
