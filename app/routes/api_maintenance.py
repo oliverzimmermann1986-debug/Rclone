@@ -341,7 +341,9 @@ def restore_config_snapshot(
     except FileNotFoundError as exc:
         raise HTTPException(404, "Snapshot nicht gefunden") from exc
     except OSError as exc:
-        raise HTTPException(400, f"Snapshot konnte nicht geöffnet werden: {exc}") from exc
+        raise HTTPException(
+            400, f"Snapshot konnte nicht geöffnet werden: {exc}"
+        ) from exc
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_SNAPSHOT_BYTES:
@@ -362,7 +364,9 @@ def restore_config_snapshot(
         normalized, warnings = validate_config(loaded)
     except (UnicodeError, yaml.YAMLError, ConfigValidationError, ValueError) as exc:
         errors = exc.errors if isinstance(exc, ConfigValidationError) else [str(exc)]
-        raise HTTPException(422, {"message": "Snapshot ist ungültig", "errors": errors}) from exc
+        raise HTTPException(
+            422, {"message": "Snapshot ist ungültig", "errors": errors}
+        ) from exc
 
     store = get_config()
     current, revision = store.snapshot_with_revision()

@@ -31,7 +31,9 @@ def test_overview_without_sizes_skips_rclone(monkeypatch):
     pairs = [{"name": "A", "local": "/mnt/a", "remote": "gd:a", "direction": "pull"}]
     monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig(pairs))
     monkeypatch.setattr(api_storage, "get_db", lambda: _FakeDB())
-    monkeypatch.setattr(api_storage, "_disk_usage", lambda p: {"path": p, "exists": True})
+    monkeypatch.setattr(
+        api_storage, "_disk_usage", lambda p: {"path": p, "exists": True}
+    )
 
     def _boom(*a, **k):
         raise AssertionError("rclone size darf ohne include_remote nicht laufen")
@@ -49,8 +51,13 @@ def test_overview_with_sizes_populates_both_sides(monkeypatch):
     monkeypatch.setattr(api_storage, "get_db", lambda: _FakeDB())
     monkeypatch.setattr(api_storage, "_disk_usage", lambda p: None)
 
-    sizes = {"/mnt/a": {"count": 12, "bytes": 2048}, "gd:a": {"count": 9, "bytes": 1024}}
-    monkeypatch.setattr(api_storage, "_rclone_size", lambda path, **k: {"path": path, **sizes[path]})
+    sizes = {
+        "/mnt/a": {"count": 12, "bytes": 2048},
+        "gd:a": {"count": 9, "bytes": 1024},
+    }
+    monkeypatch.setattr(
+        api_storage, "_rclone_size", lambda path, **k: {"path": path, **sizes[path]}
+    )
 
     result = api_storage.overview(include_remote=True)
     item = result["pairs"][0]

@@ -135,7 +135,10 @@ def overview(include_remote: bool = False) -> dict[str, Any]:
             max_workers=workers, thread_name_prefix="pair-size"
         ) as pool:
             futures = {
-                pool.submit(_rclone_size, str(output[index].get(side) or "")): (index, side)
+                pool.submit(_rclone_size, str(output[index].get(side) or "")): (
+                    index,
+                    side,
+                )
                 for index, side in tasks
             }
             for future in as_completed(futures):

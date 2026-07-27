@@ -386,7 +386,9 @@ def update_config(
 
 
 @router.post("/pairs/bulk")
-def pairs_bulk(body: PairBulkAction, user: str = Depends(require_auth)) -> dict[str, Any]:
+def pairs_bulk(
+    body: PairBulkAction, user: str = Depends(require_auth)
+) -> dict[str, Any]:
     """Aktiviert oder deaktiviert mehrere Pairs atomar anhand ihres Namens.
 
     Arbeitet auf dem gespeicherten Stand (keine ungespeicherten GUI-Entwürfe)
@@ -563,7 +565,9 @@ def change_password(
             "ascii"
         )
     except ValueError as exc:
-        raise HTTPException(400, f"Passwort kann nicht verarbeitet werden: {exc}") from exc
+        raise HTTPException(
+            400, f"Passwort kann nicht verarbeitet werden: {exc}"
+        ) from exc
 
     def updater(data: dict[str, Any]) -> None:
         web = data.setdefault("web", {})
@@ -583,7 +587,9 @@ def change_password(
         data_dir = Path(store.get("paths", "data_dir", default="/opt/rclone-sync/data"))
         (data_dir / ".initial-password").unlink(missing_ok=True)
     except (OSError, ValueError) as exc:
-        raise HTTPException(500, f"Passwort konnte nicht gespeichert werden: {exc}") from exc
+        raise HTTPException(
+            500, f"Passwort konnte nicht gespeichert werden: {exc}"
+        ) from exc
     _audit_best_effort("password_changed", actor=user, details={})
     return {"ok": True, "message": "Passwort geändert", "reauthenticate": True}
 
