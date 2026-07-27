@@ -72,7 +72,11 @@ def _rclone_version_check() -> dict[str, Any]:
         match = re.search(r"rclone\s+v?(\d+\.\d+\.\d+)", out, re.IGNORECASE)
         ver = match.group(1) if match else "unknown"
         if ver == "unknown":
-            return _warn("rclone-version", "rclone Version konnte nicht geparst werden", version=ver)
+            return _warn(
+                "rclone-version",
+                "rclone Version konnte nicht geparst werden",
+                version=ver,
+            )
 
         parts = [int(x) for x in ver.split(".")]
         major = parts[0]

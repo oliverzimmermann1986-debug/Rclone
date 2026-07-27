@@ -217,7 +217,7 @@ if [[ -d "$APP_DIR/data" || -d "/home/$APP_USER/.config/rclone" ]]; then
       [[ -f "$BACKUP_ROOT/$old/$BACKUP_MARKER" ]] || continue
       [[ ! -L "$BACKUP_ROOT/$old/$BACKUP_MARKER" ]] || continue
       [[ "$(< "$BACKUP_ROOT/$old/$BACKUP_MARKER")" == "rclone-sync-backup-v1" ]] || continue
-      rm -rf -- "$BACKUP_ROOT/$old"
+      rm -rf -- "${BACKUP_ROOT:?}/$old"
     done
   fi
 fi

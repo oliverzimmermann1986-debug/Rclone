@@ -641,7 +641,9 @@ def _validate_quick_paths(payload: QuickSyncPayload) -> tuple[str, str]:
             env=rclone_subprocess_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise HTTPException(503, f"rclone-Remotes konnten nicht geprüft werden: {exc}") from exc
+        raise HTTPException(
+            503, f"rclone-Remotes konnten nicht geprüft werden: {exc}"
+        ) from exc
     remotes = (
         {line.strip() for line in result.stdout.splitlines() if line.strip()}
         if result.returncode == 0
