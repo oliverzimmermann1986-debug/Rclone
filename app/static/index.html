@@ -188,7 +188,7 @@
               </div>
 
               <template x-if="!busy()">
-                <div class="safe-actions">
+                <div class="safe-actions hero-actions">
                   <button class="action-tile recommended" @click="runBackup(true)" :disabled="pending.backup">
                     <span class="action-icon">✓</span>
                     <span><strong>Dry-Run</strong><small>Änderungen prüfen, nichts schreiben</small></span>
@@ -388,6 +388,8 @@
                 </div>
 
                 <div class="pair-details" :id="`pair-details-${idx}`" x-show="pairOpen[idx]" x-cloak>
+                  <div class="pair-section">
+                  <h4 class="pair-section-title">Grundlagen</h4>
                   <div class="form-grid three">
                     <label class="field"><span>Name</span><input x-model="pair.name" placeholder="z. B. Fotos"></label>
                     <label class="field"><span>Sync-Art</span><select x-model="pair.two_way" @change="syncPairDirection(pair)"><option :value="false">Einweg: Quelle → Ziel</option><option :value="true">Bidirektional – beide Seiten angleichen</option></select></label>
@@ -399,6 +401,10 @@
                     <label class="field"><span x-text="pair.two_way ? 'Seite B · lokal oder Cloud' : 'Ziel · lokal, Cloud oder PBS'"></span><div class="input-action"><input class="mono" x-model="pair.target" @input="syncPairDirection(pair)" placeholder="/mnt/usb1/fotos oder pcloud:/Backup" :aria-label="pair.two_way ? 'Seite B' : 'Ziel'"><button @click.prevent="openPicker('target-remote', idx)" aria-label="Cloud-Remote als Ziel durchsuchen">Cloud</button><button @click.prevent="openPicker('target-local', idx)" aria-label="Lokalen Zielordner wählen">Lokal</button><button x-show="!pair.two_way" @click.prevent="convertPairToPbs(idx)" aria-label="Pair in PBS-Backup umwandeln">PBS</button></div></label>
                   </div>
 
+                  </div>
+
+                  <div class="pair-section">
+                  <h4 class="pair-section-title">Zeitplan & Löschschutz</h4>
                   <div class="form-grid three">
                     <label class="field pair-schedule-field"><span>Zeitplan</span><select x-model="pair.schedule" aria-label="Zeitplanvorlage"><option value="" x-text="'Standard übernehmen · ' + humanCron(config.backup.default_schedule)"></option><option value="manual">Nur manuell</option><option value="0 2 * * *">Täglich um 02:00 Uhr</option><option value="0 3 * * *">Täglich um 03:00 Uhr</option><option value="0 4 * * *">Täglich um 04:00 Uhr</option><option value="0 */6 * * *">Alle 6 Stunden</option><option value="0 */12 * * *">Alle 12 Stunden</option><option value="0 4 * * 0">Sonntag um 04:00 Uhr</option><option value="0 9 * * 1-5">Werktags um 09:00 Uhr</option><option value="*/15 * * * *">Alle 15 Minuten</option><option value="*/30 * * * *">Alle 30 Minuten</option><option value="0 * * * *">Stündlich</option><option value="custom">Eigene Cron-Angabe</option></select><input class="mono" x-show="!['','manual','0 2 * * *','0 3 * * *','0 4 * * *','0 */6 * * *','0 */12 * * *','0 4 * * 0','0 9 * * 1-5','*/15 * * * *','*/30 * * * *','0 * * * *'].includes(pair.schedule)" x-model="pair.schedule" placeholder="0 3 * * *" aria-label="Eigener Cron-Ausdruck"><small><strong x-text="pairScheduleLabel(pair)"></strong><span x-show="!pair.schedule"> · übernimmt den Standard aus Einstellungen</span></small></label>
                     <label class="field"><span>Transfers</span><input type="number" min="1" x-model="pair.transfers" placeholder="Globaler Wert"></label>
@@ -410,6 +416,10 @@
                     <label class="switch"><input type="checkbox" x-model="pair.allow_delete"><span></span><em>Löschungen freigeben</em></label>
                   </div>
 
+                  </div>
+
+                  <div class="pair-section">
+                  <h4 class="pair-section-title">Erweiterte Regeln</h4>
                   <details class="disclosure">
                     <summary>Mount-, Mindestbestands- und Filterregeln</summary>
                     <div class="disclosure-body">
@@ -432,6 +442,7 @@
                       <label class="field"><span>Zusätzliche Pair-rclone-Argumente</span><textarea class="mono" x-model="pair.rclone_args" rows="4" placeholder="Nur zusätzliche sichere Flags, eine pro Zeile"></textarea></label>
                     </div>
                   </details>
+                  </div>
 
                   <div class="test-result" x-show="testResults[idx]" :class="testResults[idx]?.ok ? 'ok' : 'error'">
                     <strong x-text="testResults[idx]?.message || testResults[idx]?.error || 'Test läuft…'"></strong><small x-show="testResults[idx]?.tested_unsaved">Aktueller GUI-Entwurf wurde geprüft.</small>
