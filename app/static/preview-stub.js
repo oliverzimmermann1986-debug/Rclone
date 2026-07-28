@@ -64,7 +64,9 @@
 
   window.app = function app() {
     return {
-      page: 'dashboard', navOpen: false, density: 'comfortable', theme: 'system',
+      // Seite über den Anker wählbar: _preview.html#pairs
+      page: (location.hash.replace('#', '') || 'dashboard'),
+      navOpen: false, density: 'comfortable', theme: 'system',
       connectionState: 'online', connectionMessage: 'Live-Verbindung aktiv', refreshing: false,
       overview: { loading: false, data: OVERVIEW },
       jobs: { items: JOBS, total: 1284, offset: 0, limit: 25, loading: false, error: '', q: '', kind: '', status: '' },
@@ -128,8 +130,8 @@
       },
       configLoaded: true, configLoading: false, configError: '', configDirty: false,
       configValidation: { loading: false, ok: true, errors: [], warnings: ['projekte-bisync: Bi-Sync ohne backup_dir'] },
-      pending: {}, pairOpen: {}, pairSearch: '', pairFilter: 'all', newPairPreset: 'push-copy',
-      selectedPairs: [], storageLoading: false, pairSizes: {},
+      pending: {}, pairOpen: { 0: true }, pairSearch: '', pairFilter: 'all', newPairPreset: 'push-copy',
+      selectedPairs: [], storageLoading: false, pairSizes: {}, pairSelection: {},
       settingsTab: 'general', settingsTabs: ['general', 'scheduler', 'security', 'notifications', 'filters', 'account', 'pbs'],
       scheduleEditor: { mode: 'daily' }, schedulePreview: { loading: false, valid: true, next: [] },
       schedulerControl: { enabled: true, paused: false, reason: '', until: null },
@@ -157,7 +159,12 @@
       auditLabel(t) { return t; },
       visiblePairCount() { return this.config.backup.pairs.length; },
       filteredPairs() { return this.config.backup.pairs; },
-      pairStatus() { return 'ok'; }, pairRuntimeIssueLevel() { return ''; },
+      pairVisible() { return true; },
+      pairIssues(p) { return p.mode === 'bisync' ? ['Bi-Sync ohne Versionsablage'] : []; },
+      pairRuntimeIssue(p) { return p.name === 'archiv-langzeit' ? '502 Bad Gateway' : ''; },
+      pairLastRun() { return { last_run: ts(620), next_run: ts(-680) }; },
+      pairSize() { return null; }, pairSizeText() { return '—'; },
+      pairStatus() { return 'ok'; }, pairRuntimeIssueLevel() { return 'error'; },
       directionLabel(p) { return `${p.local} → ${p.remote}`; },
       schedulerControlLabel() { return 'Scheduler aktiv'; },
       schedulerRiskLevel() { return 'ok'; },
