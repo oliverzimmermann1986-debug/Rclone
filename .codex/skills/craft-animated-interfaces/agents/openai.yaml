@@ -1,0 +1,4 @@
+interface:
+  display_name: "Craft Animated Interfaces"
+  short_description: "Design and motion direction for premium interfaces"
+  default_prompt: "Use $craft-animated-interfaces to design and polish a distinctive, accessible interface with purposeful motion."
