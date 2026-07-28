@@ -514,6 +514,67 @@ def find_due_pbs_targets(
     return due, status
 
 
+RESTORE_TEST_HISTORY_KEY = "restoretest:global"
+
+
+def restore_test_due(cfg, db, *, now: Optional[float] = None) -> Dict[str, Any]:
+    """Fälligkeit des Restore-Drills.
+
+    Der Drill läuft als ein Lauf über alle Pairs, nicht pro Pair — sonst
+    konkurrierten mehrere Drills um denselben Backup-Scope. Historie und
+    Retry-Backoff nutzen darum einen einzigen globalen Schlüssel.
+    """
+    from .restore_test import restore_test_settings
+
+    settings = restore_test_settings(cfg)
+    now_value = float(time.time() if now is None else now)
+    if not settings["enabled"]:
+        return {"due": False, "reason": "disabled"}
+    schedule = str(settings["schedule"] or "manual").strip()
+    if _is_disabled(schedule):
+        return {"due": False, "reason": f"schedule={schedule}"}
+    if not _is_valid_schedule(schedule):
+        return {"due": False, "reason": "invalid_schedule", "error": schedule}
+
+    backup = cfg.get("backup", default={}) or {}
+    timezone_name = str(backup.get("timezone") or DEFAULT_TIMEZONE)
+    retry_sec = (
+        _bounded_int(
+            backup.get("scheduler_retry_minutes", 60),
+            default=60,
+            minimum=1,
+            maximum=10080,
+        )
+        * 60
+    )
+    grace_minutes = _bounded_int(
+        backup.get("scheduler_grace_minutes", 15), default=15, minimum=1, maximum=1440
+    )
+    history = _load_history(db, {RESTORE_TEST_HISTORY_KEY: RESTORE_TEST_HISTORY_KEY})
+    try:
+        evaluation = _evaluate_due(
+            schedule,
+            history.get(RESTORE_TEST_HISTORY_KEY) or {},
+            history_key=RESTORE_TEST_HISTORY_KEY,
+            now=now_value,
+            timezone_name=timezone_name,
+            retry_sec=retry_sec,
+            grace_minutes=grace_minutes,
+            run_on_first_tick=False,
+        )
+    except Exception as exc:
+        return {"due": False, "error": str(exc)}
+    return {
+        "history_key": RESTORE_TEST_HISTORY_KEY,
+        "schedule": schedule,
+        "timezone": timezone_name,
+        "next_run": next_run_after(
+            schedule, after=now_value, timezone_name=timezone_name
+        ),
+        **evaluation,
+    }
+
+
 def next_run_after(
     schedule: str,
     *,

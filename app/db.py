@@ -17,10 +17,15 @@ _singleton_lock = threading.Lock()
 _SCHEMA_VERSION = 2
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
+# restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
+# sich aber bewusst den Backup-Scope: Ein Drill während eines laufenden Syncs
+# würde einen inkonsistenten Zwischenstand prüfen und Bandbreite streitig machen.
+_BACKUP_SCOPE_KINDS = ("backup", "check", "quicksync", "restoretest")
 _JOB_SCOPE_KINDS = {
-    "backup": ("backup", "check", "quicksync"),
-    "check": ("backup", "check", "quicksync"),
-    "quicksync": ("backup", "check", "quicksync"),
+    "backup": _BACKUP_SCOPE_KINDS,
+    "check": _BACKUP_SCOPE_KINDS,
+    "quicksync": _BACKUP_SCOPE_KINDS,
+    "restoretest": _BACKUP_SCOPE_KINDS,
     "pbs": ("pbs",),
 }
 

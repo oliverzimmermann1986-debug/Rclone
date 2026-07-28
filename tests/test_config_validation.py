@@ -151,3 +151,86 @@ def test_known_example_config_has_no_unknown_key_warnings(tmp_path: Path):
     cfg["web"].update({"secure_cookie": "auto", "hsts_seconds": 31536000})
     _data, warnings = validate_config(cfg)
     assert not [w for w in warnings if "Unbekannt" in w]
+
+
+def _pair(tmp_path: Path, **overrides) -> dict:
+    pair = {
+        "name": "Spiegel",
+        "remote": "wasabi:media-bk",
+        "local": str(tmp_path / "media"),
+        "direction": "push",
+        "mode": "sync",
+        "enabled": True,
+        "schedule": "0 2 * * *",
+    }
+    pair.update(overrides)
+    return pair
+
+
+def test_destructive_pair_without_backup_dir_warns(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [_pair(tmp_path)]
+    _clean, warnings = validate_config(cfg)
+    assert any("ohne backup_dir" in warning for warning in warnings)
+
+
+def test_copy_pair_without_backup_dir_is_silent(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [_pair(tmp_path, mode="copy")]
+    _clean, warnings = validate_config(cfg)
+    assert not any("backup_dir" in warning for warning in warnings)
+
+
+def test_backup_dir_inside_target_is_rejected(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [
+        _pair(tmp_path, backup_dir="wasabi:media-bk/.versions/{date}")
+    ]
+    with pytest.raises(ConfigValidationError) as excinfo:
+        validate_config(cfg)
+    assert any("überlappen" in error for error in excinfo.value.errors)
+
+
+def test_backup_dir_beside_target_is_accepted(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [
+        _pair(tmp_path, backup_dir="wasabi:media-bk-versions/{date}")
+    ]
+    clean, warnings = validate_config(cfg)
+    assert (
+        clean["backup"]["pairs"][0]["backup_dir"] == "wasabi:media-bk-versions/{date}"
+    )
+    assert not any("ohne backup_dir" in warning for warning in warnings)
+
+
+def test_backup_dir_rejects_traversal(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [_pair(tmp_path, backup_dir="../../etc/{date}")]
+    with pytest.raises(ConfigValidationError) as excinfo:
+        validate_config(cfg)
+    assert any("'..'" in error for error in excinfo.value.errors)
+
+
+def test_relative_backup_dir_on_destructive_pair_warns(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [_pair(tmp_path, backup_dir=".versions/{date}")]
+    _clean, warnings = validate_config(cfg)
+    assert any("relativ" in warning for warning in warnings)
+
+
+def test_bisync_backup_dirs_are_checked_per_side(tmp_path: Path):
+    local = tmp_path / "projekte"
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [
+        _pair(
+            tmp_path,
+            direction="bisync",
+            mode="bisync",
+            local=str(local),
+            backup_dir1=str(local / "versions"),
+            backup_dir2="gdrive:projekte-versions/{date}",
+        )
+    ]
+    with pytest.raises(ConfigValidationError) as excinfo:
+        validate_config(cfg)
+    assert any("backup_dir1" in error for error in excinfo.value.errors)

@@ -24,6 +24,7 @@ from ..auth import require_auth
 from ..config_store import get_config
 from ..db import JobAlreadyRunningError, get_db
 from ..jobs import rclone_sync as rclone_job
+from ..jobs import restore_test
 from ..jobs import runtime_state
 from ..jobs.job_lifecycle import BACKUP_KINDS, reconcile_locked_scope
 from ..jobs.locks import HeldFileLock, try_file_lock
@@ -401,11 +402,7 @@ def backup_plan(
 @router.post("/backup/cancel")
 def cancel_backup() -> dict[str, Any]:
     db = get_db()
-    running = (
-        db.job_running("backup")
-        or db.job_running("check")
-        or db.job_running("quicksync")
-    )
+    running = any(db.job_running(kind) for kind in BACKUP_KINDS)
     state = rclone_job.get_runtime_state() or {}
     if (
         not running
@@ -489,6 +486,76 @@ def check_pair(
         run_check,
         job_id=job_id,
         name=f"check-job-{job_id}",
+        scope_lock=scope_lock,
+    )
+    return {"ok": True, "job_id": job_id}
+
+
+@router.post("/backup/restore-test")
+def start_restore_test(pairs: Optional[str] = Query(None)) -> dict[str, Any]:
+    """Holt Stichproben aus dem Ziel zurück und vergleicht sie mit der Quelle.
+
+    Teilt sich den Backup-Scope, damit kein Drill gegen einen halb
+    geschriebenen Zwischenstand prüft.
+    """
+    pairs_filter = _parse_pair_filter(pairs)
+    known = _known_pair_names()
+    unknown = [name for name in (pairs_filter or []) if name not in known]
+    if unknown:
+        raise HTTPException(404, f"Pair nicht gefunden: {', '.join(unknown)}")
+    if not _locks["backup"].acquire(blocking=False):
+        raise HTTPException(409, "Backup, Check oder Drill läuft bereits")
+    job_id, scope_lock = _reserve_backup_job(restore_test.JOB_KIND)
+    _audit_best_effort(
+        "restore_test_requested",
+        actor="web",
+        details={"pairs": pairs_filter or []},
+    )
+
+    def run_drill() -> None:
+        db = None
+        handler: logging.FileHandler | None = None
+        worker_error: str | None = None
+        try:
+            db = get_db()
+            current = db.job_get(job_id) or {}
+            if current.get("status") != "running":
+                return
+            log_file, handler = _setup_job_logger(job_id, restore_test.JOB_KIND)
+            db.job_set_log_file(job_id, str(log_file))
+            result = restore_test.run_restore_test(
+                pairs_filter=pairs_filter,
+                trigger="manual",
+                reset_cancel_state=False,
+            )
+            db.job_finish(job_id, _finish_status(result), result)
+        except Exception as exc:
+            worker_error = str(exc)
+            logger.exception("Restore-Drill #%s fehlgeschlagen", job_id)
+        finally:
+            final_db = db
+            if final_db is None:
+                try:
+                    final_db = get_db()
+                except Exception:
+                    logger.exception(
+                        "DB konnte beim Drill-Abschluss nicht geöffnet werden"
+                    )
+            if final_db is not None and worker_error:
+                try:
+                    final_db.job_finish(job_id, "error", {"error": worker_error})
+                except Exception:
+                    logger.exception(
+                        "Drill-Fehlerstatus konnte nicht gespeichert werden"
+                    )
+            _remove_job_logger(handler)
+            scope_lock.release()
+            _locks["backup"].release()
+
+    _start_thread(
+        run_drill,
+        job_id=job_id,
+        name=f"restore-test-job-{job_id}",
         scope_lock=scope_lock,
     )
     return {"ok": True, "job_id": job_id}
