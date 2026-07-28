@@ -149,3 +149,39 @@ def test_schedule_preview_supports_manual_and_rejects_invalid_cron():
         assert exc.status_code == 422
     else:
         raise AssertionError("invalid cron must be rejected")
+
+
+def test_restore_test_rejects_unknown_pair_without_taking_lock(monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(api_jobs, "_known_pair_names", lambda: {"Fotos"})
+    try:
+        api_jobs.start_restore_test(pairs="Gibtsnicht")
+    except HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("unbekanntes Pair muss abgelehnt werden")
+    # Der Web-Lock darf beim frühen Abbruch nicht hängen bleiben.
+    assert api_jobs._locks["backup"].locked() is False
+
+
+def test_restore_test_lock_contention_returns_409(monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(api_jobs, "_known_pair_names", lambda: {"Fotos"})
+    assert api_jobs._locks["backup"].acquire(blocking=False)
+    try:
+        api_jobs.start_restore_test(pairs=None)
+    except HTTPException as exc:
+        assert exc.status_code == 409
+    else:
+        raise AssertionError("belegter Backup-Scope muss 409 liefern")
+    finally:
+        api_jobs._locks["backup"].release()
+
+
+def test_cancel_covers_every_backup_scope_kind():
+    from app.jobs.job_lifecycle import BACKUP_KINDS
+
+    # Ein laufender Restore-Drill muss abbrechbar sein.
+    assert "restoretest" in BACKUP_KINDS

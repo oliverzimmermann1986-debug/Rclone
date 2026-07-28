@@ -75,6 +75,7 @@ function app() {
 
     plan: { loading: false, data: null, dry_run: true },
     doctor: { loading: false, data: null },
+    copies: { loading: false, data: null },
     maintenance: { logs: [], loading: false, prune: null, database: null, logQuery: '' },
     filterFile: { content: '', path: '', revision: '', loading: false, dirty: false },
     pwChange: { current: '', new: '', confirm: '' },
@@ -293,7 +294,7 @@ function app() {
       } else if (page === 'jobs') {
         this.loadJobs(true);
       } else if (page === 'doctor') {
-        this.loadOverview(true); if (!configAlreadyLoaded) this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadSchedulerState(true);
+        this.loadOverview(true); if (!configAlreadyLoaded) this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadCopies(); this.loadSchedulerState(true);
       } else if (page === 'settings') {
         if (!configAlreadyLoaded) this.loadConfig(); this.loadFilterFile(); this.loadSchedulerState(true);
       }
@@ -941,6 +942,9 @@ function app() {
       if (pair.require_mountpoint === undefined) pair.require_mountpoint = false;
       pair.mountpoint ||= '';
       pair.sentinel_file ||= '';
+      pair.backup_dir ||= '';
+      pair.backup_dir1 ||= '';
+      pair.backup_dir2 ||= '';
       pair.exclude ||= '';
       pair.include ||= '';
       pair.filter ||= '';
@@ -1301,8 +1305,9 @@ function app() {
         direction: selected.direction, mode: selected.mode, two_way: selected.direction === 'bisync', min_local_files: 1,
         exclude: '.DS_Store\nThumbs.db', include: '', filter: '', rclone_args: '',
         transfers: '', checkers: '', max_delete: 100, allow_delete: false,
-        min_remote_files: 0, allow_empty_remote_target: false, min_free_gb: 0, max_success_age_hours: 0, require_mountpoint: false,
+        min_remote_files: 0, allow_empty_remote_target: false, min_free_gb: 0, max_success_age_hours: 48, require_mountpoint: false,
         mountpoint: '', sentinel_file: '',
+        backup_dir: '', backup_dir1: '', backup_dir2: '',
       };
       this.config.backup.pairs.push(pair);
       const idx = this.config.backup.pairs.length - 1;
@@ -1310,6 +1315,31 @@ function app() {
       this.configDirty = true;
       this.showToast(selected.mode === 'copy' ? 'Sichere Copy-Vorlage angelegt' : 'Deaktivierte Vorlage angelegt – Löschschutz prüfen', selected.mode === 'copy' ? 'ok' : 'warn');
       this.$nextTick(() => document.getElementById(`pair-${idx}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    },
+
+    // rclone bricht ab, wenn --backup-dir im Ziel liegt. Der Vorschlag setzt die
+    // Versionsablage daher als Geschwister neben das Ziel.
+    suggestedBackupDir(path) {
+      const value = String(path || '').trim().replace(/\/+$/, '');
+      if (!value) return '';
+      return `${value}-versions/{date}`;
+    },
+
+    applyBackupDirSuggestion(pair) {
+      if (pair.direction === 'bisync') {
+        pair.backup_dir1 ||= this.suggestedBackupDir(pair.local);
+        pair.backup_dir2 ||= this.suggestedBackupDir(pair.remote);
+      } else {
+        const target = pair.direction === 'pull' ? pair.local : pair.remote;
+        pair.backup_dir = this.suggestedBackupDir(target);
+      }
+      this.configDirty = true;
+    },
+
+    backupDirMissing(pair) {
+      const destructive = pair.two_way || pair.direction === 'bisync' || pair.mode === 'sync';
+      if (!destructive) return false;
+      return !(pair.backup_dir || pair.backup_dir1 || pair.backup_dir2);
     },
 
     clonePair(idx) {
@@ -1560,6 +1590,30 @@ function app() {
       if (this.isStale(result)) return;
       if (result) this.doctor.data = result;
       this.doctor.loading = false;
+    },
+
+    async loadCopies() {
+      this.copies.loading = true;
+      const result = await this.api('GET', '/api/diagnostics/copies', undefined, { requestKey: 'copies' });
+      if (this.isStale(result)) return;
+      if (result) this.copies.data = result;
+      this.copies.loading = false;
+    },
+
+    async runRestoreTest(pairName = '') {
+      const scope = pairName ? `Pair „${pairName}"` : 'alle aktiven Pairs';
+      if (!confirm(`Restore-Drill für ${scope} starten?\n\nEine Stichprobe wird vom Ziel zurückgeholt und per Prüfsumme mit der Quelle verglichen. Das erzeugt Egress-Kosten beim Anbieter. Die zurückgeholten Dateien werden nach dem Vergleich gelöscht.`)) return;
+      const query = pairName ? `?pairs=${encodeURIComponent(pairName)}` : '';
+      const result = await this.api('POST', `/api/jobs/backup/restore-test${query}`);
+      if (result?.ok) {
+        this.showToast('Restore-Drill gestartet', 'ok');
+        this.loadJobs(true);
+        this.loadOverview(true);
+      }
+    },
+
+    copyLevelLabel(level) {
+      return { ok: 'Ausreichend', warn: 'Prüfen', error: 'Kritisch' }[level] || level;
     },
 
     doctorCounts() {
@@ -1975,7 +2029,7 @@ function app() {
     },
 
     kindLabel(kind) {
-      return ({ backup: 'Backup', check: 'Check', quicksync: 'Quick-Sync', pbs: 'PBS-Backup' })[kind] || kind || 'Job';
+      return ({ backup: 'Backup', check: 'Check', quicksync: 'Quick-Sync', pbs: 'PBS-Backup', restoretest: 'Restore-Drill' })[kind] || kind || 'Job';
     },
 
     directionLabel(pair) {

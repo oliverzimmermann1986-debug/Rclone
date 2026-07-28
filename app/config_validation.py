@@ -61,6 +61,9 @@ _NOTIFICATION_EVENTS = {
     "conflict",
     "mount_check_failed",
     "cancelled",
+    "pair_overdue",
+    "restore_test_ok",
+    "restore_test_error",
 }
 
 
@@ -375,6 +378,62 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             integer=True,
         )
     )
+    overdue_alerts = backup.get("overdue_alerts")
+    if not isinstance(overdue_alerts, dict):
+        overdue_alerts = {}
+    backup["overdue_alerts"] = {
+        "enabled": _boolean(overdue_alerts.get("enabled", True)),
+        "repeat_hours": int(
+            _number(
+                overdue_alerts.get("repeat_hours", 24),
+                default=24,
+                minimum=1,
+                maximum=720,
+                integer=True,
+            )
+        ),
+    }
+    restore_test = backup.get("restore_test")
+    if not isinstance(restore_test, dict):
+        restore_test = {}
+    restore_schedule = str(restore_test.get("schedule") or "manual").strip()
+    if (
+        restore_schedule
+        and restore_schedule.lower() not in _DISABLED_SCHEDULES
+        and not _valid_cron(restore_schedule)
+    ):
+        errors.append(f"backup.restore_test.schedule ist ungültig: {restore_schedule}")
+    backup["restore_test"] = {
+        "enabled": _boolean(restore_test.get("enabled", False)),
+        "schedule": restore_schedule or "manual",
+        "sample_files": int(
+            _number(
+                restore_test.get("sample_files", 20),
+                default=20,
+                minimum=1,
+                maximum=500,
+                integer=True,
+            )
+        ),
+        "max_total_mb": int(
+            _number(
+                restore_test.get("max_total_mb", 256),
+                default=256,
+                minimum=1,
+                maximum=51_200,
+                integer=True,
+            )
+        ),
+        "max_scan_files": int(
+            _number(
+                restore_test.get("max_scan_files", 20_000),
+                default=20_000,
+                minimum=100,
+                maximum=1_000_000,
+                integer=True,
+            )
+        ),
+    }
     timezone = str(backup.get("timezone") or "Europe/Berlin").strip()
     try:
         from zoneinfo import ZoneInfo
@@ -531,6 +590,60 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             mode = "copy"
         pair["direction"] = direction
         pair["mode"] = mode
+
+        # Versionsablage: --backup-dir bewahrt überschriebene und gelöschte
+        # Dateien auf. Ohne sie repliziert ein sync/bisync eine Verschlüsselung
+        # oder Massenlöschung an der Quelle binnen eines Laufs zum Ziel — der
+        # Löschschutz greift dabei nicht, weil Dateien ersetzt statt gelöscht
+        # werden.
+        destructive = mode == "sync" or direction == "bisync"
+        for key in ("backup_dir", "backup_dir1", "backup_dir2"):
+            spec = str(pair.get(key) or "").strip()
+            if not spec:
+                pair[key] = ""
+                continue
+            if any(ch in spec for ch in ("\x00", "\r", "\n")):
+                errors.append(f"{label}.{key} enthält unzulässige Zeichen")
+                spec = ""
+            elif ".." in Path(spec.replace("{date}", "x")).parts:
+                errors.append(f"{label}.{key} darf kein '..' enthalten")
+                spec = ""
+            else:
+                # Nur absolute bzw. Remote-Angaben sind hier prüfbar; relative
+                # werden erst zur Laufzeit an die Zielwurzel gehängt.
+                probe = spec.replace("{date}", "0000-00-00T00-00-00")
+                if _is_remote(probe) or _is_absolute_local(probe):
+                    for endpoint, endpoint_label in (
+                        (remote, "remote"),
+                        (local, "local"),
+                    ):
+                        if endpoint and _paths_overlap(probe, endpoint):
+                            errors.append(
+                                f"{label}.{key} darf nicht mit {endpoint_label} "
+                                "überlappen — rclone bricht sonst ab"
+                            )
+                            break
+                elif destructive:
+                    warnings.append(
+                        f"{name}: {key} ist relativ und landet damit im Ziel selbst. "
+                        "rclone lehnt überlappende Verzeichnisse ab — einen Pfad "
+                        "neben dem Ziel angeben, z. B. "
+                        f"{(remote or 'ziel').rstrip('/')}-versions/{{date}}."
+                    )
+            pair[key] = spec
+        if (
+            destructive
+            and pair["enabled"]
+            and not any(
+                pair.get(key) for key in ("backup_dir", "backup_dir1", "backup_dir2")
+            )
+        ):
+            warnings.append(
+                f"{name}: {'Bi-Sync' if direction == 'bisync' else 'Mirror (sync)'} "
+                "ohne backup_dir — überschriebene und gelöschte Dateien sind sofort "
+                "unwiederbringlich. Eine Versionsablage neben dem Ziel setzen."
+            )
+
         pair_id = str(pair.get("id") or "").strip().lower()
         if not pair_id:
             identity = "\0".join(
