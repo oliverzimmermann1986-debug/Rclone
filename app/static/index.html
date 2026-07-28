@@ -53,7 +53,7 @@
         </div>
         <div class="sidebar-meta">
           <span x-text="overview.data?.system?.virtualization || '—'"></span>
-          <span x-text="'v' + (overview.data?.app?.version || '2.1.1')"></span>
+          <span x-text="'v' + (overview.data?.app?.version || '2.2.0')"></span>
         </div>
       </div>
     </aside>
@@ -437,6 +437,19 @@
                         <label class="field"><span>Sentinel-Datei relativ zum lokalen Pfad</span><input class="mono" x-model="pair.sentinel_file" placeholder=".rclone-sync-ready"></label>
                       </div>
                       <label class="check-row"><input type="checkbox" x-model="pair.require_mountpoint"><span><strong>Echten Mountpoint erzwingen</strong><small>Schützt davor, versehentlich in ein leeres lokales Verzeichnis zu synchronisieren.</small></span></label>
+
+                      <div class="inline-error" x-show="backupDirMissing(pair)" role="status">
+                        <span>Ohne Versionsablage sind überschriebene und gelöschte Dateien sofort weg — auch bei einer Verschlüsselung an der Quelle, die der Löschschutz nicht erkennt.</span>
+                        <button type="button" class="button secondary small" @click="applyBackupDirSuggestion(pair)">Versionsablage vorschlagen</button>
+                      </div>
+                      <div class="form-grid two" x-show="pair.direction !== 'bisync'">
+                        <label class="field"><span>Versionsablage (--backup-dir)</span><input class="mono" x-model="pair.backup_dir" :placeholder="suggestedBackupDir(pair.direction === 'pull' ? pair.local : pair.remote) || 'ziel-versions/{date}'"><small>Muss neben dem Ziel liegen, nicht darin. <code>{date}</code> wird durch den Startzeitpunkt ersetzt.</small></label>
+                      </div>
+                      <div class="form-grid two" x-show="pair.direction === 'bisync'">
+                        <label class="field"><span>Versionsablage Seite 1 (lokal)</span><input class="mono" x-model="pair.backup_dir1" :placeholder="suggestedBackupDir(pair.local) || 'lokal-versions/{date}'"></label>
+                        <label class="field"><span>Versionsablage Seite 2 (remote)</span><input class="mono" x-model="pair.backup_dir2" :placeholder="suggestedBackupDir(pair.remote) || 'remote-versions/{date}'"></label>
+                      </div>
+
                       <div class="form-grid two">
                         <label class="field"><span>Include-Patterns</span><textarea x-model="pair.include" rows="5" placeholder="+ *.jpg"></textarea></label>
                         <label class="field"><span>Exclude-Patterns</span><textarea x-model="pair.exclude" rows="5" placeholder="- .DS_Store"></textarea></label>
@@ -494,7 +507,7 @@
 
           <div class="toolbar panel slim jobs-toolbar">
             <label class="search-field job-search"><span aria-hidden="true">⌕</span><input id="job-search" x-model="jobs.q" @input.debounce.350ms="loadJobs(true)" placeholder="Pair, Fehler oder Job-ID" aria-label="Jobhistorie durchsuchen"></label>
-            <select x-model="jobs.kind" @change="loadJobs(true)" aria-label="Jobtyp filtern"><option value="">Alle Typen</option><option value="backup">Backup</option><option value="check">Check</option><option value="quicksync">Quick-Sync</option><option value="pbs">PBS-Backup</option></select>
+            <select x-model="jobs.kind" @change="loadJobs(true)" aria-label="Jobtyp filtern"><option value="">Alle Typen</option><option value="backup">Backup</option><option value="check">Check</option><option value="quicksync">Quick-Sync</option><option value="pbs">PBS-Backup</option><option value="restoretest">Restore-Drill</option></select>
             <select x-model="jobs.status" @change="loadJobs(true)" aria-label="Jobstatus filtern"><option value="">Alle Status</option><option value="running">Läuft</option><option value="ok">Erfolgreich</option><option value="error">Fehler</option><option value="skipped">Übersprungen</option><option value="cancelled">Abgebrochen</option><option value="stale">Verwaist</option></select>
             <select x-model.number="jobs.limit" @change="loadJobs(true)" aria-label="Jobs pro Seite"><option :value="25">25 pro Seite</option><option :value="50">50 pro Seite</option><option :value="100">100 pro Seite</option></select>
             <div class="toolbar-meta">Seite <span x-text="jobPage()"></span> von <span x-text="jobPages()"></span></div>
@@ -558,6 +571,45 @@
           </article>
 
           <article class="panel" x-show="!doctor.data && !doctor.loading"><div class="empty-state compact"><strong>Noch keine vollständige Prüfung</strong><span>Die Prüfung testet Konfiguration, rclone, systemd, Mountpoints, Sentinel-Dateien und Löschschutz.</span><button class="button primary" @click="loadDoctor()">Prüfung starten</button></div></article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div><span class="section-kicker">Abdeckung</span><h3>Kopien je Datenbestand</h3><p>Nach Quellpfad gruppiert statt nach Pair — beantwortet, ob jeder Bestand mehrfach, an getrennten Orten und versioniert liegt.</p></div>
+              <div class="heading-actions">
+                <button class="button secondary" @click="loadCopies()" :disabled="copies.loading" x-text="copies.loading ? 'Lädt…' : 'Aktualisieren'"></button>
+                <button class="button secondary" @click="runRestoreTest()" :disabled="busy()">Restore-Drill starten</button>
+              </div>
+            </div>
+
+            <div class="metric-grid small-metrics" x-show="copies.data">
+              <article class="metric-card"><div class="metric-head"><span>Datenbestände</span></div><strong class="metric-value" x-text="copies.data?.totals?.sources ?? '—'"></strong></article>
+              <article class="metric-card"><div class="metric-head"><span>Nur eine Kopie</span></div><strong class="metric-value" :class="(copies.data?.totals?.single_copy || 0) > 0 && 'error'" x-text="copies.data?.totals?.single_copy ?? '—'"></strong></article>
+              <article class="metric-card"><div class="metric-head"><span>Ohne Kopie außer Haus</span></div><strong class="metric-value" :class="(copies.data?.totals?.without_offsite || 0) > 0 && 'error'" x-text="copies.data?.totals?.without_offsite ?? '—'"></strong></article>
+              <article class="metric-card"><div class="metric-head"><span>Ohne Versionsablage</span></div><strong class="metric-value" :class="(copies.data?.totals?.without_versioning || 0) > 0 && 'error'" x-text="copies.data?.totals?.without_versioning ?? '—'"></strong></article>
+            </div>
+
+            <div class="table-scroll" x-show="(copies.data?.sources || []).length" tabindex="0" aria-label="Kopien je Datenbestand">
+              <table class="table">
+                <thead><tr><th>Quelle</th><th>Kopien</th><th>Speicherorte</th><th>Jüngste Kopie</th><th>Bewertung</th><th>Befunde</th></tr></thead>
+                <tbody>
+                  <template x-for="row in (copies.data?.sources || [])" :key="row.id">
+                    <tr>
+                      <td class="mono" x-text="row.source"></td>
+                      <td>
+                        <span x-text="row.copy_count"></span>
+                        <small class="dim" x-text="' (' + row.offsite_count + ' außer Haus)'"></small>
+                      </td>
+                      <td class="mono" x-text="(row.scopes || []).join(', ') || '—'"></td>
+                      <td x-text="row.newest_age_hours === null || row.newest_age_hours === undefined ? 'nie' : ('vor ' + row.newest_age_hours + ' Std.')"></td>
+                      <td><span class="badge compact" :class="row.level === 'ok' ? 'ok' : (row.level === 'error' ? 'error' : 'skipped')" x-text="copyLevelLabel(row.level)"></span></td>
+                      <td x-text="(row.findings || []).join(' · ') || '—'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <div class="empty-state compact" x-show="copies.data && !(copies.data?.sources || []).length"><strong>Keine aktiven Pairs</strong><span>Sobald ein Pair aktiv ist, erscheint sein Datenbestand hier.</span></div>
+          </article>
 
           <article class="panel">
             <div class="panel-head"><div><span class="section-kicker">Wartung</span><h3>Logs und Datenbank</h3></div><button class="button secondary" @click="loadDatabaseStatus(); loadLogs()">Aktualisieren</button></div>
@@ -762,7 +814,7 @@
                     <div class="webhook-card">
                       <div class="webhook-head"><label class="switch"><input type="checkbox" x-model="hook.enabled"><span></span><em x-text="hook.enabled ? 'Aktiv' : 'Aus'"></em></label><select x-model="hook.type"><option value="discord">Discord</option><option value="telegram">Telegram</option><option value="generic">Generic JSON</option></select><button class="button secondary" @click="testWebhook(idx)">Test</button><button class="icon-button danger" @click="config.notifications.webhooks.splice(idx,1);configDirty=true" aria-label="Webhook entfernen">×</button></div>
                       <label class="field"><span>Webhook-URL</span><input class="mono" x-model="hook.url" placeholder="Neue URL eingeben; gespeicherte URL bleibt maskiert"></label>
-                      <div class="event-grid"><template x-for="event in ['sync_started','sync_ok','sync_error','conflict','mount_check_failed','cancelled']" :key="event"><label><input type="checkbox" :checked="(hook.events||[]).includes(event)" @change="toggleHookEvent(hook,event)"><span x-text="event"></span></label></template></div>
+                      <div class="event-grid"><template x-for="event in ['sync_started','sync_ok','sync_error','conflict','mount_check_failed','cancelled','pair_overdue','restore_test_ok','restore_test_error']" :key="event"><label><input type="checkbox" :checked="(hook.events||[]).includes(event)" @change="toggleHookEvent(hook,event)"><span x-text="event"></span></label></template></div>
                     </div>
                   </template>
                   <div class="empty-state compact" x-show="!(config.notifications?.webhooks || []).length"><strong>Keine Webhooks</strong><span>Füge Discord, Telegram oder einen generischen JSON-Endpunkt hinzu.</span></div>
