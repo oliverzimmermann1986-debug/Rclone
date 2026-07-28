@@ -1,0 +1,1852 @@
+<!doctype html>
+<html lang="de" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rclone-sync — Redesign-Mockup</title>
+<style>
+/* ============================================================
+   rclone-sync — Redesign
+   Hell, luftig, ruhig. Farbe bedeutet ausschließlich Maschinenzustand.
+   ============================================================ */
+
+:root {
+  color-scheme: light;
+
+  --font-sans: "Geist", "Inter Tight", ui-sans-serif, system-ui, "Segoe UI Variable Display", "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  /* Neutrale Basis – hell, leicht kühl */
+  --bg:          #f6f7f9;
+  --surface:     #ffffff;
+  --surface-2:   #f2f4f6;
+  --surface-3:   #eaedf1;
+  --line:        #e6e9ed;
+  --line-soft:   #eef0f3;
+  --line-strong: #d3d8de;
+  --fg:          #171a1f;
+  --fg-2:        #5b636d;
+  --fg-3:        #8b939d;
+
+  /* Zustandsfarben – die einzigen Farben im Interface */
+  --ok:   #12855b;
+  --run:  #2f6feb;
+  --warn: #b06f00;
+  --err:  #d1293d;
+  --ok-bg:   #e9f7f1;
+  --run-bg:  #eaf1fe;
+  --warn-bg: #fdf3e3;
+  --err-bg:  #fdecee;
+
+  --radius:    9px;
+  --radius-lg: 13px;
+  --radius-sm: 6px;
+
+  --ease-out:    cubic-bezier(.23, 1, .32, 1);
+  --ease-in-out: cubic-bezier(.77, 0, .175, 1);
+
+  --shadow-sm: 0 1px 2px rgba(18, 24, 33, .04), 0 1px 3px rgba(18, 24, 33, .05);
+  --shadow-md: 0 2px 4px rgba(18, 24, 33, .04), 0 6px 16px -4px rgba(18, 24, 33, .09);
+  --shadow-lg: 0 8px 16px -4px rgba(18, 24, 33, .08), 0 24px 48px -12px rgba(18, 24, 33, .18);
+
+  --rail-h: 34px;
+  --side-w: 226px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  /* Angehobenes Dunkel – Graphit statt Schwarz */
+  --bg:          #16181d;
+  --surface:     #1d2026;
+  --surface-2:   #23272e;
+  --surface-3:   #2b3038;
+  --line:        #2c313a;
+  --line-soft:   #252931;
+  --line-strong: #3c424c;
+  --fg:          #eceef1;
+  --fg-2:        #a3abb6;
+  --fg-3:        #79818c;
+
+  --ok:   #46c48a;
+  --run:  #6ba4ff;
+  --warn: #e0a63c;
+  --err:  #ff7b7b;
+  --ok-bg:   #17352a;
+  --run-bg:  #1b2b47;
+  --warn-bg: #382a12;
+  --err-bg:  #3b1f24;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .3);
+  --shadow-md: 0 2px 4px rgba(0, 0, 0, .3), 0 8px 20px -6px rgba(0, 0, 0, .45);
+  --shadow-lg: 0 12px 24px -6px rgba(0, 0, 0, .5), 0 32px 64px -16px rgba(0, 0, 0, .6);
+}
+
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 13.5px/1.55 var(--font-sans);
+  letter-spacing: -.008em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+button, input, select, textarea { font: inherit; color: inherit; letter-spacing: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+h1, h2, h3, h4, p, dl, dd, dt { margin: 0; }
+table { border-collapse: collapse; width: 100%; }
+:where(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--run);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -.012em; }
+.label {
+  font: 600 10.5px/1 var(--font-sans);
+  letter-spacing: .085em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+.dim { color: var(--fg-3); }
+
+/* ---------- Zustandsanzeige ---------- */
+.led { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--fg-3); flex: none; }
+.led.ok   { background: var(--ok); }
+.led.run  { background: var(--run); animation: led-pulse 1.8s var(--ease-in-out) infinite; }
+.led.warn { background: var(--warn); }
+.led.err  { background: var(--err); }
+.led.idle { background: var(--fg-3); }
+.led.lg { width: 9px; height: 9px; }
+@keyframes led-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 9px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--fg-2);
+  font-size: 11.5px; font-weight: 500;
+  letter-spacing: -.005em; white-space: nowrap;
+}
+.chip.ok   { background: var(--ok-bg);   color: var(--ok); }
+.chip.run  { background: var(--run-bg);  color: var(--run); }
+.chip.warn { background: var(--warn-bg); color: var(--warn); }
+.chip.err  { background: var(--err-bg);  color: var(--err); }
+
+/* ============================================================
+   Statusleiste
+   ============================================================ */
+.rail {
+  position: sticky; top: 0; z-index: 30;
+  height: var(--rail-h);
+  display: flex; align-items: center; gap: 13px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  font: 400 11.5px/1 var(--font-mono);
+  color: var(--fg-2);
+}
+.rail-primary { display: inline-flex; align-items: center; gap: 7px; color: var(--fg); font-weight: 500; }
+.rail-sep { width: 1px; height: 13px; background: var(--line); flex: none; }
+.rail-spacer { margin-left: auto; }
+.rail b { font-weight: 500; color: var(--fg); }
+
+/* ============================================================
+   Shell
+   ============================================================ */
+.shell { display: grid; grid-template-columns: var(--side-w) 1fr; align-items: start; }
+
+.side {
+  position: sticky; top: var(--rail-h);
+  height: calc(100dvh - var(--rail-h));
+  display: flex; flex-direction: column;
+  padding: 16px 12px 14px;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+}
+.brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 18px; }
+.brand-mark {
+  display: grid; place-items: center;
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  background: var(--fg); color: var(--surface);
+  font: 600 11.5px/1 var(--font-mono);
+  flex: none;
+}
+.brand-name { font-size: 13.5px; font-weight: 550; letter-spacing: -.018em; }
+.brand-sub { display: block; margin-top: 1px; font: 400 10.5px/1 var(--font-mono); color: var(--fg-3); }
+
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav button {
+  display: grid; grid-template-columns: 1fr auto;
+  align-items: center; gap: 8px;
+  min-height: 33px; padding: 0 10px;
+  border-radius: var(--radius-sm);
+  color: var(--fg-2);
+  text-align: left;
+  transition: background 140ms var(--ease-out), color 140ms var(--ease-out);
+}
+.nav button:hover { color: var(--fg); background: var(--surface-2); }
+.nav button[aria-current="page"] { color: var(--fg); background: var(--surface-3); font-weight: 550; }
+.nav .count { font: 400 11.5px/1 var(--font-mono); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+
+.side-foot { margin-top: auto; padding: 14px 10px 0; border-top: 1px solid var(--line-soft); }
+.side-foot dl { display: grid; grid-template-columns: 1fr auto; gap: 6px 8px; font-size: 11.5px; }
+.side-foot dt { color: var(--fg-3); }
+.side-foot dd { font-family: var(--font-mono); color: var(--fg-2); text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ============================================================
+   Hauptbereich
+   ============================================================ */
+.main { min-width: 0; }
+.head {
+  position: sticky; top: var(--rail-h); z-index: 20;
+  display: flex; align-items: center; gap: 16px;
+  min-height: 60px; padding: 12px 26px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(10px);
+}
+h1 { font-size: 21px; font-weight: 550; letter-spacing: -.028em; }
+.head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+.body { padding: 26px 26px 72px; display: flex; flex-direction: column; gap: 34px; max-width: 1560px; }
+
+.sect { display: flex; flex-direction: column; gap: 13px; }
+.sect-head { display: flex; align-items: center; gap: 12px; }
+.sect-head .sect-tools { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+
+/* ============================================================
+   Buttons
+   ============================================================ */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 33px; padding: 0 13px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 500;
+  white-space: nowrap;
+  transition: background-color 140ms var(--ease-out), border-color 140ms var(--ease-out), color 140ms var(--ease-out), box-shadow 140ms var(--ease-out), opacity 140ms var(--ease-out);
+}
+.btn:active:not(:disabled) { transform: scale(.98); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.btn.primary { background: var(--fg); color: var(--surface); box-shadow: var(--shadow-sm); }
+.btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 86%, var(--bg)); }
+
+.btn.secondary { border-color: var(--line-strong); background: var(--surface); color: var(--fg); box-shadow: var(--shadow-sm); }
+.btn.secondary:hover:not(:disabled) { background: var(--surface-2); border-color: var(--fg-3); }
+
+.btn.ghost { color: var(--fg-2); }
+.btn.ghost:hover:not(:disabled) { color: var(--fg); background: var(--surface-2); }
+
+.btn.danger { border-color: color-mix(in srgb, var(--err) 36%, transparent); background: var(--surface); color: var(--err); }
+.btn.danger:hover:not(:disabled) { background: var(--err-bg); border-color: var(--err); }
+
+.btn.sm { height: 28px; padding: 0 10px; font-size: 12.5px; }
+.btn.icon { width: 33px; padding: 0; }
+.btn.icon.sm { width: 28px; }
+.btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ============================================================
+   Karte (eine einzige Container-Form)
+   ============================================================ */
+.card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+/* ============================================================
+   Messwert-Leiste
+   ============================================================ */
+.readouts {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+.ro { padding: 16px 20px 17px; border-left: 1px solid var(--line-soft); }
+.ro:first-child { border-left: 0; }
+.ro-v {
+  display: block; margin-top: 10px;
+  font: 400 28px/1 var(--font-mono);
+  letter-spacing: -.04em;
+  font-variant-numeric: tabular-nums;
+}
+.ro-v.ok { color: var(--ok); } .ro-v.err { color: var(--err); } .ro-v.warn { color: var(--warn); }
+.ro-v .unit { font-size: 15px; color: var(--fg-3); letter-spacing: -.01em; margin-left: 3px; }
+.ro-m { display: block; margin-top: 9px; font-size: 12px; color: var(--fg-3); line-height: 1.4; }
+.ro-m b { font-weight: 500; color: var(--fg-2); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.readouts.sm .ro-v { font-size: 22px; margin-top: 8px; }
+.readouts.sm .ro { padding: 13px 17px 14px; }
+
+/* ============================================================
+   Scheduler
+   ============================================================ */
+.scheduler {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+.scheduler-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.scheduler-text strong { font-size: 13.5px; font-weight: 550; }
+.scheduler-text span { font-size: 12.5px; color: var(--fg-2); }
+.scheduler .btn-group { margin-left: auto; display: flex; gap: 7px; }
+
+/* ============================================================
+   Live-Übertragung — der eine inszenierte Moment
+   ============================================================ */
+.transfer { position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-md); }
+.transfer.active::before {
+  content: ""; position: absolute; inset: 0 0 auto; height: 2px; z-index: 1;
+  background: linear-gradient(90deg, transparent, var(--run), transparent);
+  background-size: 40% 100%; background-repeat: no-repeat;
+  animation: sweep 2.8s var(--ease-in-out) infinite;
+}
+@keyframes sweep { from { background-position: -42% 0; } to { background-position: 142% 0; } }
+
+.transfer-head { display: flex; align-items: center; gap: 13px; padding: 15px 18px; border-bottom: 1px solid var(--line-soft); }
+.tf-title { display: flex; flex-direction: column; gap: 2px; }
+.tf-title strong { font-size: 13.5px; font-weight: 550; }
+.tf-meta { font-size: 12px; color: var(--fg-2); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.tf-right { margin-left: auto; display: flex; align-items: center; gap: 13px; }
+.tf-total { font-size: 12.5px; color: var(--fg-2); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.tf-rows { display: flex; flex-direction: column; }
+.tf-row { display: grid; grid-template-columns: 196px 1fr 84px; align-items: center; gap: 18px; padding: 13px 18px; border-top: 1px solid var(--line-soft); }
+.tf-row:first-child { border-top: 0; }
+.tf-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.tf-name span { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tf-bar-wrap { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.tf-stats { display: flex; gap: 16px; font-size: 11.5px; color: var(--fg-3); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.tf-stats b { font-weight: 400; color: var(--fg-2); }
+.tf-pct { text-align: right; font: 400 14px/1 var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -.025em; }
+
+.track { height: 5px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.track > i { display: block; height: 100%; border-radius: 999px; background: var(--fg-3); transition: width 340ms var(--ease-out); }
+.track > i.run  { background: var(--run); }
+.track > i.ok   { background: var(--ok); }
+.track > i.warn { background: var(--warn); }
+.track > i.err  { background: var(--err); }
+.track > i.pending { background: var(--line-strong); }
+
+/* ============================================================
+   Tabelle
+   ============================================================ */
+.ledger thead th {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  font: 600 10.5px/1 var(--font-sans);
+  letter-spacing: .085em; text-transform: uppercase;
+  color: var(--fg-3);
+  text-align: left; white-space: nowrap;
+}
+.ledger thead th.num, .ledger td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ledger tbody tr { border-top: 1px solid var(--line-soft); transition: background 120ms var(--ease-out); }
+.ledger tbody tr:first-child { border-top: 0; }
+.ledger tbody tr:hover { background: var(--surface-2); }
+.ledger tbody tr.open { background: var(--surface-2); }
+.ledger td { padding: 11px 16px; vertical-align: middle; font-size: 13px; }
+.ledger td.tight { padding-right: 10px; width: 1px; }
+.cell-name { display: flex; align-items: center; gap: 9px; }
+.cell-name strong { font-weight: 550; font-size: 13px; }
+.path { font: 400 12px/1.35 var(--font-mono); color: var(--fg-2); }
+.path .arrow { color: var(--fg-3); margin: 0 5px; }
+.row-actions { display: flex; gap: 5px; justify-content: flex-end; opacity: 0; transition: opacity 140ms var(--ease-out); }
+tr:hover .row-actions, tr:focus-within .row-actions, tr.open .row-actions { opacity: 1; }
+.ledger tbody tr.detail-row:hover { background: transparent; }
+.ledger tbody tr.detail-row td { padding: 0; }
+
+/* Pair-Editor */
+.detail { padding: 20px 18px 22px; border-top: 1px solid var(--line); background: var(--bg); display: flex; flex-direction: column; gap: 18px; }
+.field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(214px, 1fr)); gap: 15px 18px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > span { font: 600 10.5px/1 var(--font-sans); letter-spacing: .085em; text-transform: uppercase; color: var(--fg-3); }
+.field input, .field select, .field textarea {
+  height: 33px; padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--fg);
+  font-size: 13px;
+  transition: border-color 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
+}
+.field textarea { height: auto; padding: 9px 11px; resize: vertical; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; }
+.field input.mono, .field select.mono { font-family: var(--font-mono); font-size: 12.5px; }
+.field input:hover, .field select:hover, .field textarea:hover { border-color: var(--fg-3); }
+.field input:focus, .field select:focus, .field textarea:focus {
+  border-color: var(--run); outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--run) 16%, transparent);
+}
+.field small { font-size: 11.5px; color: var(--fg-3); }
+
+.switch-row { display: flex; align-items: center; gap: 12px; padding: 11px 13px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.sw-text { display: flex; flex-direction: column; gap: 1px; }
+.switch-row strong { font-size: 13px; font-weight: 550; }
+.switch-row small { font-size: 11.5px; color: var(--fg-3); }
+.switch { margin-left: auto; position: relative; width: 36px; height: 21px; flex: none; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.switch i { position: absolute; inset: 0; border-radius: 999px; background: var(--line-strong); transition: background 180ms var(--ease-out); pointer-events: none; }
+.switch i::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 17px; height: 17px; border-radius: 999px;
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.2);
+  transition: transform 220ms var(--ease-out);
+}
+/* ~ statt + : zwischen Input und Indikator liegt das sr-only-Label */
+.switch input:checked ~ i { background: var(--ok); }
+.switch input:checked ~ i::after { transform: translateX(15px); }
+.switch input:focus-visible ~ i { outline: 2px solid var(--run); outline-offset: 2px; }
+
+.detail-foot { display: flex; align-items: center; gap: 8px; padding-top: 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.detail-foot .spacer { margin-left: auto; }
+
+/* ============================================================
+   Ressourcen / Chronik
+   ============================================================ */
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 34px; }
+
+.res-row { padding: 15px 18px; border-top: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 9px; }
+.res-row:first-child { border-top: 0; }
+.res-top { display: flex; align-items: baseline; gap: 10px; }
+.res-top span { font-size: 13px; }
+.res-top strong { margin-left: auto; font: 400 14px/1 var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -.025em; }
+.res-foot { font-size: 11.5px; color: var(--fg-3); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.facts { display: grid; grid-template-columns: repeat(2, 1fr); border-top: 1px solid var(--line); }
+.facts > div { padding: 11px 18px; border-top: 1px solid var(--line-soft); display: flex; align-items: center; gap: 8px; }
+.facts > div:nth-child(-n+2) { border-top: 0; }
+.facts > div:nth-child(even) { border-left: 1px solid var(--line-soft); }
+.facts dt { font: 600 10.5px/1 var(--font-sans); letter-spacing: .085em; text-transform: uppercase; color: var(--fg-3); }
+.facts dd { margin-left: auto; font: 400 12px/1 var(--font-mono); color: var(--fg-2); font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 6px; }
+
+.chron-row {
+  display: grid; grid-template-columns: 58px 8px 1fr auto;
+  align-items: center; gap: 13px;
+  width: 100%; padding: 12px 18px;
+  border-top: 1px solid var(--line-soft);
+  text-align: left;
+  transition: background 120ms var(--ease-out);
+}
+.chron-row:first-child { border-top: 0; }
+.chron-row:hover { background: var(--surface-2); }
+.chron-time { font: 400 12px/1 var(--font-mono); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.chron-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.chron-main strong { font-size: 13px; font-weight: 550; }
+.chron-main small { font-size: 11.5px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chron-right { display: flex; align-items: center; gap: 14px; }
+.chron-dur { font: 400 12px/1 var(--font-mono); color: var(--fg-2); font-variant-numeric: tabular-nums; }
+
+/* ============================================================
+   Toolbar / Zustände
+   ============================================================ */
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.search { position: relative; display: flex; align-items: center; min-width: 248px; }
+.search svg { position: absolute; left: 11px; width: 15px; height: 15px; stroke: var(--fg-3); fill: none; stroke-width: 1.7; pointer-events: none; }
+.search input {
+  width: 100%; height: 33px; padding: 0 11px 0 33px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--fg); font-size: 13px;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
+}
+.search input::placeholder { color: var(--fg-3); }
+.search input:hover { border-color: var(--fg-3); }
+.search input:focus { border-color: var(--run); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--run) 16%, transparent); }
+select.control {
+  height: 33px; padding: 0 30px 0 11px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--surface) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b939d' stroke-width='2' stroke-linecap='round'><path d='m6 9 6 6 6-6'/></svg>") no-repeat right 9px center / 14px;
+  color: var(--fg); font-size: 13px; appearance: none;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 140ms var(--ease-out);
+}
+select.control:hover { border-color: var(--fg-3); }
+select.control:focus { border-color: var(--run); outline: none; }
+.toolbar-count { margin-left: auto; font-size: 12px; color: var(--fg-3); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.pager { display: flex; align-items: center; gap: 12px; padding: 11px 16px; border-top: 1px solid var(--line); background: var(--surface-2); }
+.pager .pos { margin-left: auto; font-size: 12px; color: var(--fg-3); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+.empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 44px 22px 46px; }
+.empty strong { font-size: 14px; font-weight: 550; }
+.empty p { font-size: 13px; color: var(--fg-2); max-width: 60ch; line-height: 1.6; }
+.empty .btn { margin-top: 12px; }
+
+.skel-row { height: 46px; border-top: 1px solid var(--line-soft); position: relative; overflow: hidden; }
+.skel-row:first-child { border-top: 0; }
+.skel-row::after {
+  content: ""; position: absolute; top: 17px; left: 18px;
+  width: 38%; height: 11px; border-radius: 999px;
+  background: linear-gradient(90deg, var(--surface-3) 0%, var(--surface-2) 50%, var(--surface-3) 100%);
+  background-size: 220% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+.skel-row:nth-child(2)::after { width: 54%; }
+.skel-row:nth-child(3)::after { width: 31%; }
+.skel-row:nth-child(4)::after { width: 45%; }
+@keyframes shimmer { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+
+.notice {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 13px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+.notice .led { margin-top: 6px; }
+.notice-text { display: flex; flex-direction: column; gap: 2px; }
+.notice-text strong { font-size: 13px; font-weight: 550; }
+.notice-text span { font-size: 12.5px; color: var(--fg-2); line-height: 1.5; }
+.notice .btn { margin-left: auto; flex: none; }
+.notice.err  { border-color: color-mix(in srgb, var(--err) 30%, var(--line));  background: var(--err-bg); }
+.notice.warn { border-color: color-mix(in srgb, var(--warn) 30%, var(--line)); background: var(--warn-bg); }
+.notice.err .notice-text span, .notice.warn .notice-text span { color: color-mix(in srgb, var(--fg) 78%, transparent); }
+
+/* ============================================================
+   Designsystem-Anhang
+   ============================================================ */
+.spec { display: grid; grid-template-columns: repeat(auto-fit, minmax(262px, 1fr)); gap: 18px; }
+.spec-block { display: flex; flex-direction: column; gap: 12px; padding: 17px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-sm); }
+.spec-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.swatches { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
+.sw { display: flex; flex-direction: column; gap: 6px; }
+.sw i { display: block; height: 32px; border-radius: var(--radius-sm); }
+.sw span { font: 400 10px/1.3 var(--font-mono); color: var(--fg-3); }
+.type-spec { display: flex; flex-direction: column; gap: 10px; }
+.type-spec > div { display: flex; align-items: baseline; gap: 12px; }
+.type-spec code { font: 400 10px/1 var(--font-mono); color: var(--fg-3); width: 92px; flex: none; }
+
+/* ============================================================
+   HANDY-MOCKUP (Geräterahmen auf der Desktop-Seite)
+   ============================================================ */
+.phones { display: flex; gap: 40px; flex-wrap: wrap; }
+.phone-wrap { display: flex; flex-direction: column; gap: 12px; }
+.phone-cap { font-size: 12.5px; color: var(--fg-3); }
+.phone-cap b { color: var(--fg); font-weight: 550; }
+.phone {
+  position: relative;
+  width: 390px; height: 844px;
+  padding: 11px;
+  border-radius: 44px;
+  background: linear-gradient(160deg, var(--line-strong), var(--fg-3));
+  box-shadow: var(--shadow-lg);
+  flex: none;
+}
+.phone-screen {
+  position: relative; width: 100%; height: 100%;
+  border-radius: 34px; overflow: hidden;
+  background: var(--bg);
+  display: flex; flex-direction: column;
+}
+.phone-notch {
+  position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+  width: 106px; height: 26px; border-radius: 999px;
+  background: #0b0d10; z-index: 12;
+}
+
+/* --- Mobile Statusleiste (iOS-artig) --- */
+.m-sys {
+  display: flex; align-items: center; padding: 13px 24px 8px;
+  font: 600 12.5px/1 var(--font-sans); color: var(--fg);
+  background: var(--surface); flex: none;
+}
+.m-sys .m-sys-r { margin-left: auto; display: flex; align-items: center; gap: 5px; }
+.m-sys svg { width: 15px; height: 11px; fill: var(--fg); }
+
+/* --- Mobile Kopf --- */
+.m-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 16px 12px;
+  background: var(--surface); border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.m-head h2 { font-size: 22px; font-weight: 600; letter-spacing: -.032em; }
+.m-head-actions { margin-left: auto; display: flex; gap: 7px; }
+.m-status-strip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 16px;
+  background: var(--ok-bg); color: var(--ok);
+  font-size: 12.5px; font-weight: 500;
+  flex: none;
+}
+.m-status-strip .m-host { margin-left: auto; font-family: var(--font-mono); font-size: 11.5px; opacity: .8; }
+
+/* --- Mobile Inhalt --- */
+.m-body { flex: 1; overflow-y: auto; padding: 16px 16px 96px; display: flex; flex-direction: column; gap: 20px; }
+/* overflow:hidden setzt min-height auto auf 0 — sonst quetscht der Flex-Container die Karten platt */
+.m-body > * { flex: 0 0 auto; }
+.m-body::-webkit-scrollbar { width: 0; }
+
+.m-sect { display: flex; flex-direction: column; gap: 9px; }
+.m-sect-head { display: flex; align-items: center; gap: 10px; }
+.m-sect-head .label { font-size: 10px; }
+.m-sect-head button { margin-left: auto; font-size: 12px; font-weight: 500; color: var(--run); }
+
+.m-card { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-sm); overflow: hidden; }
+
+.m-readouts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.m-ro { padding: 13px 14px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.m-ro .label { font-size: 9.5px; }
+.m-ro-v { display: block; margin-top: 7px; font: 400 23px/1 var(--font-mono); letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
+.m-ro-v.ok { color: var(--ok); } .m-ro-v.warn { color: var(--warn); } .m-ro-v.err { color: var(--err); }
+.m-ro-v .unit { font-size: 13px; color: var(--fg-3); margin-left: 3px; }
+.m-ro-m { display: block; margin-top: 6px; font-size: 11px; color: var(--fg-3); }
+
+.m-sched { display: flex; align-items: center; gap: 11px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.m-sched-text { display: flex; flex-direction: column; gap: 1px; }
+.m-sched-text strong { font-size: 13px; font-weight: 550; }
+.m-sched-text span { font-size: 11.5px; color: var(--fg-2); }
+.m-sched .btn { margin-left: auto; }
+
+.m-transfer { position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-md); }
+.m-transfer::before {
+  content: ""; position: absolute; inset: 0 0 auto; height: 2px; z-index: 1;
+  background: linear-gradient(90deg, transparent, var(--run), transparent);
+  background-size: 40% 100%; background-repeat: no-repeat;
+  animation: sweep 2.8s var(--ease-in-out) infinite;
+}
+.m-tf-head { display: flex; align-items: center; gap: 10px; padding: 13px 14px; border-bottom: 1px solid var(--line-soft); }
+.m-tf-head strong { font-size: 13px; font-weight: 550; }
+.m-tf-head small { display: block; margin-top: 1px; font: 400 11px/1 var(--font-mono); color: var(--fg-2); }
+.m-tf-head .chip { margin-left: auto; }
+.m-tf-row { padding: 12px 14px; border-top: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 8px; }
+.m-tf-row:first-child { border-top: 0; }
+.m-tf-top { display: flex; align-items: center; gap: 8px; }
+.m-tf-top span { font-size: 12.5px; font-weight: 500; }
+.m-tf-top b { margin-left: auto; font: 400 12.5px/1 var(--font-mono); font-variant-numeric: tabular-nums; }
+.m-tf-foot { display: flex; gap: 12px; font: 400 11px/1 var(--font-mono); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+
+.m-row {
+  display: grid; grid-template-columns: 8px 1fr auto;
+  align-items: center; gap: 11px;
+  width: 100%; padding: 13px 14px;
+  border-top: 1px solid var(--line-soft);
+  text-align: left;
+}
+.m-row:first-child { border-top: 0; }
+.m-row:active { background: var(--surface-2); }
+.m-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.m-row-main strong { font-size: 13.5px; font-weight: 550; }
+.m-row-main small { font-size: 11.5px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.m-row-right { display: flex; align-items: center; gap: 8px; }
+.m-chev { width: 16px; height: 16px; stroke: var(--fg-3); fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+.m-notice { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--line)); border-radius: 14px; background: var(--warn-bg); }
+.m-notice .led { margin-top: 5px; }
+.m-notice div { display: flex; flex-direction: column; gap: 2px; }
+.m-notice strong { font-size: 12.5px; font-weight: 550; }
+.m-notice span { font-size: 11.5px; color: color-mix(in srgb, var(--fg) 76%, transparent); line-height: 1.45; }
+
+.m-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.m-actions .btn { height: 42px; border-radius: 12px; font-size: 13.5px; }
+.m-actions .btn.wide { grid-column: 1 / -1; }
+
+/* --- Mobile Tab-Leiste --- */
+.m-tabs {
+  position: absolute; inset: auto 0 0; z-index: 11;
+  display: grid; grid-template-columns: repeat(5, 1fr);
+  padding: 7px 6px calc(7px + 18px);
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(16px);
+}
+.m-tab { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px 0; color: var(--fg-3); }
+.m-tab svg { width: 21px; height: 21px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.m-tab span { font-size: 10px; font-weight: 500; letter-spacing: -.01em; }
+.m-tab[aria-current="page"] { color: var(--fg); }
+.m-home-bar { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); width: 134px; height: 5px; border-radius: 999px; background: var(--fg); opacity: .28; z-index: 12; }
+
+/* ============================================================
+   Desktop-Seite responsiv
+   ============================================================ */
+@media (max-width: 1180px) {
+  .cols { grid-template-columns: minmax(0, 1fr); }
+  .readouts { grid-template-columns: repeat(2, 1fr); }
+  .ro:nth-child(3) { border-left: 0; }
+  .ro:nth-child(n+3) { border-top: 1px solid var(--line-soft); }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; }
+  .side { position: static; height: auto; flex-direction: row; align-items: center; gap: 4px; padding: 9px 14px; border-right: 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .brand { padding: 0 14px 0 0; }
+  .brand-text { display: none; }
+  .nav { flex-direction: row; }
+  .nav button { min-height: 31px; padding: 0 11px; white-space: nowrap; }
+  .side-foot { display: none; }
+  .body { padding: 18px 16px 64px; gap: 26px; }
+  .head { padding: 12px 16px; }
+  .tf-row { grid-template-columns: 1fr; gap: 10px; }
+  .tf-pct { text-align: left; }
+  .col-opt { display: none; }
+  .phone { width: 340px; height: 700px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+  .led.run { opacity: 1; }
+}
+</style>
+</head>
+<body>
+
+<!-- ============ Statusleiste ============ -->
+<div class="rail" role="status" aria-live="polite">
+  <span class="rail-primary"><i class="led ok" aria-hidden="true"></i>Betrieb normal</span>
+  <span class="rail-sep" aria-hidden="true"></span>
+  <span>pve-backup01</span>
+  <span class="rail-sep" aria-hidden="true"></span>
+  <span>LXC 104</span>
+  <span class="rail-sep" aria-hidden="true"></span>
+  <span>Uptime <b>41 T 06:12</b></span>
+  <span class="rail-spacer"></span>
+  <span>SSE verbunden</span>
+  <span class="rail-sep" aria-hidden="true"></span>
+  <span id="clock">28.07.2026&nbsp; 14:32:07</span>
+</div>
+
+<div class="shell">
+
+  <!-- ============ Seitennavigation ============ -->
+  <aside class="side">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">rs</div>
+      <div class="brand-text">
+        <div class="brand-name">rclone-sync</div>
+        <span class="brand-sub">v2.1.1</span>
+      </div>
+    </div>
+
+    <nav class="nav" aria-label="Hauptnavigation">
+      <button data-page="dashboard" aria-current="page"><span>Übersicht</span></button>
+      <button data-page="pairs"><span>Sync-Paare</span><span class="count">6</span></button>
+      <button data-page="jobs"><span>Jobhistorie</span><span class="count">1 284</span></button>
+      <button data-page="system"><span>System</span></button>
+      <button data-page="mobile"><span>Handy-Ansicht</span></button>
+      <button data-page="settings"><span>Designsystem</span></button>
+    </nav>
+
+    <div class="side-foot">
+      <dl>
+        <dt>Scheduler</dt><dd>aktiv</dd>
+        <dt>Webdienst</dt><dd>aktiv</dd>
+        <dt>rclone</dt><dd>1.68.2</dd>
+        <dt>Datenbank</dt><dd>18,4 MB</dd>
+      </dl>
+    </div>
+  </aside>
+
+  <main class="main">
+
+    <!-- ======================================================
+         ÜBERSICHT
+         ====================================================== -->
+    <section data-view="dashboard">
+      <div class="head">
+        <h1>Übersicht</h1>
+        <div class="head-actions">
+          <button class="btn icon secondary" title="Aktualisieren" aria-label="Aktualisieren">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.7 9.7 0 0 1 6.7 2.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.7 9.7 0 0 1-6.7-2.7L3 16"/><path d="M8 16H3v5"/></svg>
+          </button>
+          <button class="btn icon secondary theme-toggle" title="Hell / Dunkel umschalten" aria-label="Hell / Dunkel umschalten">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 0 0 17z" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button class="btn secondary">Plan prüfen</button>
+          <button class="btn secondary">Quick-Sync</button>
+          <button class="btn primary">Dry-Run starten</button>
+        </div>
+      </div>
+
+      <div class="body">
+
+        <div class="notice warn">
+          <i class="led warn" aria-hidden="true"></i>
+          <div class="notice-text">
+            <strong>Pair „archiv-langzeit" seit 3 Tagen ohne erfolgreichen Lauf</strong>
+            <span>Letzter Fehler: remote „hetzner-box" — 502 Bad Gateway beim Verzeichnislisting</span>
+          </div>
+          <button class="btn secondary sm">Details</button>
+        </div>
+
+        <div class="scheduler">
+          <i class="led ok lg" aria-hidden="true"></i>
+          <div class="scheduler-text">
+            <strong>Scheduler aktiv</strong>
+            <span>Nächster geplanter Lauf 02:00 &middot; in 11 h 28 min &middot; 4 Paare</span>
+          </div>
+          <div class="btn-group">
+            <button class="btn secondary sm">1 Std. pausieren</button>
+            <button class="btn secondary sm">Bis morgen 06:00</button>
+          </div>
+        </div>
+
+        <div class="readouts">
+          <div class="ro">
+            <span class="label">Letzter Lauf</span>
+            <span class="ro-v ok">Erfolg</span>
+            <span class="ro-m">Heute 04:00 &middot; <b>12:41</b> Laufzeit</span>
+          </div>
+          <div class="ro">
+            <span class="label">Übertragen · 24 h</span>
+            <span class="ro-v">184,2<span class="unit">GB</span></span>
+            <span class="ro-m"><b>41 208</b> Dateien &middot; 3 Läufe</span>
+          </div>
+          <div class="ro">
+            <span class="label">Aktive Paare</span>
+            <span class="ro-v">6</span>
+            <span class="ro-m"><b>4</b> geplant &middot; <b>2</b> manuell</span>
+          </div>
+          <div class="ro">
+            <span class="label">Fehler · 24 h</span>
+            <span class="ro-v warn">2</span>
+            <span class="ro-m"><b>1</b> Pair betroffen &middot; 1 Wiederholung</span>
+          </div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-head">
+            <span class="label">Übertragung läuft</span>
+            <span class="sect-tools"><button class="btn danger sm">Abbrechen</button></span>
+          </div>
+
+          <div class="transfer active">
+            <div class="transfer-head">
+              <i class="led run lg" aria-hidden="true"></i>
+              <div class="tf-title">
+                <strong>Backup — produktiv</strong>
+                <span class="tf-meta">Job #1284 &middot; gestartet 14:26:44 &middot; läuft seit 05:23</span>
+              </div>
+              <div class="tf-right">
+                <span class="tf-total">2 / 4 Paare</span>
+                <span class="chip run"><i class="led run" aria-hidden="true"></i><span id="tf-overall">61</span> %</span>
+              </div>
+            </div>
+
+            <div class="tf-rows">
+              <div class="tf-row">
+                <div class="tf-name"><i class="led ok" aria-hidden="true"></i><span>vm-images</span></div>
+                <div class="tf-bar-wrap">
+                  <div class="track" role="progressbar" aria-label="Fortschritt vm-images" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100"><i class="ok" style="width:100%"></i></div>
+                  <div class="tf-stats"><span><b>62,4 GB</b> / 62,4 GB</span><span>1 204 Dateien</span><span>fertig in <b>03:41</b></span></div>
+                </div>
+                <div class="tf-pct">100 %</div>
+              </div>
+
+              <div class="tf-row">
+                <div class="tf-name"><i class="led ok" aria-hidden="true"></i><span>dokumente-fibu</span></div>
+                <div class="tf-bar-wrap">
+                  <div class="track" role="progressbar" aria-label="Fortschritt dokumente-fibu" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100"><i class="ok" style="width:100%"></i></div>
+                  <div class="tf-stats"><span><b>2,1 GB</b> / 2,1 GB</span><span>18 402 Dateien</span><span>fertig in <b>00:52</b></span></div>
+                </div>
+                <div class="tf-pct">100 %</div>
+              </div>
+
+              <div class="tf-row">
+                <div class="tf-name"><i class="led run" aria-hidden="true"></i><span>mediathek</span></div>
+                <div class="tf-bar-wrap">
+                  <div class="track" role="progressbar" aria-label="Fortschritt mediathek" aria-valuenow="44" aria-valuemin="0" aria-valuemax="100"><i class="run" id="tf-bar" style="width:44%"></i></div>
+                  <div class="tf-stats"><span><b id="tf-done">41,8 GB</b> / 94,6 GB</span><span id="tf-speed">118 MB/s</span><span>ETA <b id="tf-eta">07:28</b></span></div>
+                </div>
+                <div class="tf-pct" id="tf-pct">44 %</div>
+              </div>
+
+              <div class="tf-row">
+                <div class="tf-name"><i class="led idle" aria-hidden="true"></i><span class="dim">nextcloud-data</span></div>
+                <div class="tf-bar-wrap">
+                  <div class="track" role="progressbar" aria-label="Fortschritt nextcloud-data" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"><i class="pending" style="width:0%"></i></div>
+                  <div class="tf-stats"><span class="dim">wartet in der Warteschlange</span></div>
+                </div>
+                <div class="tf-pct dim">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-head">
+            <span class="label">Sync-Paare</span>
+            <span class="sect-tools"><button class="btn ghost sm" data-goto="pairs">Verwalten</button></span>
+          </div>
+
+          <div class="card ledger">
+            <table>
+              <caption class="sr-only">Zustand aller konfigurierten Sync-Paare</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Pair</th>
+                  <th scope="col" class="col-opt">Quelle → Ziel</th>
+                  <th scope="col">Letzter Lauf</th>
+                  <th scope="col" class="col-opt">Nächster Lauf</th>
+                  <th scope="col" class="num col-opt">Volumen</th>
+                  <th scope="col">Zustand</th>
+                  <th scope="col"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><div class="cell-name"><i class="led run" aria-hidden="true"></i><strong>mediathek</strong></div></td>
+                  <td class="col-opt"><span class="path">/srv/media<span class="arrow">→</span>wasabi:media-bk</span></td>
+                  <td><span class="mono">läuft seit 14:31</span></td>
+                  <td class="col-opt"><span class="mono dim">—</span></td>
+                  <td class="num col-opt"><span class="mono">94,6 GB</span></td>
+                  <td><span class="chip run"><i class="led run" aria-hidden="true"></i>Läuft</span></td>
+                  <td class="tight"><div class="row-actions"><button class="btn ghost sm">Log</button></div></td>
+                </tr>
+                <tr>
+                  <td><div class="cell-name"><i class="led ok" aria-hidden="true"></i><strong>vm-images</strong></div></td>
+                  <td class="col-opt"><span class="path">/var/lib/vz/dump<span class="arrow">→</span>pbs:tank/vm</span></td>
+                  <td><span class="mono">heute 14:30</span></td>
+                  <td class="col-opt"><span class="mono">morgen 02:00</span></td>
+                  <td class="num col-opt"><span class="mono">62,4 GB</span></td>
+                  <td><span class="chip ok"><i class="led ok" aria-hidden="true"></i>Erfolg</span></td>
+                  <td class="tight"><div class="row-actions"><button class="btn ghost sm">Dry-Run</button><button class="btn ghost sm">Log</button></div></td>
+                </tr>
+                <tr>
+                  <td><div class="cell-name"><i class="led ok" aria-hidden="true"></i><strong>dokumente-fibu</strong></div></td>
+                  <td class="col-opt"><span class="path">/srv/fibu<span class="arrow">→</span>hetzner-box:fibu</span></td>
+                  <td><span class="mono">heute 14:27</span></td>
+                  <td class="col-opt"><span class="mono">morgen 02:00</span></td>
+                  <td class="num col-opt"><span class="mono">2,1 GB</span></td>
+                  <td><span class="chip ok"><i class="led ok" aria-hidden="true"></i>Erfolg</span></td>
+                  <td class="tight"><div class="row-actions"><button class="btn ghost sm">Dry-Run</button><button class="btn ghost sm">Log</button></div></td>
+                </tr>
+                <tr>
+                  <td><div class="cell-name"><i class="led err" aria-hidden="true"></i><strong>archiv-langzeit</strong></div></td>
+                  <td class="col-opt"><span class="path">/srv/archiv<span class="arrow">→</span>hetzner-box:archiv</span></td>
+                  <td><span class="mono">25.07. 02:14</span></td>
+                  <td class="col-opt"><span class="mono">morgen 02:00</span></td>
+                  <td class="num col-opt"><span class="mono">1,4 TB</span></td>
+                  <td><span class="chip err"><i class="led err" aria-hidden="true"></i>Fehler</span></td>
+                  <td class="tight"><div class="row-actions"><button class="btn ghost sm">Dry-Run</button><button class="btn ghost sm">Log</button></div></td>
+                </tr>
+                <tr>
+                  <td><div class="cell-name"><i class="led idle" aria-hidden="true"></i><strong>nextcloud-data</strong></div></td>
+                  <td class="col-opt"><span class="path">/srv/nextcloud<span class="arrow">→</span>wasabi:nc-bk</span></td>
+                  <td><span class="mono">heute 04:11</span></td>
+                  <td class="col-opt"><span class="mono dim">in Warteschlange</span></td>
+                  <td class="num col-opt"><span class="mono">318 GB</span></td>
+                  <td><span class="chip"><i class="led idle" aria-hidden="true"></i>Wartet</span></td>
+                  <td class="tight"><div class="row-actions"><button class="btn ghost sm">Dry-Run</button><button class="btn ghost sm">Log</button></div></td>
+                </tr>
+                <tr>
+                  <td><div class="cell-name"><i class="led warn" aria-hidden="true"></i><strong>projekte-bisync</strong></div></td>
+                  <td class="col-opt"><span class="path">/srv/projekte<span class="arrow">⇄</span>gdrive:projekte</span></td>
+                  <td><span class="mono">heute 04:02</span></td>
+                  <td class="col-opt"><span class="mono dim">manuell</span></td>
+                  <td class="num col-opt"><span class="mono">44,8 GB</span></td>
+                  <td><span class="chip warn"><i class="led warn" aria-hidden="true"></i>3 Konflikte</span></td>
+                  <td class="tight"><div class="row-actions"><button class="btn ghost sm">Dry-Run</button><button class="btn ghost sm">Log</button></div></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="cols">
+          <div class="sect">
+            <div class="sect-head"><span class="label">Ressourcen — pve-backup01</span></div>
+            <div class="card">
+              <div class="res-row">
+                <div class="res-top"><span>CPU-Last</span><strong>34 %</strong></div>
+                <div class="track" role="progressbar" aria-label="CPU-Last" aria-valuenow="34" aria-valuemin="0" aria-valuemax="100"><i style="width:34%"></i></div>
+                <div class="res-foot">4 vCPU &middot; Load 1,42 / 1,18 / 0,97 &middot; cgroup v2</div>
+              </div>
+              <div class="res-row">
+                <div class="res-top"><span>Arbeitsspeicher</span><strong>61 %</strong></div>
+                <div class="track" role="progressbar" aria-label="Arbeitsspeicher" aria-valuenow="61" aria-valuemin="0" aria-valuemax="100"><i style="width:61%"></i></div>
+                <div class="res-foot">4,9 GB von 8,0 GB &middot; Cache 1,2 GB</div>
+              </div>
+              <div class="res-row">
+                <div class="res-top"><span>Datenträger /srv</span><strong>88 %</strong></div>
+                <div class="track" role="progressbar" aria-label="Datenträger /srv" aria-valuenow="88" aria-valuemin="0" aria-valuemax="100"><i class="warn" style="width:88%"></i></div>
+                <div class="res-foot">214 GB frei von 1,8 TB &middot; ext4</div>
+              </div>
+              <dl class="facts">
+                <div><dt>Kernel</dt><dd>6.8.12-4-pve</dd></div>
+                <div><dt>Prozesse</dt><dd>142 / 4 096</dd></div>
+                <div><dt>Adresse</dt><dd>10.20.0.14</dd></div>
+                <div><dt>Scheduler</dt><dd><i class="led ok" aria-hidden="true"></i>active</dd></div>
+              </dl>
+            </div>
+          </div>
+
+          <div class="sect">
+            <div class="sect-head">
+              <span class="label">Letzte Jobs</span>
+              <span class="sect-tools"><button class="btn ghost sm" data-goto="jobs">Alle anzeigen</button></span>
+            </div>
+            <div class="card">
+              <button class="chron-row">
+                <span class="chron-time">14:26</span>
+                <i class="led run" aria-hidden="true"></i>
+                <span class="chron-main"><strong>Backup — produktiv &middot; #1284</strong><small>4 Paare &middot; 2 abgeschlossen &middot; 106,3 GB übertragen</small></span>
+                <span class="chron-right"><span class="chron-dur">05:23</span><span class="chip run">Läuft</span></span>
+              </button>
+              <button class="chron-row">
+                <span class="chron-time">04:00</span>
+                <i class="led ok" aria-hidden="true"></i>
+                <span class="chron-main"><strong>Backup — geplant &middot; #1283</strong><small>4 Paare &middot; 41 208 Dateien &middot; 78,1 GB übertragen</small></span>
+                <span class="chron-right"><span class="chron-dur">12:41</span><span class="chip ok">Erfolg</span></span>
+              </button>
+              <button class="chron-row">
+                <span class="chron-time">03:00</span>
+                <i class="led ok" aria-hidden="true"></i>
+                <span class="chron-main"><strong>PBS-Backup &middot; #1282</strong><small>Target „tank/vm" &middot; 3 Snapshots &middot; dedupliziert 91 %</small></span>
+                <span class="chron-right"><span class="chron-dur">08:04</span><span class="chip ok">Erfolg</span></span>
+              </button>
+              <button class="chron-row">
+                <span class="chron-time">02:14</span>
+                <i class="led err" aria-hidden="true"></i>
+                <span class="chron-main"><strong>Backup — geplant &middot; #1281</strong><small>archiv-langzeit: 502 Bad Gateway beim Verzeichnislisting</small></span>
+                <span class="chron-right"><span class="chron-dur">01:07</span><span class="chip err">Fehler</span></span>
+              </button>
+              <button class="chron-row">
+                <span class="chron-time">02:00</span>
+                <i class="led warn" aria-hidden="true"></i>
+                <span class="chron-main"><strong>Bi-Sync &middot; #1280</strong><small>projekte-bisync &middot; 3 Konflikte nach „newer" aufgelöst</small></span>
+                <span class="chron-right"><span class="chron-dur">04:12</span><span class="chip warn">Hinweise</span></span>
+              </button>
+              <button class="chron-row">
+                <span class="chron-time">gestern</span>
+                <i class="led idle" aria-hidden="true"></i>
+                <span class="chron-main"><strong>Check &middot; #1279</strong><small>Übersprungen — Wartungsfenster aktiv bis 06:00</small></span>
+                <span class="chron-right"><span class="chron-dur">—</span><span class="chip">Übersprungen</span></span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ======================================================
+         SYNC-PAARE
+         ====================================================== -->
+    <section data-view="pairs" hidden>
+      <div class="head">
+        <h1>Sync-Paare</h1>
+        <div class="head-actions">
+          <button class="btn secondary">Remotes testen</button>
+          <button class="btn secondary">Konfiguration prüfen</button>
+          <button class="btn secondary" disabled>Speichern</button>
+          <button class="btn primary">Pair hinzufügen</button>
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="toolbar">
+          <label class="search">
+            <span class="sr-only">Sync-Paare durchsuchen</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+            <input type="search" placeholder="Name oder Pfad">
+          </label>
+          <select class="control" aria-label="Nach Zustand filtern">
+            <option>Alle Paare</option><option>Nur aktiv</option><option>Nur deaktiviert</option><option>Mit Hinweisen</option><option>Mirror / Bi-Sync</option>
+          </select>
+          <select class="control" aria-label="Vorlage für neues Pair">
+            <option>Vorlage: Backup lokal → remote (copy)</option>
+            <option>Vorlage: Restore remote → lokal (copy)</option>
+            <option>Vorlage: Bidirektional (bisync)</option>
+            <option>Vorlage: Mirror lokal → remote (sync)</option>
+            <option>Vorlage: Proxmox Backup Server</option>
+          </select>
+          <button class="btn secondary">Aus Vorlage</button>
+          <span class="toolbar-count">6 von 6</span>
+        </div>
+
+        <div class="card ledger">
+          <table>
+            <caption class="sr-only">Konfigurierte Sync-Paare, ein Eintrag ausgeklappt</caption>
+            <thead>
+              <tr>
+                <th scope="col">Pair</th>
+                <th scope="col" class="col-opt">Richtung</th>
+                <th scope="col" class="col-opt">Quelle → Ziel</th>
+                <th scope="col">Zeitplan</th>
+                <th scope="col" class="num col-opt">Volumen</th>
+                <th scope="col">Zustand</th>
+                <th scope="col"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="open">
+                <td><div class="cell-name"><i class="led err" aria-hidden="true"></i><strong>archiv-langzeit</strong></div></td>
+                <td class="col-opt"><span class="mono">copy</span></td>
+                <td class="col-opt"><span class="path">/srv/archiv<span class="arrow">→</span>hetzner-box:archiv</span></td>
+                <td><span class="mono">täglich 02:00</span></td>
+                <td class="num col-opt"><span class="mono">1,4 TB</span></td>
+                <td><span class="chip err"><i class="led err" aria-hidden="true"></i>Fehler</span></td>
+                <td class="tight"><div class="row-actions"><button class="btn ghost sm">Schließen</button></div></td>
+              </tr>
+              <tr class="detail-row">
+                <td colspan="7">
+                  <div class="detail">
+                    <div class="notice err">
+                      <i class="led err" aria-hidden="true"></i>
+                      <div class="notice-text">
+                        <strong>Letzte 3 Läufe fehlgeschlagen</strong>
+                        <span>hetzner-box: 502 Bad Gateway beim Listing von „archiv/2026". Anmeldedaten gültig, Remote-Test erfolgreich.</span>
+                      </div>
+                      <button class="btn secondary sm">Volles Log</button>
+                    </div>
+
+                    <div class="field-grid">
+                      <label class="field"><span>Name</span><input value="archiv-langzeit"></label>
+                      <label class="field"><span>Richtung</span>
+                        <select class="mono"><option>copy — lokal → remote</option><option>sync — Mirror, löscht am Ziel</option><option>bisync — bidirektional</option></select>
+                      </label>
+                      <label class="field"><span>Quelle</span><input class="mono" value="/srv/archiv"></label>
+                      <label class="field"><span>Ziel</span><input class="mono" value="hetzner-box:archiv"></label>
+                      <label class="field"><span>Zeitplan (cron)</span><input class="mono" value="0 2 * * *"><small>täglich 02:00 &middot; nächster Lauf morgen</small></label>
+                      <label class="field"><span>Bandbreitenlimit</span><input class="mono" value="40M"><small>leer = unbegrenzt</small></label>
+                      <label class="field"><span>Parallele Transfers</span><input class="mono" value="4"></label>
+                      <label class="field"><span>Wiederholungen</span><input class="mono" value="3"></label>
+                    </div>
+
+                    <label class="field"><span>Zusätzliche Filter</span><textarea rows="3">- /tmp/**
+- **/.DS_Store
++ /2026/**</textarea></label>
+
+                    <div class="field-grid">
+                      <div class="switch-row">
+                        <div class="sw-text"><strong>Pair aktiv</strong><small>nimmt am Zeitplan teil</small></div>
+                        <label class="switch"><input type="checkbox" checked><span class="sr-only">Pair aktiv</span><i aria-hidden="true"></i></label>
+                      </div>
+                      <div class="switch-row">
+                        <div class="sw-text"><strong>Löschschutz</strong><small>bricht ab bei &gt; 5 % Löschungen</small></div>
+                        <label class="switch"><input type="checkbox" checked><span class="sr-only">Löschschutz</span><i aria-hidden="true"></i></label>
+                      </div>
+                      <div class="switch-row">
+                        <div class="sw-text"><strong>Sentinel-Datei nötig</strong><small>.rclone-sync-ok muss existieren</small></div>
+                        <label class="switch"><input type="checkbox" checked><span class="sr-only">Sentinel-Datei nötig</span><i aria-hidden="true"></i></label>
+                      </div>
+                    </div>
+
+                    <div class="detail-foot">
+                      <button class="btn secondary">Dry-Run starten</button>
+                      <button class="btn secondary">Remote testen</button>
+                      <button class="btn secondary">Größe berechnen</button>
+                      <span class="spacer"></span>
+                      <button class="btn danger">Pair löschen</button>
+                      <button class="btn primary">Änderungen übernehmen</button>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+
+              <tr>
+                <td><div class="cell-name"><i class="led run" aria-hidden="true"></i><strong>mediathek</strong></div></td>
+                <td class="col-opt"><span class="mono">copy</span></td>
+                <td class="col-opt"><span class="path">/srv/media<span class="arrow">→</span>wasabi:media-bk</span></td>
+                <td><span class="mono">täglich 02:00</span></td>
+                <td class="num col-opt"><span class="mono">94,6 GB</span></td>
+                <td><span class="chip run"><i class="led run" aria-hidden="true"></i>Läuft</span></td>
+                <td class="tight"><div class="row-actions"><button class="btn ghost sm">Öffnen</button></div></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led ok" aria-hidden="true"></i><strong>vm-images</strong></div></td>
+                <td class="col-opt"><span class="mono">pbs</span></td>
+                <td class="col-opt"><span class="path">/var/lib/vz/dump<span class="arrow">→</span>pbs:tank/vm</span></td>
+                <td><span class="mono">täglich 03:00</span></td>
+                <td class="num col-opt"><span class="mono">62,4 GB</span></td>
+                <td><span class="chip ok"><i class="led ok" aria-hidden="true"></i>Erfolg</span></td>
+                <td class="tight"><div class="row-actions"><button class="btn ghost sm">Öffnen</button></div></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led ok" aria-hidden="true"></i><strong>dokumente-fibu</strong></div></td>
+                <td class="col-opt"><span class="mono">copy</span></td>
+                <td class="col-opt"><span class="path">/srv/fibu<span class="arrow">→</span>hetzner-box:fibu</span></td>
+                <td><span class="mono">täglich 02:00</span></td>
+                <td class="num col-opt"><span class="mono">2,1 GB</span></td>
+                <td><span class="chip ok"><i class="led ok" aria-hidden="true"></i>Erfolg</span></td>
+                <td class="tight"><div class="row-actions"><button class="btn ghost sm">Öffnen</button></div></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led idle" aria-hidden="true"></i><strong>nextcloud-data</strong></div></td>
+                <td class="col-opt"><span class="mono">copy</span></td>
+                <td class="col-opt"><span class="path">/srv/nextcloud<span class="arrow">→</span>wasabi:nc-bk</span></td>
+                <td><span class="mono">täglich 02:00</span></td>
+                <td class="num col-opt"><span class="mono">318 GB</span></td>
+                <td><span class="chip"><i class="led idle" aria-hidden="true"></i>Wartet</span></td>
+                <td class="tight"><div class="row-actions"><button class="btn ghost sm">Öffnen</button></div></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led warn" aria-hidden="true"></i><strong>projekte-bisync</strong></div></td>
+                <td class="col-opt"><span class="mono">bisync</span></td>
+                <td class="col-opt"><span class="path">/srv/projekte<span class="arrow">⇄</span>gdrive:projekte</span></td>
+                <td><span class="mono dim">manuell</span></td>
+                <td class="num col-opt"><span class="mono">44,8 GB</span></td>
+                <td><span class="chip warn"><i class="led warn" aria-hidden="true"></i>3 Konflikte</span></td>
+                <td class="tight"><div class="row-actions"><button class="btn ghost sm">Öffnen</button></div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================
+         JOBHISTORIE
+         ====================================================== -->
+    <section data-view="jobs" hidden>
+      <div class="head">
+        <h1>Jobhistorie</h1>
+        <div class="head-actions">
+          <button class="btn secondary">CSV exportieren</button>
+          <button class="btn secondary">Aktualisieren</button>
+          <button class="btn danger">Fehlerhistorie löschen</button>
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="readouts sm">
+          <div class="ro"><span class="label">Gesamt</span><span class="ro-v">1 284</span><span class="ro-m">seit 12.03.2026</span></div>
+          <div class="ro"><span class="label">Erfolg · 24 h</span><span class="ro-v ok">7</span><span class="ro-m">Ø <b>06:41</b> Laufzeit</span></div>
+          <div class="ro"><span class="label">Fehler · 24 h</span><span class="ro-v err">2</span><span class="ro-m"><b>1</b> Pair betroffen</span></div>
+          <div class="ro"><span class="label">Laufend</span><span class="ro-v">1</span><span class="ro-m">seit <b>05:23</b></span></div>
+        </div>
+
+        <div class="toolbar">
+          <label class="search">
+            <span class="sr-only">Jobhistorie durchsuchen</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+            <input type="search" placeholder="Pair, Fehlertext oder Job-ID">
+          </label>
+          <select class="control" aria-label="Jobtyp"><option>Alle Typen</option><option>Backup</option><option>Check</option><option>Quick-Sync</option><option>PBS-Backup</option></select>
+          <select class="control" aria-label="Status"><option>Alle Status</option><option>Läuft</option><option>Erfolg</option><option>Fehler</option><option>Übersprungen</option><option>Abgebrochen</option></select>
+          <select class="control" aria-label="Einträge pro Seite"><option>25 pro Seite</option><option>50 pro Seite</option><option>100 pro Seite</option></select>
+          <span class="toolbar-count">Seite 1 von 52</span>
+        </div>
+
+        <div class="card ledger">
+          <table>
+            <caption class="sr-only">Jobhistorie, Seite 1</caption>
+            <thead>
+              <tr>
+                <th scope="col">Job</th>
+                <th scope="col" class="col-opt">Zusammenfassung</th>
+                <th scope="col">Start</th>
+                <th scope="col" class="num">Dauer</th>
+                <th scope="col" class="num col-opt">Volumen</th>
+                <th scope="col">Ergebnis</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><div class="cell-name"><i class="led run" aria-hidden="true"></i><strong>Backup</strong><span class="mono dim">#1284</span></div></td>
+                <td class="col-opt"><span class="path">4 Paare · 2 abgeschlossen · mediathek läuft</span></td>
+                <td><span class="mono">28.07. 14:26</span></td>
+                <td class="num"><span class="mono">05:23</span></td>
+                <td class="num col-opt"><span class="mono">106,3 GB</span></td>
+                <td><span class="chip run"><i class="led run" aria-hidden="true"></i>Läuft</span></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led ok" aria-hidden="true"></i><strong>Backup</strong><span class="mono dim">#1283</span></div></td>
+                <td class="col-opt"><span class="path">4 Paare · 41 208 Dateien · 0 Löschungen</span></td>
+                <td><span class="mono">28.07. 04:00</span></td>
+                <td class="num"><span class="mono">12:41</span></td>
+                <td class="num col-opt"><span class="mono">78,1 GB</span></td>
+                <td><span class="chip ok"><i class="led ok" aria-hidden="true"></i>Erfolg</span></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led ok" aria-hidden="true"></i><strong>PBS-Backup</strong><span class="mono dim">#1282</span></div></td>
+                <td class="col-opt"><span class="path">tank/vm · 3 Snapshots · dedup 91 %</span></td>
+                <td><span class="mono">28.07. 03:00</span></td>
+                <td class="num"><span class="mono">08:04</span></td>
+                <td class="num col-opt"><span class="mono">6,2 GB</span></td>
+                <td><span class="chip ok"><i class="led ok" aria-hidden="true"></i>Erfolg</span></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led err" aria-hidden="true"></i><strong>Backup</strong><span class="mono dim">#1281</span></div></td>
+                <td class="col-opt"><span class="path">archiv-langzeit: 502 Bad Gateway beim Verzeichnislisting</span></td>
+                <td><span class="mono">28.07. 02:14</span></td>
+                <td class="num"><span class="mono">01:07</span></td>
+                <td class="num col-opt"><span class="mono dim">—</span></td>
+                <td><span class="chip err"><i class="led err" aria-hidden="true"></i>Fehler</span></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led warn" aria-hidden="true"></i><strong>Bi-Sync</strong><span class="mono dim">#1280</span></div></td>
+                <td class="col-opt"><span class="path">projekte-bisync · 3 Konflikte nach „newer" aufgelöst</span></td>
+                <td><span class="mono">28.07. 02:00</span></td>
+                <td class="num"><span class="mono">04:12</span></td>
+                <td class="num col-opt"><span class="mono">1,8 GB</span></td>
+                <td><span class="chip warn"><i class="led warn" aria-hidden="true"></i>Hinweise</span></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led idle" aria-hidden="true"></i><strong>Check</strong><span class="mono dim">#1279</span></div></td>
+                <td class="col-opt"><span class="path">Übersprungen — Wartungsfenster aktiv bis 06:00</span></td>
+                <td><span class="mono">27.07. 23:00</span></td>
+                <td class="num"><span class="mono dim">—</span></td>
+                <td class="num col-opt"><span class="mono dim">—</span></td>
+                <td><span class="chip"><i class="led idle" aria-hidden="true"></i>Übersprungen</span></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led ok" aria-hidden="true"></i><strong>Quick-Sync</strong><span class="mono dim">#1278</span></div></td>
+                <td class="col-opt"><span class="path">/srv/fibu/2026-Q3 → hetzner-box:fibu/2026-Q3</span></td>
+                <td><span class="mono">27.07. 17:42</span></td>
+                <td class="num"><span class="mono">00:38</span></td>
+                <td class="num col-opt"><span class="mono">412 MB</span></td>
+                <td><span class="chip ok"><i class="led ok" aria-hidden="true"></i>Erfolg</span></td>
+              </tr>
+              <tr>
+                <td><div class="cell-name"><i class="led idle" aria-hidden="true"></i><strong>Backup</strong><span class="mono dim">#1277</span></div></td>
+                <td class="col-opt"><span class="path">Vom Benutzer abgebrochen nach 02:19</span></td>
+                <td><span class="mono">27.07. 14:05</span></td>
+                <td class="num"><span class="mono">02:19</span></td>
+                <td class="num col-opt"><span class="mono">8,4 GB</span></td>
+                <td><span class="chip"><i class="led idle" aria-hidden="true"></i>Abgebrochen</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="pager">
+            <button class="btn secondary sm" disabled>Zurück</button>
+            <button class="btn secondary sm">Weiter</button>
+            <span class="pos">1 – 25 von 1 284</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================
+         SYSTEM — Leer-, Lade- und Fehlerzustände
+         ====================================================== -->
+    <section data-view="system" hidden>
+      <div class="head">
+        <h1>System</h1>
+        <div class="head-actions">
+          <button class="btn secondary">Support-Bundle</button>
+          <button class="btn primary">Vollständige Prüfung</button>
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="sect">
+          <div class="sect-head"><span class="label">Diagnose</span></div>
+          <div class="card">
+            <div class="empty">
+              <strong>Noch keine vollständige Prüfung in dieser Sitzung</strong>
+              <p>Die Prüfung testet Konfiguration, rclone-Remotes, systemd-Units, Mountpoints, Sentinel-Dateien und die Löschschutzregeln aller Paare. Sie schreibt nichts und dauert etwa 20 Sekunden.</p>
+              <button class="btn primary">Prüfung starten</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-head"><span class="label">Aktivitätsprotokoll</span></div>
+          <div class="card">
+            <div role="status" aria-live="polite">
+              <span class="sr-only">Aktivitätsprotokoll wird geladen</span>
+              <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sect">
+          <div class="sect-head"><span class="label">Wartung</span></div>
+          <div class="notice err">
+            <i class="led err" aria-hidden="true"></i>
+            <div class="notice-text">
+              <strong>Datenbankstatus nicht abrufbar</strong>
+              <span>GET /api/maintenance/database — 503 Service Unavailable</span>
+            </div>
+            <button class="btn secondary sm">Erneut versuchen</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================
+         HANDY-ANSICHT
+         ====================================================== -->
+    <section data-view="mobile" hidden>
+      <div class="head">
+        <h1>Handy-Ansicht</h1>
+        <div class="head-actions">
+          <button class="btn icon secondary theme-toggle" title="Hell / Dunkel umschalten" aria-label="Hell / Dunkel umschalten">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 0 0 17z" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="phones">
+
+          <!-- ===== Handy 1: Übersicht ===== -->
+          <div class="phone-wrap">
+            <div class="phone-cap"><b>Übersicht</b> — 390 px breit, Tab-Leiste unten, laufender Transfer oben</div>
+            <div class="phone">
+              <div class="phone-notch" aria-hidden="true"></div>
+              <div class="phone-screen">
+                <div class="m-sys">
+                  <span>14:32</span>
+                  <span class="m-sys-r">
+                    <svg viewBox="0 0 18 12" aria-hidden="true"><rect x="0" y="7" width="3" height="5" rx="1"/><rect x="4.5" y="5" width="3" height="7" rx="1"/><rect x="9" y="2.5" width="3" height="9.5" rx="1"/><rect x="13.5" y="0" width="3" height="12" rx="1" opacity=".35"/></svg>
+                    <svg viewBox="0 0 18 12" aria-hidden="true"><rect x="0" y="2" width="14" height="8" rx="2.4" opacity=".35"/><rect x="1.4" y="3.4" width="9" height="5.2" rx="1.4"/><rect x="15.4" y="4.6" width="1.6" height="2.8" rx=".8" opacity=".5"/></svg>
+                  </span>
+                </div>
+
+                <div class="m-head">
+                  <h2>Übersicht</h2>
+                  <div class="m-head-actions">
+                    <button class="btn icon secondary sm" aria-label="Aktualisieren">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.7 9.7 0 0 1 6.7 2.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.7 9.7 0 0 1-6.7-2.7L3 16"/><path d="M8 16H3v5"/></svg>
+                    </button>
+                    <button class="btn icon secondary sm" aria-label="Abmelden">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="m-status-strip">
+                  <i class="led ok" aria-hidden="true"></i>
+                  <span>Betrieb normal</span>
+                  <span class="m-host">pve-backup01 · 41 T</span>
+                </div>
+
+                <div class="m-body">
+
+                  <div class="m-notice">
+                    <i class="led warn" aria-hidden="true"></i>
+                    <div>
+                      <strong>archiv-langzeit seit 3 Tagen rot</strong>
+                      <span>hetzner-box — 502 Bad Gateway beim Listing</span>
+                    </div>
+                  </div>
+
+                  <div class="m-transfer">
+                    <div class="m-tf-head">
+                      <i class="led run lg" aria-hidden="true"></i>
+                      <div>
+                        <strong>Backup läuft</strong>
+                        <small>#1284 · seit 05:23 · 2/4 Paare</small>
+                      </div>
+                      <span class="chip run" id="m-chip">61 %</span>
+                    </div>
+                    <div class="m-tf-row">
+                      <div class="m-tf-top"><i class="led run" aria-hidden="true"></i><span>mediathek</span><b id="m-pct">44 %</b></div>
+                      <div class="track"><i class="run" id="m-bar" style="width:44%"></i></div>
+                      <div class="m-tf-foot"><span id="m-done">41,8 GB</span><span>/ 94,6 GB</span><span>118 MB/s</span><span>ETA <span id="m-eta">07:28</span></span></div>
+                    </div>
+                    <div class="m-tf-row">
+                      <div class="m-tf-top"><i class="led idle" aria-hidden="true"></i><span class="dim">nextcloud-data</span><b class="dim">—</b></div>
+                      <div class="track"><i class="pending" style="width:0%"></i></div>
+                      <div class="m-tf-foot"><span>wartet in der Warteschlange</span></div>
+                    </div>
+                  </div>
+
+                  <div class="m-readouts">
+                    <div class="m-ro">
+                      <span class="label">Letzter Lauf</span>
+                      <span class="m-ro-v ok" style="font-size:19px">Erfolg</span>
+                      <span class="m-ro-m">04:00 · 12:41</span>
+                    </div>
+                    <div class="m-ro">
+                      <span class="label">24 h übertragen</span>
+                      <span class="m-ro-v">184<span class="unit">GB</span></span>
+                      <span class="m-ro-m">41 208 Dateien</span>
+                    </div>
+                    <div class="m-ro">
+                      <span class="label">Aktive Paare</span>
+                      <span class="m-ro-v">6</span>
+                      <span class="m-ro-m">4 geplant · 2 manuell</span>
+                    </div>
+                    <div class="m-ro">
+                      <span class="label">Fehler 24 h</span>
+                      <span class="m-ro-v warn">2</span>
+                      <span class="m-ro-m">1 Pair betroffen</span>
+                    </div>
+                  </div>
+
+                  <div class="m-sched">
+                    <i class="led ok lg" aria-hidden="true"></i>
+                    <div class="m-sched-text">
+                      <strong>Scheduler aktiv</strong>
+                      <span>Nächster Lauf 02:00 · in 11 h 28 m</span>
+                    </div>
+                    <button class="btn secondary sm">Pause</button>
+                  </div>
+
+                  <div class="m-sect">
+                    <div class="m-sect-head"><span class="label">Sync-Paare</span><button>Alle</button></div>
+                    <div class="m-card">
+                      <button class="m-row">
+                        <i class="led run" aria-hidden="true"></i>
+                        <span class="m-row-main"><strong>mediathek</strong><small>läuft · 44 % · ETA 07:28</small></span>
+                        <span class="m-row-right"><span class="chip run">Läuft</span><svg class="m-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+                      </button>
+                      <button class="m-row">
+                        <i class="led err" aria-hidden="true"></i>
+                        <span class="m-row-main"><strong>archiv-langzeit</strong><small>25.07. 02:14 · 502 Bad Gateway</small></span>
+                        <span class="m-row-right"><span class="chip err">Fehler</span><svg class="m-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+                      </button>
+                      <button class="m-row">
+                        <i class="led warn" aria-hidden="true"></i>
+                        <span class="m-row-main"><strong>projekte-bisync</strong><small>heute 04:02 · 3 Konflikte</small></span>
+                        <span class="m-row-right"><span class="chip warn">Hinweise</span><svg class="m-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+                      </button>
+                      <button class="m-row">
+                        <i class="led ok" aria-hidden="true"></i>
+                        <span class="m-row-main"><strong>vm-images</strong><small>heute 14:30 · 62,4 GB</small></span>
+                        <span class="m-row-right"><span class="chip ok">Erfolg</span><svg class="m-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+                      </button>
+                      <button class="m-row">
+                        <i class="led ok" aria-hidden="true"></i>
+                        <span class="m-row-main"><strong>dokumente-fibu</strong><small>heute 14:27 · 2,1 GB</small></span>
+                        <span class="m-row-right"><span class="chip ok">Erfolg</span><svg class="m-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="m-actions">
+                    <button class="btn secondary">Plan prüfen</button>
+                    <button class="btn secondary">Quick-Sync</button>
+                    <button class="btn primary wide">Dry-Run starten</button>
+                  </div>
+
+                </div>
+
+                <nav class="m-tabs" aria-label="Mobile Navigation">
+                  <button class="m-tab" aria-current="page">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></svg>
+                    <span>Übersicht</span>
+                  </button>
+                  <button class="m-tab">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg>
+                    <span>Paare</span>
+                  </button>
+                  <button class="m-tab">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3.5 2"/></svg>
+                    <span>Jobs</span>
+                  </button>
+                  <button class="m-tab">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg>
+                    <span>System</span>
+                  </button>
+                  <button class="m-tab">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+                    <span>Mehr</span>
+                  </button>
+                </nav>
+                <div class="m-home-bar" aria-hidden="true"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== Handy 2: Pair-Detail ===== -->
+          <div class="phone-wrap">
+            <div class="phone-cap"><b>Pair-Detail</b> — Fehlerfall, Aktionen gesammelt am Ende statt im Kopf</div>
+            <div class="phone">
+              <div class="phone-notch" aria-hidden="true"></div>
+              <div class="phone-screen">
+                <div class="m-sys">
+                  <span>14:32</span>
+                  <span class="m-sys-r">
+                    <svg viewBox="0 0 18 12" aria-hidden="true"><rect x="0" y="7" width="3" height="5" rx="1"/><rect x="4.5" y="5" width="3" height="7" rx="1"/><rect x="9" y="2.5" width="3" height="9.5" rx="1"/><rect x="13.5" y="0" width="3" height="12" rx="1" opacity=".35"/></svg>
+                    <svg viewBox="0 0 18 12" aria-hidden="true"><rect x="0" y="2" width="14" height="8" rx="2.4" opacity=".35"/><rect x="1.4" y="3.4" width="9" height="5.2" rx="1.4"/><rect x="15.4" y="4.6" width="1.6" height="2.8" rx=".8" opacity=".5"/></svg>
+                  </span>
+                </div>
+
+                <div class="m-head">
+                  <button class="btn icon ghost sm" aria-label="Zurück zu Sync-Paare">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                  </button>
+                  <h2 style="font-size:18px">archiv-langzeit</h2>
+                  <div class="m-head-actions"><span class="chip err"><i class="led err" aria-hidden="true"></i>Fehler</span></div>
+                </div>
+
+                <div class="m-body">
+
+                  <div class="m-notice" style="border-color:color-mix(in srgb, var(--err) 30%, var(--line)); background:var(--err-bg)">
+                    <i class="led err" aria-hidden="true"></i>
+                    <div>
+                      <strong>Letzte 3 Läufe fehlgeschlagen</strong>
+                      <span>hetzner-box: 502 Bad Gateway beim Listing von „archiv/2026". Anmeldedaten gültig.</span>
+                    </div>
+                  </div>
+
+                  <div class="m-sect">
+                    <div class="m-sect-head"><span class="label">Konfiguration</span><button>Bearbeiten</button></div>
+                    <div class="m-card">
+                      <div class="m-row" style="grid-template-columns:1fr auto">
+                        <span class="m-row-main"><strong>Richtung</strong></span>
+                        <span class="mono" style="font-size:12.5px;color:var(--fg-2)">copy</span>
+                      </div>
+                      <div class="m-row" style="grid-template-columns:1fr auto">
+                        <span class="m-row-main"><strong>Quelle</strong></span>
+                        <span class="mono" style="font-size:12.5px;color:var(--fg-2)">/srv/archiv</span>
+                      </div>
+                      <div class="m-row" style="grid-template-columns:1fr auto">
+                        <span class="m-row-main"><strong>Ziel</strong></span>
+                        <span class="mono" style="font-size:12.5px;color:var(--fg-2)">hetzner-box:archiv</span>
+                      </div>
+                      <div class="m-row" style="grid-template-columns:1fr auto">
+                        <span class="m-row-main"><strong>Zeitplan</strong></span>
+                        <span class="mono" style="font-size:12.5px;color:var(--fg-2)">täglich 02:00</span>
+                      </div>
+                      <div class="m-row" style="grid-template-columns:1fr auto">
+                        <span class="m-row-main"><strong>Volumen</strong></span>
+                        <span class="mono" style="font-size:12.5px;color:var(--fg-2)">1,4 TB</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="m-sect">
+                    <div class="m-sect-head"><span class="label">Schutzregeln</span></div>
+                    <div class="m-card">
+                      <div class="switch-row" style="border:0;border-radius:0">
+                        <div class="sw-text"><strong>Pair aktiv</strong><small>nimmt am Zeitplan teil</small></div>
+                        <label class="switch"><input type="checkbox" checked><span class="sr-only">Pair aktiv</span><i aria-hidden="true"></i></label>
+                      </div>
+                      <div class="switch-row" style="border:0;border-top:1px solid var(--line-soft);border-radius:0">
+                        <div class="sw-text"><strong>Löschschutz</strong><small>Abbruch bei &gt; 5 % Löschungen</small></div>
+                        <label class="switch"><input type="checkbox" checked><span class="sr-only">Löschschutz</span><i aria-hidden="true"></i></label>
+                      </div>
+                      <div class="switch-row" style="border:0;border-top:1px solid var(--line-soft);border-radius:0">
+                        <div class="sw-text"><strong>Sentinel-Datei</strong><small>.rclone-sync-ok muss existieren</small></div>
+                        <label class="switch"><input type="checkbox"><span class="sr-only">Sentinel-Datei</span><i aria-hidden="true"></i></label>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="m-sect">
+                    <div class="m-sect-head"><span class="label">Letzte Läufe</span><button>Alle</button></div>
+                    <div class="m-card">
+                      <button class="m-row">
+                        <i class="led err" aria-hidden="true"></i>
+                        <span class="m-row-main"><strong>25.07. 02:14 · #1281</strong><small>502 Bad Gateway · 01:07</small></span>
+                        <svg class="m-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                      </button>
+                      <button class="m-row">
+                        <i class="led err" aria-hidden="true"></i>
+                        <span class="m-row-main"><strong>24.07. 02:11 · #1268</strong><small>502 Bad Gateway · 01:04</small></span>
+                        <svg class="m-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                      </button>
+                      <button class="m-row">
+                        <i class="led ok" aria-hidden="true"></i>
+                        <span class="m-row-main"><strong>22.07. 02:00 · #1241</strong><small>1,4 TB geprüft · 18:22</small></span>
+                        <svg class="m-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="m-actions">
+                    <button class="btn secondary">Remote testen</button>
+                    <button class="btn secondary">Volles Log</button>
+                    <button class="btn primary wide">Dry-Run starten</button>
+                    <button class="btn danger wide">Produktiv ausführen</button>
+                  </div>
+
+                </div>
+
+                <nav class="m-tabs" aria-label="Mobile Navigation">
+                  <button class="m-tab">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></svg>
+                    <span>Übersicht</span>
+                  </button>
+                  <button class="m-tab" aria-current="page">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg>
+                    <span>Paare</span>
+                  </button>
+                  <button class="m-tab">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3.5 2"/></svg>
+                    <span>Jobs</span>
+                  </button>
+                  <button class="m-tab">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg>
+                    <span>System</span>
+                  </button>
+                  <button class="m-tab">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+                    <span>Mehr</span>
+                  </button>
+                </nav>
+                <div class="m-home-bar" aria-hidden="true"></div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================
+         DESIGNSYSTEM
+         ====================================================== -->
+    <section data-view="settings" hidden>
+      <div class="head">
+        <h1>Designsystem</h1>
+        <div class="head-actions">
+          <button class="btn icon secondary theme-toggle" title="Hell / Dunkel umschalten" aria-label="Hell / Dunkel umschalten">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 0 0 17z" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="body">
+        <div class="spec">
+          <div class="spec-block">
+            <span class="label">Zustandsfarben — die einzigen Farben</span>
+            <div class="swatches">
+              <div class="sw"><i style="background:var(--ok)"></i><span>ok</span></div>
+              <div class="sw"><i style="background:var(--run)"></i><span>run</span></div>
+              <div class="sw"><i style="background:var(--warn)"></i><span>warn</span></div>
+              <div class="sw"><i style="background:var(--err)"></i><span>err</span></div>
+            </div>
+            <span class="ro-m">Kein Markenakzent, keine Verläufe. Primäraktion = Vordergrundfarbe. Blau ist zusätzlich Fokus- und Auswahlfarbe.</span>
+          </div>
+          <div class="spec-block">
+            <span class="label">Neutrale Ebenen</span>
+            <div class="swatches">
+              <div class="sw"><i style="background:var(--bg);border:1px solid var(--line)"></i><span>bg</span></div>
+              <div class="sw"><i style="background:var(--surface);border:1px solid var(--line)"></i><span>surface</span></div>
+              <div class="sw"><i style="background:var(--surface-2);border:1px solid var(--line)"></i><span>surface-2</span></div>
+              <div class="sw"><i style="background:var(--surface-3);border:1px solid var(--line)"></i><span>surface-3</span></div>
+            </div>
+            <span class="ro-m">Vier Ebenen, Haarlinie 1 px, Schatten mit Versatz und Weichzeichnung — kein farbiger Halo.</span>
+          </div>
+          <div class="spec-block">
+            <span class="label">Typografie</span>
+            <div class="type-spec">
+              <div><code>21 / 550 / -.028</code><span style="font-size:21px;font-weight:550;letter-spacing:-.028em">Seitentitel</span></div>
+              <div><code>13.5 / 400</code><span>Fließtext und Bedienelemente</span></div>
+              <div><code>10.5 / 600 caps</code><span class="label">Sektionslabel</span></div>
+              <div><code>28 mono tnum</code><span class="mono" style="font-size:23px;letter-spacing:-.04em">184,2 GB</span></div>
+            </div>
+            <span class="ro-m">Eine Sans-Familie. Mono nur für Messwerte, Pfade, Zeiten, IDs.</span>
+          </div>
+          <div class="spec-block">
+            <span class="label">Buttons — alle Zustände</span>
+            <div class="spec-row">
+              <button class="btn primary">Primär</button>
+              <button class="btn secondary">Sekundär</button>
+              <button class="btn ghost">Ghost</button>
+            </div>
+            <div class="spec-row">
+              <button class="btn danger">Gefahr</button>
+              <button class="btn primary" disabled>Deaktiviert</button>
+              <button class="btn secondary sm">Klein</button>
+            </div>
+            <span class="ro-m">Höhe 33 px, auf dem Handy 42 px. Radius 6 px, 140 ms ease-out, :active scale(.98).</span>
+          </div>
+          <div class="spec-block">
+            <span class="label">Zustandsanzeigen</span>
+            <div class="spec-row">
+              <span class="chip ok"><i class="led ok" aria-hidden="true"></i>Erfolg</span>
+              <span class="chip run"><i class="led run" aria-hidden="true"></i>Läuft</span>
+              <span class="chip warn"><i class="led warn" aria-hidden="true"></i>Hinweise</span>
+            </div>
+            <div class="spec-row">
+              <span class="chip err"><i class="led err" aria-hidden="true"></i>Fehler</span>
+              <span class="chip"><i class="led idle" aria-hidden="true"></i>Wartet</span>
+            </div>
+            <span class="ro-m">Punkt plus Text — nie Farbe allein. „Läuft" pulst 1,8 s, die einzige Dauerbewegung.</span>
+          </div>
+          <div class="spec-block">
+            <span class="label">Bewegung</span>
+            <div class="type-spec">
+              <div><code>140 ms</code><span>Hover, Fokus, Farbe</span></div>
+              <div><code>220 ms</code><span>Schalter, Ausklappen</span></div>
+              <div><code>340 ms</code><span>Fortschrittsbalken</span></div>
+              <div><code>ease-out</code><span class="mono" style="font-size:11px">cubic-bezier(.23,1,.32,1)</span></div>
+            </div>
+            <span class="ro-m">Kein ease-in. prefers-reduced-motion schaltet alle Animation ab.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+(() => {
+  const views = document.querySelectorAll('[data-view]');
+  const navButtons = document.querySelectorAll('.nav button');
+
+  function show(page) {
+    views.forEach(v => { v.hidden = v.dataset.view !== page; });
+    navButtons.forEach(b => {
+      if (b.dataset.page === page) b.setAttribute('aria-current', 'page');
+      else b.removeAttribute('aria-current');
+    });
+    window.scrollTo({ top: 0 });
+  }
+  navButtons.forEach(b => b.addEventListener('click', () => show(b.dataset.page)));
+  document.querySelectorAll('[data-goto]').forEach(b => b.addEventListener('click', () => show(b.dataset.goto)));
+
+  document.querySelectorAll('.theme-toggle').forEach(b => {
+    b.addEventListener('click', () => {
+      const root = document.documentElement;
+      root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
+    });
+  });
+
+  // Direktaufruf per Anker: #pairs, #jobs, #mobile, #settings — optional +dark, z. B. #mobile,dark
+  (() => {
+    const raw = decodeURIComponent(location.hash.replace(/^#/, ''));
+    if (!raw) return;
+    const parts = raw.split(',').map(s => s.trim());
+    if (parts.includes('dark')) document.documentElement.dataset.theme = 'dark';
+    const page = parts.find(p => p !== 'dark');
+    if (page && document.querySelector(`[data-view="${page}"]`)) show(page);
+  })();
+
+  const pad = n => String(n).padStart(2, '0');
+  const clock = document.getElementById('clock');
+  setInterval(() => {
+    const d = new Date();
+    clock.textContent = `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}  ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }, 1000);
+
+  // Laufende Übertragung – Desktop und Handy synchron
+  const TOTAL = 94.6;
+  let p = 44;
+  const el = id => document.getElementById(id);
+  const parts = {
+    bar: el('tf-bar'), pct: el('tf-pct'), done: el('tf-done'), eta: el('tf-eta'),
+    speed: el('tf-speed'), overall: el('tf-overall'),
+    mBar: el('m-bar'), mPct: el('m-pct'), mDone: el('m-done'), mEta: el('m-eta'), mChip: el('m-chip')
+  };
+
+  setInterval(() => {
+    p = p >= 99 ? 44 : p + 0.4;
+    const v = Math.round(p);
+    const doneTxt = (TOTAL * p / 100).toFixed(1).replace('.', ',') + ' GB';
+    const remainSec = Math.round((TOTAL * (100 - p) / 100) * 1024 / 118);
+    const etaTxt = `${pad(Math.floor(remainSec / 60))}:${pad(remainSec % 60)}`;
+    const overallTxt = Math.round(50 + p / 4);
+
+    parts.bar.style.width = p + '%';
+    parts.bar.parentElement.setAttribute('aria-valuenow', v);
+    parts.pct.textContent = v + ' %';
+    parts.done.textContent = doneTxt;
+    parts.eta.textContent = etaTxt;
+    parts.speed.textContent = (112 + Math.round(Math.sin(p) * 9)) + ' MB/s';
+    parts.overall.textContent = overallTxt;
+
+    parts.mBar.style.width = p + '%';
+    parts.mPct.textContent = v + ' %';
+    parts.mDone.textContent = doneTxt;
+    parts.mEta.textContent = etaTxt;
+    parts.mChip.textContent = overallTxt + ' %';
+  }, 900);
+})();
+</script>
+</body>
+</html>
