@@ -7,6 +7,9 @@
 - Mehrere Sync-Pairs mit Cron-Zeitplan, manuellen Läufen und begrenzter Parallelität
 - Persistente Scheduler-Wartungsfenster mit automatischer Fortsetzung
 - Frischeüberwachung pro Pair für zu alte oder fehlende erfolgreiche Läufe
+- Ausbleib-Alarm: meldet auch den Fall, dass ein Lauf gar nicht erst startet
+- Restore-Drill: holt Stichproben zurück und vergleicht sie per Prüfsumme mit der Quelle
+- Kopien-Matrix je Datenbestand für die 3-2-1-Frage statt nur Pair-Zeilen
 - `bisync`, `pull` und `push`; einseitig wahlweise `copy` oder `sync`
 - Prozessübergreifende Locks, Laufzeitstatus und Abbruch für Web, CLI und Scheduler
 - Mount-, Sentinel-, Mindestdatei-, Freiplatz- und Remote-Prüfungen vor jedem Lauf

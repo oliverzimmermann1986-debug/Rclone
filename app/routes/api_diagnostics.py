@@ -20,9 +20,11 @@ from .. import __version__
 from ..auth import require_auth
 from ..config_store import get_config
 from ..config_validation import ConfigValidationError, validate_config
+from ..copies import build_matrix as build_copy_matrix
 from ..db import get_db
 from ..jobs.rclone_sync import _count_files_up_to, _is_remote, build_job_plan
 from ..jobs.scheduler import DISABLED_VALUES, next_run_after, rclone_history_key
+from ..overdue import evaluate_pair
 from ..rclone_args import rclone_subprocess_env
 from ..scheduler_control import scheduler_state
 from ..security import require_csrf
@@ -476,6 +478,12 @@ def _cached_overview() -> dict[str, Any] | None:
     return None
 
 
+@router.get("/copies")
+def copies_matrix() -> dict[str, Any]:
+    """Kopien je Quellpfad statt Zeilen je Pair — beantwortet 3-2-1."""
+    return build_copy_matrix(get_config(), get_db())
+
+
 @router.get("/overview")
 def overview() -> dict[str, Any]:
     """Schnelle, gegen parallele Neuberechnung geschützte Betriebsübersicht."""
@@ -555,20 +563,6 @@ def _build_overview() -> dict[str, Any]:
             if latest_success and latest_success.get("ended_at")
             else None
         )
-        max_success_age_hours = float(pair.get("max_success_age_hours") or 0)
-        success_age_hours = (
-            max(0.0, (now - last_success_at) / 3600.0)
-            if last_success_at is not None
-            else None
-        )
-        overdue = bool(
-            max_success_age_hours > 0
-            and (
-                last_success_at is None
-                or success_age_hours is None
-                or success_age_hours > max_success_age_hours
-            )
-        )
         pair_health.append(
             {
                 "name": name,
@@ -580,12 +574,7 @@ def _build_overview() -> dict[str, Any]:
                 "last_status": latest.get("status") if latest else None,
                 "last_run": latest.get("ended_at") if latest else None,
                 "job_id": latest.get("job_id") if latest else None,
-                "last_success": last_success_at,
-                "success_age_hours": round(success_age_hours, 1)
-                if success_age_hours is not None
-                else None,
-                "max_success_age_hours": max_success_age_hours,
-                "overdue": overdue,
+                **evaluate_pair(pair, last_success_at, now=now),
                 "error": ((latest.get("pair") or {}).get("error") if latest else None),
             }
         )

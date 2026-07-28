@@ -61,6 +61,34 @@ backup:
   scheduler_retry_minutes: 60
   default_schedule: "0 3 * * *"
 
+  # Ausbleib-Alarm: meldet Pairs, deren letzter Erfolg älter ist als ihre
+  # max_success_age_hours. Deckt den Fall ab, den ein Fehler-Webhook nicht
+  # sieht: der Lauf startet gar nicht (Timer aus, Scheduler tot, Gast gestoppt).
+  # Greift nur bei Pairs mit max_success_age_hours > 0.
+  overdue_alerts:
+    enabled: true
+    repeat_hours: 24   # Wiederholung je Pair, damit der Kanal nicht flutet
+
+  # Restore-Drill: holt eine Zufallsstichprobe aus dem Ziel zurück und
+  # vergleicht sie per Prüfsumme mit der Quelle. Beantwortet die Frage, die ein
+  # erfolgreicher Sync NICHT beantwortet: komme ich wieder an die Daten heran?
+  #
+  # Datenschutz: Die Stichprobe sind Produktivdaten. Sie liegen nur während des
+  # Vergleichs unter paths.temp_dir (Modus 0700) und werden danach unbedingt
+  # gelöscht — auch bei Abbruch. Weder Job-Summary noch Support-Bundle
+  # enthalten Dateiinhalte.
+  #
+  # Kosten: Jeder Lauf verursacht Egress beim Anbieter. sample_files und
+  # max_total_mb begrenzen ihn. max_scan_files deckelt das Listing; wird es
+  # erreicht, stammt die Stichprobe nur aus dem gelesenen Teil und das Ergebnis
+  # meldet "truncated".
+  restore_test:
+    enabled: false
+    schedule: "manual"     # z. B. "0 5 * * 0" für sonntags 05:00
+    sample_files: 20
+    max_total_mb: 256
+    max_scan_files: 20000
+
   # Gefährliche freie rclone-Flags werden standardmäßig blockiert. Diese Ausnahme
   # nur nach Code-/Planprüfung aktivieren.
   allow_unsafe_rclone_args: false

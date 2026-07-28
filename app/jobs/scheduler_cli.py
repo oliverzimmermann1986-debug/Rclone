@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ..config_store import get_config
 from ..db import get_db
+from ..overdue import check_and_notify as check_overdue
 from ..scheduler_control import scheduler_state
 from . import runtime_state
 from .job_lifecycle import (
@@ -21,7 +22,15 @@ from .job_lifecycle import (
 from .locks import file_lock_or_none
 from .pbs_backup import PBS_CANCEL_SCOPE, run_pbs_backup
 from .rclone_sync import reset_cancel, run_job
-from .scheduler import find_due_pairs, find_due_pbs_targets
+from .restore_test import AGGREGATE_RUN_NAME as RESTORE_AGGREGATE_NAME
+from .restore_test import JOB_KIND as RESTORE_JOB_KIND
+from .restore_test import run_restore_test
+from .scheduler import (
+    RESTORE_TEST_HISTORY_KEY,
+    find_due_pairs,
+    find_due_pbs_targets,
+    restore_test_due,
+)
 
 
 def _job_status(summary: dict) -> str:
@@ -134,6 +143,23 @@ def main() -> int:
 
     _reconcile_available_scopes(db)
 
+    # Vor der Pausenprüfung: ein Wartungsfenster darf ein seit Tagen totes Pair
+    # nicht stummschalten. Nur bei bewusst abgeschalteten Zeitplänen entfällt
+    # die Alarmierung, sonst meldete sie dauerhaft.
+    if backup_enabled:
+        try:
+            reported = check_overdue(cfg, db)
+        except Exception:
+            logging.getLogger("scheduler_cli").exception(
+                "Ausbleib-Prüfung fehlgeschlagen"
+            )
+        else:
+            if reported:
+                _configure_logging(None)
+                logging.getLogger("scheduler_cli").warning(
+                    "Ausbleib-Alarm für %s", ", ".join(reported)
+                )
+
     control = scheduler_state(db)
     if control.get("paused"):
         _configure_logging(None)
@@ -160,8 +186,9 @@ def main() -> int:
             ],
         )
     pbs_due, _pbs_status = find_due_pbs_targets(cfg, db)
+    restore_due = restore_test_due(cfg, db) if backup_enabled else {"due": False}
 
-    if not due and not pbs_due:
+    if not due and not pbs_due and not restore_due.get("due"):
         # Normalfall: kein Logfile pro Minute erzeugen.
         _configure_logging(None)
         logging.getLogger("scheduler_cli").info(
@@ -332,6 +359,83 @@ def main() -> int:
                             "trigger": "scheduler",
                             "history_keys": pbs_history_keys,
                             "scheduler_slots": pbs_scheduler_slots,
+                        },
+                    )
+                    rc = 1
+
+    # Der Drill teilt sich den Backup-Scope. Lief in diesem Tick bereits ein
+    # Sync, wartet er auf den nächsten — seine Fälligkeit bleibt bestehen, weil
+    # kein Lauf verbucht wurde.
+    if restore_due.get("due") and not due:
+        logger.info("Restore-Drill ist fällig")
+        with file_lock_or_none("backup") as got_lock:
+            if got_lock is None:
+                logger.warning("Backup-Scope belegt - Restore-Drill verschoben")
+            else:
+                reconciliation = reconcile_locked_scope(
+                    db,
+                    scope=runtime_state.DEFAULT_CANCEL_SCOPE,
+                    kinds=BACKUP_KINDS,
+                )
+                if not reconciliation.get("safe"):
+                    logger.error(
+                        "Registrierter Sync-Unterprozess ist noch aktiv; "
+                        "Restore-Drill abgebrochen"
+                    )
+                    return 1
+                restore_due = restore_test_due(cfg, db)
+                if not restore_due.get("due"):
+                    logger.info("Restore-Fälligkeit nach Lock-Erwerb bereits erledigt")
+                    return rc
+                slot = str(restore_due.get("scheduled_slot") or "")
+                history_keys = {RESTORE_AGGREGATE_NAME: RESTORE_TEST_HISTORY_KEY}
+                scheduler_slots = {RESTORE_AGGREGATE_NAME: slot} if slot else {}
+                reset_cancel()
+                job_id = db.job_start(
+                    RESTORE_JOB_KIND,
+                    log_file=str(log_file),
+                    attempts=[
+                        {
+                            "name": RESTORE_AGGREGATE_NAME,
+                            "history_key": RESTORE_TEST_HISTORY_KEY,
+                            "scheduled_slot": slot,
+                            "trigger": "scheduler",
+                        }
+                    ],
+                    exclusive_scope=True,
+                )
+                try:
+                    summary = run_restore_test(
+                        trigger="scheduler", reset_cancel_state=False
+                    )
+                    summary = _with_metadata(
+                        summary,
+                        history_keys={
+                            **(summary.get("history_keys") or {}),
+                            **history_keys,
+                        },
+                        scheduler_slots=scheduler_slots,
+                    )
+                    status_name = _job_status(summary)
+                    db.job_finish(job_id, status_name, summary)
+                    logger.info(
+                        "Restore-Drill fertig: %s von %s Stichproben identisch",
+                        summary.get("verified_files"),
+                        summary.get("sampled_files"),
+                    )
+                    if status_name != "ok":
+                        rc = 1
+                except Exception as e:
+                    logger.exception("Restore-Drill gescheitert: %s", e)
+                    db.job_finish(
+                        job_id,
+                        "error",
+                        {
+                            "ok": False,
+                            "error": str(e),
+                            "trigger": "scheduler",
+                            "history_keys": history_keys,
+                            "scheduler_slots": scheduler_slots,
                         },
                     )
                     rc = 1

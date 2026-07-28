@@ -25,6 +25,9 @@ EVENTS = (
     "conflict",
     "mount_check_failed",
     "cancelled",
+    "pair_overdue",
+    "restore_test_ok",
+    "restore_test_error",
 )
 _MAX_RESPONSE_BYTES = 64 * 1024
 _MAX_REQUEST_BYTES = 512 * 1024
@@ -258,6 +261,9 @@ _COLORS = {
     "conflict": 0xFBBF24,
     "mount_check_failed": 0xF87171,
     "cancelled": 0x8E9AAE,
+    "pair_overdue": 0xFBBF24,
+    "restore_test_ok": 0x4ADE80,
+    "restore_test_error": 0xF87171,
 }
 
 
