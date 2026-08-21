@@ -53,3 +53,30 @@ def test_dot_segments_cannot_bypass_hidden_path(monkeypatch):
     with pytest.raises(HTTPException) as excinfo:
         api_browse.browse_rclone("pcloud:/Fotos/../Crypto Folder")
     assert excinfo.value.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "pcloud:../secret",
+        "pcloud:/../secret",
+        "pcloud:folder/../../secret",
+        "pcloud:..",
+    ),
+)
+def test_parent_segments_after_remote_separator_are_rejected(monkeypatch, path):
+    monkeypatch.setattr(api_browse, "_rclone_remotes", lambda: ["pcloud:"])
+    called = False
+
+    def list_directories(_path):
+        nonlocal called
+        called = True
+        return [], False
+
+    monkeypatch.setattr(api_browse, "_rclone_directories", list_directories)
+
+    with pytest.raises(HTTPException) as excinfo:
+        api_browse.browse_rclone(path)
+
+    assert excinfo.value.status_code == 400
+    assert not called
