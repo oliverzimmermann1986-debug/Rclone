@@ -1,0 +1,75 @@
+import SwiftUI
+
+struct RootTabView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var selectedTab = 0
+    @State private var showingSettings = false
+
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            NavigationStack { DashboardView(showingSettings: $showingSettings) }
+                .tabItem { Label("Lagebild", systemImage: "gauge.with.dots.needle.50percent") }
+                .tag(0)
+            NavigationStack { BackupsView(showingSettings: $showingSettings) }
+                .tabItem { Label("Sicherungen", systemImage: "externaldrive.badge.icloud") }
+                .tag(1)
+            NavigationStack { SystemView(showingSettings: $showingSettings) }
+                .tabItem { Label("System", systemImage: "server.rack") }
+                .tag(2)
+        }
+        .tint(.teal)
+        .sheet(isPresented: $showingSettings) { SettingsView() }
+        .alert("Hinweis", isPresented: Binding(
+            get: { model.actionMessage != nil },
+            set: { if !$0 { model.dismissMessages() } }
+        )) {
+            Button("OK") { model.dismissMessages() }
+        } message: {
+            Text(model.actionMessage ?? "")
+        }
+    }
+}
+struct SettingsButton: View {
+    @Binding var showingSettings: Bool
+
+    var body: some View {
+        Button { showingSettings = true } label: { Image(systemName: "person.crop.circle") }
+            .accessibilityLabel("Konto und Einstellungen")
+    }
+}
+
+private struct SettingsView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmLogout = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Verbindung") {
+                    LabeledContent("Server", value: model.serverAddress)
+                    LabeledContent("Benutzer", value: model.savedUsername)
+                    if let version = model.overview?.app.version {
+                        LabeledContent("Server-Version", value: version)
+                    }
+                }
+                Section {
+                    Button("Abmelden", role: .destructive) { confirmLogout = true }
+                } footer: {
+                    Text("Die Abmeldung beendet aus Sicherheitsgründen alle aktiven Administrationssitzungen.")
+                }
+            }
+            .navigationTitle("Konto")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Fertig") { dismiss() } } }
+            .confirmationDialog("Alle Sitzungen abmelden?", isPresented: $confirmLogout, titleVisibility: .visible) {
+                Button("Alle Sitzungen abmelden", role: .destructive) {
+                    Task { await model.logout(); dismiss() }
+                }
+                Button("Abbrechen", role: .cancel) {}
+            } message: {
+                Text("Du musst dich anschließend auf allen Geräten neu anmelden.")
+            }
+        }
+    }
+}
