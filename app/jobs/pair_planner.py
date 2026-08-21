@@ -29,7 +29,13 @@ def paths_overlap(a: str, b: str) -> bool:
         return aa == bb or aa.startswith(bb + "/") or bb.startswith(aa + "/")
     try:
         pa, pb = Path(a).resolve(), Path(b).resolve()
-        return pa == pb or pa.is_relative_to(pb) or pb.is_relative_to(pa)
+        # Backups liegen häufig auf CIFS-/FUSE-/Wechselmedien, deren
+        # Groß-/Kleinschreibung nicht zuverlässig aus dem Host-OS ableitbar ist.
+        # Eine case-insensitive Alias-Beziehung wird deshalb fail-closed als
+        # Konflikt behandelt und nur seriell ausgeführt.
+        aa = tuple(part.casefold() for part in pa.parts)
+        bb = tuple(part.casefold() for part in pb.parts)
+        return aa == bb or aa[: len(bb)] == bb or bb[: len(aa)] == aa
     except (OSError, RuntimeError, ValueError):
         # Unklare Ressourcenidentität wird sicherheitshalber seriell geplant.
         return True
