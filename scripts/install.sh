@@ -7,6 +7,7 @@ APP_GROUP="rclone-sync"
 APP_DIR="/opt/rclone-sync"
 REPO_URL="${REPO_URL:-https://github.com/oliverzimmermann1986-debug/Rclone.git}"
 BRANCH="${BRANCH:-main}"
+SOURCE_COMMIT="${SOURCE_COMMIT:-}"
 BACKUP_ROOT="${BACKUP_ROOT:-/var/backups/rclone-sync}"
 BACKUP_KEEP="${BACKUP_KEEP:-10}"
 BACKUP_MARKER=".rclone-sync-backup-v1"
@@ -93,6 +94,17 @@ trap 'on_error "$LINENO" "$?"' ERR
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "Bitte als root oder mit sudo ausführen" >&2
+  exit 1
+fi
+
+if [[ ! "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  echo "Abbruch: SOURCE_COMMIT muss die geprüfte 40-stellige Git-Commit-ID sein." >&2
+  echo "Der Installer führt aus Sicherheitsgründen niemals einen beweglichen Branch-HEAD als root aus." >&2
+  exit 1
+fi
+SOURCE_COMMIT=${SOURCE_COMMIT,,}
+if [[ ! "$BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || [[ "$BRANCH" == *..* ]]; then
+  echo "Abbruch: BRANCH enthält ungültige Zeichen." >&2
   exit 1
 fi
 
@@ -228,11 +240,19 @@ if [[ -d "$APP_DIR/.git" ]]; then
   SOURCE_UPDATE_STARTED=1
 fi
 if [[ ! -d "$APP_DIR/.git" ]]; then
-  git clone --branch "$BRANCH" --single-branch "$REPO_URL" "$APP_DIR"
+  git clone --branch "$BRANCH" --single-branch --no-checkout "$REPO_URL" "$APP_DIR"
 else
-  git -c safe.directory="$APP_DIR" -C "$APP_DIR" fetch --prune origin "$BRANCH"
-  git -c safe.directory="$APP_DIR" -C "$APP_DIR" checkout "$BRANCH"
-  git -c safe.directory="$APP_DIR" -C "$APP_DIR" pull --ff-only origin "$BRANCH"
+  git -c safe.directory="$APP_DIR" -C "$APP_DIR" fetch --prune origin \
+    "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+fi
+git -c safe.directory="$APP_DIR" -C "$APP_DIR" cat-file -e "$SOURCE_COMMIT^{commit}"
+git -c safe.directory="$APP_DIR" -C "$APP_DIR" merge-base --is-ancestor \
+  "$SOURCE_COMMIT" "origin/$BRANCH"
+git -c safe.directory="$APP_DIR" -C "$APP_DIR" checkout --detach "$SOURCE_COMMIT"
+CHECKED_OUT_COMMIT=$(git -c safe.directory="$APP_DIR" -C "$APP_DIR" rev-parse HEAD)
+if [[ "$CHECKED_OUT_COMMIT" != "$SOURCE_COMMIT" ]]; then
+  echo "Abbruch: ausgecheckter Commit stimmt nicht mit SOURCE_COMMIT überein." >&2
+  false
 fi
 
 cd "$APP_DIR"
