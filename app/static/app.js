@@ -13,7 +13,7 @@ function app() {
 
   return {
     page: 'dashboard',
-    pages: ['dashboard', 'pairs', 'jobs', 'doctor', 'settings'],
+    pages: ['dashboard', 'pairs', 'definitions', 'runs', 'doctor', 'settings'],
     settingsTabs: ['general', 'scheduler', 'security', 'notifications', 'filters', 'account', 'pbs'],
     navOpen: false,
     online: navigator.onLine,
@@ -30,7 +30,7 @@ function app() {
     configError: '',
     pending: {
       backup: false, plan: false, quick: false, pbs: false, pbsCancel: false,
-      save: false, validate: false, filter: false, password: false,
+      save: false, validate: false, filter: false, password: false, definition: false,
     },
     currentPasswordDialog: { show: false, password: '', error: '' },
 
@@ -47,7 +47,7 @@ function app() {
 
     config: {
       web: {}, paths: {},
-      backup: { pairs: [], rclone_args: [], tuning: {} },
+      backup: { pairs: [], jobs: [], rclone_args: [], tuning: {} },
       notifications: { webhooks: [] },
       maintenance: {},
       pbs: {
@@ -66,6 +66,8 @@ function app() {
     newPairPreset: 'push-copy',
     pairOpen: {},
     pairSelection: {},
+    jobPathChoice: {},
+    jobDefinitions: { loading: false, error: '' },
     settingsTab: 'general',
     testResults: {},
     configValidation: { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true },
@@ -73,7 +75,7 @@ function app() {
     schedulePreview: { loading: false, valid: null, error: '', nextRuns: [], timer: null },
     performancePreset: 'balanced',
 
-    plan: { loading: false, data: null, dry_run: true },
+    plan: { loading: false, data: null, dry_run: true, definitionId: null },
     doctor: { loading: false, data: null },
     copies: { loading: false, data: null },
     maintenance: { logs: [], loading: false, prune: null, database: null, logQuery: '' },
@@ -128,7 +130,7 @@ function app() {
         }
         if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
           event.preventDefault();
-          const target = this.page === 'jobs' ? document.getElementById('job-search') : document.getElementById('pair-search');
+          const target = this.page === 'runs' ? document.getElementById('job-search') : document.getElementById('pair-search');
           target?.focus();
         }
       });
@@ -274,7 +276,7 @@ function app() {
 
     navigate(next, updateHash = true) {
       if (!this.pages.includes(next)) return;
-      if ((this.configDirty || this.filterFile.dirty) && ['pairs', 'settings'].includes(this.page) && next !== this.page) {
+      if ((this.configDirty || this.filterFile.dirty) && ['pairs', 'definitions', 'settings'].includes(this.page) && next !== this.page) {
         if (!confirm('Es gibt ungespeicherte Änderungen. Seite trotzdem wechseln?')) return;
       }
       this.page = next;
@@ -291,7 +293,10 @@ function app() {
         if (this.config?.pbs?.enabled) this.loadPbsStatus();
       } else if (page === 'pairs') {
         if (!configAlreadyLoaded) this.loadConfig();
-      } else if (page === 'jobs') {
+      } else if (page === 'definitions') {
+        if (!configAlreadyLoaded) this.loadConfig();
+        this.loadJobDefinitions(true);
+      } else if (page === 'runs') {
         this.loadJobs(true);
       } else if (page === 'doctor') {
         this.loadOverview(true); if (!configAlreadyLoaded) this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadCopies(); this.loadSchedulerState(true);
@@ -301,7 +306,7 @@ function app() {
     },
 
     pageTitle() {
-      return ({ dashboard: 'Übersicht', pairs: 'Sync-Paare', jobs: 'Jobhistorie', doctor: 'System & Diagnose', settings: 'Einstellungen' })[this.page] || 'rclone-sync';
+      return ({ dashboard: 'Lagebild', pairs: 'Datenwege', definitions: 'Jobs', runs: 'Läufe', doctor: 'System', settings: 'Einstellungen' })[this.page] || 'rclone-sync';
     },
 
     cookie(name) {
@@ -583,9 +588,146 @@ function app() {
         this.jobs.items = result.items || [];
         this.jobs.total = result.total || 0;
       } else {
-        this.jobs.error = 'Jobhistorie konnte nicht geladen werden.';
+        this.jobs.error = 'Läufe konnten nicht geladen werden.';
       }
       this.jobs.loading = false;
+    },
+
+    normalizeJobDefinition(job) {
+      if (job.enabled === undefined) job.enabled = true;
+      job.name ||= '';
+      job.data_path_ids ||= [];
+      job.schedule ||= 'manual';
+      job.execution_mode = job.execution_mode === 'parallel' ? 'parallel' : 'sequential';
+      job.max_parallel = job.execution_mode === 'sequential'
+        ? 1
+        : Math.max(1, Number(job.max_parallel) || 2);
+      job.retry_minutes = Math.max(1, Number(job.retry_minutes) || 60);
+      return job;
+    },
+
+    async loadJobDefinitions(silent = false) {
+      this.jobDefinitions = { loading: true, error: '' };
+      const result = await this.api('GET', '/api/jobs/definitions', undefined, {
+        silent,
+        requestKey: 'job-definitions',
+      });
+      if (this.isStale(result)) return;
+      if (!result) {
+        this.jobDefinitions = { loading: false, error: 'Jobdefinitionen konnten nicht geladen werden.' };
+        return;
+      }
+      if (!this.configDirty) {
+        this.config.backup ||= {};
+        this.config.backup.jobs = result.map((job) => this.normalizeJobDefinition({ ...job }));
+      }
+      this.jobDefinitions = { loading: false, error: '' };
+    },
+
+    addJobDefinition() {
+      this.config.backup ||= {};
+      this.config.backup.jobs ||= [];
+      this.config.backup.jobs.push(this.normalizeJobDefinition({
+        name: '', enabled: false, data_path_ids: [], schedule: 'manual',
+        execution_mode: 'sequential', max_parallel: 1, retry_minutes: 60,
+      }));
+      this.configDirty = true;
+    },
+
+    removeJobDefinition(idx) {
+      const job = this.config.backup.jobs[idx];
+      if (!confirm(`Job „${job?.name || 'ohne Namen'}“ entfernen? Die bisherigen Läufe bleiben erhalten.`)) return;
+      this.config.backup.jobs.splice(idx, 1);
+      delete this.jobPathChoice[idx];
+      this.configDirty = true;
+    },
+
+    dataPathName(pathId) {
+      const pair = (this.config.backup?.pairs || []).find((item) => item.id === pathId);
+      return pair?.name || pathId || 'Unbekannter Datenweg';
+    },
+
+    availableDataPaths(job) {
+      const assigned = new Set(job?.data_path_ids || []);
+      return (this.config.backup?.pairs || []).filter((pair) => pair.id && !assigned.has(pair.id));
+    },
+
+    addJobPath(job, jobIdx) {
+      const pathId = this.jobPathChoice[jobIdx];
+      if (!pathId || job.data_path_ids.includes(pathId)) return;
+      job.data_path_ids.push(pathId);
+      this.jobPathChoice[jobIdx] = '';
+      this.configDirty = true;
+    },
+
+    removeJobPath(job, pathIdx) {
+      job.data_path_ids.splice(pathIdx, 1);
+      this.configDirty = true;
+    },
+
+    moveJobPath(job, pathIdx, delta) {
+      const target = pathIdx + delta;
+      if (target < 0 || target >= job.data_path_ids.length) return;
+      const [pathId] = job.data_path_ids.splice(pathIdx, 1);
+      job.data_path_ids.splice(target, 0, pathId);
+      this.configDirty = true;
+    },
+
+    async planJobDefinition(job, dryRun = true) {
+      if (!job?.id || this.configDirty || this.pending.definition) {
+        this.showToast('Job zuerst speichern, dann planen.', 'warn');
+        return;
+      }
+      this.pending.definition = true;
+      this.plan = { loading: true, data: null, dry_run: dryRun, definitionId: job.id };
+      try {
+        const result = await this.api(
+          'GET',
+          `/api/jobs/definitions/${encodeURIComponent(job.id)}/plan?dry_run=${dryRun}`,
+          undefined,
+          { requestKey: 'definition-plan' },
+        );
+        if (!this.isStale(result) && result) {
+          this.plan = { loading: false, data: result, dry_run: dryRun, definitionId: job.id };
+          this.openDialog('planDialog');
+        }
+      } finally {
+        this.plan.loading = false;
+        this.pending.definition = false;
+      }
+    },
+
+    async runJobDefinition(job, dryRun = true) {
+      if (!job?.id || this.configDirty || this.pending.definition) {
+        this.showToast('Job zuerst speichern, dann starten.', 'warn');
+        return;
+      }
+      if (!dryRun && !confirm(`Job „${job.name}“ jetzt produktiv starten?`)) return;
+      this.pending.definition = true;
+      try {
+        const result = await this.api(
+          'POST',
+          `/api/jobs/definitions/${encodeURIComponent(job.id)}/run?dry_run=${dryRun}`,
+        );
+        if (result?.ok) {
+          this.showToast(dryRun ? `Dry-Run für „${job.name}“ gestartet` : `„${job.name}“ gestartet`);
+          setTimeout(() => { this.refreshStatus(true); this.loadJobs(true); }, 400);
+        }
+      } finally {
+        this.pending.definition = false;
+      }
+    },
+
+    startPlannedDryRun() {
+      const definitionId = this.plan.definitionId;
+      this.closePlan();
+      if (!definitionId) {
+        this.runBackup(true);
+        return;
+      }
+      const job = (this.config.backup?.jobs || []).find((item) => item.id === definitionId);
+      if (job) this.runJobDefinition(job, true);
+      else this.showToast('Die geplante Jobdefinition ist nicht mehr verfügbar.', 'warn');
     },
 
     jobPage() { return Math.floor(this.jobs.offset / this.jobs.limit) + 1; },
@@ -678,6 +820,7 @@ function app() {
       this.pending.plan = true;
       this.plan.loading = true;
       this.plan.dry_run = dryRun;
+      this.plan.definitionId = null;
       const result = await this.api('GET', `/api/jobs/backup/plan?dry_run=${dryRun}`, undefined, { requestKey: 'backup-plan' });
       if (!this.isStale(result) && result) {
         this.plan.data = result;
@@ -796,7 +939,7 @@ function app() {
         if (wasRunning && !result.running) {
           this.loadRecent(true);
           this.loadOverview(true);
-          if (this.page === 'jobs') this.loadJobs(false);
+          if (this.page === 'runs') this.loadJobs(false);
           this.showToast('PBS-Backup abgeschlossen');
         }
       }
@@ -864,6 +1007,7 @@ function app() {
       result.web.hsts_seconds ??= 0;
       result.backup ||= {};
       result.backup.pairs ||= [];
+      result.backup.jobs ||= [];
       result.backup.enabled ??= true;
       result.backup.rclone_args ||= [];
       result.backup.tuning ||= {};
@@ -878,7 +1022,6 @@ function app() {
       result.backup.require_max_delete_for_sync ??= true;
       result.backup.allow_unsafe_rclone_args ??= false;
       result.backup.timezone ||= 'Europe/Berlin';
-      result.backup.default_schedule ||= '0 3 * * *';
       result.backup.max_parallel ??= 2;
       result.backup.timeout_hours ??= 4;
       result.backup.scheduler_grace_minutes ??= 15;
@@ -913,6 +1056,7 @@ function app() {
         target.schedule ||= 'manual';
       }
       for (const pair of result.backup.pairs) this.normalizePair(pair);
+      for (const job of result.backup.jobs) this.normalizeJobDefinition(job);
       for (const hook of result.notifications.webhooks) if (hook.enabled === undefined) hook.enabled = true;
       this.config = result;
       this.rcloneArgsText = (result.backup.rclone_args || []).join('\n');
@@ -931,7 +1075,6 @@ function app() {
 
     normalizePair(pair) {
       if (pair.enabled === undefined) pair.enabled = true;
-      if (pair.schedule === undefined || pair.schedule === null) pair.schedule = 'manual';
       pair.direction ||= 'bisync';
       pair.mode ||= pair.direction === 'bisync' ? 'bisync' : 'copy';
       if (pair.min_local_files === undefined) pair.min_local_files = 1;
@@ -1036,7 +1179,7 @@ function app() {
           pair.direction = 'push'; pair.remote = target; pair.local = source;
         }
         if (pair.two_way === false && pair.mode === 'bisync') pair.mode = 'copy';
-        delete pair.source; delete pair.target; delete pair.two_way;
+        delete pair.source; delete pair.target; delete pair.two_way; delete pair.schedule;
       }
       return draft;
     },
@@ -1279,7 +1422,7 @@ function app() {
       const paths = (pair.source || '').startsWith('/') ? [pair.source] : [];
       this.config.pbs.targets.push({
         name: pair.name || '', paths, pathsText: paths.join('\n'),
-        schedule: pair.schedule || 'manual', namespace: '', backup_id: '',
+        schedule: 'manual', namespace: '', backup_id: '',
       });
       this.config.backup.pairs.splice(idx, 1);
       delete this.pairOpen[idx];
@@ -1302,7 +1445,7 @@ function app() {
       };
       const selected = templates[preset] || templates['push-copy'];
       const pair = {
-        name: '', remote: '', local: '', source: '', target: '', schedule: 'manual', enabled: false,
+        name: '', remote: '', local: '', source: '', target: '', enabled: false,
         direction: selected.direction, mode: selected.mode, two_way: selected.direction === 'bisync', min_local_files: 1,
         exclude: '.DS_Store\nThumbs.db', include: '', filter: '', rclone_args: '',
         transfers: '', checkers: '', max_delete: 100, allow_delete: false,
@@ -1349,7 +1492,6 @@ function app() {
       delete clone.id;
       clone.name = `${clone.name || 'Pair'}_Kopie`;
       clone.enabled = false;
-      clone.schedule = 'manual';
       this.config.backup.pairs.splice(idx + 1, 0, clone);
       this.configDirty = true;
       this.pairOpen[idx + 1] = true;
@@ -1403,8 +1545,6 @@ function app() {
       if (!dst) issues.push('Ziel fehlt');
       else if (!dst.startsWith('/') && !dst.includes(':')) issues.push('Ziel ungültig (lokaler Pfad oder remote:/pfad)');
       if (src && dst && src.replace(/\/+$/, '') === dst.replace(/\/+$/, '')) issues.push('Quelle und Ziel identisch');
-      const effectiveSchedule = String(pair.schedule || this.config.backup?.default_schedule || 'manual').trim().toLowerCase();
-      if (pair.enabled && ['off', 'disabled', 'none'].includes(effectiveSchedule)) issues.push('Zeitplan deaktiviert');
       const destructive = pair.two_way || pair.direction === 'bisync' || pair.mode === 'sync';
       if (destructive && pair.enabled && !pair.allow_delete) issues.push('Löschen nicht freigegeben');
       if (destructive && pair.enabled && (pair.max_delete === '' || pair.max_delete === null || pair.max_delete === undefined)) issues.push('Löschlimit fehlt');
@@ -1412,10 +1552,12 @@ function app() {
       return issues;
     },
 
-    pairScheduleLabel(pair) {
-      const own = String(pair?.schedule || '').trim();
-      if (!own) return `Standard · ${this.humanCron(this.config.backup?.default_schedule || 'manual')}`;
-      return this.humanCron(own);
+    pairJobLabel(pair) {
+      const count = (this.config.backup?.jobs || []).filter((job) =>
+        (job.data_path_ids || []).includes(pair?.id),
+      ).length;
+      if (!count) return 'Keinem Job zugewiesen';
+      return count === 1 ? '1 Job' : `${count} Jobs`;
     },
 
     pairRuntimeIssue(pair) {
@@ -1475,6 +1617,30 @@ function app() {
     },
 
     storagePairs() { return this.overview.data?.storage_pairs || []; },
+
+    copyFolder(entry, kind) {
+      const values = [entry?.source, entry?.target, entry?.local, entry?.remote].filter(Boolean);
+      const isLocal = (value) => String(value).startsWith('/');
+      const match = values.find((value) => kind === 'local' ? isLocal(value) : !isLocal(value));
+      return match || '—';
+    },
+
+    copySize(entry) {
+      const sourceIsCloud = entry?.source && !String(entry.source).startsWith('/');
+      const targetIsCloud = entry?.target && !String(entry.target).startsWith('/');
+      if (sourceIsCloud) return entry.source_size || null;
+      if (targetIsCloud) return entry.target_size || null;
+      return entry.target_size || entry.source_size || null;
+    },
+
+    copyMetric(entry, kind) {
+      const size = this.copySize(entry);
+      if (!size || size.error || size.measurement_status === 'failed') return '—';
+      if (kind === 'count') return size.count ?? '—';
+      if (kind === 'bytes') return size.bytes === null || size.bytes === undefined ? '—' : this.formatBytes(size.bytes);
+      if (kind === 'age') return size.measured_at ? this.formatTs(size.measured_at) : 'Noch nicht gemessen';
+      return '—';
+    },
 
     async loadPairSizes() {
       if (this.storageLoading) return;
