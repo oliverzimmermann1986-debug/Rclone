@@ -41,6 +41,8 @@ router = APIRouter(
     dependencies=[Depends(require_auth), Depends(require_csrf)],
 )
 
+_ALLOWED_JOB_KINDS = {None, "backup", "check", "quicksync", "restoretest", "pbs"}
+
 _locks: dict[str, threading.Lock] = {"backup": threading.Lock()}
 _SENSITIVE_RESULT_KEYS = {
     "password",
@@ -844,9 +846,8 @@ def list_jobs(
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    allowed_kinds = {None, "backup", "check", "quicksync", "pbs"}
     allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
-    if kind not in allowed_kinds:
+    if kind not in _ALLOWED_JOB_KINDS:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
         raise HTTPException(400, "Unbekannter Job-Status")
@@ -870,9 +871,8 @@ def search_jobs(
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    allowed_kinds = {None, "backup", "check", "quicksync", "pbs"}
     allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
-    if kind not in allowed_kinds:
+    if kind not in _ALLOWED_JOB_KINDS:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
         raise HTTPException(400, "Unbekannter Job-Status")
@@ -903,9 +903,8 @@ def export_jobs_csv(
     q: str = Query("", max_length=200),
     limit: int = Query(5000, ge=1, le=10000),
 ) -> StreamingResponse:
-    allowed_kinds = {None, "backup", "check", "quicksync", "pbs"}
     allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
-    if kind not in allowed_kinds:
+    if kind not in _ALLOWED_JOB_KINDS:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
         raise HTTPException(400, "Unbekannter Job-Status")
@@ -998,6 +997,7 @@ def status_current() -> dict[str, Any]:
             "backup": db.job_running("backup"),
             "check": db.job_running("check"),
             "quicksync": db.job_running("quicksync"),
+            "restoretest": db.job_running("restoretest"),
             "pbs": db.job_running("pbs"),
         }
     )

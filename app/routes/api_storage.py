@@ -16,6 +16,7 @@ from ..auth import require_auth
 from ..config_store import get_config
 from ..db import get_db
 from ..jobs.rclone_sync import _is_remote
+from ..jobs.scheduler import rclone_history_key
 from ..rclone_args import rclone_subprocess_env
 from ..security import require_csrf
 
@@ -88,11 +89,28 @@ def _resolve_endpoints(pair: dict[str, Any]) -> tuple[str, str]:
     return local, remote
 
 
-def _last_success_by_pair() -> dict[str, dict[str, Any]]:
+def _last_success_by_identity(
+    pairs: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Mappt echte Sync-Erfolge auf die aktuell konfigurierten Pair-Namen.
+
+    Die stabile rclone-Identität überlebt Umbenennungen und verhindert, dass
+    ein Restore-Drill oder ein inzwischen anders belegter Anzeigename als letzter
+    erfolgreicher Sync erscheint.
+    """
+    identities = {
+        rclone_history_key(pair): str(pair.get("name") or "").strip()
+        for pair in pairs
+        if isinstance(pair, dict) and str(pair.get("name") or "").strip()
+    }
+    histories = get_db().pair_last_history(identities) if identities else {}
     found: dict[str, dict[str, Any]] = {}
-    for name, result in get_db().pair_last_successes().items():
+    for history_key in identities:
+        result = (histories.get(history_key) or {}).get("last_success")
+        if not result:
+            continue
         pair = result.get("pair") or {}
-        found[name] = {
+        found[history_key] = {
             "last_sync": result.get("ended_at"),
             "last_transferred": pair.get("transferred", 0),
         }
@@ -101,8 +119,12 @@ def _last_success_by_pair() -> dict[str, dict[str, Any]]:
 
 @router.get("/overview")
 def overview(include_remote: bool = False) -> dict[str, Any]:
-    pairs = get_config().get("backup", "pairs", default=[]) or []
-    last_success = _last_success_by_pair()
+    pairs = [
+        pair
+        for pair in (get_config().get("backup", "pairs", default=[]) or [])
+        if isinstance(pair, dict)
+    ]
+    last_success = _last_success_by_identity(pairs)
     output: list[dict[str, Any]] = []
     for pair in pairs:
         local = str(pair.get("local") or "")
@@ -119,7 +141,7 @@ def overview(include_remote: bool = False) -> dict[str, Any]:
             "local_disk": _disk_usage(local)
             if local and not _is_remote(local)
             else None,
-            **last_success.get(name, {}),
+            **last_success.get(rclone_history_key(pair), {}),
         }
         output.append(info)
 

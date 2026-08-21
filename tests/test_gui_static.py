@@ -160,7 +160,7 @@ def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
     javascript = (STATIC / "app.js").read_text(encoding="utf-8")
 
     assert (
-        "status: { backup: null, check: null, quicksync: null, pbs: null }"
+        "status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null }"
         in javascript
     )
     assert "keep: { keep_last: 0, keep_daily: 7, keep_weekly: 4" in javascript
@@ -170,6 +170,9 @@ def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
     assert "this.pending.pbs || this.status?.pbs" in javascript
     assert "if (this.status?.pbs || this.pbs.status?.running)" in javascript
     assert 'value="pbs">PBS-Backup' in html
+    assert "['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs']" in javascript
+    assert "this.status?.restoretest" in javascript
+    assert "if (this.status?.restoretest) return 'Restore-Drill'" in javascript
     assert 'class="table-scroll"' in html
     assert "formatDateTime(target.last_success)" in html
 

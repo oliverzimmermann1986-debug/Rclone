@@ -47,6 +47,84 @@ def test_database_backfills_and_indexes_pair_history(tmp_path: Path):
     assert "idx_jobs_started" in indexes
 
 
+def test_database_resumes_partial_pair_backfill_without_duplicates(tmp_path: Path):
+    path = tmp_path / "partial-history.db"
+    database = Database(path)
+    first_summary = {
+        "pairs": [
+            {
+                "name": "Fotos",
+                "history_key": "rclone:id:photos",
+                "ok": True,
+            },
+            {
+                "name": "Videos",
+                "history_key": "rclone:id:videos",
+                "ok": True,
+            },
+        ]
+    }
+    second_summary = {
+        "pairs": [
+            {
+                "name": "Fotos",
+                "history_key": "rclone:id:photos",
+                "ok": False,
+            }
+        ]
+    }
+    with database.conn() as connection:
+        first = int(
+            connection.execute(
+                "INSERT INTO jobs(kind,status,started_at,ended_at,summary_json) "
+                "VALUES('backup','ok',10,20,?)",
+                (json.dumps(first_summary),),
+            ).lastrowid
+        )
+        second = int(
+            connection.execute(
+                "INSERT INTO jobs(kind,status,started_at,ended_at,summary_json) "
+                "VALUES('backup','error',30,40,?)",
+                (json.dumps(second_summary),),
+            ).lastrowid
+        )
+        # Simuliert einen Abbruch mitten im Upgrade: nur ein Attempt wurde
+        # geschrieben, obwohl weitere Jobs/Pairs noch fehlen.
+        Database._store_pair_results(
+            connection,
+            first,
+            "ok",
+            10,
+            20,
+            {"pairs": [first_summary["pairs"][0]]},
+            job_kind="backup",
+        )
+
+    Database(path)
+    Database(path)  # wiederholter Start muss vollständig idempotent bleiben
+
+    with Database(path).conn() as connection:
+        rows = connection.execute(
+            "SELECT job_id, pair_name FROM pair_runs ORDER BY job_id, pair_name"
+        ).fetchall()
+        states = connection.execute(
+            "SELECT history_key, ever_succeeded, terminal_seen "
+            "FROM pair_history_state ORDER BY history_key"
+        ).fetchall()
+    assert [(row["job_id"], row["pair_name"]) for row in rows] == [
+        (first, "Fotos"),
+        (first, "Videos"),
+        (second, "Fotos"),
+    ]
+    assert {
+        row["history_key"]: (row["ever_succeeded"], row["terminal_seen"])
+        for row in states
+    } == {
+        "rclone:id:photos": (1, 1),
+        "rclone:id:videos": (1, 1),
+    }
+
+
 def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
     path = tmp_path / "old-pairs.db"
     connection = sqlite3.connect(path)
@@ -470,6 +548,50 @@ def test_bulk_history_uses_typed_key_and_tracks_running_attempt(tmp_path: Path):
     assert history["last_result"]["pair"]["trigger"] == "scheduler"
     assert history["last_result"]["scheduled_slot"] == "slot-1"
     assert history["last_success"] is None
+
+
+def test_typed_history_survives_rename_and_rejects_restore_or_name_reuse(
+    tmp_path: Path,
+):
+    database = Database(tmp_path / "typed-history-boundaries.db")
+    stable_key = "rclone:id:photos"
+    backup = database.job_start("backup")
+    database.job_finish(
+        backup,
+        "ok",
+        {
+            "pairs": [
+                {
+                    "name": "Fotos alt",
+                    "history_key": stable_key,
+                    "ok": True,
+                }
+            ]
+        },
+    )
+    drill = database.job_start("restoretest")
+    database.job_finish(
+        drill,
+        "ok",
+        {
+            "pairs": [
+                {
+                    "name": "Fotos neu",
+                    "history_key": "restoretest:pair:Fotos neu",
+                    "ok": True,
+                }
+            ]
+        },
+    )
+
+    renamed = database.pair_last_history({stable_key: "Fotos neu"})[stable_key]
+    reused = database.pair_last_history({"rclone:id:replacement": "Fotos neu"})[
+        "rclone:id:replacement"
+    ]
+
+    assert renamed["last_success"]["job_id"] == backup
+    assert renamed["last_success"]["history_key"] == stable_key
+    assert reused == {"last_result": None, "last_success": None}
 
 
 def test_exception_due_rows_keep_scheduler_trigger_for_retry(tmp_path: Path):
