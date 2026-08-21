@@ -976,13 +976,19 @@ def _first_run_resync_allowed(
     try:
         from ..db import get_db
 
-        return (
-            get_db().pair_last_success(
-                pair_name,
-                history_key=rclone_history_key(pair),
-            )
-            is None
+        state = get_db().pair_baseline_state(
+            pair_name,
+            history_key=rclone_history_key(pair),
         )
+        if state == "new":
+            return True
+        if state == "ambiguous":
+            logger.warning(
+                "[%s] Baseline-Historie ist nicht eindeutig; automatischer "
+                "Erststart-Resync bleibt gesperrt",
+                pair_name,
+            )
+        return False
     except Exception:
         logger.exception(
             "[%s] Erststart-Prüfung fehlgeschlagen; Resync bleibt gesperrt", pair_name
