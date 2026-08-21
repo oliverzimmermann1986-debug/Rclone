@@ -35,6 +35,7 @@ targets:
       - path: RcloneMobileTests
     resources:
       - path: ../contracts/native_login_contract.json
+      - path: ../contracts/native_read_contract_v1.json
     dependencies:
       - target: RcloneMobile
     settings:

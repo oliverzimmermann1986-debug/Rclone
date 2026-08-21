@@ -1,0 +1,130 @@
+{
+  "contract_version": 1,
+  "endpoints": {
+    "diagnostics_overview": {
+      "method": "GET",
+      "path": "/api/diagnostics/overview",
+      "body": {
+        "app": {"version": "1.7.1", "timezone": "Europe/Berlin"},
+        "system": {
+          "hostname": "backup",
+          "platform": "Linux",
+          "kernel": "6.8.12",
+          "python": "3.13.5",
+          "virtualization": "lxc",
+          "addresses": ["192.168.1.67"],
+          "uptime_seconds": 86400,
+          "cpu": {"count": 2, "capacity": 2.0, "source": "cgroup-v2", "load_1": 0.2, "load_5": 0.1, "load_15": 0.1, "load_percent": 10.0},
+          "memory": {"total_bytes": 1073741824, "available_bytes": 536870912, "used_bytes": 536870912, "percent_used": 50.0, "source": "cgroup-v2"},
+          "pids": {"current": 42, "max": 512, "percent_used": 8.2},
+          "data_disk": {"path": "/opt/rclone-sync/data", "total_bytes": 1000000, "used_bytes": 250000, "free_bytes": 750000, "percent_used": 25.0}
+        },
+        "services": {
+          "web": {"enabled": "enabled", "active": "active"},
+          "scheduler": {"enabled": "enabled", "active": "active", "configured_enabled": true, "control": {"paused": false, "until": null, "remaining_seconds": null, "reason": "", "actor": "system", "updated_at": null}}
+        },
+        "pairs": {
+          "total": 1,
+          "enabled": 1,
+          "scheduled": 1,
+          "manual": 0,
+          "destructive": 0,
+          "health": [{
+            "name": "Fotos",
+            "history_key": "rclone:id:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "direction": "push",
+            "mode": "copy",
+            "jobs": [{"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "name": "Fotos täglich", "schedule": "0 3 * * *"}],
+            "next_run": 1720003600,
+            "last_status": "ok",
+            "last_run": 1719990000,
+            "job_id": 41,
+            "overdue": false,
+            "error": null
+          }]
+        },
+        "jobs": {
+          "definitions": [{"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "name": "Fotos täglich", "enabled": true, "data_path_ids": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], "schedule": "0 3 * * *", "execution_mode": "sequential", "max_parallel": 1, "retry_minutes": 60}],
+          "total_definitions": 1,
+          "scheduled_definitions": 1,
+          "last": {"id": 41, "kind": "backup", "status": "ok", "started_at": 1719989900, "ended_at": 1719990000, "log_file": "/logs/41.log", "definition_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "definition_name": "Fotos täglich", "config_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+          "last_success": {"id": 41, "kind": "backup", "status": "ok", "started_at": 1719989900, "ended_at": 1719990000, "log_file": "/logs/41.log"},
+          "last_error": null,
+          "stats_24h": {"total": 1, "by_status": {"ok": 1}, "by_kind": {"backup": 1}}
+        },
+        "alerts": [],
+        "generated_at": 1720000000
+      }
+    },
+    "storage_without_sizes": {
+      "method": "GET",
+      "path": "/api/storage/overview?include_remote=false&refresh_sizes=false",
+      "body": {"pairs": [{"name": "Fotos", "local": "/mnt/fotos", "remote": "cloud:Fotos", "direction": "push", "source": "/mnt/fotos", "target": "cloud:Fotos", "schedule": "", "local_disk": {"path": "/mnt/fotos", "exists": true, "total_bytes": 1000000, "used_bytes": 250000, "free_bytes": 750000, "percent_used": 25.0}, "last_sync": 1719990000, "last_transferred": 2048}]}
+    },
+    "storage_with_sizes": {
+      "method": "GET",
+      "path": "/api/storage/overview?include_remote=true&refresh_sizes=false",
+      "body": {"pairs": [
+        {"name": "Frisch", "local": "/mnt/fresh", "remote": "cloud:fresh", "direction": "push", "source": "/mnt/fresh", "target": "cloud:fresh", "local_disk": null, "source_size": {"path": "/mnt/fresh", "count": 12, "bytes": 2048, "measured_at": 1720000000, "measurement_status": "fresh"}, "target_size": {"path": "cloud:fresh", "count": 12, "bytes": 2048, "measured_at": 1720000000, "measurement_status": "fresh"}},
+        {"name": "Cache", "local": "/mnt/cache", "remote": "cloud:cache", "direction": "push", "source": "/mnt/cache", "target": "cloud:cache", "local_disk": null, "source_size": {"path": "/mnt/cache", "count": 9, "bytes": 1024, "measured_at": 1719999900, "measurement_status": "cached"}, "target_size": {"path": "cloud:cache", "count": 9, "bytes": 1024, "measured_at": 1719999900, "measurement_status": "cached"}},
+        {"name": "Veraltet", "local": "/mnt/stale", "remote": "cloud:stale", "direction": "push", "source": "/mnt/stale", "target": "cloud:stale", "local_disk": null, "source_size": {"path": "/mnt/stale", "count": 8, "bytes": 900, "measured_at": 1719990000, "measurement_status": "stale", "measurement_error": "Timeout"}, "target_size": {"path": "cloud:stale", "count": 8, "bytes": 900, "measured_at": 1719990000, "measurement_status": "stale", "measurement_error": "Timeout"}},
+        {"name": "Fehlend", "local": "/mnt/failed", "remote": "cloud:failed", "direction": "push", "source": "/mnt/failed", "target": "cloud:failed", "local_disk": null, "source_size": {"path": "/mnt/failed", "error": "Pfad fehlt", "measured_at": null, "measurement_status": "failed"}, "target_size": {"path": "cloud:failed", "error": "Timeout", "measured_at": null, "measurement_status": "failed"}}
+      ]}
+    },
+    "config": {
+      "method": "GET",
+      "path": "/api/config",
+      "body": {"_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "backup": {"enabled": true, "timezone": "Europe/Berlin", "default_schedule": "0 3 * * *", "pairs": [{"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "name": "Fotos", "local": "/mnt/fotos", "remote": "cloud:Fotos", "direction": "push", "mode": "copy", "enabled": true, "allow_delete": false}], "jobs": [{"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "name": "Fotos täglich", "enabled": true, "data_path_ids": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], "schedule": "0 3 * * *", "execution_mode": "sequential", "max_parallel": 1, "retry_minutes": 60}]}}
+    },
+    "jobs_list": {
+      "method": "GET",
+      "path": "/api/jobs/list",
+      "body": [{"id": 42, "kind": "backup", "status": "running", "started_at": 1720000000, "ended_at": null, "log_file": "/logs/42.log", "definition_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "definition_name": "Fotos täglich", "config_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]
+    },
+    "jobs_search": {
+      "method": "GET",
+      "path": "/api/jobs/search?limit=50",
+      "body": {"items": [{"id": 41, "kind": "backup", "status": "ok", "started_at": 1719989900, "ended_at": 1719990000, "log_file": "/logs/41.log"}], "total": 1, "limit": 50, "offset": 0}
+    },
+    "job_detail": {
+      "method": "GET",
+      "path": "/api/jobs/41",
+      "body": {"id": 41, "kind": "backup", "status": "ok", "started_at": 1719989900, "ended_at": 1719990000, "log_file": "/logs/41.log", "summary": {"ok": true}}
+    },
+    "job_log": {
+      "method": "GET",
+      "path": "/api/jobs/41/log?tail=600",
+      "body": {"log": "Transferred: 2 KiB\nChecks: 12 / 12\n"}
+    },
+    "jobs_current": {
+      "method": "GET",
+      "path": "/api/jobs/status/current",
+      "body": {"backup": {"id": 42, "kind": "backup", "status": "running", "started_at": 1720000000, "ended_at": null, "log_file": "/logs/42.log"}, "check": null, "quicksync": null, "restoretest": null, "pbs": null}
+    },
+    "backup_progress": {
+      "method": "GET",
+      "path": "/api/jobs/backup/progress",
+      "body": {"running": true, "job_id": 42, "started_at": 1720000000, "elapsed_sec": 30, "pairs": [{"name": "Fotos", "status": "running", "log_file": "/logs/42-fotos.log", "error": null, "transferred": "2 KiB", "total": "4 KiB", "percent": 50.0, "speed": "1 KiB/s", "eta": "2s"}], "total_pairs": 1, "done_pairs": 0}
+    },
+    "pbs_status": {
+      "method": "GET",
+      "path": "/api/pbs/status",
+      "body": {"enabled": true, "client_available": true, "repository": "backup@pbs@server:datastore", "namespace": "rclone", "running": false, "running_job": null, "targets": [{"name": "config", "paths": ["/opt/rclone-sync/data"], "schedule": "0 4 * * *", "namespace": "rclone", "last_success": 1719990000, "next_run": 1720007200}]}
+    },
+    "scheduler_state": {
+      "method": "GET",
+      "path": "/api/jobs/scheduler/state",
+      "body": {"paused": true, "until": 1720003600, "remaining_seconds": 3600, "reason": "Wartungsfenster", "actor": "admin", "updated_at": 1720000000, "enabled": true, "timezone": "Europe/Berlin"}
+    },
+    "doctor": {
+      "method": "GET",
+      "path": "/api/diagnostics/doctor",
+      "body": {"ok": true, "level": "ok", "checks": [{"name": "Konfiguration", "level": "ok", "message": "Schema und Werte gültig"}], "pairs": [{"name": "Fotos", "enabled": true, "remote": "cloud:Fotos", "local": "/mnt/fotos", "checks": [], "warnings": [], "jobs": [{"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "name": "Fotos täglich", "enabled": true, "schedule": "0 3 * * *"}]}], "job_definitions": [{"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "name": "Fotos täglich", "enabled": true, "data_path_ids": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], "schedule": "0 3 * * *", "execution_mode": "sequential", "max_parallel": 1, "retry_minutes": 60}], "generated_at": 1720000000}
+    },
+    "job_definitions": {
+      "method": "GET",
+      "path": "/api/jobs/definitions",
+      "body": [{"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "name": "Fotos täglich", "enabled": true, "data_path_ids": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], "schedule": "0 3 * * *", "execution_mode": "sequential", "max_parallel": 1, "retry_minutes": 60}]
+    }
+  }
+}

@@ -70,6 +70,7 @@ struct PairHealth: Decodable, Identifiable {
     let direction: String
     let mode: String
     let schedule: String
+    let jobs: [PairJobAssignment]
     let nextRun: Double?
     let lastStatus: String?
     let lastRun: Double?
@@ -78,13 +79,37 @@ struct PairHealth: Decodable, Identifiable {
     let error: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, direction, mode, schedule, overdue, error
+        case name, direction, mode, schedule, jobs, overdue, error
         case historyKey = "history_key"
         case nextRun = "next_run"
         case lastStatus = "last_status"
         case lastRun = "last_run"
         case jobID = "job_id"
     }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        name = try values.decode(String.self, forKey: .name)
+        historyKey = try values.decode(String.self, forKey: .historyKey)
+        direction = try values.decode(String.self, forKey: .direction)
+        mode = try values.decode(String.self, forKey: .mode)
+        jobs = try values.decodeIfPresent([PairJobAssignment].self, forKey: .jobs) ?? []
+        schedule = try values.decodeIfPresent(String.self, forKey: .schedule)
+            ?? jobs.first?.schedule
+            ?? "manual"
+        nextRun = try values.decodeIfPresent(Double.self, forKey: .nextRun)
+        lastStatus = try values.decodeIfPresent(String.self, forKey: .lastStatus)
+        lastRun = try values.decodeIfPresent(Double.self, forKey: .lastRun)
+        jobID = try values.decodeIfPresent(Int.self, forKey: .jobID)
+        overdue = try values.decodeIfPresent(Bool.self, forKey: .overdue)
+        error = try values.decodeIfPresent(String.self, forKey: .error)
+    }
+}
+
+struct PairJobAssignment: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let schedule: String
 }
 
 struct JobOverview: Decodable {

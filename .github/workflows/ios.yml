@@ -11,6 +11,7 @@ on:
       - "app/routes/**"
       - "contracts/**"
       - "tests/test_native_login_contract.py"
+      - "tests/test_native_read_contract.py"
       - "tests/test_ios_release_version.py"
       - "scripts/ios_release_version.py"
       - "codemagic.yaml"
@@ -25,6 +26,7 @@ on:
       - "app/routes/**"
       - "contracts/**"
       - "tests/test_native_login_contract.py"
+      - "tests/test_native_read_contract.py"
       - "tests/test_ios_release_version.py"
       - "scripts/ios_release_version.py"
       - "codemagic.yaml"
@@ -51,8 +53,8 @@ jobs:
           cache: pip
       - name: Install backend contract test dependencies
         run: python3 -m pip install -r requirements-dev.txt
-      - name: Validate native login contract and release version tooling
-        run: python3 -m pytest tests/test_native_login_contract.py tests/test_ios_release_version.py
+      - name: Validate shared native API contracts and release version tooling
+        run: python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_version.py
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
