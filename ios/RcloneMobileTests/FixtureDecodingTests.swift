@@ -64,4 +64,13 @@ final class FixtureDecodingTests: XCTestCase {
         let url = try APIClient.normalizedServerURL("https://192.168.1.97")
         XCTAssertEqual(url.absoluteString, "https://192.168.1.97")
     }
+
+    func testServerURLRejectsEmbeddedCredentials() {
+        XCTAssertThrowsError(try APIClient.normalizedServerURL("https://admin:secret@backup.example.de")) { error in
+            XCTAssertEqual(error as? APIError, .invalidServer)
+        }
+        XCTAssertThrowsError(try APIClient.normalizedServerURL("admin:secret@192.168.1.67")) { error in
+            XCTAssertEqual(error as? APIError, .invalidServer)
+        }
+    }
 }

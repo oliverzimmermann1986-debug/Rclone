@@ -26,7 +26,28 @@ enum APIError: LocalizedError, Equatable {
     }
 }
 
-final class APIClient {
+protocol APIClientProtocol: AnyObject {
+    func login(username: String, password: String) async throws
+    func getOverview() async throws -> OverviewResponse
+    func getStorage(includeSizes: Bool) async throws -> StorageOverview
+    func getConfig() async throws -> ConfigSnapshot
+    func getJobs(limit: Int) async throws -> JobSearchResponse
+    func getJob(id: Int) async throws -> JobRecord
+    func getJobLog(id: Int) async throws -> JobLogResponse
+    func getDoctor() async throws -> DoctorResponse
+    func getProgress() async throws -> BackupProgress
+    func getPBSStatus() async throws -> PBSStatus
+    func runBackup(pair: String?, dryRun: Bool) async throws -> ActionResponse
+    func cancelBackup() async throws -> ActionResponse
+    func runPBS(target: String?) async throws -> ActionResponse
+    func cancelPBS() async throws -> ActionResponse
+    func pauseScheduler(minutes: Int) async throws -> SchedulerControl
+    func resumeScheduler() async throws -> SchedulerControl
+    func logout() async throws
+    func clearLocalSession()
+}
+
+final class APIClient: APIClientProtocol {
     static let sessionCookie = "rclone_sync_session"
     static let csrfCookie = "rclone_sync_csrf"
 
@@ -65,7 +86,9 @@ final class APIClient {
         guard var components = URLComponents(string: value),
               let scheme = components.scheme?.lowercased(),
               ["http", "https"].contains(scheme),
-              components.host != nil else {
+              components.host != nil,
+              components.user == nil,
+              components.password == nil else {
             throw APIError.invalidServer
         }
         components.path = ""
@@ -187,12 +210,16 @@ final class APIClient {
     }
 
     func logout() async throws {
+        defer { clearCookies() }
         var request = URLRequest(url: url(for: "/logout"))
         request.httpMethod = "POST"
         request.setValue(origin, forHTTPHeaderField: "Origin")
         try addCSRF(to: &request)
         let (data, response) = try await session.data(for: request)
         try validate(response, data: data, allowed: 200..<400)
+    }
+
+    func clearLocalSession() {
         clearCookies()
     }
 
@@ -241,11 +268,13 @@ final class APIClient {
 
     private func cookie(named name: String) -> HTTPCookie? {
         cookieStorage.cookies(for: baseURL)?.first { $0.name == name }
-            ?? cookieStorage.cookies?.first { $0.name == name && $0.domain.contains(baseURL.host ?? "") }
     }
 
     private func clearCookies() {
-        cookieStorage.cookies?.filter { $0.domain.contains(baseURL.host ?? "") }.forEach(cookieStorage.deleteCookie)
+        let appCookieNames = Set([Self.sessionCookie, Self.csrfCookie])
+        cookieStorage.cookies(for: baseURL)?
+            .filter { appCookieNames.contains($0.name) }
+            .forEach(cookieStorage.deleteCookie)
     }
 
     private var origin: String {

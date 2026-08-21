@@ -64,7 +64,6 @@ struct LoginView: View {
             server = model.serverAddress
             username = model.savedUsername
         }
-        .onDisappear { loginTask?.cancel() }
     }
 
     private var brand: some View {

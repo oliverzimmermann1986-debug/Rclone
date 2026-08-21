@@ -1,0 +1,63 @@
+import Foundation
+import XCTest
+@testable import RcloneMobile
+
+final class APIClientSessionTests: XCTestCase {
+    func testLogoutClearsOnlyServerCookiesWhenRequestFails() async throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://backup.example.de"))
+        let unrelatedURL = try XCTUnwrap(URL(string: "https://notbackup.example.de"))
+        let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
+            forGroupContainerIdentifier: "APIClientSessionTests-\(UUID().uuidString)"
+        )
+        let sessionCookie = try XCTUnwrap(cookie(named: APIClient.sessionCookie, value: "session", domain: "backup.example.de"))
+        let csrfCookie = try XCTUnwrap(cookie(named: APIClient.csrfCookie, value: "csrf", domain: "backup.example.de"))
+        let unrelatedCookie = try XCTUnwrap(cookie(named: APIClient.sessionCookie, value: "other", domain: "notbackup.example.de"))
+        cookieStorage.setCookie(sessionCookie)
+        cookieStorage.setCookie(csrfCookie)
+        cookieStorage.setCookie(unrelatedCookie)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FailingURLProtocol.self]
+        let client = APIClient(
+            baseURL: baseURL,
+            session: URLSession(configuration: configuration),
+            cookieStorage: cookieStorage
+        )
+
+        do {
+            try await client.logout()
+            XCTFail("Logout should surface the network failure")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .cannotConnectToHost)
+        }
+
+        let remainingServerNames = cookieStorage.cookies(for: baseURL)?.map(\.name) ?? []
+        XCTAssertFalse(remainingServerNames.contains(APIClient.sessionCookie))
+        XCTAssertFalse(remainingServerNames.contains(APIClient.csrfCookie))
+        XCTAssertEqual(
+            cookieStorage.cookies(for: unrelatedURL)?.first { $0.name == APIClient.sessionCookie }?.value,
+            "other"
+        )
+    }
+
+    private func cookie(named name: String, value: String, domain: String) -> HTTPCookie? {
+        HTTPCookie(properties: [
+            .domain: domain,
+            .path: "/",
+            .name: name,
+            .value: value,
+            .secure: "TRUE"
+        ])
+    }
+}
+
+private final class FailingURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+    }
+
+    override func stopLoading() {}
+}
