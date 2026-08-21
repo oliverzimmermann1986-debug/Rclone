@@ -35,7 +35,7 @@ enum APIError: LocalizedError, Equatable {
 protocol APIClientProtocol: AnyObject {
     func login(username: String, password: String) async throws
     func getOverview() async throws -> OverviewResponse
-    func getStorage(includeSizes: Bool) async throws -> StorageOverview
+    func getStorage(includeSizes: Bool, forceRefresh: Bool) async throws -> StorageOverview
     func getConfig() async throws -> ConfigSnapshot
     func getJobs(limit: Int) async throws -> JobSearchResponse
     func getJob(id: Int) async throws -> JobRecord
@@ -49,7 +49,7 @@ protocol APIClientProtocol: AnyObject {
     func cancelPBS() async throws -> ActionResponse
     func pauseScheduler(minutes: Int) async throws -> SchedulerControl
     func resumeScheduler() async throws -> SchedulerControl
-    func logout() async throws
+    func logout() async throws -> LogoutResult
     func clearLocalSession()
 }
 
@@ -205,8 +205,10 @@ final class APIClient: APIClientProtocol {
         try await get("/api/diagnostics/overview")
     }
 
-    func getStorage(includeSizes: Bool = true) async throws -> StorageOverview {
-        try await get("/api/storage/overview?include_remote=\(includeSizes ? "true" : "false")")
+    func getStorage(includeSizes: Bool = true, forceRefresh: Bool = false) async throws -> StorageOverview {
+        try await get(
+            "/api/storage/overview?include_remote=\(includeSizes ? "true" : "false")&refresh_sizes=\(forceRefresh ? "true" : "false")"
+        )
     }
 
     func getConfig() async throws -> ConfigSnapshot {
@@ -264,14 +266,28 @@ final class APIClient: APIClientProtocol {
         try await post("/api/jobs/scheduler/resume")
     }
 
-    func logout() async throws {
+    func logout() async throws -> LogoutResult {
         defer { clearCookies() }
         var request = URLRequest(url: url(for: "/logout"))
         request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(origin, forHTTPHeaderField: "Origin")
         try addCSRF(to: &request)
         let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if (200..<400).contains(http.statusCode) {
+            return LogoutResult(
+                globalRevocation: true,
+                localSessionCleared: true,
+                detail: nil
+            )
+        }
+        if let partial = try? decoder.decode(LogoutResult.self, from: data),
+           partial.localSessionCleared {
+            return partial
+        }
         try validate(response, data: data, allowed: 200..<400)
+        throw APIError.invalidResponse
     }
 
     func clearLocalSession() {

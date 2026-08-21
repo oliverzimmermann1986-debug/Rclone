@@ -34,7 +34,7 @@ struct DashboardView: View {
                     }
                 }
 
-                Section("Kopien") {
+                Section {
                     if let pairs = model.storage?.pairs, !pairs.isEmpty {
                         ForEach(pairs) { pair in
                             CopyListRow(pair: pair)
@@ -54,6 +54,19 @@ struct DashboardView: View {
                         default:
                             LoadingSection(label: "Kopien werden geladen …")
                         }
+                    }
+                } header: {
+                    HStack {
+                        Text("Kopien")
+                        Spacer()
+                        Button {
+                            Task { await model.refreshStorageSizes() }
+                        } label: {
+                            Label("Größen neu messen", systemImage: "arrow.clockwise")
+                                .labelStyle(.iconOnly)
+                        }
+                        .disabled(model.isRefreshing)
+                        .accessibilityLabel("Dateizahlen und Größen neu messen")
                     }
                 }
 
@@ -167,19 +180,28 @@ struct DashboardView: View {
     private var liveProgress: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack {
-                Label("Sicherung läuft", systemImage: "arrow.triangle.2.circlepath")
+                Label(
+                    model.progressIsStale ? "Status veraltet" : "Sicherung läuft",
+                    systemImage: model.progressIsStale ? "wifi.exclamationmark" : "arrow.triangle.2.circlepath"
+                )
                     .font(.headline)
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(model.progressIsStale ? .orange : .blue)
                 Spacer()
                 Text(AppFormat.elapsed(Double(model.progress?.elapsedSeconds ?? 0)))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
 
+            if model.progressIsStale {
+                Text("Der Server antwortet seit mehreren Prüfungen nicht. Die folgenden Werte stammen von der letzten erfolgreichen Abfrage\(progressLastCheckedSuffix).")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
             let total = max(model.progress?.totalPairs ?? 0, 1)
             let done = model.progress?.donePairs ?? 0
             ProgressView(value: Double(done), total: Double(total))
-                .tint(.blue)
+                .tint(model.progressIsStale ? .orange : .blue)
 
             ForEach(model.progress?.pairs ?? []) { pair in
                 HStack {
@@ -206,6 +228,11 @@ struct DashboardView: View {
             .font(.subheadline.weight(.medium))
         }
         .padding(.vertical, 4)
+    }
+
+    private var progressLastCheckedSuffix: String {
+        guard let date = model.progressLastSuccessAt else { return "" }
+        return " (\(AppFormat.relative(date.timeIntervalSince1970)))"
     }
 }
 
@@ -261,8 +288,32 @@ private struct CopyListRow: View {
                 Text(AppFormat.bytes(size?.bytes))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Text(measurementLabel(size))
+                    .font(.caption2)
+                    .foregroundStyle(measurementColor(size))
             }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private func measurementLabel(_ size: PathSize?) -> String {
+        guard let size else { return "Noch nicht gemessen" }
+        switch size.measurementStatus {
+        case "fresh":
+            return "Gerade gemessen"
+        case "cached":
+            return "Gemessen \(AppFormat.relative(size.measuredAt))"
+        case "stale":
+            return "Veraltet · \(AppFormat.relative(size.measuredAt))"
+        case "failed":
+            return "Messung fehlgeschlagen"
+        default:
+            return size.measuredAt.map { "Gemessen \(AppFormat.relative($0))" } ?? "Noch nicht gemessen"
+        }
+    }
+
+    private func measurementColor(_ size: PathSize?) -> Color {
+        guard let status = size?.measurementStatus else { return .secondary }
+        return ["stale", "failed"].contains(status) ? .orange : .secondary
     }
 }

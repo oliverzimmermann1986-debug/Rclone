@@ -235,6 +235,28 @@ struct PathSize: Decodable {
     let count: Int?
     let bytes: Int64?
     let error: String?
+    let measuredAt: Double?
+    let measurementStatus: String?
+    let measurementError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case path, count, bytes, error
+        case measuredAt = "measured_at"
+        case measurementStatus = "measurement_status"
+        case measurementError = "measurement_error"
+    }
+}
+
+struct LogoutResult: Decodable, Equatable {
+    let globalRevocation: Bool
+    let localSessionCleared: Bool
+    let detail: String?
+
+    enum CodingKeys: String, CodingKey {
+        case detail
+        case globalRevocation = "global_revocation"
+        case localSessionCleared = "local_session_cleared"
+    }
 }
 
 struct ConfigSnapshot: Decodable {

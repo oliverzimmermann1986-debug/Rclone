@@ -78,6 +78,39 @@ final class APIClientSessionTests: XCTestCase {
             .secure: "TRUE"
         ])
     }
+
+    func testPartialLogoutResponseIsReturnedWhileLocalCookiesAreCleared() async throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://backup.example.de"))
+        let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
+            forGroupContainerIdentifier: "APIClientPartialLogoutTests-\(UUID().uuidString)"
+        )
+        cookieStorage.setCookie(try XCTUnwrap(cookie(
+            named: APIClient.sessionCookie,
+            value: "session",
+            domain: "backup.example.de"
+        )))
+        cookieStorage.setCookie(try XCTUnwrap(cookie(
+            named: APIClient.csrfCookie,
+            value: "csrf",
+            domain: "backup.example.de"
+        )))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PartialLogoutURLProtocol.self]
+        let client = APIClient(
+            baseURL: baseURL,
+            session: URLSession(configuration: configuration),
+            cookieStorage: cookieStorage
+        )
+
+        let result = try await client.logout()
+
+        XCTAssertFalse(result.globalRevocation)
+        XCTAssertTrue(result.localSessionCleared)
+        XCTAssertEqual(result.detail, "Andere Sitzungen bleiben möglicherweise aktiv.")
+        let remainingNames = cookieStorage.cookies(for: baseURL)?.map(\.name) ?? []
+        XCTAssertFalse(remainingNames.contains(APIClient.sessionCookie))
+        XCTAssertFalse(remainingNames.contains(APIClient.csrfCookie))
+    }
 }
 
 private final class FailingURLProtocol: URLProtocol {
@@ -86,6 +119,26 @@ private final class FailingURLProtocol: URLProtocol {
 
     override func startLoading() {
         client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+    }
+
+    override func stopLoading() {}
+}
+
+private final class PartialLogoutURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let body = Data(#"{"ok":false,"partial":true,"global_revocation":false,"local_session_cleared":true,"detail":"Andere Sitzungen bleiben möglicherweise aktiv."}"#.utf8)
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 503,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
     }
 
     override func stopLoading() {}

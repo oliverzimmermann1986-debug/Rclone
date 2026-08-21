@@ -1,6 +1,17 @@
 """Tests für Quelle/Ziel-Auflösung und Dateizahl/Größe in der Storage-Übersicht."""
 
+import pytest
+
 from app.routes import api_storage
+
+
+@pytest.fixture(autouse=True)
+def _clear_size_cache():
+    with api_storage._size_cache_lock:
+        api_storage._size_cache.clear()
+    yield
+    with api_storage._size_cache_lock:
+        api_storage._size_cache.clear()
 
 
 def test_resolve_endpoints_by_direction():
@@ -10,6 +21,10 @@ def test_resolve_endpoints_by_direction():
     assert api_storage._resolve_endpoints(pull) == ("gd:Backup", "/mnt/data")
     assert api_storage._resolve_endpoints(push) == ("/mnt/data", "gd:Backup")
     assert api_storage._resolve_endpoints(bisync) == ("/mnt/data", "gd:Backup")
+
+
+def test_blank_size_path_uses_the_same_response_contract():
+    assert api_storage._rclone_size("") == {"path": "", "error": "Pfad fehlt"}
 
 
 class _FakeConfig:
@@ -71,6 +86,111 @@ def test_overview_with_sizes_populates_both_sides(monkeypatch):
     assert item["source_size"]["bytes"] == 2048
     assert item["target_size"]["count"] == 9
     assert item["target_size"]["bytes"] == 1024
+    assert item["source_size"]["measurement_status"] == "fresh"
+    assert item["source_size"]["measured_at"] is not None
+
+
+def test_size_results_are_reused_within_ttl_and_can_be_refreshed(monkeypatch):
+    pair = {
+        "id": "photos",
+        "name": "Fotos",
+        "local": "/mnt/photos",
+        "remote": "gd:photos",
+        "direction": "push",
+    }
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
+    monkeypatch.setattr(api_storage, "get_db", lambda: _FakeDB())
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+    clock = [1_000.0]
+    monkeypatch.setattr(api_storage.time, "time", lambda: clock[0])
+    calls: list[str] = []
+
+    def measure(path):
+        calls.append(path)
+        return {"path": path, "count": len(calls), "bytes": 100 + len(calls)}
+
+    monkeypatch.setattr(api_storage, "_rclone_size", measure)
+
+    first = api_storage.overview(include_remote=True)["pairs"][0]
+    clock[0] += 10
+    cached = api_storage.overview(include_remote=True)["pairs"][0]
+    clock[0] += 10
+    refreshed = api_storage.overview(include_remote=True, refresh_sizes=True)["pairs"][
+        0
+    ]
+
+    assert len(calls) == 4
+    assert first["source_size"]["measurement_status"] == "fresh"
+    assert cached["source_size"]["measurement_status"] == "cached"
+    assert cached["source_size"]["measured_at"] == 1_000.0
+    assert refreshed["source_size"]["measurement_status"] == "fresh"
+    assert refreshed["source_size"]["measured_at"] == 1_020.0
+
+
+def test_size_cache_is_bound_to_stable_pair_side_direction_and_path(monkeypatch):
+    base = {
+        "id": "photos",
+        "name": "Fotos",
+        "local": "/mnt/photos",
+        "remote": "gd:photos",
+        "direction": "push",
+    }
+    calls: list[str] = []
+    monkeypatch.setattr(
+        api_storage,
+        "_rclone_size",
+        lambda path: calls.append(path) or {"path": path, "count": 1, "bytes": 2},
+    )
+
+    first = api_storage._cached_rclone_size(base, "source", "/mnt/photos")
+    renamed = api_storage._cached_rclone_size(
+        {**base, "name": "Fotos neu"}, "source", "/mnt/photos"
+    )
+    reversed_direction = api_storage._cached_rclone_size(
+        {**base, "direction": "pull"}, "source", "/mnt/photos"
+    )
+    other_path = api_storage._cached_rclone_size(base, "source", "/mnt/photos-neu")
+
+    assert first["measurement_status"] == "fresh"
+    assert renamed["measurement_status"] == "cached"
+    assert reversed_direction["measurement_status"] == "fresh"
+    assert other_path["measurement_status"] == "fresh"
+    assert calls == ["/mnt/photos", "/mnt/photos", "/mnt/photos-neu"]
+
+
+def test_failed_measurement_is_not_cached_as_fresh_zero(monkeypatch):
+    pair = {
+        "id": "photos",
+        "name": "Fotos",
+        "local": "/mnt/photos",
+        "remote": "gd:photos",
+        "direction": "push",
+    }
+    results = iter(
+        [
+            {"path": "/mnt/photos", "count": 4, "bytes": 512},
+            {"path": "/mnt/photos", "error": "Timeout"},
+            {"path": "/mnt/photos", "error": "Timeout"},
+        ]
+    )
+    monkeypatch.setattr(api_storage, "_rclone_size", lambda _path: next(results))
+
+    fresh = api_storage._cached_rclone_size(pair, "source", "/mnt/photos")
+    stale = api_storage._cached_rclone_size(
+        pair, "source", "/mnt/photos", force_refresh=True
+    )
+    failed = api_storage._cached_rclone_size(
+        {**pair, "id": "other"}, "source", "/mnt/photos"
+    )
+
+    assert fresh["measurement_status"] == "fresh"
+    assert stale["measurement_status"] == "stale"
+    assert stale["count"] == 4 and stale["bytes"] == 512
+    assert stale["measurement_error"] == "Timeout"
+    assert failed["measurement_status"] == "failed"
+    assert failed["measured_at"] is None
+    assert failed["error"] == "Timeout"
+    assert "count" not in failed and "bytes" not in failed
 
 
 def test_overview_keeps_last_sync_across_pair_rename(monkeypatch):

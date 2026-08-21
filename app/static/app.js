@@ -1459,8 +1459,11 @@ function app() {
       this.testResults[idx] = result || { ok: false, error: 'Test fehlgeschlagen' };
     },
 
-    async loadStorage(includeRemote = false) {
-      const result = await this.api('GET', `/api/storage/overview${includeRemote ? '?include_remote=true' : ''}`, undefined, { silent: !includeRemote, timeoutMs: includeRemote ? 120000 : 30000 });
+    async loadStorage(includeRemote = false, refreshSizes = false) {
+      const query = includeRemote
+        ? `?include_remote=true&refresh_sizes=${refreshSizes ? 'true' : 'false'}`
+        : '';
+      const result = await this.api('GET', `/api/storage/overview${query}`, undefined, { silent: !includeRemote, timeoutMs: includeRemote ? 120000 : 30000 });
       // storage_pairs auch außerhalb des Dashboards ablegen: overview.data ist auf
       // der Pairs-Seite noch null (loadOverview läuft nur dort). Alle Leser nutzen
       // optionales Chaining, ein leeres Objekt ist daher unkritisch.
@@ -1477,7 +1480,7 @@ function app() {
       if (this.storageLoading) return;
       this.storageLoading = true;
       try {
-        const result = await this.loadStorage(true);
+        const result = await this.loadStorage(true, true);
         if (result?.pairs) this.showToast('Dateizahl und Größe berechnet');
         else this.showToast('Größen konnten nicht berechnet werden', 'warn');
       } finally {
@@ -1498,6 +1501,15 @@ function app() {
       const count = size.count ?? null;
       const files = count === null ? '? Dateien' : `${count} ${count === 1 ? 'Datei' : 'Dateien'}`;
       return `${files} · ${this.formatBytes(size.bytes || 0)}`;
+    },
+
+    pairSizeAge(name, side) {
+      const size = this.pairSize(name)?.[`${side}_size`];
+      if (!size) return '';
+      if (size.measurement_status === 'failed') return 'Messung fehlgeschlagen';
+      if (!size.measured_at) return '';
+      const prefix = size.measurement_status === 'stale' ? 'Veraltet' : 'Gemessen';
+      return `${prefix} ${this.formatTs(size.measured_at)}`;
     },
 
     openPicker(mode, idx) {

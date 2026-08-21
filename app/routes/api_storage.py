@@ -6,6 +6,9 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -24,6 +27,26 @@ router = APIRouter(
     prefix="/api/storage",
     tags=["storage"],
     dependencies=[Depends(require_auth), Depends(require_csrf)],
+)
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, minimum), maximum)
+
+
+_SIZE_CACHE_TTL_SECONDS = _bounded_env_int(
+    "RCLONE_SIZE_CACHE_TTL_SECONDS", 300, 30, 3600
+)
+_SIZE_CACHE_MAX_ENTRIES = _bounded_env_int(
+    "RCLONE_SIZE_CACHE_MAX_ENTRIES", 256, 16, 2048
+)
+_size_cache_lock = threading.Lock()
+_size_cache: OrderedDict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = (
+    OrderedDict()
 )
 
 
@@ -49,7 +72,7 @@ def _disk_usage(path: str) -> dict[str, Any]:
 
 def _rclone_size(remote: str, timeout: int = 45) -> dict[str, Any]:
     if not remote:
-        return {"remote": remote, "error": "Remote-Pfad fehlt"}
+        return {"path": remote, "error": "Pfad fehlt"}
     cache_dir = os.getenv("RCLONE_CACHE_DIR", "/opt/rclone-sync/data/.rclone-cache")
     try:
         result = subprocess.run(
@@ -63,18 +86,97 @@ def _rclone_size(remote: str, timeout: int = 45) -> dict[str, Any]:
         if result.returncode == 0:
             data = json.loads(result.stdout or "{}")
             return {
-                "remote": remote,
+                "path": remote,
                 "count": data.get("count"),
                 "bytes": data.get("bytes"),
             }
         return {
-            "remote": remote,
+            "path": remote,
             "error": (result.stderr or result.stdout).strip()[:300],
         }
     except subprocess.TimeoutExpired:
-        return {"remote": remote, "error": "Timeout"}
+        return {"path": remote, "error": "Timeout"}
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return {"remote": remote, "error": str(exc)}
+        return {"path": remote, "error": str(exc)}
+
+
+def _size_cache_key(
+    pair: dict[str, Any], side: str, path: str
+) -> tuple[str, str, str, str]:
+    """Bindet Messwerte an Datenweg, Richtung, Seite und exakten Pfad."""
+    return (
+        rclone_history_key(pair),
+        str(pair.get("direction") or "").lower(),
+        side,
+        path,
+    )
+
+
+def _is_successful_size(result: dict[str, Any]) -> bool:
+    return (
+        not result.get("error")
+        and isinstance(result.get("count"), int)
+        and isinstance(result.get("bytes"), int)
+    )
+
+
+def _decorate_measurement(
+    result: dict[str, Any], *, measured_at: float | None, status: str
+) -> dict[str, Any]:
+    return {
+        **result,
+        "measured_at": measured_at,
+        "measurement_status": status,
+    }
+
+
+def _cached_rclone_size(
+    pair: dict[str, Any], side: str, path: str, *, force_refresh: bool = False
+) -> dict[str, Any]:
+    """Liefert erfolgreiche Größenmessungen aus einem begrenzten TTL-Cache.
+
+    Fehler werden nie als neue Messung gespeichert. Wenn eine erneute Messung
+    scheitert, bleibt ein vorhandener alter Wert ausdrücklich als ``stale``
+    erkennbar, statt wie ein frischer Nullwert auszusehen.
+    """
+    key = _size_cache_key(pair, side, path)
+    now = time.time()
+    with _size_cache_lock:
+        cached = _size_cache.get(key)
+        if cached and not force_refresh and now - cached[0] <= _SIZE_CACHE_TTL_SECONDS:
+            _size_cache.move_to_end(key)
+            return _decorate_measurement(
+                dict(cached[1]), measured_at=cached[0], status="cached"
+            )
+
+    result = _rclone_size(path)
+    measured_at = time.time()
+    if _is_successful_size(result):
+        clean = {
+            "path": path,
+            "count": result["count"],
+            "bytes": result["bytes"],
+        }
+        with _size_cache_lock:
+            _size_cache[key] = (measured_at, clean)
+            _size_cache.move_to_end(key)
+            while len(_size_cache) > _SIZE_CACHE_MAX_ENTRIES:
+                _size_cache.popitem(last=False)
+        return _decorate_measurement(clean, measured_at=measured_at, status="fresh")
+
+    if cached:
+        stale = _decorate_measurement(
+            dict(cached[1]), measured_at=cached[0], status="stale"
+        )
+        stale["measurement_error"] = str(
+            result.get("error") or "Messung fehlgeschlagen"
+        )
+        return stale
+    return _decorate_measurement(
+        {"path": path, "error": str(result.get("error") or "Messung fehlgeschlagen")},
+        measured_at=None,
+        status="failed",
+    )
 
 
 def _resolve_endpoints(pair: dict[str, Any]) -> tuple[str, str]:
@@ -118,7 +220,9 @@ def _last_success_by_identity(
 
 
 @router.get("/overview")
-def overview(include_remote: bool = False) -> dict[str, Any]:
+def overview(
+    include_remote: bool = False, refresh_sizes: bool = False
+) -> dict[str, Any]:
     pairs = [
         pair
         for pair in (get_config().get("backup", "pairs", default=[]) or [])
@@ -148,20 +252,26 @@ def overview(include_remote: bool = False) -> dict[str, Any]:
     # Größen für Quelle UND Ziel jedes Pairs sind teuer (rclone size traversiert
     # beide Endpunkte). Daher nur auf ausdrückliche Anforderung und parallelisiert.
     if include_remote and output:
-        tasks: list[tuple[int, str]] = []
-        for index, item in enumerate(output):
-            tasks.append((index, "source"))
-            tasks.append((index, "target"))
+        tasks: list[tuple[int, str, dict[str, Any]]] = []
+        for index, (item, pair) in enumerate(zip(output, pairs, strict=True)):
+            tasks.append((index, "source", pair))
+            tasks.append((index, "target", pair))
         workers = min(6, max(1, len(tasks)))
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="pair-size"
         ) as pool:
             futures = {
-                pool.submit(_rclone_size, str(output[index].get(side) or "")): (
+                pool.submit(
+                    _cached_rclone_size,
+                    pair,
+                    side,
+                    str(output[index].get(side) or ""),
+                    force_refresh=refresh_sizes,
+                ): (
                     index,
                     side,
                 )
-                for index, side in tasks
+                for index, side, pair in tasks
             }
             for future in as_completed(futures):
                 index, side = futures[future]

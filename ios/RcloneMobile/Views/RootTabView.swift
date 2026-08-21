@@ -72,6 +72,10 @@ private struct SettingsView: View {
                         LabeledContent("Server-Version", value: version)
                     }
                 }
+                Section("App") {
+                    LabeledContent("App-Version", value: appVersion)
+                    LabeledContent("TestFlight-Build", value: appBuild)
+                }
                 Section {
                     Button("Abmelden", role: .destructive) { confirmLogout = true }
                 } footer: {
@@ -90,5 +94,13 @@ private struct SettingsView: View {
                 Text("Du musst dich anschließend auf allen Geräten neu anmelden.")
             }
         }
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "–"
+    }
+
+    private var appBuild: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "–"
     }
 }
