@@ -321,7 +321,7 @@ private final class StubAPIClient: APIClientProtocol {
 
     func getJobs(limit: Int) async throws -> JobSearchResponse {
         jobsCallCount += 1
-        JobSearchResponse(items: [], total: 0, limit: limit, offset: 0)
+        return JobSearchResponse(items: [], total: 0, limit: limit, offset: 0)
     }
     func searchJobs(kind: String?, status: String?, query: String, limit: Int, offset: Int) async throws -> JobSearchResponse {
         try await getJobs(limit: limit)
