@@ -293,7 +293,7 @@ def notify_one(
 
 
 def notify(event: str, title: str, message: str, **extra: Any) -> None:
-    """Benachrichtigt passende Hooks parallel; Fehler stoppen keinen Sync."""
+    """Benachrichtigt Webhooks und registrierte iPhones; Fehler stoppen keinen Sync."""
     if event not in EVENTS:
         logger.warning("Unbekanntes Event %r, ignoriere", event)
         return
@@ -305,31 +305,49 @@ def notify(event: str, title: str, message: str, **extra: Any) -> None:
         and hook.get("enabled", True)
         and event in (hook.get("events") or [])
     ]
-    if not hooks:
-        return
+    from .push_notifications import send_push_notifications
+
     _allow_http, _allow_private, timeout, workers = _notification_policy()
+    # Reserve one worker for APNs so a slow webhook cannot starve error pushes.
+    webhook_workers = min(workers, len(hooks))
     pool = ThreadPoolExecutor(
-        max_workers=min(workers, len(hooks)), thread_name_prefix="webhook"
+        max_workers=max(1, webhook_workers + 1), thread_name_prefix="notify"
     )
     started = time.monotonic()
     try:
-        futures = {
-            pool.submit(notify_one, hook, event, title, message, **extra): hook
+        futures: dict[Any, tuple[str, Any]] = {
+            pool.submit(notify_one, hook, event, title, message, **extra): (
+                "webhook",
+                hook,
+            )
             for hook in hooks
         }
+        futures[pool.submit(send_push_notifications, event, title, message)] = (
+            "apns",
+            None,
+        )
         remaining = max(0.0, timeout - (time.monotonic() - started))
         completed, pending = wait(futures, timeout=remaining)
         for future in completed:
-            hook = futures[future]
-            kind = str(hook.get("type") or "generic").lower()
+            channel, hook = futures[future]
+            kind = (
+                "apns"
+                if channel == "apns"
+                else str(hook.get("type") or "generic").lower()
+            )
             try:
-                future.result()
-                logger.info("notify[%s] %s: ok", kind, event)
+                outcome = future.result()
+                if kind != "apns" or outcome.get("sent"):
+                    logger.info("notify[%s] %s: ok", kind, event)
             except Exception as exc:
                 logger.warning("notify[%s] %s fehlgeschlagen: %s", kind, event, exc)
         for future in pending:
-            hook = futures[future]
-            kind = str(hook.get("type") or "generic").lower()
+            channel, hook = futures[future]
+            kind = (
+                "apns"
+                if channel == "apns"
+                else str(hook.get("type") or "generic").lower()
+            )
             future.cancel()
             logger.warning(
                 "notify[%s] %s nach %.1f Sekunden abgebrochen",

@@ -21,10 +21,16 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.oliverzimmermann.rclonesync
         TARGETED_DEVICE_FAMILY: "1"
         INFOPLIST_FILE: RcloneMobile/Info.plist
+        CODE_SIGN_ENTITLEMENTS: RcloneMobile/RcloneMobile.entitlements
         GENERATE_INFOPLIST_FILE: false
         INFOPLIST_KEY_UILaunchScreen_Generation: true
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Debug:
+          APS_ENVIRONMENT: development
+        Release:
+          APS_ENVIRONMENT: production
     scheme:
       testTargets:
         - RcloneMobileTests

@@ -58,6 +58,7 @@ final class AppModel: ObservableObject {
     @Published var actionMessage: String?
 
     private(set) var client: (any APIClientProtocol)?
+    private var registeredPushToken: String?
     private let defaults: UserDefaults
     private let clientFactory: (URL) -> any APIClientProtocol
     private var sessionGeneration = 0
@@ -686,8 +687,32 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func registerPushDevice(token: String, environment: String) async {
+        guard phase == .signedIn, let currentClient = client else { return }
+        let session = sessionGeneration
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        do {
+            _ = try await currentClient.registerPushDevice(
+                token: token,
+                environment: environment,
+                appVersion: version
+            )
+            guard isCurrentSession(session) else { return }
+            registeredPushToken = token
+        } catch let APIError.server(status, _) where status == 404 || status == 405 {
+            // Older servers do not expose device registration yet. The rest of
+            // the authenticated app remains usable until the server is updated.
+        } catch {
+            guard isCurrentSession(session) else { return }
+            errorMessage = "Push-Benachrichtigungen konnten nicht eingerichtet werden: \(userMessage(for: error))"
+        }
+    }
+
     func logout() async {
         let exitingClient = client
+        if let registeredPushToken {
+            _ = try? await exitingClient?.unregisterPushDevice(token: registeredPushToken)
+        }
         beginSessionTransition()
         errorMessage = nil
         clearSessionState()
@@ -699,6 +724,7 @@ final class AppModel: ObservableObject {
             errorMessage = "Du wurdest auf diesem Gerät abgemeldet. Ob andere Sitzungen beendet wurden, konnte nicht bestätigt werden: \(userMessage(for: error))"
         }
         exitingClient?.clearLocalSession()
+        registeredPushToken = nil
     }
 
     func cancelSessionRestore() {

@@ -87,8 +87,20 @@ protocol APIClientProtocol: AnyObject {
     func cancelPBS() async throws -> ActionResponse
     func pauseScheduler(minutes: Int) async throws -> SchedulerControl
     func resumeScheduler() async throws -> SchedulerControl
+    func registerPushDevice(token: String, environment: String, appVersion: String) async throws -> PushRegistrationResponse
+    func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse
     func logout() async throws -> LogoutResult
     func clearLocalSession()
+}
+
+extension APIClientProtocol {
+    func registerPushDevice(token: String, environment: String, appVersion: String) async throws -> PushRegistrationResponse {
+        throw APIError.invalidResponse
+    }
+
+    func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
+        throw APIError.invalidResponse
+    }
 }
 
 struct NativeLoginChallenge: Decodable, Equatable {
@@ -320,6 +332,17 @@ final class APIClient: APIClientProtocol {
 
     func getConfig() async throws -> ConfigSnapshot {
         try await get("/api/config")
+    }
+
+    func registerPushDevice(token: String, environment: String, appVersion: String) async throws -> PushRegistrationResponse {
+        try await post(
+            "/api/push/devices",
+            body: PushDeviceRegistration(token: token, environment: environment, appVersion: appVersion)
+        )
+    }
+
+    func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
+        try await delete("/api/push/devices", body: PushDeviceRemoval(token: token))
     }
 
     func getJobDefinitions() async throws -> [JobDefinition] {
@@ -573,6 +596,16 @@ final class APIClient: APIClientProtocol {
     private func put<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
         var request = URLRequest(url: url(for: path))
         request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(origin, forHTTPHeaderField: "Origin")
+        try addCSRF(to: &request)
+        request.httpBody = try JSONEncoder().encode(body)
+        return try await send(request)
+    }
+
+    private func delete<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
+        var request = URLRequest(url: url(for: path))
+        request.httpMethod = "DELETE"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(origin, forHTTPHeaderField: "Origin")
         try addCSRF(to: &request)

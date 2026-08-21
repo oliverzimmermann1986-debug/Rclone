@@ -108,6 +108,49 @@ final class ConfigurationModelTests: XCTestCase {
         XCTAssertEqual(snapshot.backup.jobs.first?.executionMode, "sequential")
     }
 
+    func testLegacyPairScheduleBecomesVisibleCanonicalJobWhenJobsKeyIsAbsent() throws {
+        let data = Data(#"""
+        {
+          "_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "backup":{
+            "default_schedule":"0 3 * * *","scheduler_retry_minutes":30,
+            "pairs":[{
+              "name":"Fotos","local":"/srv/fotos","remote":"cloud:fotos",
+              "direction":"push","mode":"copy","enabled":true,"schedule":"15 4 * * *"
+            }]
+          }
+        }
+        """#.utf8)
+
+        let snapshot = try JSONDecoder().decode(ConfigSnapshot.self, from: data)
+        let pair = try XCTUnwrap(snapshot.backup.pairs.first)
+        let job = try XCTUnwrap(snapshot.backup.jobs.first)
+
+        XCTAssertEqual(pair.id, "abe37acc76a750729c2d1f31a6a22dd7")
+        XCTAssertEqual(job.id, "cee145c79935563a9e9ddcc8f9fb423f")
+        XCTAssertEqual(job.name, "Fotos")
+        XCTAssertEqual(job.dataPathIDs, [pair.id])
+        XCTAssertEqual(job.schedule, "15 4 * * *")
+        XCTAssertEqual(job.retryMinutes, 30)
+    }
+
+    func testExplicitEmptyJobsRemainsEmptyInsteadOfRecreatingLegacyJobs() throws {
+        let data = Data(#"""
+        {
+          "_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "backup":{
+            "default_schedule":"0 3 * * *",
+            "pairs":[{"name":"Fotos","local":"/srv/fotos","remote":"cloud:fotos","schedule":"15 4 * * *"}],
+            "jobs":[]
+          }
+        }
+        """#.utf8)
+
+        let snapshot = try JSONDecoder().decode(ConfigSnapshot.self, from: data)
+
+        XCTAssertTrue(snapshot.backup.jobs.isEmpty)
+    }
+
     func testWebhookEditPreservesUnknownNotificationAndHookFields() throws {
         let data = Data(#"""
         {

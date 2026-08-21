@@ -50,6 +50,8 @@ _PBS_BACKUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DURATION_RE = re.compile(r"^\d+(?:\.\d+)?(?:ms|s|m|h|d|w)?$")
 _REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,127}:.*$")
 _WEBHOOK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_APNS_IDENTIFIER_RE = re.compile(r"^[A-Z0-9]{10}$")
+_APNS_TOPIC_RE = re.compile(r"^[A-Za-z0-9.-]{3,255}$")
 _MAX_PAIRS = 256
 _MAX_JOBS = 256
 _MAX_PBS_TARGETS = 128
@@ -1087,6 +1089,76 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             integer=True,
         )
     )
+    apns = notifications.get("apns") or {}
+    if not isinstance(apns, dict):
+        errors.append("notifications.apns muss ein Mapping sein")
+        apns = {}
+    apns["enabled"] = _boolean(apns.get("enabled", False))
+    apns["team_id"] = str(apns.get("team_id") or "").strip().upper()
+    apns["key_id"] = str(apns.get("key_id") or "").strip().upper()
+    apns["key_file"] = _clean_path(apns.get("key_file") or "")
+    apns["topic"] = str(apns.get("topic") or "de.oliverzimmermann.rclonesync").strip()
+    raw_apns_events = apns.get("events") or [
+        "sync_error",
+        "mount_check_failed",
+        "pair_overdue",
+        "restore_test_error",
+    ]
+    if not isinstance(raw_apns_events, list):
+        errors.append("notifications.apns.events muss eine Liste sein")
+        raw_apns_events = []
+    apns["events"] = list(
+        dict.fromkeys(
+            str(event)
+            for event in raw_apns_events
+            if str(event) in _NOTIFICATION_EVENTS
+        )
+    )
+    invalid_apns_events = [
+        str(event)
+        for event in raw_apns_events
+        if str(event) not in _NOTIFICATION_EVENTS
+    ]
+    if invalid_apns_events:
+        errors.append(
+            "notifications.apns.events enthält unbekannte Events: "
+            + ", ".join(invalid_apns_events)
+        )
+    apns["timeout_seconds"] = float(
+        _number(apns.get("timeout_seconds", 10), default=10, minimum=1, maximum=30)
+    )
+    if apns["enabled"]:
+        if not _APNS_IDENTIFIER_RE.fullmatch(apns["team_id"]):
+            errors.append(
+                "notifications.apns.team_id muss aus 10 Großbuchstaben/Ziffern bestehen"
+            )
+        if not _APNS_IDENTIFIER_RE.fullmatch(apns["key_id"]):
+            errors.append(
+                "notifications.apns.key_id muss aus 10 Großbuchstaben/Ziffern bestehen"
+            )
+        if not apns["key_file"] or not _is_absolute_local(apns["key_file"]):
+            errors.append(
+                "notifications.apns.key_file muss ein absoluter lokaler Pfad sein"
+            )
+        elif (
+            not Path(apns["key_file"])
+            .resolve(strict=False)
+            .is_relative_to(
+                Path(str(paths.get("data_dir") or "/opt/rclone-sync/data")).resolve(
+                    strict=False
+                )
+            )
+        ):
+            errors.append(
+                "notifications.apns.key_file muss innerhalb paths.data_dir liegen"
+            )
+        if not _APNS_TOPIC_RE.fullmatch(apns["topic"]):
+            errors.append("notifications.apns.topic ist ungültig")
+        if not apns["events"]:
+            errors.append(
+                "notifications.apns.events muss mindestens ein Event enthalten"
+            )
+    notifications["apns"] = apns
 
     maintenance = cfg.setdefault("maintenance", {})
     if not isinstance(maintenance, dict):

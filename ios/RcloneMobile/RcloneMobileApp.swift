@@ -2,11 +2,12 @@ import SwiftUI
 
 @main
 struct RcloneMobileApp: App {
+    @UIApplicationDelegateAdaptor(PushNotificationCoordinator.self) private var pushDelegate
     @StateObject private var model = AppModel()
 
     var body: some Scene {
         WindowGroup {
-            AppRootView()
+            AppRootView(pushCoordinator: pushDelegate)
                 .environmentObject(model)
                 .tint(.green)
                 .task { await model.restoreSession() }
@@ -15,6 +16,7 @@ struct RcloneMobileApp: App {
 }
 private struct AppRootView: View {
     @EnvironmentObject private var model: AppModel
+    let pushCoordinator: PushNotificationCoordinator
 
     var body: some View {
         Group {
@@ -28,6 +30,21 @@ private struct AppRootView: View {
             }
         }
         .animation(.smooth(duration: 0.32), value: model.phase)
+        .task(id: model.phase) {
+            guard model.phase == .signedIn else { return }
+            await pushCoordinator.requestAuthorizationAndRegister()
+            if let registration = pushCoordinator.registration {
+                await model.registerPushDevice(
+                    token: registration.token,
+                    environment: registration.environment
+                )
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pushDeviceTokenReady)) { notification in
+            guard let token = notification.userInfo?["token"] as? String,
+                  let environment = notification.userInfo?["environment"] as? String else { return }
+            Task { await model.registerPushDevice(token: token, environment: environment) }
+        }
     }
 }
 
