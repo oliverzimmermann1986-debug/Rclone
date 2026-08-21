@@ -1,0 +1,57 @@
+workflows:
+  ios-testflight:
+    name: Rclone Sync · TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: rclone-sync-testflight
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: de.oliverzimmermann.rclonesync
+      vars:
+        XCODE_PROJECT: ios/RcloneMobile.xcodeproj
+        XCODE_SCHEME: RcloneMobile
+      xcode: latest
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - pattern: "ios-v*"
+          include: true
+    scripts:
+      - name: Install XcodeGen
+        script: brew install xcodegen
+      - name: Generate Xcode project
+        script: |
+          cd "$CM_BUILD_DIR/ios"
+          xcodegen generate
+      - name: Apply App Store signing profiles
+        script: |
+          xcode-project use-profiles \
+            --project "$CM_BUILD_DIR/$XCODE_PROJECT"
+      - name: Set unique build number
+        script: |
+          cd "$CM_BUILD_DIR/ios"
+          agvtool new-version -all "$BUILD_NUMBER"
+      - name: Run iOS unit tests
+        script: |
+          xcodebuild test \
+            -project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Build signed IPA
+        script: |
+          xcode-project build-ipa \
+            --project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: false
