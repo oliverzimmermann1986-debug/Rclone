@@ -45,6 +45,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var storageState: ContentLoadState = .idle
     @Published private(set) var configState: ContentLoadState = .idle
     @Published private(set) var jobsState: ContentLoadState = .idle
+    @Published private(set) var pbsState: ContentLoadState = .idle
     @Published private(set) var progressLastSuccessAt: Date?
     @Published private(set) var progressConsecutiveFailures = 0
     @Published private(set) var doctorLastCheckedAt: Date?
@@ -171,6 +172,7 @@ final class AppModel: ObservableObject {
         if storage == nil { storageState = .loading }
         if config == nil { configState = .loading }
         if jobs.isEmpty && jobsState != .loaded { jobsState = .loading }
+        if pbs == nil { pbsState = .loading }
         let task = Task { [weak self] in
             guard let self else { return }
             await self.performRefresh(client: refreshClient, session: session, refresh: refresh)
@@ -257,8 +259,12 @@ final class AppModel: ObservableObject {
                     }
                 case let .pbs(result):
                     switch result {
-                    case let .success(value): pbs = value
-                    case let .failure(error): handle(error, firstError: &firstError)
+                    case let .success(value):
+                        pbs = value
+                        pbsState = .loaded
+                    case let .failure(error):
+                        pbsState = .failed(userMessage(for: error))
+                        handle(error, firstError: &firstError)
                     }
                 }
 
@@ -797,6 +803,7 @@ final class AppModel: ObservableObject {
         storageState = .idle
         configState = .idle
         jobsState = .idle
+        pbsState = .idle
         phase = .signedOut
     }
 
