@@ -14,7 +14,7 @@ final class AppModelLifecycleTests: XCTestCase {
         await model.restoreSession()
 
         XCTAssertEqual(model.phase, .signedOut)
-        XCTAssertTrue(model.errorMessage?.contains("30 Sekunden") == true)
+        XCTAssertTrue(model.errorMessage?.contains("Zeitlimits") == true)
     }
 
     func testRefreshPublishesSuccessfulEndpointsWhenOthersFail() async {
