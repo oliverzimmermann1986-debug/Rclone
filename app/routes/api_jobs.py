@@ -400,7 +400,7 @@ def backup_plan(
 
 
 @router.post("/backup/cancel")
-def cancel_backup() -> dict[str, Any]:
+def cancel_backup(response: Response) -> dict[str, Any]:
     db = get_db()
     running = any(db.job_running(kind) for kind in BACKUP_KINDS)
     state = rclone_job.get_runtime_state() or {}
@@ -410,7 +410,21 @@ def cancel_backup() -> dict[str, Any]:
         and not runtime_state.active_processes()
     ):
         return {"ok": False, "error": "Kein laufender Job"}
-    return rclone_job.cancel_job()
+    result = rclone_job.cancel_job()
+    _audit_best_effort(
+        "backup_cancel_requested",
+        actor="web",
+        details={
+            "ok": result.get("ok", False),
+            "killed": result.get("killed", 0),
+            "signal_persisted": result.get("signal_persisted"),
+            "process_scan_ok": result.get("process_scan_ok"),
+            "error_code": result.get("error_code"),
+        },
+    )
+    if not result.get("ok"):
+        response.status_code = 503
+    return result
 
 
 @router.post("/backup/run-pair/{pair_name}")
