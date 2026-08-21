@@ -158,6 +158,25 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.config?.revision, "revision-1")
     }
 
+    func testPasswordChangeImmediatelyClearsSessionAndRequestsFreshLogin() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.passwordChangeResponse = PasswordChangeResponse(
+            ok: true,
+            message: "Passwort geändert",
+            reauthenticate: true
+        )
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        let changed = await model.changePassword(current: "secret", new: "a-new-long-password")
+
+        XCTAssertTrue(changed)
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertTrue(client.clearedLocalSession)
+        XCTAssertTrue(model.errorMessage?.contains("erneut") == true)
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suite = "AppModelLifecycleTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -175,6 +194,7 @@ private final class StubAPIClient: APIClientProtocol {
     )
     var progressResults: [Result<BackupProgress, Error>] = []
     var updateConfigError: Error?
+    var passwordChangeResponse: PasswordChangeResponse?
     private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
     private(set) var jobsCallCount = 0
@@ -222,6 +242,26 @@ private final class StubAPIClient: APIClientProtocol {
     func runJobDefinition(id: String, dryRun: Bool) async throws -> ActionResponse {
         throw APIError.invalidResponse
     }
+
+    func runQuickSync(_ request: QuickSyncRequest) async throws -> ActionResponse { throw APIError.invalidResponse }
+    func checkPair(name: String) async throws -> ActionResponse { throw APIError.invalidResponse }
+    func runRestoreTest(pair: String?) async throws -> ActionResponse { throw APIError.invalidResponse }
+    func browseLocal(path: String) async throws -> BrowseResponse { throw APIError.invalidResponse }
+    func getAuditEvents(limit: Int) async throws -> AuditResponse { throw APIError.invalidResponse }
+    func getMaintenanceLogs(limit: Int) async throws -> MaintenanceLogsResponse { throw APIError.invalidResponse }
+    func getDatabaseStatus() async throws -> DatabaseStatus { throw APIError.invalidResponse }
+    func pruneDatabase(days: Int, keepLatest: Int) async throws -> DatabasePruneResponse { throw APIError.invalidResponse }
+    func getConfigSnapshots() async throws -> SnapshotListResponse { throw APIError.invalidResponse }
+    func createConfigSnapshot() async throws -> SnapshotCreateResponse { throw APIError.invalidResponse }
+    func restoreConfigSnapshot(_ request: SnapshotRestoreRequest) async throws -> SnapshotRestoreResponse { throw APIError.invalidResponse }
+    func getFilterFile() async throws -> FilterFile { throw APIError.invalidResponse }
+    func saveFilterFile(_ request: FilterFileSaveRequest) async throws -> FilterFileSaveResponse { throw APIError.invalidResponse }
+    func changePassword(current: String, new: String) async throws -> PasswordChangeResponse {
+        guard let passwordChangeResponse else { throw APIError.invalidResponse }
+        return passwordChangeResponse
+    }
+    func testWebhook(id: String) async throws -> ActionResponse { throw APIError.invalidResponse }
+    func downloadSupportBundle() async throws -> URL { throw APIError.invalidResponse }
 
     func getJobs(limit: Int) async throws -> JobSearchResponse {
         jobsCallCount += 1

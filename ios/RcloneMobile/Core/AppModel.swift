@@ -460,6 +460,126 @@ final class AppModel: ObservableObject {
         return false
     }
 
+    func runQuickSync(_ request: QuickSyncRequest) async -> Bool {
+        await runOperationalAction(
+            success: request.dryRun ? "Quick-Sync-Probelauf wurde gestartet." : "Quick Sync wurde gestartet."
+        ) { client in
+            try await client.runQuickSync(request)
+        }
+    }
+
+    func checkDataPath(name: String) async -> Bool {
+        await runOperationalAction(success: "Datenweg-Prüfung wurde gestartet.") { client in
+            try await client.checkPair(name: name)
+        }
+    }
+
+    func runRestoreTest(pair: String?) async -> Bool {
+        await runOperationalAction(
+            success: pair == nil ? "Systemweiter Wiederherstellungstest wurde gestartet." : "Wiederherstellungstest wurde gestartet."
+        ) { client in
+            try await client.runRestoreTest(pair: pair)
+        }
+    }
+
+    func saveWebhooks(_ webhooks: [WebhookConfig], currentPassword: String? = nil) async -> Bool {
+        guard let currentConfig = config else { return false }
+        return await saveCompleteConfig(
+            currentConfig.replacingWebhooks(webhooks),
+            currentPassword: currentPassword
+        )
+    }
+
+    func changePassword(current: String, new: String) async -> Bool {
+        do {
+            let response = try await withCurrentClient {
+                try await $0.changePassword(current: current, new: new)
+            }
+            guard response.ok else { return false }
+            signOutLocally()
+            errorMessage = "Passwort geändert. Bitte melde dich mit dem neuen Passwort an."
+            return true
+        } catch {
+            errorMessage = userMessage(for: error)
+            return false
+        }
+    }
+
+    func requireFreshLogin(_ message: String) {
+        signOutLocally()
+        errorMessage = message
+    }
+
+    func withCurrentClient<Value>(
+        _ operation: (any APIClientProtocol) async throws -> Value
+    ) async throws -> Value {
+        guard let currentClient = client else { throw APIError.unauthenticated }
+        let session = sessionGeneration
+        do {
+            let value = try await operation(currentClient)
+            guard isCurrentSession(session) else { throw CancellationError() }
+            return value
+        } catch APIError.unauthenticated {
+            guard isCurrentSession(session) else { throw CancellationError() }
+            signOutLocally()
+            throw APIError.unauthenticated
+        }
+    }
+
+    private func runOperationalAction(
+        success: String,
+        _ operation: (any APIClientProtocol) async throws -> ActionResponse
+    ) async -> Bool {
+        do {
+            let response = try await withCurrentClient(operation)
+            actionMessage = response.ok ? success : (response.error ?? "Aktion konnte nicht gestartet werden.")
+            if response.ok { await refresh() }
+            return response.ok
+        } catch is CancellationError {
+            return false
+        } catch {
+            errorMessage = userMessage(for: error)
+            return false
+        }
+    }
+
+    private func saveCompleteConfig(
+        _ snapshot: ConfigSnapshot,
+        currentPassword: String?
+    ) async -> Bool {
+        guard let currentClient = client else { return false }
+        let session = sessionGeneration
+        isSavingConfig = true
+        configSaveIssue = nil
+        configWarnings = []
+        defer { if isCurrentSession(session) { isSavingConfig = false } }
+        do {
+            let response = try await currentClient.updateConfig(snapshot, currentPassword: currentPassword)
+            guard isCurrentSession(session) else { return false }
+            config = response.config
+            jobDefinitions = response.config.backup.jobs
+            configWarnings = response.warnings
+            actionMessage = "Konfiguration gespeichert."
+            return response.ok
+        } catch APIError.configConflict(let message, _) {
+            guard isCurrentSession(session) else { return false }
+            configSaveIssue = .conflict(message)
+        } catch APIError.configRevisionRequired(let message, _) {
+            guard isCurrentSession(session) else { return false }
+            configSaveIssue = .conflict(message)
+        } catch APIError.configReauthenticationRequired(let message) {
+            guard isCurrentSession(session) else { return false }
+            configSaveIssue = .passwordRequired(message)
+        } catch APIError.configValidation(let errors) {
+            guard isCurrentSession(session) else { return false }
+            configSaveIssue = .validation(errors)
+        } catch {
+            guard isCurrentSession(session) else { return false }
+            errorMessage = userMessage(for: error)
+        }
+        return false
+    }
+
     func runBackup(pair: String? = nil, dryRun: Bool = false) async -> Bool {
         guard let currentClient = client else { return false }
         let session = sessionGeneration

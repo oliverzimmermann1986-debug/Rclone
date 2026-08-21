@@ -120,6 +120,9 @@ struct SystemView: View {
             }
             .disabled(model.doctorIsRefreshing)
             .accessibilityIdentifier("refreshDoctorButton")
+            NavigationLink { OperationsHubView() } label: {
+                Label("Betrieb & Wartung", systemImage: "wrench.and.screwdriver")
+            }
         }
     }
 }

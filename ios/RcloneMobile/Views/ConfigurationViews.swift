@@ -8,6 +8,8 @@ struct DataPathsScreen: View {
     @State private var editor: PairEditorRequest?
     @State private var localError: String?
     @State private var currentPassword = ""
+    @State private var pendingPathAction: DataPathAction?
+    @State private var confirmFullRestoreTest = false
 
     var body: some View {
         List {
@@ -40,6 +42,18 @@ struct DataPathsScreen: View {
                             DataPathConfigurationRow(pair: pair)
                         }
                         .buttonStyle(.plain)
+                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            Button { pendingPathAction = .check(pair) } label: {
+                                Label("Prüfen", systemImage: "checkmark.shield")
+                            }
+                            .tint(.blue)
+                            .disabled(isDirty)
+                            Button { pendingPathAction = .restore(pair) } label: {
+                                Label("Restore-Test", systemImage: "arrow.uturn.backward.circle")
+                            }
+                            .tint(.orange)
+                            .disabled(isDirty)
+                        }
                     }
                     .onDelete(perform: deletePairs)
                 }
@@ -47,6 +61,15 @@ struct DataPathsScreen: View {
                 Text("Datenwege")
             } footer: {
                 if isDirty { Text("Nicht gespeicherte Änderungen") }
+            }
+            Section("Werkzeuge") {
+                NavigationLink { QuickSyncView() } label: {
+                    Label("Quick Sync", systemImage: "bolt.horizontal.circle")
+                }
+                Button { confirmFullRestoreTest = true } label: {
+                    Label("Systemweiten Restore-Test starten", systemImage: "arrow.counterclockwise.circle")
+                }
+                .disabled(isDirty)
             }
         }
         .listStyle(.insetGrouped)
@@ -85,6 +108,31 @@ struct DataPathsScreen: View {
         }
         .task { loadFromModel(force: false) }
         .onChange(of: model.config?.revision) { _, _ in loadFromModel(force: false) }
+        .confirmationDialog("Aktion starten?", isPresented: Binding(
+            get: { pendingPathAction != nil },
+            set: { if !$0 { pendingPathAction = nil } }
+        ), titleVisibility: .visible) {
+            if let action = pendingPathAction {
+                Button(action.buttonTitle) {
+                    pendingPathAction = nil
+                    Task {
+                        switch action {
+                        case let .check(pair): _ = await model.checkDataPath(name: pair.name)
+                        case let .restore(pair): _ = await model.runRestoreTest(pair: pair.name)
+                        }
+                    }
+                }
+            }
+            Button("Abbrechen", role: .cancel) { pendingPathAction = nil }
+        } message: {
+            Text("Der Check verändert keine Dateien. Der Restore-Test lädt Stichproben zurück und vergleicht sie mit der Quelle.")
+        }
+        .confirmationDialog("Alle Datenwege wiederherstellen testen?", isPresented: $confirmFullRestoreTest, titleVisibility: .visible) {
+            Button("Restore-Test starten") { Task { _ = await model.runRestoreTest(pair: nil) } }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Der Drill prüft alle eingerichteten Datenwege mit Stichproben und verändert keine Originaldateien.")
+        }
     }
 
     private func deletePairs(at offsets: IndexSet) {
@@ -126,6 +174,25 @@ struct DataPathsScreen: View {
 
     private func saveWithPassword() {
         Task { await save(password: currentPassword) }
+    }
+}
+
+private enum DataPathAction: Identifiable {
+    case check(PairConfig)
+    case restore(PairConfig)
+
+    var id: String {
+        switch self {
+        case let .check(pair): "check-\(pair.id)"
+        case let .restore(pair): "restore-\(pair.id)"
+        }
+    }
+
+    var buttonTitle: String {
+        switch self {
+        case .check: "Datenweg prüfen"
+        case .restore: "Restore-Test starten"
+        }
     }
 }
 
@@ -406,6 +473,7 @@ private struct DataPathEditor: View {
     @State private var requireMountpoint: Bool
     @State private var mountpoint: String
     @State private var sentinelFile: String
+    @State private var browseTarget: BrowseTarget?
 
     init(pair: PairConfig?, save: @escaping (PairConfig) -> Void) {
         original = pair
@@ -431,8 +499,12 @@ private struct DataPathEditor: View {
             Form {
                 Section("Datenweg") {
                     TextField("Name", text: $name)
-                    TextField("Lokaler Ordner", text: $local)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    HStack {
+                        TextField("Lokaler Ordner", text: $local)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        Button { browseTarget = .local } label: { Image(systemName: "folder") }
+                            .accessibilityLabel("Lokalen Ordner auswählen")
+                    }
                     TextField("Remote oder Zielpfad", text: $remote)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                     Toggle("Aktiv", isOn: $enabled)
@@ -487,6 +559,9 @@ private struct DataPathEditor: View {
                     Button("Übernehmen", action: commit).disabled(validationMessage != nil)
                 }
             }
+        }
+        .sheet(item: $browseTarget) { _ in
+            LocalPathBrowserSheet(initialPath: local) { local = $0 }
         }
     }
 
@@ -549,6 +624,11 @@ private struct DataPathEditor: View {
         save(updated)
         dismiss()
     }
+}
+
+private enum BrowseTarget: String, Identifiable {
+    case local
+    var id: String { rawValue }
 }
 
 private struct JobDefinitionEditor: View {

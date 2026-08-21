@@ -154,6 +154,39 @@ final class APIClientSessionTests: XCTestCase {
             }
         }
     }
+
+    func testRouteSpecificRevisionAndPasswordErrorsRemainActionable() async throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://operations.example"))
+        let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
+            forGroupContainerIdentifier: "APIClientOperationTests-\(UUID().uuidString)"
+        )
+        cookieStorage.setCookie(try XCTUnwrap(cookie(
+            named: APIClient.csrfCookie,
+            value: "csrf",
+            domain: "operations.example"
+        )))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OperationErrorURLProtocol.self]
+        let client = APIClient(
+            baseURL: baseURL,
+            session: URLSession(configuration: configuration),
+            cookieStorage: cookieStorage
+        )
+
+        do {
+            _ = try await client.saveFilterFile(FilterFileSaveRequest(content: "- *.tmp", revision: "old"))
+            XCTFail("Filter conflict expected")
+        } catch let error as APIError {
+            XCTAssertEqual(error, .revisionConflict(message: "Filter parallel geändert", currentRevision: "new"))
+        }
+
+        do {
+            _ = try await client.changePassword(current: "wrong", new: "a-new-password")
+            XCTFail("Password error expected")
+        } catch let error as APIError {
+            XCTAssertEqual(error, .reauthenticationRequired(message: "Aktuelles Passwort falsch"))
+        }
+    }
 }
 
 private final class FailingURLProtocol: URLProtocol {
@@ -208,6 +241,27 @@ private final class ConfigErrorURLProtocol: URLProtocol {
             url: request.url!,
             statusCode: response.0,
             httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(response.1.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class OperationErrorURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        let response: (Int, String) = path.hasSuffix("/filter-file")
+            ? (409, #"{"detail":{"message":"Filter parallel geändert","reload_required":true,"current_revision":"new"}}"#)
+            : (403, #"{"detail":"Aktuelles Passwort falsch"}"#)
+        let http = HTTPURLResponse(
+            url: request.url!, statusCode: response.0, httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]
         )!
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
