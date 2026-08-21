@@ -21,7 +21,6 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.oliverzimmermann.rclonesync
-        PRODUCT_NAME: Rclone Sync
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
