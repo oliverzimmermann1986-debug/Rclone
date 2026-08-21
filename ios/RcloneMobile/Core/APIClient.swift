@@ -128,10 +128,16 @@ final class APIClient: APIClientProtocol {
 
     let baseURL: URL
     private let session: URLSession
+    private let loginSession: URLSession
     private let cookieStorage: HTTPCookieStorage
     private let decoder: JSONDecoder
 
-    init(baseURL: URL, session: URLSession? = nil, cookieStorage: HTTPCookieStorage = .shared) {
+    init(
+        baseURL: URL,
+        session: URLSession? = nil,
+        loginSession: URLSession? = nil,
+        cookieStorage: HTTPCookieStorage = .shared
+    ) {
         self.baseURL = baseURL
         self.cookieStorage = cookieStorage
         let configuration = URLSessionConfiguration.default
@@ -146,6 +152,26 @@ final class APIClient: APIClientProtocol {
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 90
         self.session = session ?? URLSession(configuration: configuration)
+
+        if let loginSession {
+            self.loginSession = loginSession
+        } else if let session {
+            // Tests and embedders that inject a session keep full control over
+            // transport behavior. Production uses the bounded configuration below.
+            self.loginSession = session
+        } else {
+            let loginConfiguration = URLSessionConfiguration.ephemeral
+            loginConfiguration.httpCookieStorage = cookieStorage
+            loginConfiguration.httpShouldSetCookies = true
+            loginConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            // A login must never remain behind iOS' connectivity waiting state
+            // for the general 90-second resource timeout. Local-network access
+            // either succeeds promptly or returns an actionable error for retry.
+            loginConfiguration.waitsForConnectivity = false
+            loginConfiguration.timeoutIntervalForRequest = 8
+            loginConfiguration.timeoutIntervalForResource = 12
+            self.loginSession = URLSession(configuration: loginConfiguration)
+        }
         self.decoder = JSONDecoder()
     }
 
@@ -194,7 +220,16 @@ final class APIClient: APIClientProtocol {
 
     func login(username: String, password: String) async throws {
         clearCookies()
-        let challenge: NativeLoginChallenge = try await get("/api/auth/login")
+        var challengeRequest = URLRequest(url: url(for: "/api/auth/login"))
+        challengeRequest.httpMethod = "GET"
+        challengeRequest.timeoutInterval = 8
+        let challenge: NativeLoginChallenge
+        do {
+            challenge = try await sendLogin(challengeRequest)
+        } catch APIError.server(let status, _) where status == 404 || status == 405 {
+            try await loginLegacy(username: username, password: password)
+            return
+        }
         guard challenge.status == "csrf_ready", !challenge.loginCSRF.isEmpty else {
             throw APIError.loginSecurityFailed
         }
@@ -204,6 +239,7 @@ final class APIClient: APIClientProtocol {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(origin, forHTTPHeaderField: "Origin")
+        request.timeoutInterval = 8
         request.httpBody = try JSONEncoder().encode(
             NativeLoginRequest(
                 username: username,
@@ -212,7 +248,7 @@ final class APIClient: APIClientProtocol {
             )
         )
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await loginSession.data(for: request)
         guard let http = response as? HTTPURLResponse,
               let result = try? decoder.decode(NativeLoginResponse.self, from: data) else {
             throw APIError.invalidResponse
@@ -236,7 +272,39 @@ final class APIClient: APIClientProtocol {
             )
         }
         guard cookie(named: Self.sessionCookie) != nil else { throw APIError.loginFailed }
-        _ = try await getConfig()
+    }
+
+    private func loginLegacy(username: String, password: String) async throws {
+        var challengeRequest = URLRequest(url: url(for: "/login"))
+        challengeRequest.httpMethod = "GET"
+        challengeRequest.timeoutInterval = 8
+        let (challengeData, challengeResponse) = try await loginSession.data(for: challengeRequest)
+        guard let challengeHTTP = challengeResponse as? HTTPURLResponse,
+              (200..<300).contains(challengeHTTP.statusCode),
+              let loginCSRF = Self.loginCSRFToken(from: challengeData) else {
+            throw APIError.loginSecurityFailed
+        }
+
+        var request = URLRequest(url: url(for: "/login"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 8
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/html", forHTTPHeaderField: "Accept")
+        request.setValue(origin, forHTTPHeaderField: "Origin")
+        request.httpBody = Data(
+            [
+                "username=\(Self.formEncode(username))",
+                "password=\(Self.formEncode(password))",
+                "login_csrf=\(Self.formEncode(loginCSRF))"
+            ].joined(separator: "&").utf8
+        )
+
+        let (_, response) = try await loginSession.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200..<400).contains(http.statusCode),
+              cookie(named: Self.sessionCookie) != nil else {
+            throw APIError.loginFailed
+        }
     }
 
     func getOverview() async throws -> OverviewResponse {
@@ -542,6 +610,22 @@ final class APIClient: APIClientProtocol {
         cookieStorage.cookies(for: baseURL)?.first { $0.name == name }
     }
 
+    private func sendLogin<T: Decodable>(_ request: URLRequest) async throws -> T {
+        let (data, response) = try await loginSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.server(
+                status: http.statusCode,
+                message: Self.errorMessage(data) ?? "Anmeldedienst nicht erreichbar (HTTP \(http.statusCode))"
+            )
+        }
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            throw APIError.invalidResponse
+        }
+    }
+
     private func clearCookies() {
         let appCookieNames = Set([Self.sessionCookie, Self.csrfCookie])
         cookieStorage.cookies(for: baseURL)?
@@ -583,6 +667,28 @@ final class APIClient: APIClientProtocol {
 
     private static func queryEncode(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&=+?#"))) ?? value
+    }
+
+    private static func formEncode(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    private static func loginCSRFToken(from data: Data) -> String? {
+        guard let html = String(data: data, encoding: .utf8),
+              let expression = try? NSRegularExpression(
+                  pattern: #"name=["']login_csrf["'][^>]*value=["']([^"']+)["']"#,
+                  options: [.caseInsensitive]
+              ),
+              let match = expression.firstMatch(
+                  in: html,
+                  range: NSRange(html.startIndex..<html.endIndex, in: html)
+              ),
+              let tokenRange = Range(match.range(at: 1), in: html) else {
+            return nil
+        }
+        let token = String(html[tokenRange])
+        return token.count >= 20 ? token : nil
     }
 
     private static func structuredError(status: Int, path: String, data: Data) -> APIError? {
