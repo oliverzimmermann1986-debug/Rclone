@@ -8,16 +8,26 @@ struct RootTabView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             NavigationStack { DashboardView(showingSettings: $showingSettings) }
-                .tabItem { Label("Lagebild", systemImage: "gauge.with.dots.needle.50percent") }
+                .tabItem { Label("Lage", systemImage: "shield.checkered") }
                 .tag(0)
-            NavigationStack { BackupsView(showingSettings: $showingSettings) }
-                .tabItem { Label("Sicherungen", systemImage: "externaldrive.badge.icloud") }
+
+            NavigationStack { DataPathsScreen(showingSettings: $showingSettings) }
+                .tabItem { Label("Datenwege", systemImage: "arrow.left.arrow.right") }
                 .tag(1)
+
+            NavigationStack { JobsScreen(showingSettings: $showingSettings) }
+                .tabItem { Label("Jobs", systemImage: "calendar") }
+                .tag(2)
+
+            NavigationStack { RunsScreen(showingSettings: $showingSettings) }
+                .tabItem { Label("Läufe", systemImage: "clock.arrow.circlepath") }
+                .tag(3)
+
             NavigationStack { SystemView(showingSettings: $showingSettings) }
                 .tabItem { Label("System", systemImage: "server.rack") }
-                .tag(2)
+                .tag(4)
         }
-        .tint(.teal)
+        .tint(.green)
         .sheet(isPresented: $showingSettings) { SettingsView() }
         .alert("Hinweis", isPresented: Binding(
             get: { model.actionMessage != nil },
