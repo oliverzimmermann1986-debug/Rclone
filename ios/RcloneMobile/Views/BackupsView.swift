@@ -111,39 +111,128 @@ struct RunsScreen: View {
             .navigationTitle("Läufe")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                        .disabled(model.isRefreshing)
-                        .accessibilityLabel("Aktualisieren")
-                }
             }
     }
 }
 
 private struct RunsListView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var jobs: [JobRecord] = []
+    @State private var total = 0
+    @State private var query = ""
+    @State private var kind = ""
+    @State private var status = ""
+    @State private var loadingGeneration: Int?
+    @State private var requestGeneration = 0
+    @State private var errorMessage: String?
+    @State private var exportURL: URL?
+    private let pageSize = 50
 
     var body: some View {
         List {
-            if !model.jobs.isEmpty {
-                ForEach(model.jobs) { job in
-                    NavigationLink { RunDetailView(job: job) } label: { RunRow(job: job) }
+            Section("Filter") {
+                Picker("Typ", selection: $kind) {
+                    Text("Alle").tag("")
+                    Text("Sicherung").tag("backup")
+                    Text("Prüfung").tag("check")
+                    Text("Quick Sync").tag("quicksync")
+                    Text("Restore-Test").tag("restoretest")
+                    Text("PBS").tag("pbs")
                 }
-            } else if model.jobsState == .loaded {
-                ContentUnavailableView("Noch keine Läufe", systemImage: "clock.arrow.circlepath", description: Text("Ausgeführte Sicherungen erscheinen hier."))
-            } else {
-                switch model.jobsState {
-                case let .failed(message):
-                    LoadFailureView(title: "Läufe nicht geladen", message: message) {
-                        Task { await model.refresh() }
-                    }
-                default:
-                    LoadingSection(label: "Läufe werden geladen …")
+                Picker("Status", selection: $status) {
+                    Text("Alle").tag("")
+                    Text("Läuft").tag("running")
+                    Text("Erfolgreich").tag("ok")
+                    Text("Fehler").tag("error")
+                    Text("Abgebrochen").tag("cancelled")
+                    Text("Veraltet").tag("stale")
+                    Text("Übersprungen").tag("skipped")
+                }
+                if let exportURL {
+                    ShareLink(item: exportURL) { Label("Gefilterte Läufe als CSV teilen", systemImage: "square.and.arrow.up") }
+                } else {
+                    Button { Task { await prepareCSV() } } label: { Label("CSV-Export vorbereiten", systemImage: "tablecells") }
+                        .disabled(isLoading)
                 }
             }
+            Section("Läufe (\(total))") {
+                ForEach(jobs) { job in
+                    NavigationLink { RunDetailView(job: job) } label: { RunRow(job: job) }
+                }
+                if jobs.count < total {
+                    Button { Task { await loadMore() } } label: {
+                        HStack { Spacer(); if isLoading { ProgressView() }; Text("Weitere laden"); Spacer() }
+                    }
+                    .disabled(isLoading)
+                } else if jobs.isEmpty && !isLoading {
+                    ContentUnavailableView("Keine passenden Läufe", systemImage: "clock.arrow.circlepath", description: Text("Passe Suche oder Filter an."))
+                }
+            }
+            if let errorMessage { Label(errorMessage, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
         }
         .listStyle(.insetGrouped)
-        .refreshable { await model.refresh() }
+        .searchable(text: $query, prompt: "ID, Definition oder Fehler suchen")
+        .onSubmit(of: .search) { Task { await reload() } }
+        .onChange(of: query) { _, _ in exportURL = nil }
+        .onChange(of: kind) { _, _ in Task { await reload() } }
+        .onChange(of: status) { _, _ in Task { await reload() } }
+        .refreshable { await reload() }
+        .task { if jobs.isEmpty { await reload() } }
+    }
+
+    private func reload() async {
+        requestGeneration += 1
+        let generation = requestGeneration
+        jobs = []
+        total = 0
+        exportURL = nil
+        await loadMore(generation: generation)
+    }
+
+    private var isLoading: Bool { loadingGeneration != nil }
+
+    private func loadMore(generation suppliedGeneration: Int? = nil) async {
+        let generation = suppliedGeneration ?? requestGeneration
+        guard loadingGeneration != generation else { return }
+        loadingGeneration = generation
+        let selectedKind = kind
+        let selectedStatus = status
+        let selectedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let offset = jobs.count
+        defer { if loadingGeneration == generation { loadingGeneration = nil } }
+        do {
+            let response = try await model.withCurrentClient {
+                try await $0.searchJobs(
+                    kind: selectedKind.isEmpty ? nil : selectedKind,
+                    status: selectedStatus.isEmpty ? nil : selectedStatus,
+                    query: selectedQuery,
+                    limit: pageSize,
+                    offset: offset
+                )
+            }
+            guard generation == requestGeneration else { return }
+            jobs.append(contentsOf: response.items)
+            total = response.total
+            errorMessage = nil
+        } catch is CancellationError {
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func prepareCSV() async {
+        do {
+            exportURL = try await model.withCurrentClient {
+                try await $0.downloadJobsCSV(
+                    kind: kind.isEmpty ? nil : kind,
+                    status: status.isEmpty ? nil : status,
+                    query: query.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }
+        } catch is CancellationError {
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -175,8 +264,11 @@ struct RunDetailView: View {
     let job: JobRecord
     @State private var detail: JobRecord?
     @State private var log = ""
-    @State private var isLoading = true
-    @State private var loadError: String?
+    @State private var isDetailLoading = true
+    @State private var isLogLoading = true
+    @State private var detailError: String?
+    @State private var logError: String?
+    @State private var logDownloadURL: URL?
 
     var body: some View {
         List {
@@ -185,13 +277,15 @@ struct RunDetailView: View {
                 LabeledContent("Gestartet", value: AppFormat.date(detail?.startedAt ?? job.startedAt))
                 LabeledContent("Dauer", value: AppFormat.duration(start: detail?.startedAt ?? job.startedAt, end: detail?.endedAt ?? job.endedAt))
                 LabeledContent("Typ", value: (detail?.kind ?? job.kind).uppercased())
+                if isDetailLoading { ProgressView("Metadaten werden aktualisiert …") }
+                if let detailError { Text(detailError).font(.caption).foregroundStyle(.orange) }
             }
             Section("Protokoll") {
-                if isLoading {
+                if isLogLoading {
                     ProgressView("Protokoll wird geladen …")
-                } else if let loadError {
-                    LoadFailureView(title: "Protokoll nicht geladen", message: loadError) {
-                        Task { await load() }
+                } else if let logError {
+                    LoadFailureView(title: "Protokoll nicht geladen", message: logError) {
+                        Task { await loadLog() }
                     }
                 } else if log.isEmpty {
                     Text("Kein Protokoll verfügbar").foregroundStyle(.secondary)
@@ -202,26 +296,52 @@ struct RunDetailView: View {
                             .textSelection(.enabled)
                     }
                 }
+                if let logDownloadURL {
+                    ShareLink(item: logDownloadURL) { Label("Vollständiges redigiertes Log teilen", systemImage: "square.and.arrow.up") }
+                } else {
+                    Button { Task { await prepareLogDownload() } } label: { Label("Vollständiges Log vorbereiten", systemImage: "doc.badge.arrow.up") }
+                }
             }
         }
         .navigationTitle("Lauf #\(job.id)")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
+        .task {
+            async let detailTask: Void = loadDetail()
+            async let logTask: Void = loadLog()
+            _ = await (detailTask, logTask)
+        }
     }
 
-    private func load() async {
-        guard let client = model.client else { return }
-        isLoading = true
-        loadError = nil
-        defer { isLoading = false }
+    private func loadDetail() async {
+        isDetailLoading = true
+        detailError = nil
+        defer { isDetailLoading = false }
         do {
-            async let detailRequest = client.getJob(id: job.id)
-            async let logRequest = client.getJobLog(id: job.id)
-            let (newDetail, newLog) = try await (detailRequest, logRequest)
-            detail = newDetail
-            log = newLog.log
+            detail = try await model.withCurrentClient { try await $0.getJob(id: job.id) }
+        } catch is CancellationError {
         } catch {
-            loadError = error.localizedDescription
+            detailError = error.localizedDescription
+        }
+    }
+
+    private func loadLog() async {
+        isLogLoading = true
+        logError = nil
+        defer { isLogLoading = false }
+        do {
+            log = try await model.withCurrentClient { try await $0.getJobLog(id: job.id) }.log
+        } catch is CancellationError {
+        } catch {
+            logError = error.localizedDescription
+        }
+    }
+
+    private func prepareLogDownload() async {
+        do {
+            logDownloadURL = try await model.withCurrentClient { try await $0.downloadJobLog(id: job.id) }
+        } catch is CancellationError {
+        } catch {
+            logError = error.localizedDescription
         }
     }
 }

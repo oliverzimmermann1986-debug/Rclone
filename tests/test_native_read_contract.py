@@ -485,3 +485,27 @@ def test_native_management_uses_canonical_routes_and_models_without_webview():
         assert feature in operations or feature in views
     assert "WKWebView" not in production
     assert "UIWebView" not in production
+
+
+def test_native_f14_revision_safety_history_and_run_all_contracts():
+    ios_root = CONTRACT_PATH.parents[1] / "ios" / "RcloneMobile"
+    api = (ios_root / "Core" / "APIClient.swift").read_text(encoding="utf-8")
+    app_model = (ios_root / "Core" / "AppModel.swift").read_text(encoding="utf-8")
+    configuration = (ios_root / "Views" / "ConfigurationViews.swift").read_text(
+        encoding="utf-8"
+    )
+    backups = (ios_root / "Views" / "BackupsView.swift").read_text(encoding="utf-8")
+    dashboard = (ios_root / "Views" / "DashboardView.swift").read_text(encoding="utf-8")
+
+    assert 'post("/api/jobs/definitions/run-all?dry_run=\\(dryRun)")' in api
+    assert "runAllJobDefinitions()" in dashboard
+    assert "model.runBackup()" not in dashboard
+    assert "getJobDefinitions()" not in app_model
+    assert "jobDefinitions = newConfig.backup.jobs" in app_model
+    assert configuration.count("if isDirty && !discardDirty") == 2
+    assert configuration.count("Ungespeicherte") >= 2
+    assert "searchJobs(" in backups
+    assert "downloadJobsCSV(" in backups
+    assert "downloadJobLog(" in backups
+    assert backups.count("model.withCurrentClient") >= 5
+    assert "detailError" in backups and "logError" in backups
