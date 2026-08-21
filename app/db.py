@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS pair_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_pair_runs_name_ended ON pair_runs(pair_name, ended_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_pair_runs_name_ok_ended ON pair_runs(pair_name, ok, ended_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS pair_history_state (
+    history_key TEXT PRIMARY KEY,
+    pair_name TEXT NOT NULL,
+    ever_succeeded INTEGER NOT NULL DEFAULT 0,
+    terminal_seen INTEGER NOT NULL DEFAULT 0,
+    first_seen_at REAL NOT NULL,
+    last_seen_at REAL NOT NULL,
+    last_success_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_pair_history_state_name ON pair_history_state(pair_name);
 
 CREATE TABLE IF NOT EXISTS auth_failures (
     client_key TEXT PRIMARY KEY,
@@ -186,6 +197,7 @@ class Database:
             connection.executescript(_DDL)
             self._migrate_schema(connection)
             self._backfill_pair_runs(connection)
+            self._backfill_pair_history_state(connection)
         try:
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
@@ -225,6 +237,21 @@ class Database:
                 "ON pair_runs(history_key, dry_run, ok, ended_at DESC, id DESC)"
             )
             connection.execute("PRAGMA user_version=2")
+            version = 2
+        if version < 3:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS pair_history_state ("
+                "history_key TEXT PRIMARY KEY, pair_name TEXT NOT NULL, "
+                "ever_succeeded INTEGER NOT NULL DEFAULT 0, "
+                "terminal_seen INTEGER NOT NULL DEFAULT 0, "
+                "first_seen_at REAL NOT NULL, last_seen_at REAL NOT NULL, "
+                "last_success_at REAL)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pair_history_state_name "
+                "ON pair_history_state(pair_name)"
+            )
+            connection.execute("PRAGMA user_version=3")
 
     @classmethod
     def _migrate_pair_history_columns(cls, connection: sqlite3.Connection) -> None:
@@ -317,6 +344,81 @@ class Database:
             connection.execute("RELEASE SAVEPOINT pair_runs_backfill")
             raise
 
+    @staticmethod
+    def _record_pair_history_state(
+        connection: sqlite3.Connection,
+        *,
+        history_key: str,
+        pair_name: str,
+        seen_at: float,
+        succeeded: bool = False,
+        terminal: bool = False,
+        success_at: float | None = None,
+    ) -> None:
+        """Speichert Baseline-Evidenz unabhängig von der löschbaren Job-Historie."""
+
+        key = str(history_key or "").strip()
+        name = str(pair_name or "").strip()
+        if not key or not name:
+            return
+        timestamp = float(seen_at)
+        succeeded_value = 1 if succeeded else 0
+        terminal_value = 1 if terminal else 0
+        succeeded_at = float(success_at or timestamp) if succeeded else None
+        connection.execute(
+            "INSERT INTO pair_history_state "
+            "(history_key, pair_name, ever_succeeded, terminal_seen, "
+            "first_seen_at, last_seen_at, last_success_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(history_key) DO UPDATE SET "
+            "pair_name=CASE WHEN excluded.last_seen_at >= pair_history_state.last_seen_at "
+            "THEN excluded.pair_name ELSE pair_history_state.pair_name END, "
+            "ever_succeeded=MAX(pair_history_state.ever_succeeded, excluded.ever_succeeded), "
+            "terminal_seen=MAX(pair_history_state.terminal_seen, excluded.terminal_seen), "
+            "first_seen_at=MIN(pair_history_state.first_seen_at, excluded.first_seen_at), "
+            "last_seen_at=MAX(pair_history_state.last_seen_at, excluded.last_seen_at), "
+            "last_success_at=CASE "
+            "WHEN excluded.last_success_at IS NULL THEN pair_history_state.last_success_at "
+            "WHEN pair_history_state.last_success_at IS NULL THEN excluded.last_success_at "
+            "ELSE MAX(pair_history_state.last_success_at, excluded.last_success_at) END",
+            (
+                key,
+                name,
+                succeeded_value,
+                terminal_value,
+                timestamp,
+                timestamp,
+                succeeded_at,
+            ),
+        )
+
+    @classmethod
+    def _backfill_pair_history_state(cls, connection: sqlite3.Connection) -> None:
+        """Backfillt den dauerhaften Marker idempotent aus allen Pair-Versuchen."""
+
+        rows = connection.execute(
+            "SELECT history_key, pair_name, MIN(started_at) AS first_seen, "
+            "MAX(COALESCE(ended_at, started_at)) AS last_seen, "
+            "MAX(CASE WHEN ok=1 AND dry_run=0 THEN 1 ELSE 0 END) AS succeeded, "
+            "MAX(CASE WHEN status<>'running' OR ended_at IS NOT NULL THEN 1 ELSE 0 END) "
+            "AS terminal_seen, "
+            "MAX(CASE WHEN ok=1 AND dry_run=0 "
+            "THEN COALESCE(ended_at, started_at) ELSE NULL END) AS success_at "
+            "FROM pair_runs WHERE history_key<>'' GROUP BY history_key, pair_name"
+        ).fetchall()
+        for row in rows:
+            cls._record_pair_history_state(
+                connection,
+                history_key=str(row["history_key"]),
+                pair_name=str(row["pair_name"]),
+                seen_at=float(row["last_seen"] or row["first_seen"] or time.time()),
+                succeeded=bool(row["succeeded"]),
+                terminal=bool(row["terminal_seen"]),
+                success_at=(
+                    float(row["success_at"]) if row["success_at"] is not None else None
+                ),
+            )
+
     @contextmanager
     def conn(self, *, initialize: bool = False) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(
@@ -408,6 +510,12 @@ class Database:
                         scheduled_slot,
                         _json_dumps_bounded(result, _MAX_PAIR_RESULT_BYTES),
                     ),
+                )
+                self._record_pair_history_state(
+                    connection,
+                    history_key=history_key,
+                    pair_name=pair_name,
+                    seen_at=started_at,
                 )
             return job_id
 
@@ -529,6 +637,15 @@ class Database:
                     _json_dumps_bounded(pair, _MAX_PAIR_RESULT_BYTES),
                 ),
             )
+            Database._record_pair_history_state(
+                connection,
+                history_key=history_key,
+                pair_name=name,
+                seen_at=ended_at,
+                succeeded=pair.get("ok") is True and not dry_run,
+                terminal=job_status != "running",
+                success_at=ended_at,
+            )
 
         due = summary.get("due") or []
         if job_status in {"error", "stale", "cancelled"} and isinstance(due, list):
@@ -574,6 +691,13 @@ class Database:
                         _json_dumps_bounded(result, _MAX_PAIR_RESULT_BYTES),
                     ),
                 )
+                Database._record_pair_history_state(
+                    connection,
+                    history_key=history_key,
+                    pair_name=name,
+                    seen_at=ended_at,
+                    terminal=True,
+                )
 
         if job_status != "running":
             unfinished_status = (
@@ -603,7 +727,7 @@ class Database:
         for raw_job_id in job_ids:
             job_id = int(raw_job_id)
             unfinished_rows = connection.execute(
-                "SELECT id, result_json FROM pair_runs "
+                "SELECT id, pair_name, history_key, result_json FROM pair_runs "
                 "WHERE job_id=? AND status='running'",
                 (job_id,),
             ).fetchall()
@@ -630,6 +754,13 @@ class Database:
                         _json_dumps_bounded(result, _MAX_PAIR_RESULT_BYTES),
                         int(unfinished["id"]),
                     ),
+                )
+                Database._record_pair_history_state(
+                    connection,
+                    history_key=str(unfinished["history_key"] or ""),
+                    pair_name=str(unfinished["pair_name"] or ""),
+                    seen_at=ended_at,
+                    terminal=True,
                 )
 
     def job_set_log_file(self, job_id: int, path: str) -> None:
@@ -924,11 +1055,12 @@ class Database:
                     (history_key,),
                 ).fetchone()
                 if not row:
-                    stable_attempt_exists = connection.execute(
-                        "SELECT 1 FROM pair_runs WHERE history_key=? LIMIT 1",
+                    terminal_stable_attempt_exists = connection.execute(
+                        "SELECT 1 FROM pair_runs WHERE history_key=? "
+                        "AND (status<>'running' OR ended_at IS NOT NULL) LIMIT 1",
                         (history_key,),
                     ).fetchone()
-                    if stable_attempt_exists:
+                    if terminal_stable_attempt_exists:
                         return None
                     legacy_key = self._default_history_key("", pair_name)
                     row = connection.execute(
@@ -963,6 +1095,116 @@ class Database:
             "pair": legacy["pair"],
             "job_id": legacy["job_id"],
         }
+
+    def pair_baseline_state(
+        self,
+        pair_name: str,
+        *,
+        history_key: Optional[str] = None,
+    ) -> str:
+        """Bewertet, ob ein automatischer initialer Baseline-Resync sicher ist.
+
+        ``new`` bedeutet, dass ausschließlich ein aktueller laufender Versuch
+        bekannt ist. ``succeeded`` ist dauerhafte Erfolgsevidenz. Bereits
+        abgeschlossene Versuche ohne nachweisbaren Erfolg sind ``ambiguous``
+        und müssen aus Sicherheitsgründen manuell geprüft werden.
+        """
+
+        name = str(pair_name or "").strip()
+        key = str(history_key or self._default_history_key("", name)).strip()
+        if not name or not key:
+            return "ambiguous"
+        legacy_key = self._default_history_key("", name)
+
+        with self.conn() as connection:
+            stable = connection.execute(
+                "SELECT * FROM pair_history_state WHERE history_key=?",
+                (key,),
+            ).fetchone()
+            if stable and bool(stable["ever_succeeded"]):
+                return "succeeded"
+
+            success = connection.execute(
+                "SELECT pair_name, COALESCE(ended_at, started_at) AS succeeded_at "
+                "FROM pair_runs WHERE history_key=? AND ok=1 AND dry_run=0 "
+                "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1",
+                (key,),
+            ).fetchone()
+            if success:
+                self._record_pair_history_state(
+                    connection,
+                    history_key=key,
+                    pair_name=str(success["pair_name"] or name),
+                    seen_at=float(success["succeeded_at"]),
+                    succeeded=True,
+                    terminal=True,
+                    success_at=float(success["succeeded_at"]),
+                )
+                return "succeeded"
+
+            # Beim Umstieg von name-basierten Keys auf stabile Config-IDs darf
+            # der bereits vor dem Lookup reservierte laufende Versuch die alte
+            # Erfolgsevidenz nicht verdecken. Die Evidenz wird auf den stabilen
+            # Key übernommen und überlebt danach auch Job-Pruning und Umbenennen.
+            if key != legacy_key:
+                legacy = connection.execute(
+                    "SELECT * FROM pair_history_state "
+                    "WHERE history_key=? AND pair_name=?",
+                    (legacy_key, name),
+                ).fetchone()
+                if legacy and bool(legacy["ever_succeeded"]):
+                    success_at = float(
+                        legacy["last_success_at"] or legacy["last_seen_at"]
+                    )
+                    self._record_pair_history_state(
+                        connection,
+                        history_key=key,
+                        pair_name=name,
+                        seen_at=float(legacy["last_seen_at"]),
+                        succeeded=True,
+                        terminal=bool(legacy["terminal_seen"]),
+                        success_at=success_at,
+                    )
+                    return "succeeded"
+
+                legacy_success = connection.execute(
+                    "SELECT COALESCE(ended_at, started_at) AS succeeded_at "
+                    "FROM pair_runs WHERE pair_name=? AND history_key IN ('', ?) "
+                    "AND ok=1 AND dry_run=0 "
+                    "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1",
+                    (name, legacy_key),
+                ).fetchone()
+                if legacy_success:
+                    success_at = float(legacy_success["succeeded_at"])
+                    self._record_pair_history_state(
+                        connection,
+                        history_key=key,
+                        pair_name=name,
+                        seen_at=success_at,
+                        succeeded=True,
+                        terminal=True,
+                        success_at=success_at,
+                    )
+                    return "succeeded"
+
+            terminal_seen = bool(stable and stable["terminal_seen"])
+            if not terminal_seen:
+                terminal_seen = (
+                    connection.execute(
+                        "SELECT 1 FROM pair_runs WHERE history_key=? "
+                        "AND (status<>'running' OR ended_at IS NOT NULL) LIMIT 1",
+                        (key,),
+                    ).fetchone()
+                    is not None
+                )
+            if not terminal_seen and key != legacy_key:
+                legacy = connection.execute(
+                    "SELECT terminal_seen FROM pair_history_state "
+                    "WHERE history_key=? AND pair_name=?",
+                    (legacy_key, name),
+                ).fetchone()
+                terminal_seen = bool(legacy and legacy["terminal_seen"])
+            return "ambiguous" if terminal_seen else "new"
 
     def pair_last_history(
         self, identities: Mapping[str, str]

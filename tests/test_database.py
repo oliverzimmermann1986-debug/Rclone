@@ -39,7 +39,7 @@ def test_database_backfills_and_indexes_pair_history(tmp_path: Path):
     assert db.stats()["pair_runs"] == 1
     assert db.integrity_check()["ok"] is True
     with db.conn() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         indexes = {
             row["name"]
             for row in connection.execute("PRAGMA index_list(jobs)").fetchall()
@@ -98,7 +98,7 @@ def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(pair_runs)").fetchall()
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
     assert {"history_key", "dry_run", "scheduled_slot"} <= columns
 
 
@@ -269,6 +269,26 @@ def test_stable_history_attempt_stops_legacy_success_fallback(tmp_path: Path):
     assert database.pair_last_success("pbs:docs", history_key=stable_key) is None
 
 
+def test_running_stable_attempt_keeps_legacy_success_evidence(tmp_path: Path):
+    database = Database(tmp_path / "running-stable-history.db")
+    legacy_job = database.job_start("backup")
+    database.job_finish(
+        legacy_job,
+        "ok",
+        {"pairs": [{"name": "Fotos", "ok": True}]},
+    )
+    stable_key = "rclone:id:stable-photos"
+    database.job_start(
+        "backup",
+        attempts=[{"name": "Fotos", "history_key": stable_key}],
+    )
+
+    success = database.pair_last_success("Fotos", history_key=stable_key)
+
+    assert success is not None and success["job_id"] == legacy_job
+    assert database.pair_baseline_state("Fotos", history_key=stable_key) == "succeeded"
+
+
 def test_rclone_stable_history_attempt_stops_legacy_json_success_fallback(
     tmp_path: Path,
 ):
@@ -349,6 +369,55 @@ def test_prune_never_deletes_running_jobs(tmp_path: Path):
     assert database.jobs_prune(older_than_days=1, keep_latest=0) == 1
     assert database.job_get(running)["status"] == "running"
     assert database.job_get(terminal) is None
+
+
+def test_success_marker_survives_job_pruning_and_pair_rename(tmp_path: Path):
+    database = Database(tmp_path / "persistent-baseline.db")
+    stable_key = "rclone:id:photos"
+    successful = database.job_start(
+        "backup",
+        attempts=[{"name": "Fotos alt", "history_key": stable_key}],
+    )
+    database.job_finish(
+        successful,
+        "ok",
+        {"pairs": [{"name": "Fotos alt", "history_key": stable_key, "ok": True}]},
+    )
+    with database.conn() as connection:
+        connection.execute(
+            "UPDATE jobs SET started_at=? WHERE id=?",
+            (time.time() - 3 * 86400, successful),
+        )
+
+    assert database.jobs_prune(older_than_days=1, keep_latest=0) == 1
+    assert database.pair_last_success("Fotos alt", history_key=stable_key) is None
+    assert (
+        database.pair_baseline_state("Fotos neu", history_key=stable_key) == "succeeded"
+    )
+
+
+def test_terminal_attempt_without_success_stays_ambiguous_after_pruning(
+    tmp_path: Path,
+):
+    database = Database(tmp_path / "ambiguous-baseline.db")
+    stable_key = "rclone:id:photos"
+    failed = database.job_start(
+        "backup",
+        attempts=[{"name": "Fotos", "history_key": stable_key}],
+    )
+    database.job_finish(
+        failed,
+        "error",
+        {"pairs": [{"name": "Fotos", "history_key": stable_key, "ok": False}]},
+    )
+    with database.conn() as connection:
+        connection.execute(
+            "UPDATE jobs SET started_at=? WHERE id=?",
+            (time.time() - 3 * 86400, failed),
+        )
+
+    assert database.jobs_prune(older_than_days=1, keep_latest=0) == 1
+    assert database.pair_baseline_state("Fotos", history_key=stable_key) == "ambiguous"
 
 
 def test_job_and_pair_summaries_have_hard_byte_limits(tmp_path: Path):
