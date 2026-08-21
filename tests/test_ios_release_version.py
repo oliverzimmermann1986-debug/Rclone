@@ -86,12 +86,12 @@ def test_codemagic_publishes_to_internal_testflight_without_beta_review():
     assert "submit_to_app_store: false" in config
 
 
-def test_codemagic_pins_an_image_with_the_requested_simulator_runtime():
+def test_codemagic_pins_the_verified_simulator_image():
     root = Path(__file__).parents[1]
     config = (root / "codemagic.yaml").read_text(encoding="utf-8")
 
-    assert "xcode: 26.5" in config
-    assert '-destination "platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5"' in config
+    assert "xcode: 26.4" in config
+    assert '-destination "platform=iOS Simulator,name=iPhone 17,OS=latest"' in config
 
 
 def test_ios_ci_tracks_native_contract_sources():
