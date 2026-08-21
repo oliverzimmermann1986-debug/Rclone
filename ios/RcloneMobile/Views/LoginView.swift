@@ -40,9 +40,10 @@ struct LoginView: View {
                     loginButton
                         .padding(.top, 22)
 
-                    Label("Dein Passwort bleibt auf diesem iPhone.", systemImage: "lock.shield")
+                    Label("Die App speichert dein Passwort nicht. Es wird zur Anmeldung an den angegebenen Server gesendet.", systemImage: "lock.shield")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.top, 18)
                 }
@@ -93,6 +94,8 @@ struct LoginView: View {
                 symbol: "server.rack",
                 text: $server,
                 contentType: .URL,
+                keyboardType: .URL,
+                capitalization: .never,
                 isSecure: false,
                 focus: $focusedField,
                 field: .server
@@ -114,6 +117,8 @@ struct LoginView: View {
                 symbol: "person",
                 text: $username,
                 contentType: .username,
+                keyboardType: .default,
+                capitalization: .never,
                 isSecure: false,
                 focus: $focusedField,
                 field: .username
@@ -129,6 +134,8 @@ struct LoginView: View {
                 symbol: "key",
                 text: $password,
                 contentType: .password,
+                keyboardType: .default,
+                capitalization: .never,
                 isSecure: true,
                 focus: $focusedField,
                 field: .password
@@ -181,6 +188,8 @@ private struct LoginField: View {
     let symbol: String
     @Binding var text: String
     let contentType: UITextContentType?
+    let keyboardType: UIKeyboardType
+    let capitalization: TextInputAutocapitalization
     let isSecure: Bool
     let focus: FocusState<LoginFieldID?>.Binding
     let field: LoginFieldID
@@ -206,9 +215,9 @@ private struct LoginField: View {
                 }
                 .textContentType(contentType)
                 .focused(focus, equals: field)
-                .textInputAutocapitalization(.never)
+                .textInputAutocapitalization(capitalization)
                 .autocorrectionDisabled()
-                .keyboardType(.asciiCapable)
+                .keyboardType(keyboardType)
             }
         }
         .padding(.horizontal, 16)

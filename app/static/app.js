@@ -490,9 +490,9 @@ function app() {
       const data = this.overview.data;
       if (!this.online) return 'error';
       if (!data) return 'pending';
-      if (this.busy()) return 'running';
       if ((data.alerts || []).some((a) => a.level === 'error')) return 'error';
-      if ((data.alerts || []).some((a) => a.level === 'warn')) return 'warn';
+      if ((data.alerts || []).some((a) => ['warn', 'warning'].includes(a.level))) return 'warn';
+      if (this.busy()) return 'running';
       return 'ok';
     },
 
@@ -1952,6 +1952,18 @@ function app() {
       let index = -1;
       do { bytes /= 1024; index += 1; } while (bytes >= 1024 && index < units.length - 1);
       return `${bytes.toFixed(bytes >= 100 ? 0 : 1)} ${units[index]}`;
+    },
+
+    metricAvailable(value) {
+      return value !== null && value !== undefined && Number.isFinite(Number(value));
+    },
+
+    metricPercent(value) {
+      return this.metricAvailable(value) ? `${Math.round(Number(value))}%` : 'Nicht verfügbar';
+    },
+
+    metricWidth(value) {
+      return this.metricAvailable(value) ? Math.min(100, Math.max(0, Number(value))) : 0;
     },
 
     formatTs(value) {

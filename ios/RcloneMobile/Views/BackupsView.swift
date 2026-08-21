@@ -43,7 +43,8 @@ private struct JobsListView: View {
 
     var body: some View {
         List {
-            if let scheduler = model.overview?.services.scheduler {
+            if let overview = model.overview {
+                let scheduler = overview.services.scheduler
                 Section {
                     HStack {
                         Label(scheduler.control?.paused == true ? "Zeitpläne pausiert" : "Zeitpläne aktiv", systemImage: scheduler.control?.paused == true ? "pause.circle.fill" : "calendar.badge.clock")
@@ -51,18 +52,26 @@ private struct JobsListView: View {
                         StatusBadge(status: scheduler.control?.paused == true ? "warning" : scheduler.active)
                     }
                 }
-            }
-            Section("Geplante Jobs") {
-                let pairs = model.overview?.pairs.health ?? []
-                if pairs.isEmpty {
-                    ContentUnavailableView("Keine Jobs", systemImage: "calendar.badge.exclamationmark", description: Text("Sobald ein Job eingerichtet ist, erscheint er hier."))
-                } else {
-                    ForEach(pairs) { pair in
-                        Button { selectedPair = pair } label: {
-                            JobRow(pair: pair)
+                Section("Geplante Jobs") {
+                    if overview.pairs.health.isEmpty {
+                        ContentUnavailableView("Keine Jobs", systemImage: "calendar.badge.exclamationmark", description: Text("Sobald ein Job eingerichtet ist, erscheint er hier."))
+                    } else {
+                        ForEach(overview.pairs.health) { pair in
+                            Button { selectedPair = pair } label: {
+                                JobRow(pair: pair)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
+                }
+            } else {
+                switch model.overviewState {
+                case let .failed(message):
+                    LoadFailureView(title: "Jobs nicht geladen", message: message) {
+                        Task { await model.refresh() }
+                    }
+                default:
+                    LoadingSection(label: "Jobs werden geladen …")
                 }
             }
         }
@@ -116,11 +125,20 @@ private struct RunsListView: View {
 
     var body: some View {
         List {
-            if model.jobs.isEmpty {
-                ContentUnavailableView("Noch keine Läufe", systemImage: "clock.arrow.circlepath", description: Text("Ausgeführte Sicherungen erscheinen hier."))
-            } else {
+            if !model.jobs.isEmpty {
                 ForEach(model.jobs) { job in
                     NavigationLink { RunDetailView(job: job) } label: { RunRow(job: job) }
+                }
+            } else if model.jobsState == .loaded {
+                ContentUnavailableView("Noch keine Läufe", systemImage: "clock.arrow.circlepath", description: Text("Ausgeführte Sicherungen erscheinen hier."))
+            } else {
+                switch model.jobsState {
+                case let .failed(message):
+                    LoadFailureView(title: "Läufe nicht geladen", message: message) {
+                        Task { await model.refresh() }
+                    }
+                default:
+                    LoadingSection(label: "Läufe werden geladen …")
                 }
             }
         }
@@ -158,6 +176,7 @@ struct RunDetailView: View {
     @State private var detail: JobRecord?
     @State private var log = ""
     @State private var isLoading = true
+    @State private var loadError: String?
 
     var body: some View {
         List {
@@ -170,6 +189,10 @@ struct RunDetailView: View {
             Section("Protokoll") {
                 if isLoading {
                     ProgressView("Protokoll wird geladen …")
+                } else if let loadError {
+                    LoadFailureView(title: "Protokoll nicht geladen", message: loadError) {
+                        Task { await load() }
+                    }
                 } else if log.isEmpty {
                     Text("Kein Protokoll verfügbar").foregroundStyle(.secondary)
                 } else {
@@ -188,6 +211,8 @@ struct RunDetailView: View {
 
     private func load() async {
         guard let client = model.client else { return }
+        isLoading = true
+        loadError = nil
         defer { isLoading = false }
         do {
             async let detailRequest = client.getJob(id: job.id)
@@ -196,7 +221,7 @@ struct RunDetailView: View {
             detail = newDetail
             log = newLog.log
         } catch {
-            model.errorMessage = error.localizedDescription
+            loadError = error.localizedDescription
         }
     }
 }
@@ -224,10 +249,7 @@ private struct DataPathsListView: View {
 
     var body: some View {
         List {
-            let pairs = model.config?.backup.pairs ?? []
-            if pairs.isEmpty {
-                ContentUnavailableView("Keine Datenwege", systemImage: "arrow.left.arrow.right", description: Text("Eingerichtete Verbindungen zwischen lokalen und entfernten Ordnern erscheinen hier."))
-            } else {
+            if let pairs = model.config?.backup.pairs, !pairs.isEmpty {
                 ForEach(pairs) { pair in
                     NavigationLink { DataPathDetailView(pair: pair, storage: model.storage?.pairs.first { $0.name == pair.name }) } label: {
                         VStack(alignment: .leading, spacing: 5) {
@@ -241,6 +263,17 @@ private struct DataPathsListView: View {
                         }
                         .padding(.vertical, 3)
                     }
+                }
+            } else if model.configState == .loaded {
+                ContentUnavailableView("Keine Datenwege", systemImage: "arrow.left.arrow.right", description: Text("Eingerichtete Verbindungen zwischen lokalen und entfernten Ordnern erscheinen hier."))
+            } else {
+                switch model.configState {
+                case let .failed(message):
+                    LoadFailureView(title: "Datenwege nicht geladen", message: message) {
+                        Task { await model.refresh() }
+                    }
+                default:
+                    LoadingSection(label: "Datenwege werden geladen …")
                 }
             }
         }

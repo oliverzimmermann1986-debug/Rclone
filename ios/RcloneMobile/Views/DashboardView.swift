@@ -9,12 +9,6 @@ struct DashboardView: View {
 
     var body: some View {
         List {
-            if let error = model.errorMessage {
-                ErrorBanner(message: error, dismiss: model.dismissMessages)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-            }
-
             if let overview = model.overview {
                 Section {
                     statusSummary(overview)
@@ -46,11 +40,20 @@ struct DashboardView: View {
                             CopyListRow(pair: pair)
                         }
                     } else {
-                        ContentUnavailableView(
-                            "Keine Datenwege",
-                            systemImage: "arrow.left.arrow.right",
-                            description: Text("Eingerichtete Kopien erscheinen hier.")
-                        )
+                        switch model.storageState {
+                        case .loaded:
+                            ContentUnavailableView(
+                                "Keine Datenwege",
+                                systemImage: "arrow.left.arrow.right",
+                                description: Text("Eingerichtete Kopien erscheinen hier.")
+                            )
+                        case let .failed(message):
+                            LoadFailureView(title: "Kopien nicht geladen", message: message) {
+                                Task { await model.refresh() }
+                            }
+                        default:
+                            LoadingSection(label: "Kopien werden geladen …")
+                        }
                     }
                 }
 
@@ -76,7 +79,14 @@ struct DashboardView: View {
                     }
                 }
             } else {
-                LoadingSection(label: "Lage wird geladen …")
+                switch model.overviewState {
+                case let .failed(message):
+                    LoadFailureView(title: "Lage nicht geladen", message: message) {
+                        Task { await model.refresh() }
+                    }
+                default:
+                    LoadingSection(label: "Lage wird geladen …")
+                }
             }
         }
         .listStyle(.insetGrouped)
@@ -119,20 +129,23 @@ struct DashboardView: View {
     }
 
     private func statusSummary(_ overview: OverviewResponse) -> some View {
-        let hasError = overview.alerts.contains { $0.level == "error" }
+        let level = aggregateLevel(for: overview.alerts)
+        let color: Color = level == .error ? .red : level == .warning ? .orange : .green
+        let symbol = level == .error ? "exclamationmark" : level == .warning ? "exclamationmark.triangle" : "checkmark"
+        let title = level == .error ? "Aufmerksamkeit nötig" : level == .warning ? "Hinweise vorhanden" : "Alles in Ordnung"
         return HStack(spacing: 14) {
             ZStack {
                 Circle()
-                    .fill((hasError ? Color.red : Color.green).opacity(0.14))
-                Image(systemName: hasError ? "exclamationmark" : "checkmark")
+                    .fill(color.opacity(0.14))
+                Image(systemName: symbol)
                     .font(.title2.bold())
-                    .foregroundStyle(hasError ? Color.red : Color.green)
+                    .foregroundStyle(color)
             }
             .frame(width: 50, height: 50)
             .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(hasError ? "Aufmerksamkeit nötig" : "Alles in Ordnung")
+                Text(title)
                     .font(.title3.weight(.semibold))
                 Text("\(overview.system.hostname) · \(AppFormat.relative(overview.generatedAt))")
                     .font(.subheadline)
@@ -141,6 +154,14 @@ struct DashboardView: View {
         }
         .padding(.vertical, 5)
         .accessibilityElement(children: .combine)
+    }
+
+    private enum AggregateLevel: Equatable { case ok, warning, error }
+
+    private func aggregateLevel(for alerts: [SystemAlert]) -> AggregateLevel {
+        if alerts.contains(where: { $0.level.lowercased() == "error" }) { return .error }
+        if alerts.contains(where: { ["warn", "warning"].contains($0.level.lowercased()) }) { return .warning }
+        return .ok
     }
 
     private var liveProgress: some View {
