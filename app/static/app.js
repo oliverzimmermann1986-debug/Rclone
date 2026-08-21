@@ -24,7 +24,7 @@ function app() {
     lastUpdated: null,
     requestTimeoutMs: 30000,
     refreshing: false,
-    polling: { active: false, refreshTimer: null, activityTimer: null },
+    polling: { active: false, generation: 0, refreshTimer: null, activityTimer: null },
     configLoading: true,
     configLoaded: false,
     configError: '',
@@ -61,6 +61,7 @@ function app() {
     allowedHostsText: '',
     browseRootsText: '',
     configDirty: false,
+    configEditGeneration: 0,
     pairSearch: '',
     pairFilter: 'all',
     newPairPreset: 'push-copy',
@@ -228,6 +229,7 @@ function app() {
 
     stopPolling() {
       this.polling.active = false;
+      this.polling.generation += 1;
       if (this.polling.refreshTimer) window.clearTimeout(this.polling.refreshTimer);
       if (this.polling.activityTimer) window.clearTimeout(this.polling.activityTimer);
       this.polling.refreshTimer = null;
@@ -238,13 +240,16 @@ function app() {
     startPolling() {
       if (this.polling.active || document.hidden) return;
       this.polling.active = true;
+      this.polling.generation += 1;
+      const generation = this.polling.generation;
+      const isCurrent = () => this.polling.active && this.polling.generation === generation;
       this.startSseProgress();
       const scheduleRefresh = () => {
-        if (!this.polling.active) return;
+        if (!isCurrent()) return;
         this.polling.refreshTimer = window.setTimeout(refreshLoop, 30000);
       };
       const scheduleActivity = () => {
-        if (!this.polling.active) return;
+        if (!isCurrent()) return;
         const busy = this.rcloneBusy() || this.progress?.running
           || this.pbs.status?.running
           || (this.jobModal.show && this.jobModal.autoRefresh && this.jobModal.job?.status === 'running');
@@ -252,14 +257,14 @@ function app() {
       };
       const refreshLoop = async () => {
         try {
-          if (this.polling.active && !document.hidden) await this.refreshAll(false);
+          if (isCurrent() && !document.hidden) await this.refreshAll(false);
         } finally {
           scheduleRefresh();
         }
       };
       const activityLoop = async () => {
         try {
-          if (this.polling.active && !document.hidden) {
+          if (isCurrent() && !document.hidden) {
             if (this.rcloneBusy() || this.progress?.running) await this.loadProgress(true);
             if (this.status?.pbs || this.pbs.status?.running) await this.loadPbsStatus(true);
             if (this.jobModal.show && this.jobModal.autoRefresh && this.jobModal.job?.status === 'running') {
@@ -631,7 +636,7 @@ function app() {
         name: '', enabled: false, data_path_ids: [], schedule: 'manual',
         execution_mode: 'sequential', max_parallel: 1, retry_minutes: 60,
       }));
-      this.configDirty = true;
+      this.markConfigDirty();
     },
 
     removeJobDefinition(idx) {
@@ -639,7 +644,7 @@ function app() {
       if (!confirm(`Job „${job?.name || 'ohne Namen'}“ entfernen? Die bisherigen Läufe bleiben erhalten.`)) return;
       this.config.backup.jobs.splice(idx, 1);
       delete this.jobPathChoice[idx];
-      this.configDirty = true;
+      this.markConfigDirty();
     },
 
     dataPathName(pathId) {
@@ -657,12 +662,12 @@ function app() {
       if (!pathId || job.data_path_ids.includes(pathId)) return;
       job.data_path_ids.push(pathId);
       this.jobPathChoice[jobIdx] = '';
-      this.configDirty = true;
+      this.markConfigDirty();
     },
 
     removeJobPath(job, pathIdx) {
       job.data_path_ids.splice(pathIdx, 1);
-      this.configDirty = true;
+      this.markConfigDirty();
     },
 
     moveJobPath(job, pathIdx, delta) {
@@ -670,7 +675,7 @@ function app() {
       if (target < 0 || target >= job.data_path_ids.length) return;
       const [pathId] = job.data_path_ids.splice(pathIdx, 1);
       job.data_path_ids.splice(target, 0, pathId);
-      this.configDirty = true;
+      this.markConfigDirty();
     },
 
     async planJobDefinition(job, dryRun = true) {
@@ -989,6 +994,7 @@ function app() {
       }
     },
     async loadConfig(silent = false) {
+      const editGeneration = this.configEditGeneration;
       this.configLoading = true;
       this.configError = '';
       const result = await this.api('GET', '/api/config', undefined, { silent, requestKey: 'config' });
@@ -997,6 +1003,10 @@ function app() {
         this.configLoading = false;
         this.configError = 'Konfiguration konnte nicht geladen werden. Bearbeitung bleibt gesperrt.';
         return false;
+      }
+      if (this.configDirty && editGeneration !== this.configEditGeneration) {
+        this.configLoading = false;
+        return null;
       }
       result.web ||= {};
       result.paths ||= {};
@@ -1367,6 +1377,7 @@ function app() {
       if (this.pending.save || this.configLoading || !this.configLoaded) return false;
       this.pending.save = true;
       this.syncPbsTargets();
+      const savedGeneration = this.configEditGeneration;
       try {
         const payload = { config: this.configPayload() };
         let result = await this.api('PUT', '/api/config', payload, { captureError: true, silent: true });
@@ -1396,11 +1407,18 @@ function app() {
           return false;
         }
         if (!result?.ok) return false;
-        this.config = result.config || this.config;
-        this.configDirty = false;
-        if (result.warnings?.length) this.showToast(`Gespeichert: ${result.warnings.join(' · ')}`, 'warn');
-        else this.showToast('Einstellungen gespeichert');
-        await this.loadConfig();
+        const editedDuringSave = this.configEditGeneration !== savedGeneration;
+        if (editedDuringSave) {
+          if (result.config?._revision) this.config._revision = result.config._revision;
+          this.configDirty = true;
+          this.showToast('Gespeichert · neuere Änderungen sind noch ungespeichert', 'warn');
+        } else {
+          this.config = result.config || this.config;
+          this.configDirty = false;
+          if (result.warnings?.length) this.showToast(`Gespeichert: ${result.warnings.join(' · ')}`, 'warn');
+          else this.showToast('Einstellungen gespeichert');
+          await this.loadConfig();
+        }
         this.loadOverview(true);
         return true;
       } finally {
@@ -1456,7 +1474,7 @@ function app() {
       this.config.backup.pairs.push(pair);
       const idx = this.config.backup.pairs.length - 1;
       this.pairOpen[idx] = true;
-      this.configDirty = true;
+      this.markConfigDirty();
       this.showToast(selected.mode === 'copy' ? 'Sichere Copy-Vorlage angelegt' : 'Deaktivierte Vorlage angelegt – Löschschutz prüfen', selected.mode === 'copy' ? 'ok' : 'warn');
       this.$nextTick(() => document.getElementById(`pair-${idx}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
     },
@@ -1477,7 +1495,7 @@ function app() {
         const target = pair.direction === 'pull' ? pair.local : pair.remote;
         pair.backup_dir = this.suggestedBackupDir(target);
       }
-      this.configDirty = true;
+      this.markConfigDirty();
     },
 
     backupDirMissing(pair) {
@@ -1493,7 +1511,7 @@ function app() {
       clone.name = `${clone.name || 'Pair'}_Kopie`;
       clone.enabled = false;
       this.config.backup.pairs.splice(idx + 1, 0, clone);
-      this.configDirty = true;
+      this.markConfigDirty();
       this.pairOpen[idx + 1] = true;
       this.showToast('Pair als deaktivierte Kopie angelegt');
     },
@@ -1502,7 +1520,7 @@ function app() {
       const pair = this.config.backup.pairs[idx];
       if (!confirm(`Pair „${pair?.name || 'ohne Namen'}“ aus der Konfiguration entfernen?`)) return;
       this.config.backup.pairs.splice(idx, 1);
-      this.configDirty = true;
+      this.markConfigDirty();
     },
 
     movePair(idx, delta) {
@@ -1510,7 +1528,7 @@ function app() {
       if (target < 0 || target >= this.config.backup.pairs.length) return;
       const [pair] = this.config.backup.pairs.splice(idx, 1);
       this.config.backup.pairs.splice(target, 0, pair);
-      this.configDirty = true;
+      this.markConfigDirty();
     },
 
     visiblePairCount() {
@@ -1757,7 +1775,7 @@ function app() {
       } else {
         if (mode === 'remote' || mode === 'remote-local') this.config.backup.pairs[idx].remote = path;
         else this.config.backup.pairs[idx].local = path;
-        this.configDirty = true;
+        this.markConfigDirty();
       }
       this.closePicker();
       this.showToast(`Pfad gesetzt: ${path}`);
@@ -1938,7 +1956,7 @@ function app() {
         id: window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
         enabled: true, type: 'discord', url: '', events: ['sync_error', 'mount_check_failed'],
       });
-      this.configDirty = true;
+      this.markConfigDirty();
     },
 
     toggleHookEvent(hook, event) {
@@ -1946,7 +1964,7 @@ function app() {
       const idx = hook.events.indexOf(event);
       if (idx >= 0) hook.events.splice(idx, 1);
       else hook.events.push(event);
-      this.configDirty = true;
+      this.markConfigDirty();
     },
 
     async testWebhook(idx) {
@@ -2119,6 +2137,7 @@ function app() {
 
     markConfigDirty() {
       this.configDirty = true;
+      this.configEditGeneration += 1;
       if (this.configValidation.ok !== null) this.configValidation.ok = null;
     },
 
