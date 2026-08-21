@@ -1,8 +1,9 @@
 """Validierung frei konfigurierbarer rclone-Argumente.
 
-Die Anwendung startet rclone ohne Shell; Command-Injection ist damit ausgeschlossen.
-Einige globale rclone-Flags könnten aber Schutzpfade, Konfiguration, Logging oder RC-
-Server überschreiben. Diese Flags bleiben standardmäßig der Anwendung vorbehalten.
+Die Anwendung startet rclone ohne Shell. Einige rclone-Flags können trotzdem externe
+Programme ausführen oder Schutzpfade, Konfiguration, Logging beziehungsweise RC-Server
+überschreiben. Ausführungs- und Zugangsdaten-Flags bleiben immer gesperrt; weitere
+geschützte Flags können ausschließlich im expliziten Expertenmodus verwendet werden.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from typing import Any
 
 _MAX_ARGS = 256
 _MAX_ARG_LENGTH = 4096
+
+_EXECUTION_FLAGS = {"--metadata-mapper"}
 
 _EXACT_BLOCKED = {
     "--",
@@ -179,6 +182,16 @@ def validate_parsed_rclone_args(
             raise ValueError("Leeres oder zu langes rclone-Argument")
         if any(char in token for char in ("\x00", "\r", "\n")):
             raise ValueError("rclone-Argument enthält Steuerzeichen")
+    execution_flags = [
+        token.split("=", 1)[0]
+        for token in normalized
+        if token.split("=", 1)[0].lower() in _EXECUTION_FLAGS
+    ]
+    if execution_flags:
+        raise UnsafeRcloneArgument(
+            "rclone-Flags zur Ausführung externer Programme sind auch im "
+            "Expertenmodus nicht erlaubt: " + ", ".join(dict.fromkeys(execution_flags))
+        )
     credential_flags = [
         token.split("=", 1)[0]
         for token in normalized
