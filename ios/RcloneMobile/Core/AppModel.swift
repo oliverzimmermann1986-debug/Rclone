@@ -505,7 +505,7 @@ final class AppModel: ObservableObject {
             }
             guard response.ok else { return false }
             signOutLocally()
-            errorMessage = "Passwort geändert. Bitte melde dich mit dem neuen Passwort an."
+            errorMessage = "Passwort geändert. Bitte melde dich mit dem neuen Passwort erneut an."
             return true
         } catch {
             errorMessage = userMessage(for: error)

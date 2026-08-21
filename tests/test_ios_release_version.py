@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.ios_release_version import (
     apply_marketing_version,
@@ -90,3 +91,19 @@ def test_ios_ci_tracks_native_contract_sources():
         '"contracts/**"',
     ):
         assert workflow.count(expected_path) == 2
+
+
+def test_shared_contracts_are_copied_into_ios_test_bundle():
+    root = Path(__file__).parents[1]
+    project = yaml.safe_load((root / "ios" / "project.yml").read_text(encoding="utf-8"))
+    test_target = project["targets"]["RcloneMobileTests"]
+    resource_sources = {
+        source["path"]
+        for source in test_target["sources"]
+        if isinstance(source, dict) and source.get("buildPhase") == "resources"
+    }
+
+    assert resource_sources == {
+        "../contracts/native_login_contract.json",
+        "../contracts/native_read_contract_v1.json",
+    }
