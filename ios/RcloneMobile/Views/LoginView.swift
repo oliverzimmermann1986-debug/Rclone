@@ -7,17 +7,27 @@ struct LoginView: View {
     @State private var server = ""
     @State private var username = "admin"
     @State private var password = ""
+    @State private var loginTask: Task<Void, Never>?
     @FocusState private var focusedField: LoginFieldID?
 
     var body: some View {
         ZStack {
-            Color(.systemBackground)
+            Color(.systemGroupedBackground)
                 .ignoresSafeArea()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     brand
-                        .padding(.bottom, 34)
+                        .padding(.bottom, 30)
+
+                    Text("Mit Server verbinden")
+                        .font(.title2.weight(.bold))
+
+                    Text("Adresse und Zugangsdaten deiner Rclone-Installation.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 6)
+                        .padding(.bottom, 16)
 
                     connectionForm
 
@@ -38,7 +48,7 @@ struct LoginView: View {
                 }
                 .frame(maxWidth: 440)
                 .padding(.horizontal, 24)
-                .padding(.top, 52)
+                .padding(.top, 34)
                 .padding(.bottom, 32)
                 .frame(maxWidth: .infinity)
             }
@@ -54,25 +64,23 @@ struct LoginView: View {
             server = model.serverAddress
             username = model.savedUsername
         }
+        .onDisappear { loginTask?.cancel() }
     }
 
     private var brand: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 19, style: .continuous)
-                    .fill(.green.opacity(0.13))
-                Image(systemName: "arrow.triangle.2.circlepath.icloud.fill")
-                    .font(.system(size: 34, weight: .semibold))
-                    .foregroundStyle(.green)
-            }
-            .frame(width: 68, height: 68)
-            .accessibilityHidden(true)
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.triangle.2.circlepath.icloud.fill")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(.green)
+                .frame(width: 44, height: 44)
+                .background(.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text("Rclone Sync")
-                    .font(.largeTitle.weight(.bold))
-                Text("Deine Sicherungen. Ruhig im Blick.")
-                    .font(.title3)
+                    .font(.headline)
+                Text("Sicherungen auf deinem Server")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
@@ -129,20 +137,20 @@ struct LoginView: View {
             .submitLabel(.go)
             .onSubmit(login)
         }
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(.primary.opacity(0.07), lineWidth: 1)
         }
     }
 
     private var loginButton: some View {
-        Button(action: login) {
+        Button(action: model.isRefreshing ? cancelLogin : login) {
             HStack(spacing: 10) {
                 if model.isRefreshing {
                     ProgressView().tint(.white)
                 }
-                Text(model.isRefreshing ? "Verbindung wird hergestellt …" : "Anmelden")
+                Text(model.isRefreshing ? "Abbrechen" : "Verbinden")
                     .fontWeight(.semibold)
             }
             .frame(maxWidth: .infinity, minHeight: 52)
@@ -150,12 +158,21 @@ struct LoginView: View {
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
         .tint(.green)
-        .disabled(server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || username.isEmpty || password.isEmpty || model.isRefreshing)
+        .disabled(!model.isRefreshing && (server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || username.isEmpty || password.isEmpty))
     }
 
     private func login() {
         focusedField = nil
-        Task { await model.login(server: server, username: username, password: password) }
+        loginTask?.cancel()
+        loginTask = Task {
+            await model.login(server: server, username: username, password: password)
+            loginTask = nil
+        }
+    }
+
+    private func cancelLogin() {
+        loginTask?.cancel()
+        loginTask = nil
     }
 }
 
