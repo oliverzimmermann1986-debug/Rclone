@@ -18,7 +18,7 @@ Environment="RCLONE_CONFIG=/home/rclone-sync/.config/rclone/rclone.conf"
 Environment="RCLONE_ASK_PASSWORD=false"
 ExecStartPre=/bin/mkdir -p /opt/rclone-sync/data/.rclone-cache /opt/rclone-sync/data/runtime /opt/rclone-sync/logs /opt/rclone-sync/temp
 ExecStart=/opt/rclone-sync/venv/bin/python -m app.jobs.scheduler_cli
-TimeoutStartSec=infinity
+TimeoutStartSec=6h
 TimeoutStopSec=30
 NoNewPrivileges=true
 PrivateTmp=true

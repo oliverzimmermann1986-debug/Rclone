@@ -17,6 +17,7 @@ final class FixtureDecodingTests: XCTestCase {
         let base: StorageOverview = try decode("storage_without_sizes")
         XCTAssertNil(base.pairs.first?.sourceSize)
         XCTAssertNil(base.pairs.first?.targetSize)
+        XCTAssertEqual(base.pairs.first?.lastTransferred, "2 KiB")
 
         let detailed: StorageOverview = try decode("storage_with_sizes")
         XCTAssertEqual(detailed.pairs.count, 4)

@@ -58,6 +58,12 @@ def test_settings_defaults_and_clamping(tmp_path: Path):
     assert clamped["max_total_mb"] == 1
     assert clamped["enabled"] is True
 
+    snapshot_settings = drill.restore_test_settings(
+        {"backup": {"restore_test": {"enabled": True, "schedule": "0 4 * * *"}}}
+    )
+    assert snapshot_settings["enabled"] is True
+    assert snapshot_settings["schedule"] == "0 4 * * *"
+
 
 def test_endpoints_follow_direction():
     push = {"direction": "push", "local": "/srv/a", "remote": "wasabi:a"}

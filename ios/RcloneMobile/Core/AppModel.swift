@@ -45,6 +45,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var storageState: ContentLoadState = .idle
     @Published private(set) var configState: ContentLoadState = .idle
     @Published private(set) var jobsState: ContentLoadState = .idle
+    @Published private(set) var pbsState: ContentLoadState = .idle
     @Published private(set) var progressLastSuccessAt: Date?
     @Published private(set) var progressConsecutiveFailures = 0
     @Published private(set) var doctorLastCheckedAt: Date?
@@ -171,6 +172,7 @@ final class AppModel: ObservableObject {
         if storage == nil { storageState = .loading }
         if config == nil { configState = .loading }
         if jobs.isEmpty && jobsState != .loaded { jobsState = .loading }
+        if pbs == nil { pbsState = .loading }
         let task = Task { [weak self] in
             guard let self else { return }
             await self.performRefresh(client: refreshClient, session: session, refresh: refresh)
@@ -257,8 +259,12 @@ final class AppModel: ObservableObject {
                     }
                 case let .pbs(result):
                     switch result {
-                    case let .success(value): pbs = value
-                    case let .failure(error): handle(error, firstError: &firstError)
+                    case let .success(value):
+                        pbs = value
+                        pbsState = .loaded
+                    case let .failure(error):
+                        pbsState = .failed(userMessage(for: error))
+                        handle(error, firstError: &firstError)
                     }
                 }
 
@@ -797,6 +803,7 @@ final class AppModel: ObservableObject {
         storageState = .idle
         configState = .idle
         jobsState = .idle
+        pbsState = .idle
         phase = .signedOut
     }
 
@@ -808,7 +815,7 @@ final class AppModel: ObservableObject {
             case .notConnectedToInternet, .networkConnectionLost:
                 return "Das lokale Netzwerk ist nicht verfügbar. Prüfe WLAN und erlaube Rclone Sync unter Einstellungen → Datenschutz & Sicherheit → Lokales Netzwerk."
             case .timedOut:
-                return "Der Server hat nicht innerhalb von 30 Sekunden geantwortet. Prüfe Adresse, WLAN und die lokale Netzwerkfreigabe für Rclone Sync."
+                return "Der Server hat nicht innerhalb des Zeitlimits geantwortet. Prüfe Adresse, WLAN und die lokale Netzwerkfreigabe für Rclone Sync."
             case .appTransportSecurityRequiresSecureConnection:
                 return "iOS blockiert diese HTTP-Adresse. Verwende eine lokale IP-Adresse oder eine HTTPS-Adresse."
             case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot:

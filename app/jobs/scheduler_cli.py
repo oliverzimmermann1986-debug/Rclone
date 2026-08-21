@@ -276,24 +276,32 @@ def main() -> int:
                     scope=runtime_state.DEFAULT_CANCEL_SCOPE,
                     kinds=BACKUP_KINDS,
                 )
-                if not reconciliation.get("safe"):
+                backup_scope_safe = bool(reconciliation.get("safe"))
+                if not backup_scope_safe:
                     logger.error(
-                        "Registrierter Sync-Unterprozess ist noch aktiv; Tick abgebrochen"
+                        "Registrierter Sync-Unterprozess ist noch aktiv; "
+                        "Backup-Scope wird übersprungen"
                     )
-                    return 1
+                    rc = 1
                 # Die erste Fälligkeitsprüfung liegt vor dem non-blocking Lock.
                 # Nach einem gerade abgeschlossenen konkurrierenden Lauf kann
                 # ihr Ergebnis bereits veraltet sein, daher unter dem Lock mit
                 # frischer Historie erneut prüfen.
-                scheduler_snapshot, config_revision = _snapshot_with_revision(cfg)
-                due, status = find_due_pairs(scheduler_snapshot, db)
-                due_definitions = [
-                    item
-                    for item in status
-                    if item.get("due") and item.get("name") in set(due)
-                ]
+                if backup_scope_safe:
+                    scheduler_snapshot, config_revision = _snapshot_with_revision(cfg)
+                    due, status = find_due_pairs(scheduler_snapshot, db)
+                    due_definitions = [
+                        item
+                        for item in status
+                        if item.get("due") and item.get("name") in set(due)
+                    ]
+                else:
+                    due_definitions = []
                 if not due_definitions:
-                    logger.info("Rclone-Fälligkeit nach Lock-Erwerb bereits erledigt")
+                    if backup_scope_safe:
+                        logger.info(
+                            "Rclone-Fälligkeit nach Lock-Erwerb bereits erledigt"
+                        )
                 else:
                     for definition in due_definitions:
                         (

@@ -172,9 +172,10 @@ def browse_rclone(path: str = "") -> dict[str, Any]:
             raise HTTPException(400, "Pfad enthält ungültige Zeichen")
         if ":" not in path:
             raise HTTPException(400, "Pfad muss 'remote:ordner' sein")
-        if any(segment == ".." for segment in path.split("/")):
+        remote, remote_path = path.split(":", 1)
+        if any(segment == ".." for segment in remote_path.split("/")):
             raise HTTPException(400, "Pfad darf keine '..'-Segmente enthalten")
-        remote_name = path.split(":", 1)[0] + ":"
+        remote_name = remote + ":"
         if remote_name not in remotes:
             raise HTTPException(403, "Remote ist nicht konfiguriert")
         if _is_hidden_remote_path(path, hidden):

@@ -191,11 +191,33 @@ def test_gui_requests_are_latest_response_wins_and_poll_page_aware():
     assert "window.setTimeout(refreshLoop, 30000)" in javascript
     assert "document.addEventListener('visibilitychange'" in javascript
     assert "if (document.hidden) this.stopPolling()" in javascript
+    assert "polling: { active: false, generation: 0" in javascript
+    assert (
+        "const isCurrent = () => this.polling.active && this.polling.generation === generation"
+        in javascript
+    )
     assert "busy ? 2000 : 10000" in javascript
     assert "window.setTimeout(activityLoop, busy ? 2000 : 10000)" in javascript
     assert "setInterval(" not in javascript
     assert "history.pushState" in javascript
     assert "window.addEventListener('popstate'" in javascript
+
+
+def test_config_save_preserves_edits_made_while_request_is_running():
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "configEditGeneration: 0" in javascript
+    assert "const savedGeneration = this.configEditGeneration" in javascript
+    assert (
+        "const editedDuringSave = this.configEditGeneration !== savedGeneration"
+        in javascript
+    )
+    assert "neuere Änderungen sind noch ungespeichert" in javascript
+    assert (
+        "if (result.config?._revision) this.config._revision = result.config._revision"
+        in javascript
+    )
+    assert "this.configEditGeneration += 1" in javascript
 
 
 def test_dialog_focus_accessibility_and_loading_contracts():
