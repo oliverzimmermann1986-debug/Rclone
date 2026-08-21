@@ -8,46 +8,106 @@ struct DashboardView: View {
     @State private var successFeedback = 0
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 22) {
-                if let error = model.errorMessage {
-                    ErrorBanner(message: error, dismiss: model.dismissMessages)
-                }
-                if let overview = model.overview {
-                    statusHeader(overview)
-                    if model.progress?.running == true { liveProgress }
-                    alerts(overview.alerts)
-                    metrics(overview)
-                    copyOverview
-                    lastRun(overview.jobs.last)
-                } else {
-                    LoadingSection(label: "Lagebild wird geladen …")
-                }
+        List {
+            if let error = model.errorMessage {
+                ErrorBanner(message: error, dismiss: model.dismissMessages)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
             }
-            .padding(16)
+
+            if let overview = model.overview {
+                Section {
+                    statusSummary(overview)
+                }
+
+                if model.progress?.running == true {
+                    Section("Aktiver Lauf") {
+                        liveProgress
+                    }
+                }
+
+                if !overview.alerts.isEmpty {
+                    Section("Hinweise") {
+                        ForEach(overview.alerts) { alert in
+                            Label {
+                                Text(alert.message)
+                            } icon: {
+                                Image(systemName: alert.level == "error" ? "exclamationmark.octagon.fill" : "info.circle.fill")
+                                    .foregroundStyle(StatusStyle.color(for: alert.level))
+                            }
+                            .font(.subheadline)
+                        }
+                    }
+                }
+
+                Section("Kopien") {
+                    if let pairs = model.storage?.pairs, !pairs.isEmpty {
+                        ForEach(pairs) { pair in
+                            CopyListRow(pair: pair)
+                        }
+                    } else {
+                        ContentUnavailableView(
+                            "Keine Datenwege",
+                            systemImage: "arrow.left.arrow.right",
+                            description: Text("Eingerichtete Kopien erscheinen hier.")
+                        )
+                    }
+                }
+
+                if let last = overview.jobs.last {
+                    Section("Letzter Lauf") {
+                        NavigationLink { RunDetailView(job: last) } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(.title3)
+                                    .foregroundStyle(StatusStyle.color(for: last.status))
+                                    .frame(width: 28)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(AppFormat.date(last.startedAt))
+                                        .font(.body.weight(.medium))
+                                    Text("Lauf #\(last.id)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                StatusBadge(status: last.status)
+                            }
+                        }
+                    }
+                }
+            } else {
+                LoadingSection(label: "Lage wird geladen …")
+            }
         }
-        .background(Color(.systemGroupedBackground))
-        .navigationTitle("Lagebild")
+        .listStyle(.insetGrouped)
+        .navigationTitle("Lage")
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
+            ToolbarItem(placement: .topBarLeading) {
+                SettingsButton(showingSettings: $showingSettings)
+            }
             ToolbarItem(placement: .topBarTrailing) {
-                Button { confirmRunAll = true } label: { Label("Alle sichern", systemImage: "play.fill") }
+                Button { confirmRunAll = true } label: {
+                    Image(systemName: "play.fill")
+                }
+                .accessibilityLabel("Alle Jobs starten")
             }
         }
         .refreshable { await model.refresh() }
-        .confirmationDialog("Alle Datenwege jetzt sichern?", isPresented: $confirmRunAll, titleVisibility: .visible) {
+        .confirmationDialog("Alle Jobs jetzt starten?", isPresented: $confirmRunAll, titleVisibility: .visible) {
             Button("Sicherung starten") {
                 Task { if await model.runBackup() { successFeedback += 1 } }
             }
             Button("Abbrechen", role: .cancel) {}
         } message: {
-            Text("Es werden alle aktivierten Datenwege nach den hinterlegten Schutzregeln ausgeführt.")
+            Text("Alle aktivierten Jobs werden nach ihren Schutzregeln ausgeführt.")
         }
         .confirmationDialog("Lauf abbrechen?", isPresented: $confirmCancel, titleVisibility: .visible) {
-            Button("Abbruch anfordern", role: .destructive) { Task { _ = await model.cancelBackup() } }
+            Button("Abbruch anfordern", role: .destructive) {
+                Task { _ = await model.cancelBackup() }
+            }
             Button("Weiterlaufen lassen", role: .cancel) {}
         } message: {
-            Text("Bereits übertragene Dateien bleiben bestehen. Der aktuelle rclone-Prozess wird kontrolliert beendet.")
+            Text("Bereits übertragene Dateien bleiben bestehen.")
         }
         .sensoryFeedback(.success, trigger: successFeedback)
         .task {
@@ -58,151 +118,128 @@ struct DashboardView: View {
         }
     }
 
+    private func statusSummary(_ overview: OverviewResponse) -> some View {
+        let hasError = overview.alerts.contains { $0.level == "error" }
+        return HStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill((hasError ? Color.red : Color.green).opacity(0.14))
+                Image(systemName: hasError ? "exclamationmark" : "checkmark")
+                    .font(.title2.bold())
+                    .foregroundStyle(hasError ? Color.red : Color.green)
+            }
+            .frame(width: 50, height: 50)
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(hasError ? "Aufmerksamkeit nötig" : "Alles in Ordnung")
+                    .font(.title3.weight(.semibold))
+                Text("\(overview.system.hostname) · \(AppFormat.relative(overview.generatedAt))")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .combine)
+    }
+
     private var liveProgress: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 13) {
             HStack {
                 Label("Sicherung läuft", systemImage: "arrow.triangle.2.circlepath")
-                    .font(.headline).foregroundStyle(.blue)
+                    .font(.headline)
+                    .foregroundStyle(.blue)
                 Spacer()
                 Text(AppFormat.elapsed(Double(model.progress?.elapsedSeconds ?? 0)))
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
+
             let total = max(model.progress?.totalPairs ?? 0, 1)
             let done = model.progress?.donePairs ?? 0
-            ProgressView(value: Double(done), total: Double(total)).tint(.blue)
+            ProgressView(value: Double(done), total: Double(total))
+                .tint(.blue)
+
             ForEach(model.progress?.pairs ?? []) { pair in
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(pair.name).font(.subheadline.weight(.semibold))
+                        Text(pair.name)
+                            .font(.subheadline.weight(.semibold))
                         Text([pair.transferred, pair.speed].compactMap { $0 }.joined(separator: " · "))
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     Spacer()
                     if let percent = pair.percent {
-                        Text(percent / 100, format: .percent.precision(.fractionLength(0))).font(.caption.monospacedDigit())
+                        Text(percent / 100, format: .percent.precision(.fractionLength(0)))
+                            .font(.caption.monospacedDigit())
                     } else {
                         StatusBadge(status: pair.status)
                     }
                 }
             }
-            Button(role: .destructive) { confirmCancel = true } label: { Label("Lauf abbrechen", systemImage: "stop.circle") }
-                .buttonStyle(.bordered)
-        }
-        .padding(16)
-        .background(.blue.opacity(0.09), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-    }
 
-    private func statusHeader(_ overview: OverviewResponse) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            ZStack {
-                Circle().fill((overview.alerts.contains { $0.level == "error" } ? Color.red : Color.green).opacity(0.14))
-                Image(systemName: overview.alerts.contains { $0.level == "error" } ? "exclamationmark" : "checkmark")
-                    .font(.title2.bold())
-                    .foregroundStyle(overview.alerts.contains { $0.level == "error" } ? Color.red : Color.green)
+            Button("Lauf abbrechen", role: .destructive) {
+                confirmCancel = true
             }
-            .frame(width: 52, height: 52)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(overview.alerts.contains { $0.level == "error" } ? "Aufmerksamkeit nötig" : "Alles im Blick")
-                    .font(.title2.bold())
-                Text("\(overview.system.hostname) · aktualisiert \(AppFormat.relative(overview.generatedAt))")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func alerts(_ alerts: [SystemAlert]) -> some View {
-        if !alerts.isEmpty {
-            VStack(spacing: 9) {
-                ForEach(alerts) { alert in
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: alert.level == "error" ? "exclamationmark.octagon.fill" : "info.circle.fill")
-                            .foregroundStyle(StatusStyle.color(for: alert.level))
-                        Text(alert.message).font(.subheadline).frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .padding(13)
-                    .background(StatusStyle.color(for: alert.level).opacity(0.1), in: RoundedRectangle(cornerRadius: 14))
-                }
-            }
-        }
-    }
-
-    private func metrics(_ overview: OverviewResponse) -> some View {
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-            MetricTile(title: "Datenwege", value: "\(overview.pairs.enabled)", detail: "\(overview.pairs.scheduled) automatisch", symbol: "point.3.connected.trianglepath.dotted")
-            MetricTile(title: "Letzter Lauf", value: StatusStyle.label(for: overview.jobs.last?.status), detail: AppFormat.relative(overview.jobs.last?.startedAt), symbol: "clock.arrow.circlepath", tint: StatusStyle.color(for: overview.jobs.last?.status))
-        }
-    }
-
-    private var copyOverview: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Kopien").font(.title3.bold())
-            if let pairs = model.storage?.pairs, !pairs.isEmpty {
-                ForEach(pairs) { pair in
-                    CopyRow(pair: pair)
-                    if pair.id != pairs.last?.id { Divider() }
-                }
-            } else {
-                Text("Keine Datenwege eingerichtet").foregroundStyle(.secondary)
-            }
-        }
-        .padding(16)
-        .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-    }
-
-    @ViewBuilder
-    private func lastRun(_ job: JobRecord?) -> some View {
-        if let job {
-            NavigationLink { RunDetailView(job: job) } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.title3).foregroundStyle(StatusStyle.color(for: job.status))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Letzter Lauf").font(.headline)
-                        Text("#\(job.id) · \(AppFormat.date(job.startedAt))").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    StatusBadge(status: job.status)
-                }
-                .padding(16)
-                .background(.background, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            }
-            .buttonStyle(.plain)
-        }
-    }
-}
-
-private struct CopyRow: View {
-    let pair: StoragePair
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(pair.name).font(.headline)
-                Spacer()
-                Text(AppFormat.relative(pair.lastSync)).font(.caption).foregroundStyle(.secondary)
-            }
-            endpoint(symbol: "folder.fill", title: "Lokal", path: pair.local, size: localSize)
-            endpoint(symbol: "icloud.fill", title: "Cloud", path: pair.remote ?? "–", size: remoteSize)
+            .font(.subheadline.weight(.medium))
         }
         .padding(.vertical, 4)
     }
+}
 
-    private var localSize: PathSize? { pair.source == pair.local ? pair.sourceSize : pair.targetSize }
-    private var remoteSize: PathSize? { pair.source == pair.remote ? pair.sourceSize : pair.targetSize }
+private struct CopyListRow: View {
+    let pair: StoragePair
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack {
+                Text(pair.name)
+                    .font(.headline)
+                Spacer()
+                Text(AppFormat.relative(pair.lastSync))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            endpoint(symbol: "folder.fill", title: "Lokal", path: pair.local, size: localSize)
+            endpoint(symbol: "icloud.fill", title: "Cloud", path: pair.remote ?? "–", size: remoteSize)
+        }
+        .padding(.vertical, 5)
+    }
+
+    private var localSize: PathSize? {
+        pair.source == pair.local ? pair.sourceSize : pair.targetSize
+    }
+
+    private var remoteSize: PathSize? {
+        pair.source == pair.remote ? pair.sourceSize : pair.targetSize
+    }
 
     private func endpoint(symbol: String, title: String, path: String, size: PathSize?) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 9) {
-            Image(systemName: symbol).foregroundStyle(.teal).frame(width: 20)
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .foregroundStyle(.green)
+                .frame(width: 20)
+
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Text(path).font(.subheadline).lineLimit(1).truncationMode(.middle)
+                Text(title)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Text(path)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
+
             Spacer(minLength: 8)
+
             VStack(alignment: .trailing, spacing: 2) {
-                Text(AppFormat.count(size?.count)).font(.subheadline.weight(.semibold))
-                Text(AppFormat.bytes(size?.bytes)).font(.caption).foregroundStyle(.secondary)
+                Text(AppFormat.count(size?.count))
+                    .font(.subheadline.weight(.semibold))
+                Text(AppFormat.bytes(size?.bytes))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .combine)

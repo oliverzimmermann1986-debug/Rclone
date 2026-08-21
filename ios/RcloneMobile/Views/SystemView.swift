@@ -116,7 +116,7 @@ private struct PBSToolsView: View {
                 }
                 Section("Targets") {
                     if pbs.targets.isEmpty {
-                        ContentUnavailableView("Keine PBS-Targets", systemImage: "shippingbox", description: Text("Targets werden in den erweiterten Einstellungen des Web-Frontends eingerichtet."))
+                        ContentUnavailableView("Keine PBS-Targets", systemImage: "shippingbox", description: Text("Eingerichtete Ziele erscheinen hier."))
                     } else {
                         ForEach(pbs.targets) { target in
                             Button { selectedTarget = target } label: {
@@ -181,7 +181,7 @@ private struct UsageRow: View {
                 Text("\(value.formatted(.number.precision(.fractionLength(0)))) %")
             }
             ProgressView(value: min(max(value, 0), 100), total: 100)
-                .tint(value >= 90 ? .red : value >= 75 ? .orange : .teal)
+                .tint(value >= 90 ? .red : value >= 75 ? .orange : .green)
             Text(detail).font(.caption).foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)

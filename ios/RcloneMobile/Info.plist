@@ -25,10 +25,7 @@
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>UILaunchScreen</key>
-    <dict>
-        <key>UIColorName</key>
-        <string></string>
-    </dict>
+    <dict/>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>

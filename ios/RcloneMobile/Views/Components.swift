@@ -24,35 +24,6 @@ private struct CompactStatusLabelStyle: LabelStyle {
     }
 }
 
-struct MetricTile: View {
-    let title: String
-    let value: String
-    let detail: String
-    let symbol: String
-    var tint: Color = .teal
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Image(systemName: symbol)
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(tint)
-                .accessibilityHidden(true)
-            Text(value)
-                .font(.title2.weight(.bold))
-                .contentTransition(.numericText())
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-        }
-        .frame(maxWidth: .infinity, minHeight: 138, alignment: .leading)
-        .padding(16)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-    }
-}
-
 struct LoadingSection: View {
     let label: String
 
