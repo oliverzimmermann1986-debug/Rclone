@@ -65,7 +65,10 @@ _LISTING_CANDIDATE_FACTOR = 8
 
 
 def restore_test_settings(cfg) -> dict[str, Any]:
-    backup = cfg.get("backup", default={}) or {}
+    if isinstance(cfg, Mapping):
+        backup = cfg.get("backup") or {}
+    else:
+        backup = cfg.get("backup", default={}) or {}
     raw = backup.get("restore_test")
     if not isinstance(raw, Mapping):
         raw = {}

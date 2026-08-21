@@ -585,7 +585,10 @@ def restore_test_due(cfg, db, *, now: Optional[float] = None) -> Dict[str, Any]:
     if not _is_valid_schedule(schedule):
         return {"due": False, "reason": "invalid_schedule", "error": schedule}
 
-    backup = cfg.get("backup", default={}) or {}
+    if isinstance(cfg, Mapping):
+        backup = cfg.get("backup") or {}
+    else:
+        backup = cfg.get("backup", default={}) or {}
     timezone_name = str(backup.get("timezone") or DEFAULT_TIMEZONE)
     retry_sec = (
         _bounded_int(
