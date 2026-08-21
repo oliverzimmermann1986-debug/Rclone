@@ -50,6 +50,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var progressConsecutiveFailures = 0
     @Published private(set) var doctorLastCheckedAt: Date?
     @Published private(set) var doctorIsRefreshing = false
+    @Published private(set) var storageSizesAreLoading = false
     @Published private(set) var isSavingConfig = false
     @Published private(set) var configSaveIssue: ConfigSaveIssue?
     @Published private(set) var configWarnings: [String] = []
@@ -189,7 +190,13 @@ final class AppModel: ObservableObject {
     private func performRefresh(client refreshClient: any APIClientProtocol, session: Int, refresh: Int) async {
         let activity = beginActivity()
         errorMessage = nil
-        defer { endActivity(activity) }
+        storageSizesAreLoading = true
+        defer {
+            endActivity(activity)
+            if isCurrent(session: session, refresh: refresh) {
+                storageSizesAreLoading = false
+            }
+        }
 
         var firstError: Error?
         await withTaskGroup(of: RefreshPayload.self) { group in
@@ -223,6 +230,7 @@ final class AppModel: ObservableObject {
                         handle(error, firstError: &firstError)
                     }
                 case let .detailedStorage(result):
+                    storageSizesAreLoading = false
                     // Remote size calculation is optional and may be slow. Its
                     // failure must never discard usable base storage or old sizes.
                     if case let .success(detailed) = result {
@@ -309,7 +317,11 @@ final class AppModel: ObservableObject {
         guard let currentClient = client else { return }
         let session = sessionGeneration
         let activity = beginActivity()
-        defer { endActivity(activity) }
+        storageSizesAreLoading = true
+        defer {
+            endActivity(activity)
+            if isCurrentSession(session) { storageSizesAreLoading = false }
+        }
         do {
             let detailed = try await currentClient.getStorage(
                 includeSizes: true,
@@ -482,14 +494,6 @@ final class AppModel: ObservableObject {
         ) { client in
             try await client.runRestoreTest(pair: pair)
         }
-    }
-
-    func saveWebhooks(_ webhooks: [WebhookConfig], currentPassword: String? = nil) async -> Bool {
-        guard let currentConfig = config else { return false }
-        return await saveCompleteConfig(
-            currentConfig.replacingWebhooks(webhooks),
-            currentPassword: currentPassword
-        )
     }
 
     func savePBSConfiguration(
@@ -821,6 +825,7 @@ final class AppModel: ObservableObject {
         progressConsecutiveFailures = 0
         doctorLastCheckedAt = nil
         doctorIsRefreshing = false
+        storageSizesAreLoading = false
         isSavingConfig = false
         configSaveIssue = nil
         configWarnings = []

@@ -450,6 +450,7 @@ def test_native_management_uses_canonical_routes_and_models_without_webview():
         "/api/jobs/backup/check/",
         "/api/jobs/backup/restore-test",
         "/api/browse/local?path=",
+        "/api/browse/rclone?path=",
         "/api/maintenance/audit?limit=",
         "/api/maintenance/config/snapshots",
         "/api/config/filter-file",
@@ -485,10 +486,14 @@ def test_native_management_uses_canonical_routes_and_models_without_webview():
         "Konfigurations-Snapshots",
         "Support-Bundle",
         "Filter-Datei",
-        "Webhooks",
         "Passwort ändern",
     ):
         assert feature in operations or feature in views
+    assert "Webhooks" not in operations
+    assert "WebhookManagementView" not in operations
+    assert "browseTarget = .remote" in views
+    assert "PathBrowserSheet" in views
+    assert "timeout: includeSizes ? 75 : nil" in api
     assert "WKWebView" not in production
     assert "UIWebView" not in production
 

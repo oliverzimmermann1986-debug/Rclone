@@ -1641,15 +1641,6 @@ input[type="checkbox"], input[type="radio"] {
 .scheduler-pause-card small { margin-top: 2px; color: var(--text-soft); font-size: 12px; }
 .pause-reason { min-width: 0; }
 
-.webhook-list { display: grid; gap: 12px; }
-.webhook-card {
-  display: grid; gap: 12px;
-  padding: 14px;
-  border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--surface);
-}
-.webhook-head { display: grid; grid-template-columns: 100px 150px 1fr auto; gap: 8px; align-items: center; }
-
 .code-editor { min-height: 380px; font-family: var(--mono); font-size: 12px; }
 .code-block {
   overflow: auto;
@@ -2067,8 +2058,6 @@ html[data-density="compact"] .job-row { min-height: 54px; }
   .pair-footer-actions > div { justify-content: flex-end; }
   .job-row, .job-row.detailed { grid-template-columns: 26px 1fr auto 16px; gap: 9px; }
   .job-time, .job-column { display: none; }
-  .webhook-head { grid-template-columns: 1fr 1fr auto; }
-  .webhook-head .switch { grid-column: 1 / -1; }
   .system-facts, .scheduler-facts { grid-template-columns: 1fr; }
   .job-detail-facts { grid-template-columns: 1fr 1fr; }
   .summary-json { height: 220px; }

@@ -10,6 +10,10 @@ final class ConfigurationModelTests: XCTestCase {
           "schema_version":3,
           "web":{"username":"admin","session_version":7},
           "paths":{"data_dir":"/data","logs_dir":"/logs","temp_dir":"/tmp"},
+          "notifications":{
+            "apns":{"enabled":true,"topic":"de.oliverzimmermann.rclonesync"},
+            "webhooks":[{"id":"legacy","url":"***SET***"}]
+          },
           "backup":{
             "enabled":true,
             "timezone":"Europe/Berlin",
@@ -45,12 +49,16 @@ final class ConfigurationModelTests: XCTestCase {
             JSONSerialization.jsonObject(with: encoded) as? [String: Any]
         )
         let web = try XCTUnwrap(root["web"] as? [String: Any])
+        let notifications = try XCTUnwrap(root["notifications"] as? [String: Any])
+        let apns = try XCTUnwrap(notifications["apns"] as? [String: Any])
         let backup = try XCTUnwrap(root["backup"] as? [String: Any])
         let tuning = try XCTUnwrap(backup["tuning"] as? [String: Any])
         let pair = try XCTUnwrap((backup["pairs"] as? [[String: Any]])?.first)
 
         XCTAssertEqual((root["schema_version"] as? NSNumber)?.intValue, 3)
         XCTAssertEqual((web["session_version"] as? NSNumber)?.intValue, 7)
+        XCTAssertEqual(apns["enabled"] as? Bool, true)
+        XCTAssertEqual((notifications["webhooks"] as? [[String: Any]])?.count, 1)
         XCTAssertEqual((tuning["transfers"] as? NSNumber)?.intValue, 4)
         XCTAssertEqual(pair["name"] as? String, "Neu")
         XCTAssertEqual(pair["include"] as? String, "*.jpg")
@@ -149,39 +157,6 @@ final class ConfigurationModelTests: XCTestCase {
         let snapshot = try JSONDecoder().decode(ConfigSnapshot.self, from: data)
 
         XCTAssertTrue(snapshot.backup.jobs.isEmpty)
-    }
-
-    func testWebhookEditPreservesUnknownNotificationAndHookFields() throws {
-        let data = Data(#"""
-        {
-          "_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "backup":{"pairs":[],"jobs":[]},
-          "notifications":{
-            "timeout_seconds":9,
-            "webhooks":[{
-              "id":"webhook01","enabled":true,"type":"generic",
-              "url":"https://example.invalid/hook","events":["sync_error"],
-              "custom_header":"preserve-me"
-            }]
-          }
-        }
-        """#.utf8)
-        let snapshot = try JSONDecoder().decode(ConfigSnapshot.self, from: data)
-        let original = try XCTUnwrap(snapshot.webhooks.first)
-        let edited = original.replacing(
-            enabled: false,
-            type: original.type,
-            url: original.url,
-            events: original.events
-        )
-        let encoded = try JSONEncoder().encode(snapshot.replacingWebhooks([edited]))
-        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
-        let notifications = try XCTUnwrap(root["notifications"] as? [String: Any])
-        let hook = try XCTUnwrap((notifications["webhooks"] as? [[String: Any]])?.first)
-
-        XCTAssertEqual((notifications["timeout_seconds"] as? NSNumber)?.intValue, 9)
-        XCTAssertEqual(hook["enabled"] as? Bool, false)
-        XCTAssertEqual(hook["custom_header"] as? String, "preserve-me")
     }
 
     func testPBSEditPreservesSecretPlaceholderAndUnknownFields() throws {

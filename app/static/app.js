@@ -14,7 +14,7 @@ function app() {
   return {
     page: 'dashboard',
     pages: ['dashboard', 'pairs', 'definitions', 'runs', 'doctor', 'settings'],
-    settingsTabs: ['general', 'scheduler', 'security', 'notifications', 'filters', 'account', 'pbs'],
+    settingsTabs: ['general', 'scheduler', 'security', 'filters', 'account', 'pbs'],
     navOpen: false,
     online: navigator.onLine,
     connectionState: navigator.onLine ? 'checking' : 'offline',
@@ -1947,31 +1947,6 @@ function app() {
       } finally {
         this.pending.filter = false;
       }
-    },
-
-    addWebhook() {
-      this.config.notifications ||= { webhooks: [] };
-      this.config.notifications.webhooks ||= [];
-      this.config.notifications.webhooks.push({
-        id: window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-        enabled: true, type: 'discord', url: '', events: ['sync_error', 'mount_check_failed'],
-      });
-      this.markConfigDirty();
-    },
-
-    toggleHookEvent(hook, event) {
-      hook.events ||= [];
-      const idx = hook.events.indexOf(event);
-      if (idx >= 0) hook.events.splice(idx, 1);
-      else hook.events.push(event);
-      this.markConfigDirty();
-    },
-
-    async testWebhook(idx) {
-      if (this.configDirty && !(await this.saveConfig())) return;
-      const hook = this.config.notifications.webhooks[idx];
-      const result = await this.api('POST', '/api/config/test-webhook', { index: idx, id: hook?.id, event: 'sync_ok' });
-      if (result?.ok) this.showToast('Webhook-Test gesendet');
     },
 
     async changePassword() {

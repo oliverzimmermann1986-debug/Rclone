@@ -37,11 +37,11 @@ struct DashboardView: View {
                 Section {
                     if let pairs = model.storage?.pairs, !pairs.isEmpty {
                         ForEach(pairs) { pair in
-                            CopyListRow(pair: pair)
+                            CopyListRow(pair: pair, isMeasuring: model.storageSizesAreLoading)
                         }
                     } else if let configured = model.config?.backup.pairs, !configured.isEmpty {
                         ForEach(configured) { pair in
-                            ConfiguredCopyListRow(pair: pair)
+                            ConfiguredCopyListRow(pair: pair, isMeasuring: model.storageSizesAreLoading)
                         }
                         if case .failed = model.storageState {
                             Label("Dateizahlen und Größen sind vorübergehend nicht verfügbar.", systemImage: "info.circle")
@@ -68,14 +68,20 @@ struct DashboardView: View {
                     HStack {
                         Text("Kopien")
                         Spacer()
-                        Button {
-                            Task { await model.refreshStorageSizes() }
-                        } label: {
-                            Label("Größen neu messen", systemImage: "arrow.clockwise")
-                                .labelStyle(.iconOnly)
+                        if model.storageSizesAreLoading {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityLabel("Dateizahlen und Größen werden gemessen")
+                        } else {
+                            Button {
+                                Task { await model.refreshStorageSizes() }
+                            } label: {
+                                Label("Größen neu messen", systemImage: "arrow.clockwise")
+                                    .labelStyle(.iconOnly)
+                            }
+                            .disabled(model.isRefreshing)
+                            .accessibilityLabel("Dateizahlen und Größen neu messen")
                         }
-                        .disabled(model.isRefreshing)
-                        .accessibilityLabel("Dateizahlen und Größen neu messen")
                     }
                 }
 
@@ -247,6 +253,7 @@ struct DashboardView: View {
 
 private struct ConfiguredCopyListRow: View {
     let pair: PairConfig
+    let isMeasuring: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
@@ -272,8 +279,11 @@ private struct ConfiguredCopyListRow: View {
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 2) {
-                Text("– Dateien").font(.subheadline.weight(.semibold))
-                Text("– Größe").font(.caption).foregroundStyle(.secondary)
+                Text(isMeasuring ? "Dateien werden gezählt" : "– Dateien")
+                    .font(.subheadline.weight(.semibold))
+                Text(isMeasuring ? "Größe wird berechnet" : "– Größe")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .combine)
@@ -282,6 +292,7 @@ private struct ConfiguredCopyListRow: View {
 
 private struct CopyListRow: View {
     let pair: StoragePair
+    let isMeasuring: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
@@ -341,7 +352,7 @@ private struct CopyListRow: View {
     }
 
     private func measurementLabel(_ size: PathSize?) -> String {
-        guard let size else { return "Noch nicht gemessen" }
+        guard let size else { return isMeasuring ? "Wird gemessen …" : "Noch nicht gemessen" }
         switch size.measurementStatus {
         case "fresh":
             return "Gerade gemessen"
