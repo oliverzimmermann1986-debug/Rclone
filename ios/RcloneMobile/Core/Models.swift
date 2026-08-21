@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 struct OverviewResponse: Decodable {
     let app: AppInfo
@@ -331,6 +332,17 @@ enum JSONValue: Codable, Equatable {
     }
 }
 
+private func stableUUID5(_ identity: String) -> String {
+    let namespace = UUID(uuidString: "6ba7b811-9dad-11d1-80b4-00c04fd430c8")!
+    var namespaceValue = namespace.uuid
+    let namespaceBytes = withUnsafeBytes(of: &namespaceValue) { Array($0) }
+    let digest = Insecure.SHA1.hash(data: Data(namespaceBytes + Array(identity.utf8)))
+    var bytes = Array(digest.prefix(16))
+    bytes[6] = (bytes[6] & 0x0f) | 0x50
+    bytes[8] = (bytes[8] & 0x3f) | 0x80
+    return bytes.map { String(format: "%02x", $0) }.joined()
+}
+
 struct ConfigSnapshot: Codable {
     let revision: String
     let backup: BackupConfig
@@ -621,7 +633,33 @@ struct BackupConfig: Codable {
         timezone = try values.decodeIfPresent(String.self, forKey: key("timezone"))
         defaultSchedule = try values.decodeIfPresent(String.self, forKey: key("default_schedule"))
         pairs = try values.decodeIfPresent([PairConfig].self, forKey: key("pairs")) ?? []
-        jobs = try values.decodeIfPresent([JobDefinition].self, forKey: key("jobs")) ?? []
+        if values.contains(key("jobs")) {
+            jobs = try values.decodeIfPresent([JobDefinition].self, forKey: key("jobs")) ?? []
+        } else {
+            let fallbackSchedule = defaultSchedule?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let retryMinutes = try values.decodeIfPresent(Int.self, forKey: key("scheduler_retry_minutes")) ?? 60
+            jobs = pairs.map { pair in
+                let pairSchedule = pair.legacySchedule?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedSchedule: String
+                if let pairSchedule, !pairSchedule.isEmpty {
+                    resolvedSchedule = pairSchedule
+                } else if let fallbackSchedule, !fallbackSchedule.isEmpty {
+                    resolvedSchedule = fallbackSchedule
+                } else {
+                    resolvedSchedule = "0 3 * * *"
+                }
+                return JobDefinition(
+                    id: stableUUID5("rclone-job\0\(pair.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())\0\(pair.id)"),
+                    name: pair.name,
+                    enabled: pair.enabled,
+                    dataPathIDs: [pair.id],
+                    schedule: resolvedSchedule,
+                    executionMode: "sequential",
+                    maxParallel: 1,
+                    retryMinutes: min(max(retryMinutes, 1), 10_080)
+                )
+            }
+        }
         let known = Set(["enabled", "timezone", "default_schedule", "pairs", "jobs"])
         var preserved: [String: JSONValue] = [:]
         for codingKey in values.allKeys where !known.contains(codingKey.stringValue) {
@@ -655,7 +693,21 @@ struct BackupConfig: Codable {
 
 struct PairConfig: Codable, Identifiable {
     let stableID: String?
-    var id: String { stableID ?? name }
+    var id: String {
+        if let stableID, !stableID.isEmpty { return stableID }
+        let normalizedDirection = direction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedMode = normalizedDirection == "bisync"
+            ? "bisync"
+            : mode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return stableUUID5([
+            "rclone",
+            name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            remote.trimmingCharacters(in: .whitespacesAndNewlines),
+            local.trimmingCharacters(in: .whitespacesAndNewlines),
+            normalizedDirection,
+            normalizedMode
+        ].joined(separator: "\0"))
+    }
     let name: String
     let local: String
     let remote: String
@@ -671,6 +723,11 @@ struct PairConfig: Codable, Identifiable {
     let mountpoint: String
     let sentinelFile: String
     private let extras: [String: JSONValue]
+
+    var legacySchedule: String? {
+        guard case let .string(value)? = extras["schedule"] else { return nil }
+        return value
+    }
 
     init(
         stableID: String?, name: String, local: String, remote: String,
@@ -983,6 +1040,25 @@ struct ActionResponse: Decodable {
         case ok, error
         case jobID = "job_id"
     }
+}
+
+struct PushDeviceRegistration: Encodable {
+    let token: String
+    let environment: String
+    let appVersion: String
+
+    enum CodingKeys: String, CodingKey {
+        case token, environment
+        case appVersion = "app_version"
+    }
+}
+
+struct PushDeviceRemoval: Encodable {
+    let token: String
+}
+
+struct PushRegistrationResponse: Decodable {
+    let ok: Bool
 }
 
 struct QuickSyncRequest: Encodable {

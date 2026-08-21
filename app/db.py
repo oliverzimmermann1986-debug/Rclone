@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -103,6 +103,15 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_events_type_created ON audit_events(event_type, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS push_devices (
+    token TEXT PRIMARY KEY,
+    environment TEXT NOT NULL,
+    app_version TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_devices_updated ON push_devices(updated_at DESC);
 """
 
 
@@ -275,6 +284,19 @@ class Database:
                 "ON jobs(definition_id, started_at DESC, id DESC)"
             )
             connection.execute("PRAGMA user_version=4")
+            version = 4
+        if version < 5:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS push_devices ("
+                "token TEXT PRIMARY KEY, environment TEXT NOT NULL, "
+                "app_version TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, "
+                "updated_at REAL NOT NULL)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_push_devices_updated "
+                "ON push_devices(updated_at DESC)"
+            )
+            connection.execute("PRAGMA user_version=5")
 
     @classmethod
     def _migrate_pair_history_columns(cls, connection: sqlite3.Connection) -> None:
@@ -1501,6 +1523,40 @@ class Database:
                 (cutoff, keep_latest),
             )
             return int(cursor.rowcount or 0)
+
+    def push_device_upsert(
+        self,
+        token: str,
+        environment: str,
+        *,
+        app_version: str = "",
+        now: Optional[float] = None,
+    ) -> None:
+        now_value = float(time.time() if now is None else now)
+        with self.conn() as connection:
+            connection.execute(
+                "INSERT INTO push_devices(token, environment, app_version, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(token) DO UPDATE SET "
+                "environment=excluded.environment, app_version=excluded.app_version, "
+                "updated_at=excluded.updated_at",
+                (token, environment, app_version, now_value, now_value),
+            )
+
+    def push_device_delete(self, token: str) -> bool:
+        with self.conn() as connection:
+            cursor = connection.execute(
+                "DELETE FROM push_devices WHERE token=?", (token,)
+            )
+            return bool(cursor.rowcount)
+
+    def push_devices(self, *, limit: int = 32) -> List[Dict[str, Any]]:
+        with self.conn() as connection:
+            rows = connection.execute(
+                "SELECT token, environment, app_version, created_at, updated_at "
+                "FROM push_devices ORDER BY updated_at DESC LIMIT ?",
+                (max(1, min(int(limit), 128)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def auth_retry_after(self, client_key: str, *, now: Optional[float] = None) -> int:
         now_value = float(time.time() if now is None else now)

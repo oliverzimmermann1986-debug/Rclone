@@ -39,6 +39,15 @@ struct DashboardView: View {
                         ForEach(pairs) { pair in
                             CopyListRow(pair: pair)
                         }
+                    } else if let configured = model.config?.backup.pairs, !configured.isEmpty {
+                        ForEach(configured) { pair in
+                            ConfiguredCopyListRow(pair: pair)
+                        }
+                        if case .failed = model.storageState {
+                            Label("Dateizahlen und Größen sind vorübergehend nicht verfügbar.", systemImage: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
                         switch model.storageState {
                         case .loaded:
@@ -233,6 +242,41 @@ struct DashboardView: View {
     private var progressLastCheckedSuffix: String {
         guard let date = model.progressLastSuccessAt else { return "" }
         return " (\(AppFormat.relative(date.timeIntervalSince1970)))"
+    }
+}
+
+private struct ConfiguredCopyListRow: View {
+    let pair: PairConfig
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack {
+                Text(pair.name).font(.headline)
+                Spacer()
+                Text(pair.enabled ? "Aktiv" : "Pausiert")
+                    .font(.caption)
+                    .foregroundStyle(pair.enabled ? .green : .secondary)
+            }
+            endpoint(symbol: "folder.fill", title: "Lokal", path: pair.local)
+            endpoint(symbol: "icloud.fill", title: "Cloud", path: pair.remote)
+        }
+        .padding(.vertical, 5)
+    }
+
+    private func endpoint(symbol: String, title: String, path: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol).foregroundStyle(.green).frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Text(path).font(.subheadline).lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("– Dateien").font(.subheadline.weight(.semibold))
+                Text("– Größe").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

@@ -51,6 +51,7 @@ from .routes import (
     api_diagnostics,
     api_jobs,
     api_maintenance,
+    api_push,
     api_storage,
     api_test,
 )
@@ -457,6 +458,7 @@ app.include_router(api_diagnostics.router)
 app.include_router(api_maintenance.router)
 app.include_router(api_browse.router)
 app.include_router(api_pbs.router)
+app.include_router(api_push.router)
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

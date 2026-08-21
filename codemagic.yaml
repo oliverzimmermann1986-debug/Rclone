@@ -83,6 +83,8 @@ workflows:
           test "$(/usr/libexec/PlistBuddy -c 'Print :UIDeviceFamily:0' "$APP_PATH/Info.plist")" = "1"
           test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchScreen:UIColorName' "$APP_PATH/Info.plist")" = "LaunchBackground"
           /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$APP_PATH/Info.plist" >/dev/null
+          codesign -d --entitlements :- "$APP_PATH" > "$VERIFY_DIR/entitlements.plist" 2>/dev/null
+          test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$VERIFY_DIR/entitlements.plist")" = "production"
           test -f "$APP_PATH/Assets.car"
     artifacts:
       - build/ios/ipa/*.ipa
