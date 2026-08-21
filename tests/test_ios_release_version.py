@@ -76,6 +76,16 @@ def test_codemagic_validates_live_backend_contracts_before_xcode_build():
     )
 
 
+def test_codemagic_publishes_to_internal_testflight_without_beta_review():
+    root = Path(__file__).parents[1]
+    config = (root / "codemagic.yaml").read_text(encoding="utf-8")
+
+    assert "--custom-export-options='{" in config
+    assert '"testFlightInternalTestingOnly": true' in config
+    assert "submit_to_testflight: false" in config
+    assert "submit_to_app_store: false" in config
+
+
 def test_ios_ci_tracks_native_contract_sources():
     root = Path(__file__).parents[1]
     workflow = (root / ".github" / "workflows" / "ios.yml").read_text(encoding="utf-8")
