@@ -136,6 +136,13 @@ private struct PBSToolsView: View {
     var body: some View {
         List {
             if let pbs = model.pbs {
+                if case let .failed(message) = model.pbsState {
+                    Section {
+                        LoadFailureView(title: "PBS-Status nicht aktualisiert", message: message) {
+                            Task { await model.refresh() }
+                        }
+                    }
+                }
                 Section("Verbindung") {
                     LabeledContent("Status") { StatusBadge(status: pbs.enabled && pbs.clientAvailable ? "ok" : "warning") }
                     LabeledContent("Repository", value: pbs.repository.isEmpty ? "Nicht eingerichtet" : pbs.repository)
@@ -166,7 +173,16 @@ private struct PBSToolsView: View {
                     }
                 }
             } else {
-                LoadingSection(label: "PBS-Status wird geladen …")
+                switch model.pbsState {
+                case let .failed(message):
+                    Section {
+                        LoadFailureView(title: "PBS-Status nicht geladen", message: message) {
+                            Task { await model.refresh() }
+                        }
+                    }
+                default:
+                    LoadingSection(label: "PBS-Status wird geladen …")
+                }
             }
             Section("Konfiguration") {
                 NavigationLink { PBSConfigurationView() } label: {

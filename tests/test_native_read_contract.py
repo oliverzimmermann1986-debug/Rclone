@@ -517,6 +517,10 @@ def test_native_f14_revision_safety_history_and_run_all_contracts():
     assert "detailError" in backups and "logError" in backups
     assert ".task(id: query)" in backups
     assert backups.count("guard generation == requestGeneration else { return }") >= 3
+    assert "pbsState: ContentLoadState" in app_model
+    assert "PBS-Status nicht geladen" in (
+        ios_root / "Views" / "SystemView.swift"
+    ).read_text(encoding="utf-8")
 
 
 def test_native_pbs_configuration_is_revision_safe_and_feature_complete():
