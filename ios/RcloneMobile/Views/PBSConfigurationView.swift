@@ -95,7 +95,7 @@ struct PBSConfigurationView: View {
     }
 
     private var targetsSection: some View {
-        Section("Targets") {
+        Section {
             ForEach(Array(draft.targets.enumerated()), id: \.element.id) { index, target in
                 Button { editor = PBSTargetEditorRequest(index: index, target: target) } label: {
                     VStack(alignment: .leading, spacing: 4) {
@@ -110,6 +110,8 @@ struct PBSConfigurationView: View {
             Button { editor = PBSTargetEditorRequest(index: nil, target: nil) } label: {
                 Label("Target hinzufügen", systemImage: "plus")
             }
+        } header: {
+            Text("Targets")
         } footer: {
             Text("Mehrere Targets brauchen jeweils eine eigene Backup-ID. Pfade beziehen sich auf den Server, nicht auf das iPhone.")
         }
