@@ -92,6 +92,49 @@ def test_gui_assets_reference_current_cache_version():
     assert 'class="shell"' in login
 
 
+def test_login_uses_system_theme_and_mobile_full_frame():
+    login = (STATIC / "login.html").read_text(encoding="utf-8")
+
+    assert "color-scheme:light dark" in login
+    assert "prefers-color-scheme:dark" in login
+    assert "min-height:100dvh" in login
+    assert (
+        ".shell{display:block;width:100%;min-height:100dvh;border:0;border-radius:0;box-shadow:none}"
+        in login
+    )
+    assert "font:inherit;font-size:16px" in login
+
+
+def test_missing_resource_metrics_never_render_as_zero_percent():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    for path in (
+        "overview.data?.system?.cpu?.load_percent",
+        "overview.data?.system?.memory?.percent_used",
+        "overview.data?.system?.data_disk?.percent_used",
+    ):
+        assert f"metricPercent({path})" in html
+        assert f"metricAvailable({path})" in html
+    assert (
+        "return this.metricAvailable(value) ? `${Math.round(Number(value))}%` : 'Nicht verfügbar'"
+        in javascript
+    )
+    assert "?? 0) + '%'" not in html
+
+
+def test_system_health_prioritizes_alerts_over_running_state():
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    method = javascript[
+        javascript.index("    systemLevel() {") : javascript.index(
+            "    systemLabel() {"
+        )
+    ]
+
+    assert method.index("a.level === 'error'") < method.index("this.busy()")
+    assert "['warn', 'warning'].includes(a.level)" in method
+
+
 def test_scheduler_settings_explain_cron_and_offer_presets():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     javascript = (STATIC / "app.js").read_text(encoding="utf-8")

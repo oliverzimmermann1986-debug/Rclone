@@ -238,18 +238,18 @@
                 <span class="badge neutral" x-text="overview.data?.system?.virtualization || '—'"></span>
               </div>
               <div class="resource-row">
-                <div class="resource-label"><span>CPU-Last</span><strong x-text="(overview.data?.system?.cpu?.load_percent ?? 0) + '%'"></strong></div>
-                <div class="progress-track" role="progressbar" aria-label="CPU-Last" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="Math.min(100, overview.data?.system?.cpu?.load_percent || 0)"><div :style="`width:${Math.min(100, overview.data?.system?.cpu?.load_percent || 0)}%`"></div></div>
+                <div class="resource-label"><span>CPU-Last</span><strong x-text="metricPercent(overview.data?.system?.cpu?.load_percent)"></strong></div>
+                <div class="progress-track" x-show="metricAvailable(overview.data?.system?.cpu?.load_percent)" role="progressbar" aria-label="CPU-Last" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="metricWidth(overview.data?.system?.cpu?.load_percent)"><div :style="`width:${metricWidth(overview.data?.system?.cpu?.load_percent)}%`"></div></div>
                 <small x-text="(overview.data?.system?.cpu?.capacity ?? overview.data?.system?.cpu?.count ?? '—') + ' vCPU · Load ' + (overview.data?.system?.cpu?.load_1 ?? '—') + ' · ' + (overview.data?.system?.cpu?.source || 'system')"></small>
               </div>
               <div class="resource-row">
-                <div class="resource-label"><span>Arbeitsspeicher</span><strong x-text="(overview.data?.system?.memory?.percent_used ?? 0) + '%'"></strong></div>
-                <div class="progress-track" role="progressbar" aria-label="Arbeitsspeicher-Auslastung" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="overview.data?.system?.memory?.percent_used || 0"><div :style="`width:${overview.data?.system?.memory?.percent_used || 0}%`" :class="(overview.data?.system?.memory?.percent_used || 0) >= 90 && 'error'"></div></div>
+                <div class="resource-label"><span>Arbeitsspeicher</span><strong x-text="metricPercent(overview.data?.system?.memory?.percent_used)"></strong></div>
+                <div class="progress-track" x-show="metricAvailable(overview.data?.system?.memory?.percent_used)" role="progressbar" aria-label="Arbeitsspeicher-Auslastung" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="metricWidth(overview.data?.system?.memory?.percent_used)"><div :style="`width:${metricWidth(overview.data?.system?.memory?.percent_used)}%`" :class="metricWidth(overview.data?.system?.memory?.percent_used) >= 90 && 'error'"></div></div>
                 <small><span x-text="formatBytes(overview.data?.system?.memory?.used_bytes)"></span> von <span x-text="formatBytes(overview.data?.system?.memory?.total_bytes)"></span> · <span x-text="overview.data?.system?.memory?.source || 'proc'"></span></small>
               </div>
               <div class="resource-row">
-                <div class="resource-label"><span>App-Datenträger</span><strong x-text="(overview.data?.system?.data_disk?.percent_used ?? 0) + '%'"></strong></div>
-                <div class="progress-track" role="progressbar" aria-label="Datenträger-Auslastung" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="overview.data?.system?.data_disk?.percent_used || 0"><div :style="`width:${overview.data?.system?.data_disk?.percent_used || 0}%`" :class="(overview.data?.system?.data_disk?.percent_used || 0) >= 90 && 'error'"></div></div>
+                <div class="resource-label"><span>App-Datenträger</span><strong x-text="metricPercent(overview.data?.system?.data_disk?.percent_used)"></strong></div>
+                <div class="progress-track" x-show="metricAvailable(overview.data?.system?.data_disk?.percent_used)" role="progressbar" aria-label="Datenträger-Auslastung" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="metricWidth(overview.data?.system?.data_disk?.percent_used)"><div :style="`width:${metricWidth(overview.data?.system?.data_disk?.percent_used)}%`" :class="metricWidth(overview.data?.system?.data_disk?.percent_used) >= 90 && 'error'"></div></div>
                 <small><span x-text="formatBytes(overview.data?.system?.data_disk?.free_bytes)"></span> frei</small>
               </div>
               <dl class="system-facts">

@@ -52,3 +52,21 @@ struct ErrorBanner: View {
         .background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
+
+struct LoadFailureView: View {
+    let title: String
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(title, systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(message)
+        } actions: {
+            Button("Erneut versuchen", action: retry)
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("retryLoadButton")
+        }
+    }
+}

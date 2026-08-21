@@ -20,7 +20,7 @@
   --sidebar-2:     #f2f4f6;
   --text:          #171a1f;
   --text-soft:     #5b636d;
-  --text-faint:    #8b939d;
+  --text-faint:    #66707c;
   --border:        #e6e9ed;
   --border-soft:   #eef0f3;
   --border-strong: #d3d8de;
@@ -85,7 +85,7 @@ html[data-theme="dark"] {
   --sidebar-2:     #23272e;
   --text:          #eceef1;
   --text-soft:     #a3abb6;
-  --text-faint:    #79818c;
+  --text-faint:    #a8b0bb;
   --border:        #2c313a;
   --border-soft:   #252931;
   --border-strong: #3c424c;
@@ -123,7 +123,7 @@ html[data-theme="dark"] {
     --sidebar-2:     #23272e;
     --text:          #eceef1;
     --text-soft:     #a3abb6;
-    --text-faint:    #79818c;
+    --text-faint:    #a8b0bb;
     --border:        #2c313a;
     --border-soft:   #252931;
     --border-strong: #3c424c;
@@ -700,7 +700,6 @@ code { font-family: var(--mono); }
 .overall-progress > div, .progress-track > div {
   height: 100%; border-radius: 999px;
   background: var(--running);
-  transition: width 340ms var(--ease-out);
 }
 .progress-track > div.ok, .progress-track > div.done { background: var(--ok); }
 .progress-track > div.warn { background: var(--warning); }
@@ -2081,4 +2080,19 @@ html[data-density="compact"] .job-row { min-height: 54px; }
     transition-duration: .001ms !important;
   }
   .status-dot.running, .job-status-icon.running span { opacity: 1; }
+}
+
+/* Bedien- und Statusbeschriftungen bleiben auch in der kompakten Ansicht
+   bei einer funktionalen Mindestgröße. Rein dekorative Statuspunkte sind
+   davon nicht betroffen. */
+.badge.compact,
+.status-line span,
+.button.small,
+.field > small,
+.settings-nav button small,
+.mobile-nav small,
+.job-main strong em,
+.job-meta,
+.auto-refresh {
+  font-size: 12px;
 }

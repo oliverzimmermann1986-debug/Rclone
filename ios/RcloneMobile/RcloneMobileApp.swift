@@ -32,16 +32,54 @@ private struct AppRootView: View {
 }
 
 private struct LaunchStatusView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var showRecoveryActions = false
+
     var body: some View {
         ZStack {
             Color(.systemGroupedBackground).ignoresSafeArea()
-            VStack(spacing: 18) {
+            VStack(spacing: 16) {
                 Image(systemName: "arrow.triangle.2.circlepath.icloud")
                     .font(.system(size: 42, weight: .semibold))
                     .foregroundStyle(.green)
                     .accessibilityHidden(true)
-                ProgressView("Verbindung wird geprüft …")
+                ProgressView()
+                Text("Verbindung wird geprüft …")
+                    .font(.headline)
+                if !model.serverAddress.isEmpty {
+                    Text(model.serverAddress)
+                        .font(.subheadline.monospaced())
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .accessibilityLabel("Gespeicherter Server: \(model.serverAddress)")
+                }
+                if showRecoveryActions {
+                    Text("Du kannst weiter warten oder die Verbindungseinstellungen prüfen.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    HStack {
+                        Button("Abbrechen", role: .cancel) {
+                            model.cancelSessionRestore()
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("cancelSessionRestoreButton")
+                        Button("Server ändern") {
+                            model.changeServerDuringRestore()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("changeServerButton")
+                    }
+                }
             }
+            .frame(maxWidth: 420)
+            .padding(24)
+        }
+        .task {
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            withAnimation { showRecoveryActions = true }
         }
     }
 }

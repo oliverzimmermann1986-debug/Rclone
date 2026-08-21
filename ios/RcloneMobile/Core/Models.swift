@@ -132,7 +132,7 @@ struct CPUMetrics: Decodable {
     let load1: Double
     let load5: Double
     let load15: Double
-    let loadPercent: Double
+    let loadPercent: Double?
 
     enum CodingKeys: String, CodingKey {
         case count, capacity, source

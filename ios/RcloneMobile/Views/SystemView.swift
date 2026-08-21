@@ -17,8 +17,8 @@ struct SystemView: View {
                 }
                 Section("Auslastung") {
                     UsageRow(title: "CPU", value: system.cpu.loadPercent, detail: "\(system.cpu.capacity.formatted()) Kerne", symbol: "cpu")
-                    UsageRow(title: "Arbeitsspeicher", value: system.memory.percentUsed ?? 0, detail: "\(AppFormat.bytes(system.memory.usedBytes)) von \(AppFormat.bytes(system.memory.totalBytes))", symbol: "memorychip")
-                    UsageRow(title: "Datenträger", value: system.dataDisk.percentUsed ?? 0, detail: "\(AppFormat.bytes(system.dataDisk.freeBytes)) frei", symbol: "internaldrive")
+                    UsageRow(title: "Arbeitsspeicher", value: system.memory.percentUsed, detail: "\(AppFormat.bytes(system.memory.usedBytes)) von \(AppFormat.bytes(system.memory.totalBytes))", symbol: "memorychip")
+                    UsageRow(title: "Datenträger", value: system.dataDisk.percentUsed, detail: "\(AppFormat.bytes(system.dataDisk.freeBytes)) frei", symbol: "internaldrive")
                 }
                 schedulerSection
                 Section("Spezialwerkzeuge") {
@@ -37,7 +37,14 @@ struct SystemView: View {
                     LabeledContent("Kernel", value: system.kernel)
                 }
             } else {
-                LoadingSection(label: "Systemdaten werden geladen …")
+                switch model.overviewState {
+                case let .failed(message):
+                    LoadFailureView(title: "Systemdaten nicht geladen", message: message) {
+                        Task { await model.refresh() }
+                    }
+                default:
+                    LoadingSection(label: "Systemdaten werden geladen …")
+                }
             }
         }
         .navigationTitle("System")
@@ -169,7 +176,7 @@ private struct PBSToolsView: View {
 
 private struct UsageRow: View {
     let title: String
-    let value: Double
+    let value: Double?
     let detail: String
     let symbol: String
 
@@ -178,11 +185,17 @@ private struct UsageRow: View {
             HStack {
                 Label(title, systemImage: symbol)
                 Spacer()
-                Text("\(value.formatted(.number.precision(.fractionLength(0)))) %")
+                Text(value.map { "\($0.formatted(.number.precision(.fractionLength(0)))) %" } ?? "Nicht verfügbar")
             }
-            ProgressView(value: min(max(value, 0), 100), total: 100)
-                .tint(value >= 90 ? .red : value >= 75 ? .orange : .green)
-            Text(detail).font(.caption).foregroundStyle(.secondary)
+            if let value {
+                ProgressView(value: min(max(value, 0), 100), total: 100)
+                    .tint(value >= 90 ? .red : value >= 75 ? .orange : .green)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("Messwert nicht vom Server geliefert")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)

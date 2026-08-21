@@ -11,6 +11,13 @@ private enum RefreshPayload {
     case pbs(Result<PBSStatus, Error>)
 }
 
+enum ContentLoadState: Equatable {
+    case idle
+    case loading
+    case loaded
+    case failed(String)
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     enum Phase: Equatable {
@@ -27,6 +34,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var doctor: DoctorResponse?
     @Published private(set) var progress: BackupProgress?
     @Published private(set) var pbs: PBSStatus?
+    @Published private(set) var overviewState: ContentLoadState = .idle
+    @Published private(set) var storageState: ContentLoadState = .idle
+    @Published private(set) var configState: ContentLoadState = .idle
+    @Published private(set) var jobsState: ContentLoadState = .idle
     @Published private(set) var isRefreshing = false
     @Published var errorMessage: String?
     @Published var actionMessage: String?
@@ -76,6 +87,7 @@ final class AppModel: ObservableObject {
             guard isCurrentSession(generation) else { return }
             client = newClient
             config = restoredConfig
+            configState = .loaded
             phase = .signedIn
             await refresh()
         } catch is CancellationError {
@@ -133,6 +145,10 @@ final class AppModel: ObservableObject {
         let refresh = refreshGeneration
         let owner = UUID()
         refreshOwner = owner
+        if overview == nil { overviewState = .loading }
+        if storage == nil { storageState = .loading }
+        if config == nil { configState = .loading }
+        if jobs.isEmpty && jobsState != .loaded { jobsState = .loading }
         let task = Task { [weak self] in
             guard let self else { return }
             await self.performRefresh(client: refreshClient, session: session, refresh: refresh)
@@ -165,14 +181,20 @@ final class AppModel: ObservableObject {
                 switch payload {
                 case let .overview(result):
                     switch result {
-                    case let .success(value): overview = value
-                    case let .failure(error): handle(error, firstError: &firstError)
+                    case let .success(value):
+                        overview = value
+                        overviewState = .loaded
+                    case let .failure(error):
+                        overviewState = .failed(userMessage(for: error))
+                        handle(error, firstError: &firstError)
                     }
                 case let .baseStorage(result):
                     switch result {
                     case let .success(base):
                         storage = base.preservingSizes(from: storage)
+                        storageState = .loaded
                     case let .failure(error):
+                        storageState = .failed(userMessage(for: error))
                         handle(error, firstError: &firstError)
                     }
                 case let .detailedStorage(result):
@@ -186,13 +208,21 @@ final class AppModel: ObservableObject {
                     }
                 case let .config(result):
                     switch result {
-                    case let .success(value): config = value
-                    case let .failure(error): handle(error, firstError: &firstError)
+                    case let .success(value):
+                        config = value
+                        configState = .loaded
+                    case let .failure(error):
+                        configState = .failed(userMessage(for: error))
+                        handle(error, firstError: &firstError)
                     }
                 case let .jobs(result):
                     switch result {
-                    case let .success(response): jobs = response.items
-                    case let .failure(error): handle(error, firstError: &firstError)
+                    case let .success(response):
+                        jobs = response.items
+                        jobsState = .loaded
+                    case let .failure(error):
+                        jobsState = .failed(userMessage(for: error))
+                        handle(error, firstError: &firstError)
                     }
                 case let .progress(result):
                     switch result {
@@ -351,6 +381,20 @@ final class AppModel: ObservableObject {
         exitingClient?.clearLocalSession()
     }
 
+    func cancelSessionRestore() {
+        guard phase == .checking else { return }
+        beginSessionTransition()
+        clearSessionState()
+        errorMessage = "Verbindungsprüfung abgebrochen. Du kannst die Serveradresse prüfen und es erneut versuchen."
+    }
+
+    func changeServerDuringRestore() {
+        guard phase == .checking else { return }
+        beginSessionTransition()
+        clearSessionState()
+        errorMessage = nil
+    }
+
     func dismissMessages() {
         errorMessage = nil
         actionMessage = nil
@@ -417,6 +461,10 @@ final class AppModel: ObservableObject {
         doctor = nil
         progress = nil
         pbs = nil
+        overviewState = .idle
+        storageState = .idle
+        configState = .idle
+        jobsState = .idle
         phase = .signedOut
     }
 

@@ -28,6 +28,15 @@ struct RootTabView: View {
                 .tag(4)
         }
         .tint(.green)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let error = model.errorMessage {
+                ErrorBanner(message: error, dismiss: model.dismissMessages)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.bar)
+                    .accessibilityIdentifier("globalErrorBanner")
+            }
+        }
         .sheet(isPresented: $showingSettings) { SettingsView() }
         .alert("Hinweis", isPresented: Binding(
             get: { model.actionMessage != nil },

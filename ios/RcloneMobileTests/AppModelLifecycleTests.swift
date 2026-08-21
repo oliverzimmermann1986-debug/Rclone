@@ -30,7 +30,22 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertNotNil(model.progress)
         XCTAssertNotNil(model.pbs)
         XCTAssertNotNil(model.errorMessage, "The independent overview failure should remain visible")
+        XCTAssertEqual(model.overviewState, .failed("Overview nicht verfügbar"))
+        XCTAssertEqual(model.storageState, .loaded)
+        XCTAssertEqual(model.configState, .loaded)
+        XCTAssertEqual(model.jobsState, .loaded)
         XCTAssertFalse(model.isRefreshing)
+    }
+
+    func testStartupRestoreCanBeCancelledWithoutWaitingForNetworkTimeout() {
+        let defaults = makeDefaults()
+        defaults.set("https://backup.example.de", forKey: "serverAddress")
+        let model = AppModel(defaults: defaults) { _ in StubAPIClient() }
+
+        model.cancelSessionRestore()
+
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertTrue(model.errorMessage?.contains("abgebrochen") == true)
     }
 
     private func makeDefaults() -> UserDefaults {

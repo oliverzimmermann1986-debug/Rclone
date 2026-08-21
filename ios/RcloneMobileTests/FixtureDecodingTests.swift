@@ -65,6 +65,31 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertEqual(url.absoluteString, "https://192.168.1.97")
     }
 
+    func testOverviewAcceptsUnavailableResourcePercentages() throws {
+        let data = Data(#"""
+        {
+          "app":{"version":"1.7.1","timezone":"Europe/Berlin"},
+          "system":{
+            "hostname":"backup","platform":"Linux","kernel":"6.8","python":"3.12",
+            "virtualization":"lxc","addresses":[],"uptime_seconds":0,
+            "cpu":{"count":2,"capacity":2.0,"source":"unknown","load_1":0,"load_5":0,"load_15":0,"load_percent":null},
+            "memory":{"total_bytes":null,"available_bytes":null,"used_bytes":null,"percent_used":null,"source":null},
+            "pids":{"current":1,"max":null,"percent_used":null},
+            "data_disk":{"path":"/data","total_bytes":null,"used_bytes":null,"free_bytes":null,"percent_used":null,"error":"unavailable"}
+          },
+          "services":{"web":{"enabled":null,"active":null},"scheduler":{"enabled":null,"active":null,"configured_enabled":false,"control":null}},
+          "pairs":{"total":0,"enabled":0,"scheduled":0,"manual":0,"destructive":0,"health":[]},
+          "jobs":{"last":null,"last_success":null,"last_error":null},
+          "alerts":[],"generated_at":1720000000
+        }
+        """#.utf8)
+
+        let overview = try JSONDecoder().decode(OverviewResponse.self, from: data)
+        XCTAssertNil(overview.system.cpu.loadPercent)
+        XCTAssertNil(overview.system.memory.percentUsed)
+        XCTAssertNil(overview.system.dataDisk.percentUsed)
+    }
+
     func testServerURLRejectsEmbeddedCredentials() {
         XCTAssertThrowsError(try APIClient.normalizedServerURL("https://admin:secret@backup.example.de")) { error in
             XCTAssertEqual(error as? APIError, .invalidServer)
