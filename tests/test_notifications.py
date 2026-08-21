@@ -1,4 +1,6 @@
 import socket
+import threading
+import time
 
 import pytest
 
@@ -47,3 +49,38 @@ def test_notification_policy_clamps_invalid_manual_config(monkeypatch):
     assert allow_private is False
     assert timeout == 10.0
     assert workers == 16
+
+
+def test_notify_returns_after_total_deadline_when_hook_stalls(monkeypatch):
+    class Config:
+        def get(self, *keys, default=None):
+            if tuple(keys) == ("notifications", "webhooks"):
+                return [
+                    {
+                        "enabled": True,
+                        "type": "generic",
+                        "url": "https://example.test/hook",
+                        "events": ["sync_ok"],
+                    }
+                ]
+            return default
+
+    release = threading.Event()
+    monkeypatch.setattr(notifications, "get_config", lambda: Config())
+    monkeypatch.setattr(
+        notifications,
+        "_notification_policy",
+        lambda: (False, False, 0.05, 1),
+    )
+    monkeypatch.setattr(
+        notifications,
+        "notify_one",
+        lambda *_args, **_kwargs: release.wait(2),
+    )
+
+    started = time.monotonic()
+    notifications.notify("sync_ok", "Fertig", "Test")
+    elapsed = time.monotonic() - started
+    release.set()
+
+    assert elapsed < 0.5
