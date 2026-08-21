@@ -1726,6 +1726,65 @@ input[type="checkbox"], input[type="radio"] {
 .nav-scrim { display: none; }
 .mobile-nav { display: none; }
 
+/* Jobdefinitionen bleiben eine flache Arbeitsliste: Zuordnung und Ausführung
+   sind scanbar, seltene Parameter liegen in der Disclosure. */
+.definition-list {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.definition-row { padding: 20px; border-bottom: 1px solid var(--border); }
+.definition-row:last-child { border-bottom: 0; }
+.definition-main {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 1fr) minmax(220px, .8fr);
+  gap: 16px;
+  align-items: end;
+}
+.definition-main > .switch { align-self: center; margin-bottom: 8px; }
+.definition-assignments {
+  display: grid;
+  grid-template-columns: minmax(130px, .45fr) minmax(240px, 1fr) minmax(220px, .7fr);
+  gap: 16px;
+  align-items: start;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-soft);
+}
+.definition-label { display: grid; gap: 4px; }
+.definition-label small, .definition-actions small, .muted { color: var(--text-soft); }
+.assignment-list { display: grid; gap: 6px; }
+.assignment-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 38px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.assignment-order {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font-size: 12px;
+}
+.assignment-actions { display: flex; gap: 2px; }
+.assignment-actions .icon-button { width: 32px; height: 32px; }
+.assignment-add { display: flex; gap: 8px; align-items: end; }
+.assignment-add .field { flex: 1; }
+.definition-options { margin-top: 14px; }
+.definition-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; }
+.definition-actions small { margin-left: auto; }
+.copy-table th, .copy-table td { white-space: nowrap; }
+.copy-table .mono { max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+.schedule-routing { margin-bottom: 16px; }
+
 .modal {
   position: fixed; inset: 0; z-index: 100;
   display: grid; place-items: center;
@@ -1957,18 +2016,6 @@ html[data-density="compact"] .job-row { min-height: 54px; }
   }
   .mobile-nav button.active { color: var(--text); }
   .mobile-nav .icon { width: 20px; height: 20px; }
-  /* Die häufigste Aktion am Handy ist der Dry-Run; sie sitzt mittig in der
-     Tab-Leiste und ist die einzige erhöhte Fläche darin. */
-  .mobile-nav .mobile-run {
-    align-self: center;
-    width: 50px; height: 50px;
-    border-radius: 999px;
-    color: var(--surface); background: var(--text);
-    box-shadow: var(--shadow-md);
-    transform: translateY(-10px);
-  }
-  .mobile-nav .mobile-run small { font-size: 9px; }
-  .mobile-nav .mobile-run:disabled { opacity: .45; }
   .unsaved-bar {
     right: 12px; left: 12px; min-width: 0;
     bottom: calc(76px + env(safe-area-inset-bottom));
@@ -2052,6 +2099,12 @@ html[data-density="compact"] .job-row { min-height: 54px; }
   .snapshot-list > div span:last-child { grid-column: 1 / -1; }
   .recovery-panel .panel-head { flex-direction: column; }
   .jobs-toolbar .job-search { min-width: 0; width: 100%; }
+  .definition-main, .definition-assignments { grid-template-columns: 1fr; }
+  .definition-main > .switch { justify-self: start; }
+  .assignment-add { align-items: stretch; flex-direction: column; }
+  .definition-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .definition-actions .button { width: 100%; }
+  .definition-actions small { grid-column: 1 / -1; margin-left: 0; }
   .table-scroll.mobile-cards { overflow: visible; }
   .toast { right: 12px; left: 12px; max-width: none; min-width: 0; transform: none; }
 }

@@ -32,7 +32,7 @@ def test_main_template_has_unique_ids_and_required_navigation():
         name for name, count in Counter(parser.ids).items() if count > 1
     )
     assert duplicates == []
-    for page in ("dashboard", "pairs", "jobs", "doctor", "settings"):
+    for page in ("dashboard", "pairs", "definitions", "runs", "doctor", "settings"):
         assert f"navigate('{page}')" in html
     assert 'class="mobile-nav"' in html
     assert 'class="sidebar"' in html
@@ -135,20 +135,19 @@ def test_system_health_prioritizes_alerts_over_running_state():
     assert "['warn', 'warning'].includes(a.level)" in method
 
 
-def test_scheduler_settings_explain_cron_and_offer_presets():
+def test_scheduler_settings_route_schedules_to_jobs_and_offer_performance_presets():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     javascript = (STATIC / "app.js").read_text(encoding="utf-8")
     for text in (
-        "Wann sollen automatische Läufe starten?",
-        "In verständlicher Form",
-        "Nächste Standard-Termine",
+        "Zeitpläne werden pro Job verwaltet",
+        "Jobs öffnen",
         "Nachholfenster",
         "Leistungsprofil wählen",
     ):
         assert text in html
     for method in (
-        "applyScheduleMode",
-        "loadSchedulePreview",
+        "loadJobDefinitions",
+        "runJobDefinition",
         "setPerformancePreset",
         "schedulerRiskLevel",
     ):
@@ -221,8 +220,8 @@ def test_dialog_focus_accessibility_and_loading_contracts():
     assert 'role="tabpanel"' in html
     assert ":aria-current=" in html
     assert 'role="progressbar"' in html
-    assert 'aria-label="Jobhistorie durchsuchen"' in html
-    assert 'aria-label="Sync-Paare nach Name oder Pfad durchsuchen"' in html
+    assert 'aria-label="Läufe durchsuchen"' in html
+    assert 'aria-label="Datenwege nach Name oder Pfad durchsuchen"' in html
     assert ".skip-link" in css
     assert ":focus-visible" in css
     assert ".search-field:focus-within" in css
@@ -254,3 +253,23 @@ def test_size_recalculation_is_explicit_and_measurement_age_is_visible():
     assert "pairSizeAge(name, side)" in javascript
     assert "pairSizeAge(pair.name, 'source')" in html
     assert "pairSizeAge(pair.name, 'target')" in html
+
+
+def test_canonical_jobs_ui_separates_data_paths_definitions_and_runs():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    for label in ("Lagebild", "Datenwege", "Jobs", "Läufe", "System"):
+        assert f"<span>{label}</span>" in html
+    assert 'x-model="pair.schedule"' not in html
+    assert "delete pair.schedule" in javascript
+    assert "result.backup.jobs ||= []" in javascript
+    assert "'/api/jobs/definitions'" in javascript
+    assert "/plan?dry_run=${dryRun}" in javascript
+    assert "/run?dry_run=${dryRun}" in javascript
+    assert "data_path_ids" in html
+    assert "job.definition_name" in html
+    assert "jobModal.job?.config_revision" in html
+    assert 'min="1" max="10080" x-model.number="job.retry_minutes"' in html
+    for heading in ("Lokaler Ordner", "Cloud-Ordner", "Dateien", "Größe", "Messalter"):
+        assert f"<th>{heading}</th>" in html

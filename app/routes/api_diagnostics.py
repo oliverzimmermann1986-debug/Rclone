@@ -22,7 +22,11 @@ from ..config_store import get_config
 from ..config_validation import ConfigValidationError, validate_config
 from ..copies import build_matrix as build_copy_matrix
 from ..db import get_db
-from ..job_definitions import effective_job_definitions
+from ..job_definitions import (
+    effective_job_definitions,
+    scheduled_data_path_ids,
+    stable_data_path_id,
+)
 from ..jobs.rclone_sync import _count_files_up_to, _is_remote, build_job_plan
 from ..jobs.scheduler import next_run_after, rclone_history_key
 from ..overdue import evaluate_pair
@@ -512,6 +516,10 @@ def _build_overview() -> dict[str, Any]:
         if definition.get("enabled", True)
         and str(definition.get("schedule") or "manual").casefold() not in manual_values
     ]
+    scheduled_path_ids = scheduled_data_path_ids(cfg)
+    scheduled_paths = sum(
+        1 for pair in enabled if stable_data_path_id(pair) in scheduled_path_ids
+    )
     destructive = []
     for pair in enabled:
         direction = str(pair.get("direction") or "bisync").casefold()
@@ -689,14 +697,8 @@ def _build_overview() -> dict[str, Any]:
         "pairs": {
             "total": len(pairs),
             "enabled": len(enabled),
-            "scheduled": len(scheduled),
-            "manual": sum(
-                1
-                for definition in definitions
-                if definition.get("enabled", True)
-                and str(definition.get("schedule") or "manual").casefold()
-                in manual_values
-            ),
+            "scheduled": scheduled_paths,
+            "manual": len(enabled) - scheduled_paths,
             "destructive": len(destructive),
             "health": pair_health,
         },
