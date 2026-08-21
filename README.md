@@ -53,6 +53,12 @@ Produktive Aktionen bleiben bewusst visuell von Dry-Runs getrennt. Löschende L�
 
 Tastaturkürzel: `Strg/Cmd + S` speichert offene Konfigurations- bzw. Filteränderungen. `/` fokussiert auf der Pair- oder Jobseite direkt die Suche.
 
+## Native iPhone-App
+
+Unter [`ios/`](ios/) liegt eine dependency-freie SwiftUI-App ab iOS 17. Sie bietet das verdichtete Lagebild, lokale/cloudseitige Kopien mit Dateizahl und Größe, Jobs, Live-Fortschritt und Abbruch, Laufhistorie mit Logs, getrennte Datenwege, Scheduler-Wartungsfenster, Systemdiagnose und PBS-Starts. Seltene oder riskante Aktionen öffnen in nativen Detailansichten und Bestätigungsdialogen.
+
+Das Xcode-Projekt wird mit XcodeGen erzeugt. Ohne eigenen Mac übernimmt Codemagic Build, Signierung und TestFlight-Upload; GitHub Actions kompiliert und testet jede iOS-Änderung mit Xcode 26. Einrichtung, Sicherheitsmodell und die noch bestehende Backend-Grenze für die neue Trennung Datenwege → Jobs → Läufe beschreibt [`ios/README.md`](ios/README.md).
+
 ## Proxmox-Betrieb
 
 Empfohlen ist ein eigener, möglichst unprivilegierter Debian-/Ubuntu-LXC oder eine kleine VM. Die Anwendung benötigt keine Docker- oder Nesting-Funktion. Für typische Installationen genügen 1–2 vCPU und 512 MiB bis 1 GiB RAM; große Remotes, viele parallele Transfers oder `--fast-list` benötigen entsprechend mehr Speicher.
