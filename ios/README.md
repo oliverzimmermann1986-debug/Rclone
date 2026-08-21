@@ -30,7 +30,7 @@ Jeder Tag im Format `ios-v*`, beispielsweise `ios-v1.0.0`, startet danach automa
 
 ## Verbindung
 
-Die Serveradresse muss direkt auf die rclone-sync-Webanwendung zeigen, zum Beispiel `https://backup.example.de`. HTTPS ist für produktive Installationen vorgesehen. Lokale Netzwerkverbindungen sind erlaubt; unsichere beliebige HTTP-Verbindungen werden durch App Transport Security nicht global freigegeben.
+Die Serveradresse muss direkt auf die rclone-sync-Webanwendung zeigen, zum Beispiel `https://backup.example.de`. Eine lokale IP-Adresse ohne Schema und Port, etwa `192.168.1.97`, wird automatisch als `http://192.168.1.97:8001` verwendet. Explizit angegebene Schemas und Ports bleiben erhalten. HTTPS ist für produktive Installationen vorgesehen. Lokale Netzwerkverbindungen sind erlaubt; unsichere beliebige HTTP-Verbindungen werden durch App Transport Security nicht global freigegeben.
 
 Das Passwort wird nur für den Login übertragen und nicht gespeichert. Serveradresse und Benutzername liegen in `UserDefaults`; die Sitzung bleibt in Apples Cookie-Speicher. Der Privacy-Manifest deklariert diesen ausschließlich app-internen `UserDefaults`-Zugriff mit Apples Grund `CA92.1`; Tracking und Datensammlung sind deaktiviert.
 
