@@ -436,7 +436,7 @@ private struct JobDefinitionRow: View {
                 .foregroundStyle(definition.enabled ? .green : .secondary)
             VStack(alignment: .leading, spacing: 4) {
                 Text(definition.name).font(.headline)
-                Text(definition.schedule == "manual" ? "Nur manuell" : definition.schedule)
+                Text(JobScheduleCodec.summary(definition.schedule))
                     .font(.caption).foregroundStyle(.secondary)
                 Text(pathNames).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
@@ -522,8 +522,13 @@ private struct DataPathEditor: View {
                         Button { browseTarget = .local } label: { Image(systemName: "folder") }
                             .accessibilityLabel("Lokalen Ordner auswählen")
                     }
-                    TextField("Remote oder Zielpfad", text: $remote)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    HStack {
+                        TextField("Remote oder Zielpfad", text: $remote)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        Image(systemName: "folder")
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }
                     Toggle("Aktiv", isOn: $enabled)
                 }
                 Section("Übertragung") {
@@ -656,6 +661,9 @@ private struct JobDefinitionEditor: View {
     @State private var name: String
     @State private var enabled: Bool
     @State private var schedule: String
+    @State private var scheduleMode: JobScheduleMode
+    @State private var scheduleTime: Date
+    @State private var weeklyDay: Int
     @State private var executionMode: String
     @State private var maxParallel: Int
     @State private var retryMinutes: Int
@@ -668,7 +676,12 @@ private struct JobDefinitionEditor: View {
         self.save = save
         _name = State(initialValue: definition?.name ?? "")
         _enabled = State(initialValue: definition?.enabled ?? true)
-        _schedule = State(initialValue: definition?.schedule ?? "manual")
+        let initialSchedule = definition?.schedule ?? "manual"
+        let scheduleSelection = JobScheduleCodec.selection(for: initialSchedule)
+        _schedule = State(initialValue: initialSchedule)
+        _scheduleMode = State(initialValue: scheduleSelection.mode)
+        _scheduleTime = State(initialValue: scheduleSelection.time)
+        _weeklyDay = State(initialValue: scheduleSelection.weeklyDay)
         _executionMode = State(initialValue: definition?.executionMode ?? "sequential")
         _maxParallel = State(initialValue: definition?.maxParallel ?? 2)
         _retryMinutes = State(initialValue: definition?.retryMinutes ?? 60)
@@ -681,10 +694,30 @@ private struct JobDefinitionEditor: View {
                 Section("Job") {
                     TextField("Name", text: $name)
                     Toggle("Aktiv", isOn: $enabled)
-                    TextField("Zeitplan oder manual", text: $schedule)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    Text("Cron: Minute Stunde Tag Monat Wochentag, z. B. 0 3 * * *")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Picker("Rhythmus", selection: $scheduleMode) {
+                        ForEach(JobScheduleMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    if scheduleMode != .manual && scheduleMode != .custom {
+                        DatePicker("Uhrzeit", selection: $scheduleTime, displayedComponents: .hourAndMinute)
+                    }
+                    if scheduleMode == .weekly {
+                        Picker("Wochentag", selection: $weeklyDay) {
+                            ForEach(JobScheduleCodec.weekdays) { weekday in
+                                Text(weekday.label).tag(weekday.value)
+                            }
+                        }
+                    }
+                    if scheduleMode == .custom {
+                        TextField("Cron-Zeitplan", text: $schedule)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        Text("Minute Stunde Tag Monat Wochentag, z. B. 0 3 * * *")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text(JobScheduleCodec.summary(schedule))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Section("Datenwege in Reihenfolge") {
                     if selectedPathIDs.isEmpty {
@@ -738,6 +771,9 @@ private struct JobDefinitionEditor: View {
                 }
             }
         }
+        .onChange(of: scheduleMode) { _, _ in rebuildSchedule() }
+        .onChange(of: scheduleTime) { _, _ in rebuildSchedule() }
+        .onChange(of: weeklyDay) { _, _ in rebuildSchedule() }
     }
 
     private var validationMessage: String? {
@@ -758,6 +794,15 @@ private struct JobDefinitionEditor: View {
         paths.first { $0.id == id }?.name ?? "Unbekannter Datenweg"
     }
 
+    private func rebuildSchedule() {
+        guard scheduleMode != .custom else { return }
+        schedule = JobScheduleCodec.cron(
+            mode: scheduleMode,
+            time: scheduleTime,
+            weeklyDay: weeklyDay
+        )
+    }
+
     private func commit() {
         save(JobDefinition(
             id: original?.id ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
@@ -770,6 +815,88 @@ private struct JobDefinitionEditor: View {
             retryMinutes: retryMinutes
         ))
         dismiss()
+    }
+}
+
+private enum JobScheduleMode: String, CaseIterable, Identifiable {
+    case manual, daily, weekdays, weekly, custom
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .manual: "Manuell"
+        case .daily: "Täglich"
+        case .weekdays: "Werktags"
+        case .weekly: "Wöchentlich"
+        case .custom: "Eigener Zeitplan"
+        }
+    }
+}
+
+private struct JobWeekday: Identifiable {
+    let value: Int
+    let label: String
+    var id: Int { value }
+}
+
+private enum JobScheduleCodec {
+    static let weekdays = [
+        JobWeekday(value: 1, label: "Montag"), JobWeekday(value: 2, label: "Dienstag"),
+        JobWeekday(value: 3, label: "Mittwoch"), JobWeekday(value: 4, label: "Donnerstag"),
+        JobWeekday(value: 5, label: "Freitag"), JobWeekday(value: 6, label: "Samstag"),
+        JobWeekday(value: 0, label: "Sonntag")
+    ]
+
+    static func selection(for schedule: String) -> (mode: JobScheduleMode, time: Date, weeklyDay: Int) {
+        let clean = schedule.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let fallback = Calendar.current.date(from: DateComponents(hour: 3, minute: 0)) ?? Date()
+        guard !["", "manual", "off", "disabled", "none"].contains(clean) else {
+            return (.manual, fallback, 1)
+        }
+        let fields = clean.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard fields.count == 5,
+              let minute = Int(fields[0]), (0...59).contains(minute),
+              let hour = Int(fields[1]), (0...23).contains(hour),
+              fields[2] == "*", fields[3] == "*"
+        else { return (.custom, fallback, 1) }
+        let time = Calendar.current.date(from: DateComponents(hour: hour, minute: minute)) ?? fallback
+        if fields[4] == "*" { return (.daily, time, 1) }
+        if fields[4] == "1-5" { return (.weekdays, time, 1) }
+        if let day = Int(fields[4]), (0...6).contains(day) { return (.weekly, time, day) }
+        return (.custom, time, 1)
+    }
+
+    static func cron(mode: JobScheduleMode, time: Date, weeklyDay: Int) -> String {
+        guard mode != .manual else { return "manual" }
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: time)
+        let minute = parts.minute ?? 0
+        let hour = parts.hour ?? 3
+        switch mode {
+        case .manual: return "manual"
+        case .daily: return "\(minute) \(hour) * * *"
+        case .weekdays: return "\(minute) \(hour) * * 1-5"
+        case .weekly: return "\(minute) \(hour) * * \(min(max(weeklyDay, 0), 6))"
+        case .custom: return ""
+        }
+    }
+
+    static func summary(_ schedule: String) -> String {
+        let selection = selection(for: schedule)
+        guard selection.mode != .manual else { return "Nur bei manuellem Start" }
+        guard selection.mode != .custom else { return schedule }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "de_DE")
+        formatter.dateFormat = "HH:mm"
+        let time = formatter.string(from: selection.time)
+        switch selection.mode {
+        case .daily: return "Täglich um \(time) Uhr"
+        case .weekdays: return "Montag bis Freitag um \(time) Uhr"
+        case .weekly:
+            let day = weekdays.first { $0.value == selection.weeklyDay }?.label ?? "Wöchentlich"
+            return "\(day) um \(time) Uhr"
+        case .manual: return "Nur bei manuellem Start"
+        case .custom: return schedule
+        }
     }
 }
 

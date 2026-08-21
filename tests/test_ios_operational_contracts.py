@@ -66,3 +66,25 @@ def test_operations_hub_is_always_reachable_once_and_filter_dirty_state_is_deriv
     assert system.count("NavigationLink { OperationsHubView() }") == 1
     assert "private var isDirty: Bool { filter?.content != content }" in operations
     assert ".onChange(of: content) { _, _ in isDirty = true }" not in operations
+
+
+def test_legacy_jobs_feedback_and_native_push_contracts_are_wired():
+    models = _swift("Core/Models.swift")
+    config = _swift("Views/ConfigurationViews.swift")
+    dashboard = _swift("Views/DashboardView.swift")
+    api = _swift("Core/APIClient.swift")
+    app = _swift("RcloneMobileApp.swift")
+    push = _swift("Core/PushNotifications.swift")
+
+    assert 'if values.contains(key("jobs"))' in models
+    assert 'stableUUID5("rclone-job\\0' in models
+    assert 'Picker("Rhythmus"' in config
+    assert 'DatePicker("Uhrzeit"' in config
+    assert (
+        'TextField("Remote oder Zielpfad"' in config
+        and 'Image(systemName: "folder")' in config
+    )
+    assert "ConfiguredCopyListRow" in dashboard
+    assert '"/api/push/devices"' in api
+    assert "registerForRemoteNotifications" in push
+    assert "pushDeviceTokenReady" in app

@@ -219,6 +219,17 @@ notifications:
   timeout_seconds: 10
   max_parallel: 4
   webhooks: []
+  # Native iPhone-Pushs bei Fehlern. AuthKey_XXXXXXXXXX.p8 mit Modus 0600
+  # innerhalb von paths.data_dir ablegen. Team-ID und Key-ID stammen aus dem
+  # Apple Developer Portal; der Schlüssel selbst gehört nie ins Git-Repository.
+  apns:
+    enabled: false
+    team_id: ""
+    key_id: ""
+    key_file: /opt/rclone-sync/data/AuthKey_APNS.p8
+    topic: de.oliverzimmermann.rclonesync
+    timeout_seconds: 10
+    events: [sync_error, mount_check_failed, pair_overdue, restore_test_error]
   # Beispiel (URL wird im Browser nach dem Speichern maskiert):
   # - id: webhook_prod_01
   #   enabled: true
