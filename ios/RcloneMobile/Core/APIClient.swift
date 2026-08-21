@@ -42,11 +42,13 @@ final class APIClient {
         configuration.httpCookieStorage = cookieStorage
         configuration.httpShouldSetCookies = true
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        // A login screen must never wait indefinitely for a LAN route. If the
-        // server is offline, fail quickly and let the user correct the address.
-        configuration.waitsForConnectivity = false
-        configuration.timeoutIntervalForRequest = 8
-        configuration.timeoutIntervalForResource = 12
+        // Local-network privacy can briefly leave a request without a usable
+        // route while iOS presents its permission dialog. Keep the request alive
+        // long enough to continue after approval, but retain a bounded resource
+        // timeout and the login screen's explicit cancel action.
+        configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
         self.session = session ?? URLSession(configuration: configuration)
         self.decoder = JSONDecoder()
     }
@@ -63,11 +65,8 @@ final class APIClient {
         guard var components = URLComponents(string: value),
               let scheme = components.scheme?.lowercased(),
               ["http", "https"].contains(scheme),
-              let host = components.host else {
+              components.host != nil else {
             throw APIError.invalidServer
-        }
-        if scheme == "http", isLocalHost(host), components.port == nil {
-            components.port = 8001
         }
         components.path = ""
         components.query = nil

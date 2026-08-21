@@ -90,7 +90,7 @@ struct LoginView: View {
         VStack(spacing: 0) {
             LoginField(
                 title: "Server",
-                placeholder: "192.168.1.97 oder backup.example.de",
+                placeholder: "192.168.1.67 oder backup.example.de",
                 symbol: "server.rack",
                 text: $server,
                 contentType: .URL,
@@ -101,7 +101,7 @@ struct LoginView: View {
             .submitLabel(.next)
             .onSubmit { focusedField = .username }
 
-            Text("Lokale IP-Adressen verwenden automatisch HTTP und Port 8001.")
+            Text("Lokale IP-Adressen verwenden automatisch HTTP. Einen abweichenden Port kannst du direkt anhängen.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 16)

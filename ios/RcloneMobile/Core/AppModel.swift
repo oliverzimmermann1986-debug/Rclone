@@ -230,11 +230,13 @@ final class AppModel: ObservableObject {
         if let urlError = error as? URLError {
             switch urlError.code {
             case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
-                return "Server nicht erreichbar. Lokale Installationen verwenden normalerweise http://IP-ADRESSE:8001. Prüfe außerdem die lokale Netzwerkfreigabe in den iPhone-Einstellungen."
+                return "Server nicht erreichbar. Prüfe die vollständige Adresse und unter Einstellungen → Datenschutz & Sicherheit → Lokales Netzwerk die Freigabe für Rclone Sync."
             case .notConnectedToInternet, .networkConnectionLost:
-                return "Keine Netzwerkverbindung. Prüfe WLAN und die lokale Netzwerkfreigabe für Rclone Sync."
+                return "Das lokale Netzwerk ist nicht verfügbar. Prüfe WLAN und erlaube Rclone Sync unter Einstellungen → Datenschutz & Sicherheit → Lokales Netzwerk."
             case .timedOut:
-                return "Keine Antwort innerhalb von 12 Sekunden. Prüfe Serveradresse, Port 8001, WLAN und ob der Server im Netzwerk freigegeben ist."
+                return "Der Server hat nicht innerhalb von 30 Sekunden geantwortet. Prüfe Adresse, WLAN und die lokale Netzwerkfreigabe für Rclone Sync."
+            case .appTransportSecurityRequiresSecureConnection:
+                return "iOS blockiert diese HTTP-Adresse. Verwende eine lokale IP-Adresse oder eine HTTPS-Adresse."
             case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot:
                 return "Die sichere Verbindung konnte nicht geprüft werden. Kontrolliere HTTPS-Adresse und Zertifikat."
             default:
