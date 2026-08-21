@@ -226,7 +226,7 @@ struct StoragePair: Decodable, Identifiable {
     let target: String
     let localDisk: LocalDisk?
     let lastSync: Double?
-    let lastTransferred: Int64?
+    let lastTransferred: String?
     let sourceSize: PathSize?
     let targetSize: PathSize?
 
