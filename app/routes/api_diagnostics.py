@@ -22,8 +22,9 @@ from ..config_store import get_config
 from ..config_validation import ConfigValidationError, validate_config
 from ..copies import build_matrix as build_copy_matrix
 from ..db import get_db
+from ..job_definitions import effective_job_definitions
 from ..jobs.rclone_sync import _count_files_up_to, _is_remote, build_job_plan
-from ..jobs.scheduler import DISABLED_VALUES, next_run_after, rclone_history_key
+from ..jobs.scheduler import next_run_after, rclone_history_key
 from ..overdue import evaluate_pair
 from ..rclone_args import rclone_subprocess_env
 from ..scheduler_control import scheduler_state
@@ -323,9 +324,11 @@ def doctor() -> dict[str, Any]:
         )
 
     names: dict[str, int] = {}
-    default_schedule = str(backup.get("default_schedule") or "").strip()
-    timezone_name = str(backup.get("timezone") or "Europe/Berlin")
-    now = time.time()
+    definitions = effective_job_definitions(cfg)
+    assignments: dict[str, list[dict[str, Any]]] = {}
+    for definition in definitions:
+        for path_id in definition.get("data_path_ids") or []:
+            assignments.setdefault(str(path_id), []).append(definition)
     for pair in backup.get("pairs") or []:
         name = str(pair.get("name") or "<ohne Name>")
         names[name] = names.get(name, 0) + 1
@@ -343,22 +346,15 @@ def doctor() -> dict[str, Any]:
                 _err("remote", f"Remote '{remote_name}' ist nicht konfiguriert")
             )
 
-        schedule = str(pair.get("schedule") or "").strip() or default_schedule
-        if not schedule or schedule.lower() in DISABLED_VALUES:
-            pair_result["schedule"] = {"enabled": False, "message": "manuell/off"}
-        elif len(schedule.split()) == 5 and croniter.is_valid(schedule):
-            pair_result["schedule"] = {
-                "enabled": True,
-                "expr": schedule,
-                "timezone": timezone_name,
-                "next_run": next_run_after(
-                    schedule, after=now, timezone_name=timezone_name
-                ),
+        pair_result["jobs"] = [
+            {
+                "id": definition.get("id"),
+                "name": definition.get("name"),
+                "enabled": definition.get("enabled", True),
+                "schedule": definition.get("schedule", "manual"),
             }
-        else:
-            pair_result["checks"].append(
-                _err("schedule", f"Ungültige Cron-Expression: {schedule}")
-            )
+            for definition in assignments.get(str(pair.get("id") or ""), [])
+        ]
 
         local = str(pair.get("local") or "")
         if local and not _is_remote(local):
@@ -465,6 +461,7 @@ def doctor() -> dict[str, Any]:
         "level": "error" if has_error else ("warn" if has_warning else "ok"),
         "checks": checks,
         "pairs": pair_checks,
+        "job_definitions": definitions,
         "generated_at": time.time(),
     }
 
@@ -507,14 +504,16 @@ def _build_overview() -> dict[str, Any]:
     paths = cfg.get("paths") or {}
     pairs = [p for p in (backup.get("pairs") or []) if isinstance(p, dict)]
     enabled = [p for p in pairs if p.get("enabled", True)]
-    default_schedule = str(backup.get("default_schedule") or "").strip()
+    definitions = effective_job_definitions(cfg)
     manual_values = {"", "manual", "off", "disabled", "none"}
-    scheduled = []
+    scheduled = [
+        definition
+        for definition in definitions
+        if definition.get("enabled", True)
+        and str(definition.get("schedule") or "manual").casefold() not in manual_values
+    ]
     destructive = []
     for pair in enabled:
-        schedule = str(pair.get("schedule") or "").strip() or default_schedule
-        if schedule.casefold() not in manual_values:
-            scheduled.append(pair)
         direction = str(pair.get("direction") or "bisync").casefold()
         mode = str(pair.get("mode") or "bisync").casefold()
         if direction == "bisync" or mode == "sync":
@@ -543,21 +542,33 @@ def _build_overview() -> dict[str, Any]:
         history = histories.get(history_key) or {}
         latest = history.get("last_result")
         latest_success = history.get("last_success")
-        schedule = str(pair.get("schedule") or "").strip() or default_schedule
-        next_run = None
-        if (
-            schedule.casefold() not in manual_values
-            and len(schedule.split()) == 5
-            and croniter.is_valid(schedule)
-        ):
-            try:
-                next_run = next_run_after(
-                    schedule,
-                    after=now,
-                    timezone_name=str(backup.get("timezone") or "Europe/Berlin"),
-                )
-            except Exception:
-                next_run = None
+        assigned = [
+            definition
+            for definition in definitions
+            if str(pair.get("id") or "")
+            in {str(value) for value in definition.get("data_path_ids") or []}
+        ]
+        next_runs = []
+        for definition in assigned:
+            schedule = str(definition.get("schedule") or "manual")
+            if (
+                definition.get("enabled", True)
+                and schedule.casefold() not in manual_values
+                and len(schedule.split()) == 5
+                and croniter.is_valid(schedule)
+            ):
+                try:
+                    next_runs.append(
+                        next_run_after(
+                            schedule,
+                            after=now,
+                            timezone_name=str(
+                                backup.get("timezone") or "Europe/Berlin"
+                            ),
+                        )
+                    )
+                except Exception:
+                    pass
         last_success_at = (
             float(latest_success.get("ended_at"))
             if latest_success and latest_success.get("ended_at")
@@ -569,8 +580,15 @@ def _build_overview() -> dict[str, Any]:
                 "history_key": history_key,
                 "direction": pair.get("direction", "bisync"),
                 "mode": pair.get("mode", "bisync"),
-                "schedule": schedule,
-                "next_run": next_run,
+                "jobs": [
+                    {
+                        "id": item.get("id"),
+                        "name": item.get("name"),
+                        "schedule": item.get("schedule", "manual"),
+                    }
+                    for item in assigned
+                ],
+                "next_run": min(next_runs) if next_runs else None,
                 "last_status": latest.get("status") if latest else None,
                 "last_run": latest.get("ended_at") if latest else None,
                 "job_id": latest.get("job_id") if latest else None,
@@ -672,11 +690,20 @@ def _build_overview() -> dict[str, Any]:
             "total": len(pairs),
             "enabled": len(enabled),
             "scheduled": len(scheduled),
-            "manual": len(enabled) - len(scheduled),
+            "manual": sum(
+                1
+                for definition in definitions
+                if definition.get("enabled", True)
+                and str(definition.get("schedule") or "manual").casefold()
+                in manual_values
+            ),
             "destructive": len(destructive),
             "health": pair_health,
         },
         "jobs": {
+            "definitions": definitions,
+            "total_definitions": len(definitions),
+            "scheduled_definitions": len(scheduled),
             "last": last_job,
             "last_success": last_success,
             "last_error": last_error,

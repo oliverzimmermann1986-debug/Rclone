@@ -17,10 +17,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from ..config_store import get_config
 from .rclone_sync import (
+    _SnapshotConfig,
     _run_rclone_command,
     _safe_name,
     command_to_string,
@@ -259,6 +260,7 @@ def run_pbs_backup(
     *,
     trigger: str = "web",
     reset_cancel_state: bool = True,
+    config_snapshot: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Führt PBS-Backups für alle (oder gefilterte) Targets aus.
 
@@ -266,7 +268,11 @@ def run_pbs_backup(
     Läufe als pair_runs (mit Prefix "pbs:") persistiert und der Scheduler
     last_success/Retry darauf aufbauen kann.
     """
-    cfg = get_config()
+    cfg = (
+        _SnapshotConfig(dict(config_snapshot))
+        if config_snapshot is not None
+        else get_config()
+    )
     settings = pbs_settings(cfg)
     summary: dict[str, Any] = {
         "ok": True,

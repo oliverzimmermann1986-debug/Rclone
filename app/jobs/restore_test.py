@@ -32,6 +32,7 @@ from ..rclone_args import rclone_subprocess_env
 from ..utils import bounded_int as _bounded_int
 from .rclone_sync import (
     DEFAULT_CANCEL_SCOPE,
+    _SnapshotConfig,
     _filter_args,
     _rclone_cache_args,
     _register_proc,
@@ -606,9 +607,14 @@ def run_restore_test(
     trigger: str = "manual",
     seed: Optional[int] = None,
     reset_cancel_state: bool = True,
+    config_snapshot: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Drill über alle ausgewählten Pairs. Rückgabe im Job-Summary-Format."""
-    cfg = get_config()
+    cfg = (
+        _SnapshotConfig(dict(config_snapshot))
+        if config_snapshot is not None
+        else get_config()
+    )
     settings = restore_test_settings(cfg)
     if reset_cancel_state:
         reset_cancel(DEFAULT_CANCEL_SCOPE)

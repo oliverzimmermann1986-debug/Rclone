@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -15,7 +16,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from ..config_store import get_config
 from ..rclone_args import (
@@ -1244,8 +1245,11 @@ def _selected_pairs(
 ) -> list[dict[str, Any]]:
     selected = [pair for pair in pairs if pair.get("enabled", True)]
     if pairs_filter:
-        wanted = {str(name).strip() for name in pairs_filter if str(name).strip()}
-        selected = [pair for pair in selected if pair.get("name") in wanted]
+        ordered_names = [
+            str(name).strip() for name in pairs_filter if str(name).strip()
+        ]
+        indexed = {str(pair.get("name") or ""): pair for pair in selected}
+        selected = [indexed[name] for name in ordered_names if name in indexed]
     return selected
 
 
@@ -1267,11 +1271,27 @@ def run_job(
     job_id: int | None = None,
     defer_runtime_finish: bool = False,
     reset_cancel_state: bool = True,
+    execution_mode: str | None = None,
+    max_parallel_override: int | None = None,
+    definition_id: str | None = None,
+    definition_name: str | None = None,
+    config_revision: str | None = None,
+    scheduled_slot: str | None = None,
+    config_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     trigger = str(trigger or "manual").strip().lower()[:32] or "manual"
     cfg = get_config()
-    config_snapshot = cfg.snapshot()
-    backup = config_snapshot.get("backup") or {}
+    snapshot_with_revision = getattr(cfg, "snapshot_with_revision", None)
+    if config_snapshot is not None:
+        effective_snapshot = copy.deepcopy(dict(config_snapshot))
+        effective_revision = str(config_revision or "")
+    elif callable(snapshot_with_revision):
+        effective_snapshot, effective_revision = snapshot_with_revision()
+    else:
+        effective_snapshot = cfg.snapshot()
+        effective_revision = str(config_revision or "")
+    effective_revision = str(config_revision or effective_revision or "")
+    backup = effective_snapshot.get("backup") or {}
     if not backup.get("enabled", True):
         return {"enabled": False, "ok": True}
 
@@ -1304,7 +1324,12 @@ def run_job(
         allow_unsafe=bool(backup.get("allow_unsafe_rclone_args", False)),
     )
     log_dir = (
-        Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs")) / "rclone"
+        Path(
+            (effective_snapshot.get("paths") or {}).get(
+                "logs_dir", "/opt/rclone-sync/logs"
+            )
+        )
+        / "rclone"
     )
     log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
@@ -1320,6 +1345,13 @@ def run_job(
     max_parallel = int(
         _bounded_number(backup.get("max_parallel", 2), default=2, minimum=1, maximum=16)
     )
+    normalized_execution_mode = str(execution_mode or "parallel").casefold()
+    if max_parallel_override is not None:
+        max_parallel = int(
+            _bounded_number(max_parallel_override, default=1, minimum=1, maximum=16)
+        )
+    if normalized_execution_mode == "sequential":
+        max_parallel = 1
     max_parallel = min(max_parallel, len(pairs))
 
     if reset_cancel_state:
@@ -1386,7 +1418,7 @@ def run_job(
                         dry_run,
                         timeout_sec,
                         run_id,
-                        config_snapshot,
+                        effective_snapshot,
                     )
                     running[future] = pair
 
@@ -1436,6 +1468,12 @@ def run_job(
         "warnings": warnings,
         "run_id": run_id,
         "trigger": trigger,
+        "definition_id": str(definition_id or "") or None,
+        "definition_name": str(definition_name or "") or None,
+        "config_revision": effective_revision or None,
+        "scheduled_slot": str(scheduled_slot or "") or None,
+        "execution_mode": normalized_execution_mode,
+        "max_parallel": max_parallel,
     }
 
     if not defer_runtime_finish:
@@ -1471,10 +1509,18 @@ def run_job(
 
 
 def build_job_plan(
-    dry_run: bool = True, pairs_filter: Optional[list[str]] = None
+    dry_run: bool = True,
+    pairs_filter: Optional[list[str]] = None,
+    *,
+    config_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     cfg = get_config()
-    backup = cfg.get("backup", default={}) or {}
+    snapshot = (
+        copy.deepcopy(dict(config_snapshot))
+        if config_snapshot is not None
+        else cfg.snapshot()
+    )
+    backup = snapshot.get("backup") or {}
     pairs = _selected_pairs(backup.get("pairs") or [], pairs_filter)
     base_args = _parse_rclone_args(
         backup.get("rclone_args"),
@@ -1527,8 +1573,16 @@ def run_pair_check(
     one_way: Optional[bool] = None,
     download: bool = False,
     reset_cancel_state: bool = True,
+    config_snapshot: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
-    cfg = get_config()
+    effective_snapshot = (
+        copy.deepcopy(dict(config_snapshot)) if config_snapshot is not None else None
+    )
+    cfg = (
+        _SnapshotConfig(effective_snapshot)
+        if effective_snapshot is not None
+        else get_config()
+    )
     backup = cfg.get("backup", default={}) or {}
     matches = [
         pair for pair in (backup.get("pairs") or []) if pair.get("name") == pair_name
@@ -1648,8 +1702,16 @@ def run_quick(
     max_delete: Optional[int] = None,
     min_local_files: int = 1,
     reset_cancel_state: bool = True,
+    config_snapshot: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
-    cfg = get_config()
+    effective_snapshot = (
+        copy.deepcopy(dict(config_snapshot)) if config_snapshot is not None else None
+    )
+    cfg = (
+        _SnapshotConfig(effective_snapshot)
+        if effective_snapshot is not None
+        else get_config()
+    )
     try:
         min_local_files_i = max(0, int(min_local_files))
     except (TypeError, ValueError):
@@ -1743,7 +1805,12 @@ def run_quick(
         "log_file": str(log_file),
     }
     try:
-        cmd, verb, direction, mode = _build_pair_command(pair, base_args, dry_run)
+        cmd, verb, direction, mode = _build_pair_command(
+            pair,
+            base_args,
+            dry_run,
+            config_snapshot=effective_snapshot,
+        )
         summary.update(
             {
                 "command": command_to_string(cmd),

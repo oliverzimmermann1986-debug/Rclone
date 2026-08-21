@@ -226,3 +226,44 @@ def test_check_and_notify_skips_manual_pair(tmp_path, monkeypatch):
     )
     assert check_and_notify(cfg, db, now=1_000_000.0) == []
     assert recorder.calls == []
+
+
+def test_overdue_schedule_comes_from_job_definitions(tmp_path, monkeypatch):
+    recorder = _patch_notify(monkeypatch)
+    database = Database(tmp_path / "job-schedule.db")
+    pair = {
+        "name": "archiv",
+        "id": "archive-id",
+        "enabled": True,
+        "max_success_age_hours": 1,
+    }
+    config = _Cfg(
+        {
+            "backup": {
+                "pairs": [pair],
+                "jobs": [
+                    {
+                        "id": "a" * 32,
+                        "name": "Nur manuell",
+                        "enabled": True,
+                        "data_path_ids": [pair["id"]],
+                        "schedule": "manual",
+                    }
+                ],
+            }
+        }
+    )
+
+    assert check_and_notify(config, database, now=1_000_000.0) == []
+    assert recorder.calls == []
+
+    config._data["backup"]["jobs"].append(
+        {
+            "id": "b" * 32,
+            "name": "Nachts",
+            "enabled": True,
+            "data_path_ids": [pair["id"]],
+            "schedule": "0 2 * * *",
+        }
+    )
+    assert check_and_notify(config, database, now=1_000_000.0) == ["archiv"]

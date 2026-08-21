@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import csv
 import io
 import json
@@ -23,6 +24,7 @@ from pydantic import BaseModel, Field
 from ..auth import require_auth
 from ..config_store import get_config
 from ..db import JobAlreadyRunningError, get_db
+from ..job_definitions import definition_pairs, effective_job_definitions
 from ..jobs import rclone_sync as rclone_job
 from ..jobs import restore_test
 from ..jobs import runtime_state
@@ -155,6 +157,7 @@ def _run_backup_thread(
     pairs_filter: Optional[list[str]],
     history_keys: dict[str, str],
     scope_lock: HeldFileLock,
+    run_metadata: dict[str, Any],
 ) -> None:
     db = None
     handler: logging.FileHandler | None = None
@@ -179,6 +182,7 @@ def _run_backup_thread(
             job_id=job_id,
             defer_runtime_finish=True,
             reset_cancel_state=False,
+            **run_metadata,
         )
         summary["history_keys"] = history_keys
         status = _finish_status(summary)
@@ -230,6 +234,10 @@ def _reserve_backup_job(
     log_file: Optional[str] = None,
     *,
     attempts: list[dict[str, Any]] | None = None,
+    definition_id: str | None = None,
+    definition_name: str | None = None,
+    scheduled_slot: str | None = None,
+    config_revision: str,
 ) -> tuple[int, HeldFileLock]:
     """Reserviert DB und Prozess-Lock ohne abbrechbares Zwischenfenster."""
 
@@ -255,6 +263,10 @@ def _reserve_backup_job(
             log_file=log_file,
             attempts=attempts,
             exclusive_scope=True,
+            definition_id=definition_id,
+            definition_name=definition_name,
+            config_revision=config_revision,
+            scheduled_slot=scheduled_slot,
         )
         return job_id, scope_lock
     except HTTPException:
@@ -344,11 +356,22 @@ def resume_scheduler_endpoint(user: str = Depends(require_auth)) -> dict[str, An
 
 
 def _queue_backup(
-    *, dry_run: bool, pairs_filter: Optional[list[str]]
+    *,
+    dry_run: bool,
+    pairs_filter: Optional[list[str]],
+    definition: dict[str, Any] | None = None,
+    config_snapshot: dict[str, Any] | None = None,
+    config_revision: str | None = None,
 ) -> dict[str, Any]:
+    if config_snapshot is None:
+        config_snapshot, captured_revision = get_config().snapshot_with_revision()
+        config_revision = captured_revision
+    else:
+        config_snapshot = copy.deepcopy(config_snapshot)
+    config_revision = str(config_revision or "")
     configured_pairs = [
         pair
-        for pair in (get_config().get("backup", "pairs", default=[]) or [])
+        for pair in ((config_snapshot.get("backup") or {}).get("pairs") or [])
         if isinstance(pair, dict)
         and pair.get("enabled", True)
         and (not pairs_filter or str(pair.get("name")) in pairs_filter)
@@ -369,7 +392,25 @@ def _queue_backup(
     ]
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup läuft bereits")
-    job_id, scope_lock = _reserve_backup_job("backup", attempts=attempts)
+    definition_id = str((definition or {}).get("id") or "") or None
+    definition_name = str((definition or {}).get("name") or "") or None
+    job_id, scope_lock = _reserve_backup_job(
+        "backup",
+        attempts=attempts,
+        definition_id=definition_id,
+        definition_name=definition_name,
+        config_revision=config_revision,
+    )
+    run_metadata = {
+        "execution_mode": str((definition or {}).get("execution_mode") or "parallel"),
+        "max_parallel_override": (
+            int((definition or {}).get("max_parallel") or 1) if definition else None
+        ),
+        "definition_id": definition_id,
+        "definition_name": definition_name,
+        "config_revision": config_revision,
+        "config_snapshot": config_snapshot,
+    }
     _audit_best_effort(
         "backup_requested",
         actor="web",
@@ -380,9 +421,23 @@ def _queue_backup(
         job_id=job_id,
         name=f"backup-job-{job_id}",
         scope_lock=scope_lock,
-        args=(job_id, dry_run, pairs_filter, history_keys, scope_lock),
+        args=(
+            job_id,
+            dry_run,
+            pairs_filter,
+            history_keys,
+            scope_lock,
+            run_metadata,
+        ),
     )
-    return {"ok": True, "job_id": job_id, "pairs": pairs_filter}
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "pairs": pairs_filter,
+        "definition_id": definition_id,
+        "definition_name": definition_name,
+        "config_revision": config_revision,
+    }
 
 
 @router.post("/backup/run")
@@ -390,6 +445,73 @@ def run_backup(
     dry_run: bool = Query(False), pairs: Optional[str] = Query(None)
 ) -> dict[str, Any]:
     return _queue_backup(dry_run=dry_run, pairs_filter=_parse_pair_filter(pairs))
+
+
+@router.get("/definitions")
+def list_job_definitions() -> list[dict[str, Any]]:
+    return effective_job_definitions(get_config())
+
+
+def _resolved_definition(
+    snapshot: dict[str, Any], definition_id: str
+) -> tuple[dict[str, Any], list[str]]:
+    definition = next(
+        (
+            item
+            for item in effective_job_definitions(snapshot)
+            if str(item.get("id") or "") == definition_id
+        ),
+        None,
+    )
+    if definition is None:
+        raise HTTPException(404, "Jobdefinition nicht gefunden")
+    if not definition.get("enabled", True):
+        raise HTTPException(409, "Jobdefinition ist deaktiviert")
+    pairs = definition_pairs(snapshot, definition)
+    pair_names = [
+        str(pair.get("name") or "")
+        for pair in pairs
+        if pair.get("enabled", True) and str(pair.get("name") or "")
+    ]
+    if not pair_names:
+        raise HTTPException(409, "Jobdefinition hat keine aktiven Datenwege")
+    return definition, pair_names
+
+
+@router.post("/definitions/{definition_id}/run")
+def run_job_definition(
+    definition_id: str, dry_run: bool = Query(False)
+) -> dict[str, Any]:
+    snapshot, revision = get_config().snapshot_with_revision()
+    definition, pair_names = _resolved_definition(snapshot, definition_id)
+    return _queue_backup(
+        dry_run=dry_run,
+        pairs_filter=pair_names,
+        definition=definition,
+        config_snapshot=snapshot,
+        config_revision=revision,
+    )
+
+
+@router.get("/definitions/{definition_id}/plan")
+def plan_job_definition(
+    definition_id: str, dry_run: bool = Query(True)
+) -> dict[str, Any]:
+    snapshot, revision = get_config().snapshot_with_revision()
+    definition, pair_names = _resolved_definition(snapshot, definition_id)
+    plan = rclone_job.build_job_plan(
+        dry_run=dry_run,
+        pairs_filter=pair_names,
+        config_snapshot=snapshot,
+    )
+    return {
+        **plan,
+        "definition_id": definition.get("id"),
+        "definition_name": definition.get("name"),
+        "config_revision": revision,
+        "execution_mode": definition.get("execution_mode"),
+        "max_parallel": definition.get("max_parallel"),
+    }
 
 
 @router.get("/backup/plan")
@@ -446,7 +568,8 @@ def check_pair(
         raise HTTPException(404, "Pair nicht gefunden")
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup/Check läuft bereits")
-    job_id, scope_lock = _reserve_backup_job("check")
+    config_snapshot, config_revision = get_config().snapshot_with_revision()
+    job_id, scope_lock = _reserve_backup_job("check", config_revision=config_revision)
     _audit_best_effort(
         "check_requested",
         actor="web",
@@ -469,6 +592,7 @@ def check_pair(
                 one_way=one_way,
                 download=download,
                 reset_cancel_state=False,
+                config_snapshot=config_snapshot,
             )
             db.job_finish(job_id, _finish_status(result), result)
         except Exception as exc:
@@ -521,7 +645,10 @@ def start_restore_test(pairs: Optional[str] = Query(None)) -> dict[str, Any]:
         raise HTTPException(404, f"Pair nicht gefunden: {', '.join(unknown)}")
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup, Check oder Drill läuft bereits")
-    job_id, scope_lock = _reserve_backup_job(restore_test.JOB_KIND)
+    config_snapshot, config_revision = get_config().snapshot_with_revision()
+    job_id, scope_lock = _reserve_backup_job(
+        restore_test.JOB_KIND, config_revision=config_revision
+    )
     _audit_best_effort(
         "restore_test_requested",
         actor="web",
@@ -543,6 +670,7 @@ def start_restore_test(pairs: Optional[str] = Query(None)) -> dict[str, Any]:
                 pairs_filter=pairs_filter,
                 trigger="manual",
                 reset_cancel_state=False,
+                config_snapshot=config_snapshot,
             )
             db.job_finish(job_id, _finish_status(result), result)
         except Exception as exc:
@@ -678,17 +806,28 @@ class QuickSyncPayload(BaseModel):
     min_local_files: int = Field(default=1, ge=0, le=1_000_000)
 
 
-def _validate_quick_paths(payload: QuickSyncPayload) -> tuple[str, str]:
+def _validate_quick_paths(
+    payload: QuickSyncPayload, config_snapshot: dict[str, Any] | None = None
+) -> tuple[str, str]:
+    if config_snapshot is None:
+        cfg = get_config()
+        config_snapshot = {
+            "web": {
+                "local_browse_roots": cfg.get(
+                    "web",
+                    "local_browse_roots",
+                    default=["/mnt", "/media", "/srv", "/opt/rclone-sync/data"],
+                )
+            },
+            "backup": cfg.get("backup", default={}) or {},
+        }
     if any(char in payload.remote + payload.local for char in ("\x00", "\n", "\r")):
         raise HTTPException(400, "Pfad enthält ungültige Zeichen")
     if not Path(payload.local).is_absolute():
         raise HTTPException(400, "Lokaler Pfad muss absolut sein")
     roots = parse_browse_roots(
-        get_config().get(
-            "web",
-            "local_browse_roots",
-            default=["/mnt", "/media", "/srv", "/opt/rclone-sync/data"],
-        )
+        ((config_snapshot.get("web") or {}).get("local_browse_roots"))
+        or ["/mnt", "/media", "/srv", "/opt/rclone-sync/data"]
     )
     if not roots:
         raise HTTPException(503, "Keine lokalen Quick-Sync-Wurzeln konfiguriert")
@@ -712,7 +851,7 @@ def _validate_quick_paths(payload: QuickSyncPayload) -> tuple[str, str]:
             or is_relative_to(local_path, remote_path)
         ):
             raise HTTPException(400, "Lokale Quelle und Ziel dürfen nicht überlappen")
-        _finish_quick_validation(payload)
+        _finish_quick_validation(payload, config_snapshot)
         return str(remote_path), str(local_path)
     try:
         result = subprocess.run(
@@ -736,17 +875,21 @@ def _validate_quick_paths(payload: QuickSyncPayload) -> tuple[str, str]:
     if remote_name not in remotes:
         raise HTTPException(403, "Remote ist nicht konfiguriert")
 
-    _finish_quick_validation(payload)
+    _finish_quick_validation(payload, config_snapshot)
     return payload.remote, str(local_path)
 
 
-def _finish_quick_validation(payload: QuickSyncPayload) -> None:
+def _finish_quick_validation(
+    payload: QuickSyncPayload, config_snapshot: dict[str, Any] | None = None
+) -> None:
+    if config_snapshot is None:
+        config_snapshot = {"backup": get_config().get("backup", default={}) or {}}
     if payload.direction == "bisync" and payload.mode != "bisync":
         raise HTTPException(400, "Bei direction=bisync muss mode=bisync sein")
     if payload.direction != "bisync" and payload.mode == "bisync":
         raise HTTPException(400, "Bei pull/push muss mode copy oder sync sein")
     if payload.mode in {"sync", "bisync"} and not payload.dry_run:
-        backup = get_config().get("backup", default={}) or {}
+        backup = config_snapshot.get("backup") or {}
         if backup.get("require_delete_confirmation", True) and not payload.allow_delete:
             raise HTTPException(
                 400,
@@ -764,10 +907,13 @@ def _finish_quick_validation(payload: QuickSyncPayload) -> None:
 
 @router.post("/backup/quick")
 def run_quick_sync(payload: QuickSyncPayload) -> dict[str, Any]:
-    remote_path, local_path = _validate_quick_paths(payload)
+    config_snapshot, config_revision = get_config().snapshot_with_revision()
+    remote_path, local_path = _validate_quick_paths(payload, config_snapshot)
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup läuft bereits")
-    job_id, scope_lock = _reserve_backup_job("quicksync")
+    job_id, scope_lock = _reserve_backup_job(
+        "quicksync", config_revision=config_revision
+    )
     _audit_best_effort(
         "quicksync_requested",
         actor="web",
@@ -800,6 +946,7 @@ def run_quick_sync(payload: QuickSyncPayload) -> dict[str, Any]:
                 max_delete=payload.max_delete,
                 min_local_files=payload.min_local_files,
                 reset_cancel_state=False,
+                config_snapshot=config_snapshot,
             )
             db.job_finish(job_id, _finish_status(result), result)
         except Exception as exc:
@@ -923,6 +1070,10 @@ def export_jobs_csv(
             [
                 "id",
                 "typ",
+                "definition_id",
+                "definition_name",
+                "config_revision",
+                "scheduled_slot",
                 "status",
                 "gestartet",
                 "beendet",
@@ -950,6 +1101,10 @@ def export_jobs_csv(
                     [
                         job.get("id"),
                         job.get("kind"),
+                        job.get("definition_id"),
+                        job.get("definition_name"),
+                        job.get("config_revision"),
+                        job.get("scheduled_slot"),
                         job.get("status"),
                         datetime.fromtimestamp(started).astimezone().isoformat()
                         if started

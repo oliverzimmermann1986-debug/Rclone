@@ -41,6 +41,43 @@ def test_target_scope_groups_by_storage_unit():
     assert target_scope("") == ""
 
 
+def test_scheduled_flag_comes_from_job_definitions(tmp_path):
+    pair = _pair("archiv", "/srv/archiv", "wasabi:archiv")
+    pair.pop("schedule", None)
+    config = _Cfg(
+        {
+            "backup": {
+                "pairs": [pair],
+                "jobs": [
+                    {
+                        "id": "a" * 32,
+                        "name": "Archiv manuell",
+                        "enabled": True,
+                        "data_path_ids": [pair["id"]],
+                        "schedule": "manual",
+                    }
+                ],
+            }
+        }
+    )
+    database = Database(tmp_path / "copies-schedule.db")
+
+    manual = build_matrix(config, database)["sources"][0]["copies"][0]
+    assert manual["scheduled"] is False
+
+    config._data["backup"]["jobs"].append(
+        {
+            "id": "b" * 32,
+            "name": "Archiv nachts",
+            "enabled": True,
+            "data_path_ids": [pair["id"]],
+            "schedule": "0 2 * * *",
+        }
+    )
+    planned = build_matrix(config, database)["sources"][0]["copies"][0]
+    assert planned["scheduled"] is True
+
+
 def test_single_copy_is_an_error(tmp_path):
     db = Database(tmp_path / "app.db")
     matrix = build_matrix(

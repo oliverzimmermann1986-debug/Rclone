@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -42,7 +42,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     started_at REAL NOT NULL,
     ended_at REAL,
     summary_json TEXT,
-    log_file TEXT
+    log_file TEXT,
+    definition_id TEXT,
+    definition_name TEXT,
+    config_revision TEXT,
+    scheduled_slot TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_kind_started ON jobs(kind, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_status_started ON jobs(status, started_at DESC);
@@ -252,6 +256,25 @@ class Database:
                 "ON pair_history_state(pair_name)"
             )
             connection.execute("PRAGMA user_version=3")
+            version = 3
+        if version < 4:
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            for name, sql_type in (
+                ("definition_id", "TEXT"),
+                ("definition_name", "TEXT"),
+                ("config_revision", "TEXT"),
+                ("scheduled_slot", "TEXT"),
+            ):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {sql_type}")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_definition_started "
+                "ON jobs(definition_id, started_at DESC, id DESC)"
+            )
+            connection.execute("PRAGMA user_version=4")
 
     @classmethod
     def _migrate_pair_history_columns(cls, connection: sqlite3.Connection) -> None:
@@ -476,6 +499,10 @@ class Database:
         *,
         attempts: Optional[Iterable[Mapping[str, Any]]] = None,
         exclusive_scope: bool = False,
+        definition_id: Optional[str] = None,
+        definition_name: Optional[str] = None,
+        config_revision: Optional[str] = None,
+        scheduled_slot: Optional[str] = None,
     ) -> int:
         if not kind or len(kind) > 64:
             raise ValueError("Ungültiger Job-Typ")
@@ -496,8 +523,18 @@ class Database:
                         f"{running['kind']} #{running['id']}"
                     )
             cursor = connection.execute(
-                "INSERT INTO jobs (kind, status, started_at, log_file) VALUES (?, 'running', ?, ?)",
-                (kind, started_at, log_file),
+                "INSERT INTO jobs (kind, status, started_at, log_file, "
+                "definition_id, definition_name, config_revision, scheduled_slot) "
+                "VALUES (?, 'running', ?, ?, ?, ?, ?, ?)",
+                (
+                    kind,
+                    started_at,
+                    log_file,
+                    str(definition_id or "").strip() or None,
+                    str(definition_name or "").strip() or None,
+                    str(config_revision or "").strip() or None,
+                    str(scheduled_slot or "").strip() or None,
+                ),
             )
             job_id = int(cursor.lastrowid)
             for attempt in attempts or ():
@@ -858,9 +895,19 @@ class Database:
             )
             clauses.append(
                 "(CAST(id AS TEXT)=? OR LOWER(COALESCE(summary_json, '')) LIKE ? ESCAPE '\\' "
-                "OR LOWER(COALESCE(log_file, '')) LIKE ? ESCAPE '\\')"
+                "OR LOWER(COALESCE(log_file, '')) LIKE ? ESCAPE '\\' "
+                "OR LOWER(COALESCE(definition_id, '')) LIKE ? ESCAPE '\\' "
+                "OR LOWER(COALESCE(definition_name, '')) LIKE ? ESCAPE '\\')"
             )
-            params.extend([needle, f"%{escaped}%", f"%{escaped}%"])
+            params.extend(
+                [
+                    needle,
+                    f"%{escaped}%",
+                    f"%{escaped}%",
+                    f"%{escaped}%",
+                    f"%{escaped}%",
+                ]
+            )
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         params.extend([limit, offset])
         with self.conn() as connection:
@@ -892,9 +939,19 @@ class Database:
             )
             clauses.append(
                 "(CAST(id AS TEXT)=? OR LOWER(COALESCE(summary_json, '')) LIKE ? ESCAPE '\\' "
-                "OR LOWER(COALESCE(log_file, '')) LIKE ? ESCAPE '\\')"
+                "OR LOWER(COALESCE(log_file, '')) LIKE ? ESCAPE '\\' "
+                "OR LOWER(COALESCE(definition_id, '')) LIKE ? ESCAPE '\\' "
+                "OR LOWER(COALESCE(definition_name, '')) LIKE ? ESCAPE '\\')"
             )
-            params.extend([needle, f"%{escaped}%", f"%{escaped}%"])
+            params.extend(
+                [
+                    needle,
+                    f"%{escaped}%",
+                    f"%{escaped}%",
+                    f"%{escaped}%",
+                    f"%{escaped}%",
+                ]
+            )
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self.conn() as connection:
             return int(
@@ -924,6 +981,41 @@ class Database:
             "by_status": {str(row["status"]): int(row["count"]) for row in rows},
             "by_kind": {str(row["kind"]): int(row["count"]) for row in kinds},
         }
+
+    def job_definition_history(
+        self, definitions: Mapping[str, str]
+    ) -> Dict[str, Dict[str, Optional[Dict[str, Any]]]]:
+        """Lädt letzten Versuch und Erfolg pro stabiler Jobdefinitions-ID."""
+
+        ids = [str(value).strip() for value in definitions if str(value).strip()]
+        result: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = {
+            definition_id: {"last_success": None, "last_result": None}
+            for definition_id in ids
+        }
+        if not ids:
+            return result
+        marks = ",".join("?" for _ in ids)
+        with self.conn() as connection:
+            rows = connection.execute(
+                "SELECT * FROM jobs WHERE definition_id IN ("
+                + marks
+                + ") ORDER BY started_at DESC, id DESC",
+                tuple(ids),
+            ).fetchall()
+        for row in rows:
+            item = self._row_to_dict(row)
+            definition_id = str(item.get("definition_id") or "")
+            bucket = result.get(definition_id)
+            if bucket is None:
+                continue
+            summary = item.get("summary")
+            if isinstance(summary, dict):
+                item = {**item, **summary, "summary": summary}
+            if bucket["last_result"] is None:
+                bucket["last_result"] = item
+            if item.get("status") == "ok" and bucket["last_success"] is None:
+                bucket["last_success"] = item
+        return result
 
     def job_running(self, kind: str) -> Optional[Dict[str, Any]]:
         with self.conn() as connection:

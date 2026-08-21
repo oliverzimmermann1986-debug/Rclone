@@ -11,7 +11,7 @@ import time
 from typing import Any, Mapping, Optional
 from urllib.parse import quote
 
-from .overdue import is_scheduled
+from .job_definitions import scheduled_data_path_ids, stable_data_path_id
 
 # Eine einzige Kopie ist kein Backup, sondern eine Verschiebung mit Zeitversatz.
 MIN_RECOMMENDED_COPIES = 2
@@ -56,7 +56,7 @@ def build_matrix(cfg, db, *, now: Optional[float] = None) -> dict[str, Any]:
 
     now_value = float(time.time() if now is None else now)
     backup = cfg.get("backup", default={}) or {}
-    default_schedule = str(backup.get("default_schedule") or "").strip()
+    scheduled_ids = scheduled_data_path_ids(cfg)
 
     pairs = [
         pair
@@ -94,7 +94,7 @@ def build_matrix(cfg, db, *, now: Optional[float] = None) -> dict[str, Any]:
                 "remote": _is_remote(target),
                 "direction": str(pair.get("direction") or "bisync"),
                 "mode": str(pair.get("mode") or ""),
-                "scheduled": is_scheduled(pair, default_schedule),
+                "scheduled": stable_data_path_id(pair) in scheduled_ids,
                 "last_success": last_success,
                 "age_hours": round((now_value - last_success) / 3600.0, 1)
                 if last_success is not None

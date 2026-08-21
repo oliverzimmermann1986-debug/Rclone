@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from croniter import croniter
 
+from .job_definitions import legacy_job_definitions, stable_job_id
 from .rclone_args import UnsafeRcloneArgument, validate_rclone_args
 from .security import (
     DEFAULT_HIDDEN_REMOTE_PATHS,
@@ -50,10 +51,11 @@ _DURATION_RE = re.compile(r"^\d+(?:\.\d+)?(?:ms|s|m|h|d|w)?$")
 _REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,127}:.*$")
 _WEBHOOK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _MAX_PAIRS = 256
+_MAX_JOBS = 256
 _MAX_PBS_TARGETS = 128
 _MAX_WEBHOOKS = 64
 _MAX_PBS_PATHS = 64
-CONFIG_SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION = 3
 _NOTIFICATION_EVENTS = {
     "sync_started",
     "sync_ok",
@@ -308,6 +310,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         errors.append("backup muss ein Mapping sein")
         backup = cfg["backup"] = {}
     backup["enabled"] = _boolean(backup.get("enabled", True), default=True)
+    jobs_were_explicit = "jobs" in backup
     backup["max_parallel"] = int(
         _number(
             backup.get("max_parallel", 2),
@@ -516,6 +519,9 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     elif len(pairs) > _MAX_PAIRS:
         errors.append(f"backup.pairs darf höchstens {_MAX_PAIRS} Einträge enthalten")
         pairs = pairs[:_MAX_PAIRS]
+    # Vor dem Entfernen der Legacy-Zeitpläne ableiten. Der Helper nutzt dieselbe
+    # deterministische Datenweg-ID wie die Normalisierung weiter unten.
+    migrated_legacy_jobs = legacy_job_definitions({**backup, "pairs": pairs})
     normalized_pairs: list[dict[str, Any]] = []
     seen_names: set[str] = set()
     seen_pair_ids: set[str] = set()
@@ -664,7 +670,8 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             and not _valid_cron(schedule)
         ):
             errors.append(f"{label}.schedule ist ungültig: {schedule}")
-        pair["schedule"] = schedule
+        # Zeitplanung gehört ausschließlich in backup.jobs.
+        pair.pop("schedule", None)
         pair["min_local_files"] = int(
             _number(
                 pair.get("min_local_files", 1),
@@ -886,6 +893,97 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         normalized_pairs.append(pair)
 
     backup["pairs"] = normalized_pairs
+
+    raw_jobs = backup.get("jobs") if jobs_were_explicit else migrated_legacy_jobs
+    if not isinstance(raw_jobs, list):
+        errors.append("backup.jobs muss eine Liste sein")
+        raw_jobs = []
+    elif len(raw_jobs) > _MAX_JOBS:
+        errors.append(f"backup.jobs darf höchstens {_MAX_JOBS} Einträge enthalten")
+        raw_jobs = raw_jobs[:_MAX_JOBS]
+
+    normalized_jobs: list[dict[str, Any]] = []
+    seen_job_ids: set[str] = set()
+    seen_job_names: set[str] = set()
+    known_path_ids = {str(pair.get("id") or "") for pair in normalized_pairs}
+    for index, raw_job in enumerate(raw_jobs):
+        label = f"backup.jobs[{index}]"
+        if not isinstance(raw_job, dict):
+            errors.append(f"{label} muss ein Mapping sein")
+            continue
+        job = copy.deepcopy(raw_job)
+        name = str(job.get("name") or "").strip()
+        if not _NAME_RE.match(name):
+            errors.append(f"{label}.name fehlt oder ist ungültig")
+        folded_name = name.casefold()
+        if folded_name in seen_job_names:
+            errors.append(f"Doppelter Job-Name: {name}")
+        seen_job_names.add(folded_name)
+
+        raw_path_ids = job.get("data_path_ids")
+        if not isinstance(raw_path_ids, list):
+            errors.append(f"{label}.data_path_ids muss eine Liste sein")
+            raw_path_ids = []
+        path_ids = [str(value or "").strip().lower() for value in raw_path_ids]
+        if not path_ids:
+            errors.append(f"{label} muss mindestens einen Datenweg referenzieren")
+        if len(set(path_ids)) != len(path_ids):
+            errors.append(f"{label}.data_path_ids enthält Duplikate")
+        unknown = [path_id for path_id in path_ids if path_id not in known_path_ids]
+        if unknown:
+            errors.append(
+                f"{label}.data_path_ids enthält unbekannte IDs: {', '.join(unknown)}"
+            )
+
+        job_id = str(job.get("id") or "").strip().lower()
+        if not job_id:
+            job_id = stable_job_id(name, path_ids)
+        elif not _STABLE_ID_RE.fullmatch(job_id):
+            errors.append(f"{label}.id ist ungültig")
+        if job_id in seen_job_ids:
+            errors.append(f"{label}.id ist doppelt")
+        seen_job_ids.add(job_id)
+
+        schedule = str(job.get("schedule") or "manual").strip() or "manual"
+        if schedule.casefold() not in _DISABLED_SCHEDULES and not _valid_cron(schedule):
+            errors.append(f"{label}.schedule ist ungültig: {schedule}")
+        execution_mode = str(job.get("execution_mode") or "sequential").casefold()
+        if execution_mode not in {"sequential", "parallel"}:
+            errors.append(f"{label}.execution_mode ist ungültig")
+            execution_mode = "sequential"
+        max_parallel = int(
+            _number(
+                job.get("max_parallel", 1),
+                default=1,
+                minimum=1,
+                maximum=16,
+                integer=True,
+            )
+        )
+        if execution_mode == "sequential":
+            max_parallel = 1
+        retry_minutes = int(
+            _number(
+                job.get("retry_minutes", backup["scheduler_retry_minutes"]),
+                default=backup["scheduler_retry_minutes"],
+                minimum=1,
+                maximum=10080,
+                integer=True,
+            )
+        )
+        normalized_jobs.append(
+            {
+                "id": job_id,
+                "name": name,
+                "enabled": _boolean(job.get("enabled", True), default=True),
+                "data_path_ids": path_ids,
+                "schedule": schedule,
+                "execution_mode": execution_mode,
+                "max_parallel": max_parallel,
+                "retry_minutes": retry_minutes,
+            }
+        )
+    backup["jobs"] = normalized_jobs
 
     for i, first in enumerate(normalized_pairs):
         for second in normalized_pairs[i + 1 :]:
