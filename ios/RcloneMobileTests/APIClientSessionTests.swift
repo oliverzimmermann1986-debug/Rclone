@@ -32,6 +32,64 @@ final class APIClientSessionTests: XCTestCase {
         }
     }
 
+    func testLoginUsesBoundedRequestsWithoutBlockingOnConfigRefresh() async throws {
+        let baseURL = try XCTUnwrap(URL(string: "http://192.168.1.67:8001"))
+        let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
+            forGroupContainerIdentifier: "APIClientLoginTimeoutTests-\(UUID().uuidString)"
+        )
+        RecordingLoginURLProtocol.reset(cookieStorage: cookieStorage)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RecordingLoginURLProtocol.self]
+        configuration.httpCookieStorage = cookieStorage
+        configuration.httpShouldSetCookies = true
+        let loginSession = URLSession(configuration: configuration)
+        let client = APIClient(
+            baseURL: baseURL,
+            session: loginSession,
+            loginSession: loginSession,
+            cookieStorage: cookieStorage
+        )
+
+        try await client.login(username: "admin", password: "secret")
+
+        XCTAssertEqual(
+            RecordingLoginURLProtocol.requests,
+            ["GET /api/auth/login", "POST /api/auth/login"]
+        )
+        XCTAssertEqual(RecordingLoginURLProtocol.timeouts.count, 2)
+        XCTAssertTrue(RecordingLoginURLProtocol.timeouts.allSatisfy { $0 <= 8.1 })
+    }
+
+    func testLoginFallsBackToCSRFProtectedWebContractOnOlderServer() async throws {
+        let baseURL = try XCTUnwrap(URL(string: "http://192.168.1.67"))
+        let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
+            forGroupContainerIdentifier: "APIClientLegacyLoginTests-\(UUID().uuidString)"
+        )
+        LegacyLoginURLProtocol.reset(cookieStorage: cookieStorage)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LegacyLoginURLProtocol.self]
+        configuration.httpCookieStorage = cookieStorage
+        configuration.httpShouldSetCookies = true
+        let loginSession = URLSession(configuration: configuration)
+        let client = APIClient(
+            baseURL: baseURL,
+            session: loginSession,
+            loginSession: loginSession,
+            cookieStorage: cookieStorage
+        )
+
+        try await client.login(username: "admin", password: "sicher & geheim")
+
+        XCTAssertEqual(
+            LegacyLoginURLProtocol.requests,
+            ["GET /api/auth/login", "GET /login", "POST /login"]
+        )
+        XCTAssertEqual(LegacyLoginURLProtocol.timeouts.count, 3)
+        XCTAssertTrue(LegacyLoginURLProtocol.timeouts.allSatisfy { $0 <= 8.1 })
+        XCTAssertTrue(LegacyLoginURLProtocol.postBody?.contains("login_csrf=legacy-login-csrf-token") == true)
+        XCTAssertTrue(LegacyLoginURLProtocol.postBody?.contains("password=sicher%20%26%20geheim") == true)
+    }
+
     func testLogoutClearsOnlyServerCookiesWhenRequestFails() async throws {
         let baseURL = try XCTUnwrap(URL(string: "https://backup.example.de"))
         let unrelatedURL = try XCTUnwrap(URL(string: "https://notbackup.example.de"))
@@ -226,6 +284,132 @@ final class APIClientSessionTests: XCTestCase {
         XCTAssertEqual(result.pairs.count, 0)
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(StorageTimeoutURLProtocol.timeout), 60)
     }
+}
+
+private final class LegacyLoginURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var requests: [String] = []
+    nonisolated(unsafe) static var timeouts: [TimeInterval] = []
+    nonisolated(unsafe) static var postBody: String?
+    nonisolated(unsafe) static var cookieStorage: HTTPCookieStorage?
+
+    static func reset(cookieStorage: HTTPCookieStorage) {
+        requests = []
+        timeouts = []
+        postBody = nil
+        self.cookieStorage = cookieStorage
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let method = request.httpMethod ?? "GET"
+        let path = request.url?.path ?? ""
+        Self.requests.append("\(method) \(path)")
+        Self.timeouts.append(request.timeoutInterval)
+
+        let status: Int
+        let type: String
+        let body: Data
+        if path == "/api/auth/login" {
+            status = 404
+            type = "application/json"
+            body = Data(#"{"detail":"Not Found"}"#.utf8)
+        } else if method == "GET" {
+            status = 200
+            type = "text/html"
+            body = Data(
+                #"<form><input type="hidden" name="login_csrf" value="legacy-login-csrf-token"></form>"#.utf8
+            )
+        } else {
+            status = 200
+            type = "text/html"
+            Self.postBody = Self.bodyData(from: request).flatMap { String(data: $0, encoding: .utf8) }
+            if let cookie = HTTPCookie(properties: [
+                .domain: request.url?.host ?? "192.168.1.67",
+                .path: "/",
+                .name: APIClient.sessionCookie,
+                .value: "session"
+            ]) {
+                Self.cookieStorage?.setCookie(cookie)
+            }
+            body = Data("ok".utf8)
+        }
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: status, httpVersion: nil,
+            headerFields: ["Content-Type": type]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func bodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream else {
+            return nil
+        }
+
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 1_024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            body.append(contentsOf: buffer.prefix(count))
+        }
+        return body
+    }
+}
+
+private final class RecordingLoginURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var requests: [String] = []
+    nonisolated(unsafe) static var timeouts: [TimeInterval] = []
+    nonisolated(unsafe) static var cookieStorage: HTTPCookieStorage?
+
+    static func reset(cookieStorage: HTTPCookieStorage) {
+        requests = []
+        timeouts = []
+        self.cookieStorage = cookieStorage
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let method = request.httpMethod ?? "GET"
+        Self.requests.append("\(method) \(request.url?.path ?? "")")
+        Self.timeouts.append(request.timeoutInterval)
+
+        let body: Data
+        if method == "POST" {
+            if let cookie = HTTPCookie(properties: [
+                .domain: request.url?.host ?? "192.168.1.67",
+                .path: "/",
+                .name: APIClient.sessionCookie,
+                .value: "session"
+            ]) {
+                Self.cookieStorage?.setCookie(cookie)
+            }
+            body = Data(#"{"status":"success"}"#.utf8)
+        } else {
+            body = Data(#"{"status":"csrf_ready","login_csrf":"native-login-csrf-token"}"#.utf8)
+        }
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class StorageTimeoutURLProtocol: URLProtocol {
