@@ -15,6 +15,7 @@ from typing import Any
 
 _MAX_ARGS = 256
 _MAX_ARG_LENGTH = 4096
+_BLOCKED_SHORT_OPTIONS = {"n", "i"}
 
 _EXECUTION_FLAGS = {"--metadata-mapper"}
 
@@ -84,7 +85,7 @@ _BLOCKED_PREFIXES = (
 )
 _REDACTED = "***REDACTED***"
 _SENSITIVE_FLAG = (
-    r"--(?=[A-Za-z0-9-]*(?:password|passwd|secret|token|credential|"
+    r"-{1,2}(?=[A-Za-z0-9-]*(?:password|passwd|pass|secret|token|credential|"
     r"access-key|private-key|customer-key|encryption-key|sas-url|header|key))"
     r"[A-Za-z0-9][A-Za-z0-9-]*"
 )
@@ -163,8 +164,17 @@ def blocked_arguments(args: list[str]) -> list[str]:
     for token in args:
         flag = token.split("=", 1)[0].lower()
         lowered = token.lower()
-        if flag in _EXACT_BLOCKED or any(
-            lowered.startswith(prefix) for prefix in _BLOCKED_PREFIXES
+        short_cluster = (
+            flag.startswith("-")
+            and not flag.startswith("--")
+            and 2 <= len(flag[1:]) <= 4
+            and flag[1:].isalpha()
+            and any(option in flag[1:] for option in _BLOCKED_SHORT_OPTIONS)
+        )
+        if (
+            flag in _EXACT_BLOCKED
+            or short_cluster
+            or any(lowered.startswith(prefix) for prefix in _BLOCKED_PREFIXES)
         ):
             blocked.append(token)
     return list(dict.fromkeys(blocked))
