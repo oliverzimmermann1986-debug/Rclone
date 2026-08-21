@@ -14,11 +14,14 @@ Support-Bundle. Protokolliert werden ausschließlich Pfadnamen und Zähler.
 from __future__ import annotations
 
 import logging
+import queue
 import random
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -31,8 +34,11 @@ from .rclone_sync import (
     DEFAULT_CANCEL_SCOPE,
     _filter_args,
     _rclone_cache_args,
+    _register_proc,
     _run_rclone_command,
     _safe_name,
+    _terminate_proc,
+    _unregister_proc,
     command_to_string,
     is_cancelled,
     reset_cancel,
@@ -53,6 +59,8 @@ AGGREGATE_RUN_NAME = "restore-drill"
 # Das Ergebnis weist das über "truncated" aus.
 _DEFAULT_MAX_SCAN = 20_000
 _LISTING_TIMEOUT_SEC = 900
+_FREE_SPACE_MARGIN_BYTES = 64 * 1024 * 1024
+_LISTING_CANDIDATE_FACTOR = 8
 
 
 def restore_test_settings(cfg) -> dict[str, Any]:
@@ -91,26 +99,52 @@ def _sample_paths(
     *,
     sample_size: int,
     max_scan: int,
+    max_total_bytes: int,
     rng: random.Random,
+    timeout_sec: float = _LISTING_TIMEOUT_SEC,
 ) -> dict[str, Any]:
-    """Reservoir-Sampling über ein gestreamtes rclone-Listing.
+    """Reservoir-Sampling über ein gestreamtes, größenbewusstes Listing.
 
     Reservoir statt "erste N": sonst träfe die Stichprobe immer dieselben
     alphabetisch führenden Dateien und ein defekter Bereich am Ende bliebe
-    für immer unentdeckt.
+    für immer unentdeckt. Unbekannt große Dateien werden nicht übertragen;
+    nur eine Stichprobe, deren Summe das harte Byte-Budget einhält, verlässt
+    diese Funktion.
     """
+    if sample_size <= 0 or max_scan <= 0 or max_total_bytes <= 0:
+        raise ValueError(
+            "Stichprobengröße, Scanlimit und Byte-Budget müssen positiv sein"
+        )
     cmd = [
         "rclone",
         "lsf",
         "--recursive",
         "--files-only",
+        "--format",
+        "sp",
+        "--separator",
+        "\t",
         *_rclone_cache_args(),
         "--",
         target,
     ]
-    reservoir: list[str] = []
+    # Ein etwas größeres Reservoir erhält die zufällige Streuung, während die
+    # anschließende Budgetauswahl große Kandidaten überspringen kann.
+    candidate_limit = min(
+        max_scan, max(sample_size, sample_size * _LISTING_CANDIDATE_FACTOR)
+    )
+    reservoir: list[tuple[str, int]] = []
     scanned = 0
+    eligible = 0
+    unknown_size = 0
+    oversized = 0
     truncated = False
+    timed_out = False
+    cancelled = False
+    stop_reason = ""
+    stderr_tail: deque[str] = deque(maxlen=40)
+    stdout_events: queue.Queue[tuple[str, str | None]] = queue.Queue(maxsize=256)
+    stop_readers = threading.Event()
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -123,52 +157,178 @@ def _sample_paths(
         close_fds=True,
         env=rclone_subprocess_env(),
     )
-    deadline = time.monotonic() + _LISTING_TIMEOUT_SEC
+    registered = False
+
+    def _pump_stdout() -> None:
+        stream = proc.stdout
+        if stream is None:
+            stdout_events.put(("eof", None))
+            return
+        try:
+            for line in stream:
+                if stop_readers.is_set():
+                    continue
+                while not stop_readers.is_set():
+                    try:
+                        stdout_events.put(("line", line), timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+        finally:
+            while True:
+                try:
+                    stdout_events.put(("eof", None), timeout=0.1)
+                    break
+                except queue.Full:
+                    if stop_readers.is_set():
+                        break
+
+    def _pump_stderr() -> None:
+        stream = proc.stderr
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                stderr_tail.append(line)
+        except (OSError, ValueError):
+            return
+
+    deadline = time.monotonic() + max(0.01, float(timeout_sec))
+    stdout_thread = threading.Thread(
+        target=_pump_stdout, name="restore-listing-stdout", daemon=True
+    )
+    stderr_thread = threading.Thread(
+        target=_pump_stderr, name="restore-listing-stderr", daemon=True
+    )
     try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            path = line.rstrip("\n").rstrip("\r")
-            if not path or path.endswith("/"):
+        try:
+            _register_proc(proc, pair_name="restoretest:listing")
+            registered = True
+        except Exception:
+            _terminate_proc(proc, graceful_sec=2)
+            try:
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            _unregister_proc(proc)
+            raise
+        stdout_thread.start()
+        stderr_thread.start()
+        stdout_done = False
+        while True:
+            if is_cancelled():
+                cancelled = True
+                stop_reason = "cancelled"
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                truncated = True
+                stop_reason = "timeout"
+                break
+            try:
+                kind, payload = stdout_events.get(timeout=min(0.1, remaining))
+            except queue.Empty:
+                if proc.poll() is not None and stdout_done:
+                    break
                 continue
-            scanned += 1
-            if len(reservoir) < sample_size:
-                reservoir.append(path)
+            if kind == "eof":
+                stdout_done = True
+                if proc.poll() is not None:
+                    break
+                continue
+            raw = str(payload or "").rstrip("\n").rstrip("\r")
+            if not raw:
+                continue
+            try:
+                size_text, path = raw.split("\t", 1)
+            except ValueError:
+                scanned += 1
+                unknown_size += 1
             else:
-                index = rng.randrange(scanned)
-                if index < sample_size:
-                    reservoir[index] = path
+                if not path or path.endswith("/"):
+                    continue
+                scanned += 1
+                try:
+                    size = int(size_text)
+                    if size < 0:
+                        raise ValueError
+                except (ValueError, TypeError):
+                    unknown_size += 1
+                else:
+                    if size > max_total_bytes:
+                        oversized += 1
+                    else:
+                        eligible += 1
+                        candidate = (path, size)
+                        if len(reservoir) < candidate_limit:
+                            reservoir.append(candidate)
+                        else:
+                            index = rng.randrange(eligible)
+                            if index < candidate_limit:
+                                reservoir[index] = candidate
             if scanned >= max_scan:
                 truncated = True
-                break
-            if time.monotonic() >= deadline:
-                truncated = True
-                break
-            if is_cancelled():
+                stop_reason = "scan_limit"
                 break
     finally:
-        if proc.poll() is None:
-            proc.terminate()
+        stop_readers.set()
+        try:
+            if proc.poll() is None:
+                _terminate_proc(proc, graceful_sec=2)
             try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
                 proc.wait(timeout=5)
-        stderr = ""
-        if proc.stderr is not None:
-            try:
-                stderr = proc.stderr.read() or ""
-            except (OSError, ValueError):
-                stderr = ""
-            proc.stderr.close()
-        if proc.stdout is not None:
-            proc.stdout.close()
+            except subprocess.TimeoutExpired:
+                _terminate_proc(proc, graceful_sec=0)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.error(
+                        "rclone-Listingprozess %s ließ sich nicht reapen", proc.pid
+                    )
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+            if stdout_thread.ident is not None:
+                stdout_thread.join(timeout=1)
+            if stderr_thread.ident is not None:
+                stderr_thread.join(timeout=1)
+        finally:
+            if registered:
+                _unregister_proc(proc)
 
-    if scanned == 0 and proc.returncode not in (0, None) and not truncated:
+    stderr = "".join(stderr_tail).strip()
+    if not stop_reason and proc.returncode not in (0, None):
         raise RuntimeError(
             f"Listing von {target} fehlgeschlagen (exit {proc.returncode}): "
-            f"{stderr.strip()[:300]}"
+            f"{stderr[:300]}"
         )
-    return {"paths": reservoir, "scanned": scanned, "truncated": truncated}
+    rng.shuffle(reservoir)
+    selected: list[tuple[str, int]] = []
+    selected_bytes = 0
+    for path, size in reservoir:
+        if len(selected) >= sample_size:
+            break
+        if selected_bytes + size > max_total_bytes:
+            continue
+        selected.append((path, size))
+        selected_bytes += size
+    return {
+        "paths": [path for path, _size in selected],
+        "sizes": {path: size for path, size in selected},
+        "selected_bytes": selected_bytes,
+        "budget_bytes": max_total_bytes,
+        "scanned": scanned,
+        "eligible": eligible,
+        "unknown_size": unknown_size,
+        "oversized": oversized,
+        "truncated": truncated,
+        "timed_out": timed_out,
+        "cancelled": cancelled,
+    }
 
 
 def _write_file_list(paths: list[str], directory: Path) -> Path:
@@ -228,27 +388,71 @@ def run_pair_restore_test(
     restored.mkdir(parents=True, exist_ok=True)
 
     timeout_sec = max(300, int(float(backup.get("timeout_hours", 4) or 4) * 3600))
+    max_total_bytes = int(settings["max_total_mb"]) * 1024 * 1024
+    result["budget_bytes"] = max_total_bytes
     try:
         sample = _sample_paths(
             copy_target,
             sample_size=int(settings["sample_files"]),
             max_scan=int(settings["max_scan_files"]),
+            max_total_bytes=max_total_bytes,
             rng=rng,
         )
         result["scanned"] = sample["scanned"]
         result["truncated"] = sample["truncated"]
-        paths = sample["paths"]
-        if not paths:
-            # Ein leeres Ziel ist kein bestandener Drill, sondern ein Befund.
+        result["eligible_files"] = int(sample.get("eligible") or 0)
+        result["skipped_unknown_size"] = int(sample.get("unknown_size") or 0)
+        result["skipped_oversized"] = int(sample.get("oversized") or 0)
+        result["selected_bytes"] = int(sample.get("selected_bytes") or 0)
+        if sample.get("cancelled"):
+            result.update({"ok": False, "cancelled": True, "error": "Abgebrochen"})
+            return result
+        if sample.get("timed_out"):
             result.update(
                 {
                     "ok": False,
-                    "error": "Ziel enthält keine Dateien — nichts zu prüfen",
+                    "error": (
+                        "Listing-Timeout nach "
+                        f"{round(_LISTING_TIMEOUT_SEC / 60)} Minuten"
+                    ),
+                }
+            )
+            return result
+        paths = sample["paths"]
+        if not paths:
+            # Ein leeres Ziel ist kein bestandener Drill, sondern ein Befund.
+            detail = "Ziel enthält keine Dateien innerhalb des sicheren Gesamtlimits"
+            if result["skipped_unknown_size"]:
+                detail += "; Dateien mit unbekannter Größe wurden sicher ausgeschlossen"
+            result.update(
+                {
+                    "ok": False,
+                    "error": detail,
                 }
             )
             return result
 
+        selected_bytes = int(sample.get("selected_bytes") or 0)
+        if selected_bytes < 0 or selected_bytes > max_total_bytes:
+            raise RuntimeError("Stichprobe überschreitet das konfigurierte Gesamtlimit")
         result["sample_size"] = len(paths)
+        usage = shutil.disk_usage(workdir)
+        safety_margin = max(_FREE_SPACE_MARGIN_BYTES, selected_bytes // 10)
+        required_space = selected_bytes + safety_margin
+        result["free_space_bytes"] = int(usage.free)
+        result["required_space_bytes"] = required_space
+        if usage.free < required_space:
+            result.update(
+                {
+                    "ok": False,
+                    "error": (
+                        "Nicht genügend freier Speicher für den Restore-Drill "
+                        f"({usage.free} Byte frei, {required_space} Byte benötigt)"
+                    ),
+                }
+            )
+            return result
+
         listing = _write_file_list(paths, workdir)
         filter_args = _filter_args(cfg, dict(pair), "check")
 
@@ -258,8 +462,10 @@ def run_pair_restore_test(
             *_rclone_cache_args(),
             "--files-from-raw",
             str(listing),
-            "--max-size",
-            f"{int(settings['max_total_mb'])}M",
+            "--max-transfer",
+            str(max_total_bytes),
+            "--cutoff-mode",
+            "hard",
             "--stats",
             "10s",
             "--stats-one-line",
@@ -290,13 +496,24 @@ def run_pair_restore_test(
             return result
 
         pulled = sum(1 for item in restored.rglob("*") if item.is_file())
+        restored_bytes = sum(
+            item.stat().st_size for item in restored.rglob("*") if item.is_file()
+        )
         result["restored_files"] = pulled
+        result["restored_bytes"] = restored_bytes
+        if restored_bytes > max_total_bytes:
+            result.update(
+                {
+                    "ok": False,
+                    "error": "Rückgeholte Daten überschreiten das Gesamtlimit",
+                }
+            )
+            return result
         if pulled == 0:
             result.update(
                 {
                     "ok": False,
-                    "error": "Keine Datei zurückgeholt — Stichprobe evtl. größer "
-                    f"als max_total_mb ({settings['max_total_mb']} MB)",
+                    "error": "Keine Datei aus der ausgewählten Stichprobe zurückgeholt",
                 }
             )
             return result
