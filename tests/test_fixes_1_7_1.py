@@ -156,6 +156,92 @@ def test_logout_invalidates_existing_session_tokens(tmp_path, monkeypatch):
         assert replay.headers["location"] == "/login"
 
 
+def test_logout_revocation_failure_is_explicit_and_clears_local_cookies(
+    tmp_path, monkeypatch
+):
+    with _client(tmp_path, monkeypatch) as client:
+        from app import main
+
+        _login(client)
+        csrf = client.cookies.get("rclone_sync_csrf")
+        assert client.cookies.get("rclone_sync_session")
+        assert csrf
+
+        def fail_revocation():
+            raise OSError("config is read-only")
+
+        monkeypatch.setattr(main, "bump_session_version", fail_revocation)
+        response = client.post(
+            "/logout",
+            headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "ok": False,
+            "partial": True,
+            "global_revocation": False,
+            "local_session_cleared": True,
+            "detail": (
+                "Lokale Sitzung beendet, aber nicht alle bestehenden Sitzungen "
+                "konnten widerrufen werden. Bitte später erneut anmelden und "
+                "noch einmal abmelden."
+            ),
+        }
+        set_cookies = "\n".join(response.headers.get_list("set-cookie"))
+        assert "rclone_sync_session=" in set_cookies
+        assert "rclone_sync_csrf=" in set_cookies
+        assert client.cookies.get("rclone_sync_session") is None
+        assert client.cookies.get("rclone_sync_csrf") is None
+        audit = db.get_db().audit_list(event_type="logout_revocation_failed")
+        assert len(audit) == 1
+        assert audit[0]["details"]["global_revocation"] is False
+        assert audit[0]["details"]["local_cookies_cleared"] is True
+        assert audit[0]["details"]["error_type"] == "OSError"
+
+
+def test_cancel_endpoints_return_503_when_persistent_signal_fails(
+    tmp_path, monkeypatch
+):
+    with _client(tmp_path, monkeypatch) as client:
+        _login(client)
+        csrf = client.cookies.get("rclone_sync_csrf")
+        database = db.get_db()
+        database.job_start("backup")
+        database.job_start("pbs")
+        failure = {
+            "ok": False,
+            "killed": 1,
+            "scope": "backup",
+            "signal_persisted": False,
+            "process_scan_ok": True,
+            "error": "Abbruchsignal konnte nicht zuverlässig übermittelt werden",
+            "error_code": "cancel_signal_persist_failed",
+        }
+        monkeypatch.setattr(rclone_sync, "cancel_job", lambda *_args: dict(failure))
+
+        backup = client.post(
+            "/api/jobs/backup/cancel",
+            headers={"X-CSRF-Token": csrf},
+        )
+        pbs = client.post(
+            "/api/pbs/cancel",
+            headers={"X-CSRF-Token": csrf},
+        )
+
+        assert backup.status_code == 503
+        assert backup.json()["ok"] is False
+        assert backup.json()["error_code"] == "cancel_signal_persist_failed"
+        assert pbs.status_code == 503
+        assert pbs.json()["ok"] is False
+        assert pbs.json()["error_code"] == "cancel_signal_persist_failed"
+        backup_audit = database.audit_list(event_type="backup_cancel_requested")
+        pbs_audit = database.audit_list(event_type="pbs_cancel_requested")
+        assert backup_audit[0]["details"]["signal_persisted"] is False
+        assert pbs_audit[0]["details"]["signal_persisted"] is False
+
+
 def test_unhandled_exception_response_has_security_headers(tmp_path, monkeypatch):
     with _client(tmp_path, monkeypatch):
         from app import main

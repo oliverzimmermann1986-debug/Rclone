@@ -182,10 +182,29 @@ def cancel_job(scope: str = DEFAULT_CANCEL_SCOPE) -> dict[str, Any]:
     """Beendet laufende rclone-Prozesse auch aus CLI-/Scheduler-Prozessen."""
     normalized_scope = runtime_state._scope_name(scope)
     _cancel_event(normalized_scope).set()
-    runtime_state.request_cancel_marker(normalized_scope)
-    killed = runtime_state.terminate_active_processes(
-        graceful_sec=8, scope=normalized_scope
-    )
+    marker_error: OSError | None = None
+    termination_error: OSError | None = None
+    try:
+        runtime_state.request_cancel_marker(normalized_scope)
+    except OSError as exc:
+        marker_error = exc
+        logger.exception(
+            "Cancel-Signal für Scope %s konnte nicht dauerhaft gespeichert werden",
+            normalized_scope,
+        )
+    try:
+        killed = runtime_state.terminate_active_processes(
+            graceful_sec=8,
+            scope=normalized_scope,
+            request_cancel=False,
+        )
+    except OSError as exc:
+        killed = 0
+        termination_error = exc
+        logger.exception(
+            "Registrierte Prozesse für Scope %s konnten nicht vollständig geprüft werden",
+            normalized_scope,
+        )
     # Fallback für einen Marker-Schreibfehler im aktuellen Prozess.
     with _ACTIVE_PROCS_LOCK:
         local_procs = [
@@ -195,12 +214,25 @@ def cancel_job(scope: str = DEFAULT_CANCEL_SCOPE) -> dict[str, Any]:
         if proc.poll() is None:
             _terminate_proc(proc, graceful_sec=2)
 
+    signal_persisted = marker_error is None
+    process_scan_ok = termination_error is None
+    ok = signal_persisted and process_scan_ok
+
     def _notify_cancelled() -> None:
         try:
             from ..notifications import notify
 
+            title = "Sync abgebrochen" if ok else "Sync-Abbruch unvollständig"
+            message = (
+                f"{killed} rclone-Prozess(e) beendet"
+                if ok
+                else "Lokale Prozesse wurden beendet, aber das dauerhafte "
+                "Cancel-Signal konnte nicht zuverlässig gesetzt werden"
+            )
             notify(
-                "cancelled", "Sync abgebrochen", f"{killed} rclone-Prozess(e) beendet"
+                "cancelled",
+                title,
+                message,
             )
         except Exception:
             logger.exception("Cancel-Benachrichtigung fehlgeschlagen")
@@ -209,7 +241,23 @@ def cancel_job(scope: str = DEFAULT_CANCEL_SCOPE) -> dict[str, Any]:
     threading.Thread(
         target=_notify_cancelled, name="notify-cancelled", daemon=True
     ).start()
-    return {"ok": True, "killed": killed, "scope": normalized_scope}
+    result: dict[str, Any] = {
+        "ok": ok,
+        "killed": killed,
+        "scope": normalized_scope,
+        "signal_persisted": signal_persisted,
+        "process_scan_ok": process_scan_ok,
+    }
+    if not ok:
+        result["error"] = (
+            "Abbruchsignal konnte nicht zuverlässig an alle Worker übermittelt werden"
+        )
+        result["error_code"] = (
+            "cancel_signal_persist_failed"
+            if marker_error is not None
+            else "cancel_process_scan_failed"
+        )
+    return result
 
 
 def is_cancelled(scope: str = DEFAULT_CANCEL_SCOPE) -> bool:

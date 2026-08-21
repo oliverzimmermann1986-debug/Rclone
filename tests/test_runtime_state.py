@@ -1,8 +1,10 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from app.jobs import runtime_state
+from app.jobs import rclone_sync
 
 
 def _use_runtime_dir(tmp_path: Path, monkeypatch) -> None:
@@ -66,6 +68,114 @@ def test_cancel_markers_are_scoped(tmp_path: Path, monkeypatch):
     assert runtime_state.cancel_requested("backup") is False
     runtime_state.reset_cancel_marker("pbs")
     assert runtime_state.cancel_requested("pbs") is False
+
+
+def test_cancel_marker_write_failure_is_not_swallowed(tmp_path: Path, monkeypatch):
+    _use_runtime_dir(tmp_path, monkeypatch)
+
+    def fail_replace(_source, _target):
+        raise OSError("disk is read-only")
+
+    monkeypatch.setattr(runtime_state.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="read-only"):
+        runtime_state.request_cancel_marker()
+
+    assert runtime_state.cancel_requested() is False
+    assert list(tmp_path.glob(".cancel.requested.*.tmp")) == []
+
+
+def test_cross_process_termination_runs_even_when_cancel_marker_fails(monkeypatch):
+    marker = {"pid": 4321, "marker_id": "known", "scope": "backup"}
+    signals: list[int] = []
+    unregistered: list[tuple[int, str]] = []
+
+    def fail_marker(_scope):
+        raise OSError("marker unavailable")
+
+    monkeypatch.setattr(runtime_state, "request_cancel_marker", fail_marker)
+    monkeypatch.setattr(runtime_state, "active_processes", lambda _scope: [marker])
+    monkeypatch.setattr(
+        runtime_state, "_is_same_registered_process", lambda _marker: True
+    )
+    monkeypatch.setattr(runtime_state.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(runtime_state.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(
+        runtime_state.os,
+        "killpg",
+        lambda _pgid, sent_signal: signals.append(sent_signal),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_state,
+        "unregister_process",
+        lambda pid, marker_id="": unregistered.append((pid, marker_id)),
+    )
+
+    with pytest.raises(OSError, match="marker unavailable"):
+        runtime_state.terminate_active_processes(graceful_sec=0)
+
+    assert signals == [runtime_state.signal.SIGTERM, runtime_state.signal.SIGKILL]
+    assert unregistered == [(4321, "known")]
+
+
+def test_cancel_job_reports_marker_failure_after_local_termination(monkeypatch):
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    class NoopThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    process = FakeProcess()
+    terminated = []
+    cross_process_calls = []
+
+    def fail_marker(_scope):
+        raise OSError("marker unavailable")
+
+    def terminate_registered(**kwargs):
+        cross_process_calls.append(kwargs)
+        return 2
+
+    monkeypatch.setattr(runtime_state, "request_cancel_marker", fail_marker)
+    monkeypatch.setattr(
+        runtime_state, "terminate_active_processes", terminate_registered
+    )
+    monkeypatch.setattr(rclone_sync, "_ACTIVE_PROCS", [(process, "backup")])
+    monkeypatch.setattr(
+        rclone_sync,
+        "_terminate_proc",
+        lambda proc, **_kwargs: terminated.append(proc),
+    )
+    monkeypatch.setattr(
+        rclone_sync,
+        "threading",
+        SimpleNamespace(Thread=NoopThread, Event=rclone_sync.threading.Event),
+    )
+
+    try:
+        result = rclone_sync.cancel_job()
+    finally:
+        rclone_sync._cancel_event().clear()
+
+    assert terminated == [process]
+    assert cross_process_calls == [
+        {"graceful_sec": 8, "scope": "backup", "request_cancel": False}
+    ]
+    assert result == {
+        "ok": False,
+        "killed": 2,
+        "scope": "backup",
+        "signal_persisted": False,
+        "process_scan_ok": True,
+        "error": "Abbruchsignal konnte nicht zuverlässig an alle Worker übermittelt werden",
+        "error_code": "cancel_signal_persist_failed",
+    }
 
 
 def test_active_processes_only_returns_requested_scope(tmp_path: Path, monkeypatch):

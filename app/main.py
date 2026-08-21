@@ -492,8 +492,40 @@ def logout():
     # Beim Single-Admin-Konto ist "alle Sessions beenden" das erwartete Verhalten.
     try:
         bump_session_version()
-    except Exception:
-        logger.exception("Session-Version konnte beim Logout nicht erhöht werden")
+    except Exception as exc:
+        logger.exception(
+            "Globale Sitzungswiderrufung beim Logout fehlgeschlagen; "
+            "lokale Cookies werden trotzdem gelöscht"
+        )
+        try:
+            get_db().audit_add(
+                "logout_revocation_failed",
+                actor="web",
+                details={
+                    "global_revocation": False,
+                    "local_cookies_cleared": True,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        except Exception:
+            logger.exception("Logout-Fehler konnte nicht im Audit protokolliert werden")
+        response = JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "partial": True,
+                "global_revocation": False,
+                "local_session_cleared": True,
+                "detail": (
+                    "Lokale Sitzung beendet, aber nicht alle bestehenden Sitzungen "
+                    "konnten widerrufen werden. Bitte später erneut anmelden und "
+                    "noch einmal abmelden."
+                ),
+            },
+        )
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie(CSRF_COOKIE, path="/")
+        return response
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie(SESSION_COOKIE, path="/")
     response.delete_cookie(CSRF_COOKIE, path="/")

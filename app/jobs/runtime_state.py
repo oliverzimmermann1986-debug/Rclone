@@ -111,8 +111,6 @@ def request_cancel_marker(scope: str = DEFAULT_CANCEL_SCOPE) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp, cancel_path)
         tmp = None
-    except OSError:
-        pass
     finally:
         if fd >= 0:
             os.close(fd)
@@ -361,11 +359,21 @@ def active_processes(
 
 
 def terminate_active_processes(
-    graceful_sec: int = 10, *, scope: str = DEFAULT_CANCEL_SCOPE
+    graceful_sec: int = 10,
+    *,
+    scope: str = DEFAULT_CANCEL_SCOPE,
+    request_cancel: bool = True,
 ) -> int:
     """Beendet nur Prozessgruppen des angeforderten Job-Scopes."""
     normalized_scope = _scope_name(scope)
-    request_cancel_marker(normalized_scope)
+    marker_error: OSError | None = None
+    if request_cancel:
+        try:
+            request_cancel_marker(normalized_scope)
+        except OSError as exc:
+            # Bekannte Prozesse trotzdem beenden. Der Aufrufer muss danach aber
+            # erfahren, dass ein anderer Worker das Cancel-Signal nicht sieht.
+            marker_error = exc
     markers = active_processes(normalized_scope)
     killed = 0
     for marker in markers:
@@ -393,4 +401,6 @@ def terminate_active_processes(
         except (ProcessLookupError, PermissionError, OSError):
             pass
         unregister_process(pid, marker_id=str(marker.get("marker_id") or ""))
+    if marker_error is not None:
+        raise marker_error
     return killed

@@ -6,7 +6,7 @@ import logging
 import threading
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from ..auth import require_auth
@@ -235,13 +235,22 @@ def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
 
 
 @router.post("/cancel")
-def pbs_cancel() -> dict[str, Any]:
+def pbs_cancel(response: Response) -> dict[str, Any]:
     running = get_db().job_running(pbs_backup.JOB_KIND)
     if not running and not runtime_state.active_processes(pbs_backup.PBS_CANCEL_SCOPE):
         return {"ok": False, "error": "Kein laufender PBS-Job"}
     result = rclone_sync.cancel_job(pbs_backup.PBS_CANCEL_SCOPE)
     _audit_best_effort(
         "pbs_cancel_requested",
-        {"job_id": (running or {}).get("id"), "killed": result.get("killed", 0)},
+        {
+            "job_id": (running or {}).get("id"),
+            "ok": result.get("ok", False),
+            "killed": result.get("killed", 0),
+            "signal_persisted": result.get("signal_persisted"),
+            "process_scan_ok": result.get("process_scan_ok"),
+            "error_code": result.get("error_code"),
+        },
     )
+    if not result.get("ok"):
+        response.status_code = 503
     return result
