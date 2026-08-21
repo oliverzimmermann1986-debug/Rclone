@@ -302,10 +302,14 @@ class Database:
 
     @classmethod
     def _backfill_pair_runs(cls, connection: sqlite3.Connection) -> None:
-        """Migriert bestehende JSON-Historie einmalig in die indexierte Pair-Tabelle."""
-        count = int(connection.execute("SELECT COUNT(*) FROM pair_runs").fetchone()[0])
-        if count:
-            return
+        """Ergänzt fehlende Pair-Versuche aus der historischen JSON-Historie.
+
+        Eine Datenbank kann nach einem abgebrochenen Upgrade bereits einzelne
+        ``pair_runs`` enthalten. Ein globaler Tabellen-Count ist deshalb kein
+        belastbarer Migrationsmarker: Wir vergleichen stattdessen jeden Job mit
+        den in seiner Zusammenfassung enthaltenen Versuchen. Bestehende Zeilen
+        bleiben durch den Unique-Key ``(job_id, pair_name)`` idempotent.
+        """
         # Cursor-Iteration statt fetchall(): große historische Datenbanken werden
         # beim Upgrade nicht vollständig in den Arbeitsspeicher geladen. SQLite
         # liefert die Zeilen intern schrittweise; regelmäßige Savepoints begrenzen
@@ -324,6 +328,30 @@ class Database:
                 except (json.JSONDecodeError, TypeError):
                     continue
                 if not isinstance(summary, dict):
+                    continue
+                expected_names = {
+                    str(pair.get("name") or "").strip()
+                    for pair in (summary.get("pairs") or [])
+                    if isinstance(pair, dict) and str(pair.get("name") or "").strip()
+                }
+                if str(row["status"]) in {"error", "stale", "cancelled"}:
+                    due = summary.get("due") or []
+                    if isinstance(due, list):
+                        expected_names.update(
+                            str(name or "").strip()
+                            for name in due
+                            if str(name or "").strip()
+                        )
+                if not expected_names:
+                    continue
+                existing_names = {
+                    str(existing["pair_name"])
+                    for existing in connection.execute(
+                        "SELECT pair_name FROM pair_runs WHERE job_id=?",
+                        (int(row["id"]),),
+                    ).fetchall()
+                }
+                if expected_names <= existing_names:
                     continue
                 cls._store_pair_results(
                     connection,

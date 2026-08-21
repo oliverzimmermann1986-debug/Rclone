@@ -35,7 +35,7 @@ function app() {
     currentPasswordDialog: { show: false, password: '', error: '' },
 
     overview: { loading: false, data: null },
-    status: { backup: null, check: null, quicksync: null, pbs: null },
+    status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null },
     progress: null,
     sse: null,
     storageLoading: false,
@@ -106,7 +106,7 @@ function app() {
         ['all', 'enabled', 'disabled', 'issues', 'destructive'],
         'all',
       );
-      this.jobs.kind = safeStoredValue('rclone-sync-job-kind', ['', 'backup', 'check', 'quicksync', 'pbs'], '');
+      this.jobs.kind = safeStoredValue('rclone-sync-job-kind', ['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs'], '');
       this.jobs.status = safeStoredValue(
         'rclone-sync-job-status',
         ['', 'running', 'ok', 'error', 'skipped', 'cancelled', 'stale'],
@@ -461,19 +461,19 @@ function app() {
     busy() {
       return Boolean(
         this.pending.backup || this.pending.quick || this.pending.pbs ||
-        this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.pbs,
+        this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.pbs,
       );
     },
 
     rcloneBusy() {
       return Boolean(
         this.pending.backup || this.pending.quick ||
-        this.status?.backup || this.status?.check || this.status?.quicksync,
+        this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest,
       );
     },
 
     runningJob() {
-      return this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.pbs || null;
+      return this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.pbs || null;
     },
 
     runningKind() {
@@ -481,6 +481,7 @@ function app() {
       if (this.status?.backup) return 'Backup';
       if (this.status?.check) return 'Check';
       if (this.status?.quicksync) return 'Quick-Sync';
+      if (this.status?.restoretest) return 'Restore-Drill';
       if (this.pending.backup) return 'Backup';
       if (this.pending.quick) return 'Quick-Sync';
       return '';

@@ -23,8 +23,13 @@ class _FakeConfig:
 
 
 class _FakeDB:
-    def pair_last_successes(self):
-        return {}
+    def __init__(self, histories=None):
+        self.histories = histories or {}
+        self.identities = None
+
+    def pair_last_history(self, identities):
+        self.identities = identities
+        return self.histories
 
 
 def test_overview_without_sizes_skips_rclone(monkeypatch):
@@ -66,3 +71,60 @@ def test_overview_with_sizes_populates_both_sides(monkeypatch):
     assert item["source_size"]["bytes"] == 2048
     assert item["target_size"]["count"] == 9
     assert item["target_size"]["bytes"] == 1024
+
+
+def test_overview_keeps_last_sync_across_pair_rename(monkeypatch):
+    pair = {
+        "id": "photos",
+        "name": "Fotos neu",
+        "local": "/mnt/photos",
+        "remote": "gd:photos",
+        "direction": "push",
+    }
+    key = "rclone:id:photos"
+    database = _FakeDB(
+        {
+            key: {
+                "last_result": None,
+                "last_success": {
+                    "ended_at": 1234,
+                    "pair": {"name": "Fotos alt", "transferred": "2 GiB"},
+                },
+            }
+        }
+    )
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
+    monkeypatch.setattr(api_storage, "get_db", lambda: database)
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+
+    item = api_storage.overview()["pairs"][0]
+
+    assert database.identities == {key: "Fotos neu"}
+    assert item["last_sync"] == 1234
+    assert item["last_transferred"] == "2 GiB"
+
+
+def test_overview_does_not_reuse_history_for_new_identity_or_restore_drill(
+    monkeypatch,
+):
+    pair = {
+        "id": "new-photos",
+        "name": "Fotos",
+        "local": "/mnt/new-photos",
+        "remote": "gd:new-photos",
+        "direction": "push",
+    }
+    # pair_last_history hat die typed-key-/Legacy-Fallback-Regeln bereits
+    # angewendet: Ein alter Stable-Key und restoretest:pair:* sind keine
+    # Kandidaten für die neue rclone-Identität.
+    database = _FakeDB(
+        {"rclone:id:new-photos": {"last_result": None, "last_success": None}}
+    )
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
+    monkeypatch.setattr(api_storage, "get_db", lambda: database)
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+
+    item = api_storage.overview()["pairs"][0]
+
+    assert "last_sync" not in item
+    assert "last_transferred" not in item
