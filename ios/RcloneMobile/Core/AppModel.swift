@@ -6,6 +6,7 @@ private enum RefreshPayload {
     case baseStorage(Result<StorageOverview, Error>)
     case detailedStorage(Result<StorageOverview, Error>)
     case config(Result<ConfigSnapshot, Error>)
+    case definitions(Result<[JobDefinition], Error>)
     case jobs(Result<JobSearchResponse, Error>)
     case progress(Result<BackupProgress, Error>)
     case pbs(Result<PBSStatus, Error>)
@@ -16,6 +17,12 @@ enum ContentLoadState: Equatable {
     case loading
     case loaded
     case failed(String)
+}
+
+enum ConfigSaveIssue: Equatable {
+    case conflict(String)
+    case passwordRequired(String)
+    case validation([String])
 }
 
 @MainActor
@@ -30,6 +37,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var overview: OverviewResponse?
     @Published private(set) var storage: StorageOverview?
     @Published private(set) var config: ConfigSnapshot?
+    @Published private(set) var jobDefinitions: [JobDefinition] = []
     @Published private(set) var jobs: [JobRecord] = []
     @Published private(set) var doctor: DoctorResponse?
     @Published private(set) var progress: BackupProgress?
@@ -42,6 +50,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var progressConsecutiveFailures = 0
     @Published private(set) var doctorLastCheckedAt: Date?
     @Published private(set) var doctorIsRefreshing = false
+    @Published private(set) var isSavingConfig = false
+    @Published private(set) var configSaveIssue: ConfigSaveIssue?
+    @Published private(set) var configWarnings: [String] = []
     @Published private(set) var isRefreshing = false
     @Published var errorMessage: String?
     @Published var actionMessage: String?
@@ -98,6 +109,7 @@ final class AppModel: ObservableObject {
             guard isCurrentSession(generation) else { return }
             client = newClient
             config = restoredConfig
+            jobDefinitions = restoredConfig.backup.jobs
             configState = .loaded
             phase = .signedIn
             await refresh()
@@ -183,6 +195,7 @@ final class AppModel: ObservableObject {
             group.addTask { .baseStorage(await Self.capture { try await refreshClient.getStorage(includeSizes: false, forceRefresh: false) }) }
             group.addTask { .detailedStorage(await Self.capture { try await refreshClient.getStorage(includeSizes: true, forceRefresh: false) }) }
             group.addTask { .config(await Self.capture { try await refreshClient.getConfig() }) }
+            group.addTask { .definitions(await Self.capture { try await refreshClient.getJobDefinitions() }) }
             group.addTask { .jobs(await Self.capture { try await refreshClient.getJobs(limit: 50) }) }
             group.addTask { .progress(await Self.capture { try await refreshClient.getProgress() }) }
             group.addTask { .pbs(await Self.capture { try await refreshClient.getPBSStatus() }) }
@@ -221,10 +234,20 @@ final class AppModel: ObservableObject {
                     switch result {
                     case let .success(value):
                         config = value
+                        jobDefinitions = value.backup.jobs
                         configState = .loaded
                     case let .failure(error):
                         configState = .failed(userMessage(for: error))
                         handle(error, firstError: &firstError)
+                    }
+                case let .definitions(result):
+                    switch result {
+                    case let .success(value):
+                        jobDefinitions = value
+                    case let .failure(error):
+                        if error as? APIError == .unauthenticated {
+                            handle(error, firstError: &firstError)
+                        }
                     }
                 case let .jobs(result):
                     switch result {
@@ -324,6 +347,117 @@ final class AppModel: ObservableObject {
             guard isCurrentSession(session) else { return }
             errorMessage = userMessage(for: error)
         }
+    }
+
+    func reloadConfiguration() async {
+        guard let currentClient = client else { return }
+        let session = sessionGeneration
+        let activity = beginActivity()
+        defer { endActivity(activity) }
+        do {
+            async let configRequest = currentClient.getConfig()
+            async let definitionsRequest = currentClient.getJobDefinitions()
+            let (newConfig, newDefinitions) = try await (configRequest, definitionsRequest)
+            guard isCurrentSession(session) else { return }
+            config = newConfig
+            jobDefinitions = newDefinitions
+            configState = .loaded
+            configSaveIssue = nil
+            configWarnings = []
+        } catch APIError.unauthenticated {
+            guard isCurrentSession(session) else { return }
+            signOutLocally()
+        } catch {
+            guard isCurrentSession(session) else { return }
+            errorMessage = userMessage(for: error)
+        }
+    }
+
+    @discardableResult
+    func saveConfiguration(
+        pairs: [PairConfig],
+        definitions: [JobDefinition],
+        currentPassword: String? = nil
+    ) async -> Bool {
+        guard let currentClient = client, let currentConfig = config else { return false }
+        let session = sessionGeneration
+        isSavingConfig = true
+        configSaveIssue = nil
+        configWarnings = []
+        defer {
+            if isCurrentSession(session) { isSavingConfig = false }
+        }
+        do {
+            let response = try await currentClient.updateConfig(
+                currentConfig.replacing(pairs: pairs, jobs: definitions),
+                currentPassword: currentPassword
+            )
+            guard isCurrentSession(session) else { return false }
+            config = response.config
+            jobDefinitions = response.config.backup.jobs
+            configWarnings = response.warnings
+            actionMessage = response.warnings.isEmpty
+                ? "Konfiguration gespeichert."
+                : "Konfiguration gespeichert – Hinweise bitte prüfen."
+            await refresh()
+            return response.ok
+        } catch APIError.configConflict(let message, _) {
+            guard isCurrentSession(session) else { return false }
+            configSaveIssue = .conflict(message)
+        } catch APIError.configRevisionRequired(let message, _) {
+            guard isCurrentSession(session) else { return false }
+            configSaveIssue = .conflict(message)
+        } catch APIError.configReauthenticationRequired(let message) {
+            guard isCurrentSession(session) else { return false }
+            configSaveIssue = .passwordRequired(message)
+        } catch APIError.configValidation(let errors) {
+            guard isCurrentSession(session) else { return false }
+            configSaveIssue = .validation(errors)
+        } catch APIError.unauthenticated {
+            guard isCurrentSession(session) else { return false }
+            signOutLocally()
+        } catch {
+            guard isCurrentSession(session) else { return false }
+            errorMessage = userMessage(for: error)
+        }
+        return false
+    }
+
+    func jobDefinitionPlan(id: String) async -> JobPlan? {
+        guard let currentClient = client else { return nil }
+        let session = sessionGeneration
+        do {
+            let plan = try await currentClient.getJobDefinitionPlan(id: id, dryRun: true)
+            guard isCurrentSession(session) else { return nil }
+            return plan
+        } catch APIError.unauthenticated {
+            guard isCurrentSession(session) else { return nil }
+            signOutLocally()
+        } catch {
+            guard isCurrentSession(session) else { return nil }
+            errorMessage = userMessage(for: error)
+        }
+        return nil
+    }
+
+    @discardableResult
+    func runJobDefinition(id: String, dryRun: Bool) async -> Bool {
+        guard let currentClient = client else { return false }
+        let session = sessionGeneration
+        do {
+            let response = try await currentClient.runJobDefinition(id: id, dryRun: dryRun)
+            guard isCurrentSession(session) else { return false }
+            actionMessage = dryRun ? "Probelauf wurde gestartet." : "Job wurde gestartet."
+            await refresh()
+            return response.ok
+        } catch APIError.unauthenticated {
+            guard isCurrentSession(session) else { return false }
+            signOutLocally()
+        } catch {
+            guard isCurrentSession(session) else { return false }
+            errorMessage = userMessage(for: error)
+        }
+        return false
     }
 
     func runBackup(pair: String? = nil, dryRun: Bool = false) async -> Bool {
@@ -519,6 +653,7 @@ final class AppModel: ObservableObject {
         overview = nil
         storage = nil
         config = nil
+        jobDefinitions = []
         jobs = []
         doctor = nil
         progress = nil
@@ -526,6 +661,9 @@ final class AppModel: ObservableObject {
         progressConsecutiveFailures = 0
         doctorLastCheckedAt = nil
         doctorIsRefreshing = false
+        isSavingConfig = false
+        configSaveIssue = nil
+        configWarnings = []
         pbs = nil
         overviewState = .idle
         storageState = .idle

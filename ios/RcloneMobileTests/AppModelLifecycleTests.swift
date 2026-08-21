@@ -112,6 +112,52 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertFalse(model.doctorIsRefreshing)
     }
 
+    func testConfigurationSavePublishesCanonicalServerSnapshot() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+        let pair = PairConfig(
+            stableID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            name: "Fotos", local: "/mnt/fotos", remote: "cloud:Fotos"
+        )
+        let definition = JobDefinition(
+            id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            name: "Fotos täglich",
+            enabled: true,
+            dataPathIDs: [pair.id],
+            schedule: "0 3 * * *",
+            executionMode: "sequential",
+            maxParallel: 1,
+            retryMinutes: 60
+        )
+
+        let saved = await model.saveConfiguration(pairs: [pair], definitions: [definition])
+
+        XCTAssertTrue(saved)
+        XCTAssertEqual(client.updatedConfig?.revision, "revision-1")
+        XCTAssertEqual(client.updatedConfig?.backup.jobs.first?.id, definition.id)
+        XCTAssertEqual(model.jobDefinitions.first?.id, definition.id)
+        XCTAssertNil(model.configSaveIssue)
+    }
+
+    func testConfigurationConflictIsExposedWithoutReplacingDraftBase() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.updateConfigError = APIError.configConflict(
+            message: "Parallel geändert",
+            currentRevision: "revision-2"
+        )
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        let saved = await model.saveConfiguration(pairs: [], definitions: [])
+
+        XCTAssertFalse(saved)
+        XCTAssertEqual(model.configSaveIssue, .conflict("Parallel geändert"))
+        XCTAssertEqual(model.config?.revision, "revision-1")
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suite = "AppModelLifecycleTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -128,6 +174,8 @@ private final class StubAPIClient: APIClientProtocol {
         detail: nil
     )
     var progressResults: [Result<BackupProgress, Error>] = []
+    var updateConfigError: Error?
+    private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
     private(set) var jobsCallCount = 0
     private(set) var doctorCallCount = 0
@@ -147,10 +195,32 @@ private final class StubAPIClient: APIClientProtocol {
 
     func getConfig() async throws -> ConfigSnapshot {
         if let configError { throw configError }
+        if let updatedConfig { return updatedConfig }
         return ConfigSnapshot(
             revision: "revision-1",
             backup: BackupConfig(enabled: true, timezone: "Europe/Berlin", defaultSchedule: nil, pairs: [])
         )
+    }
+
+    func getJobDefinitions() async throws -> [JobDefinition] {
+        updatedConfig?.backup.jobs ?? []
+    }
+
+    func updateConfig(
+        _ config: ConfigSnapshot,
+        currentPassword: String?
+    ) async throws -> ConfigSaveResponse {
+        if let updateConfigError { throw updateConfigError }
+        updatedConfig = config
+        return ConfigSaveResponse(ok: true, warnings: [], config: config)
+    }
+
+    func getJobDefinitionPlan(id: String, dryRun: Bool) async throws -> JobPlan {
+        throw APIError.invalidResponse
+    }
+
+    func runJobDefinition(id: String, dryRun: Bool) async throws -> ActionResponse {
+        throw APIError.invalidResponse
     }
 
     func getJobs(limit: Int) async throws -> JobSearchResponse {

@@ -111,6 +111,49 @@ final class APIClientSessionTests: XCTestCase {
         XCTAssertFalse(remainingNames.contains(APIClient.sessionCookie))
         XCTAssertFalse(remainingNames.contains(APIClient.csrfCookie))
     }
+
+    func testConfigWriteMapsConflictRevisionPasswordAndValidationPrecisely() async throws {
+        let cases: [(String, APIError)] = [
+            ("conflict.example", .configConflict(message: "Parallel geändert", currentRevision: "r2")),
+            ("revision.example", .configRevisionRequired(message: "Revision fehlt", currentRevision: "r2")),
+            ("password.example", .configReauthenticationRequired(message: "Passwort nötig")),
+            ("validation.example", .configValidation(errors: ["Name fehlt"]))
+        ]
+        for (host, expected) in cases {
+            let baseURL = try XCTUnwrap(URL(string: "https://\(host)"))
+            let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
+                forGroupContainerIdentifier: "APIClientConfigTests-\(UUID().uuidString)"
+            )
+            cookieStorage.setCookie(try XCTUnwrap(cookie(
+                named: APIClient.csrfCookie,
+                value: "csrf",
+                domain: host
+            )))
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [ConfigErrorURLProtocol.self]
+            let client = APIClient(
+                baseURL: baseURL,
+                session: URLSession(configuration: configuration),
+                cookieStorage: cookieStorage
+            )
+            let snapshot = ConfigSnapshot(
+                revision: "r1",
+                backup: BackupConfig(
+                    enabled: true,
+                    timezone: "Europe/Berlin",
+                    defaultSchedule: "manual",
+                    pairs: []
+                )
+            )
+
+            do {
+                _ = try await client.updateConfig(snapshot, currentPassword: nil)
+                XCTFail("\(host) should fail")
+            } catch let error as APIError {
+                XCTAssertEqual(error, expected)
+            }
+        }
+    }
 }
 
 private final class FailingURLProtocol: URLProtocol {
@@ -138,6 +181,37 @@ private final class PartialLogoutURLProtocol: URLProtocol {
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class ConfigErrorURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let host = request.url?.host ?? ""
+        let response: (Int, String)
+        switch host {
+        case "conflict.example":
+            response = (409, #"{"detail":{"message":"Parallel geändert","reload_required":true,"current_revision":"r2"}}"#)
+        case "revision.example":
+            response = (428, #"{"detail":{"message":"Revision fehlt","reload_required":true,"current_revision":"r2"}}"#)
+        case "password.example":
+            response = (403, #"{"detail":{"message":"Passwort nötig","reauth_required":true}}"#)
+        default:
+            response = (422, #"{"detail":{"message":"Ungültig","errors":["Name fehlt"]}}"#)
+        }
+        let http = HTTPURLResponse(
+            url: request.url!,
+            statusCode: response.0,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(response.1.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
 
