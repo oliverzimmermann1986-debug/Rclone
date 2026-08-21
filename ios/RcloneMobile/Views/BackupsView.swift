@@ -172,12 +172,17 @@ private struct RunsListView: View {
         }
         .listStyle(.insetGrouped)
         .searchable(text: $query, prompt: "ID, Definition oder Fehler suchen")
-        .onSubmit(of: .search) { Task { await reload() } }
-        .onChange(of: query) { _, _ in exportURL = nil }
+        .task(id: query) {
+            do {
+                try await Task.sleep(for: .milliseconds(350))
+                await reload()
+            } catch is CancellationError {
+            } catch {
+            }
+        }
         .onChange(of: kind) { _, _ in Task { await reload() } }
         .onChange(of: status) { _, _ in Task { await reload() } }
         .refreshable { await reload() }
-        .task { if jobs.isEmpty { await reload() } }
     }
 
     private func reload() async {
@@ -216,21 +221,29 @@ private struct RunsListView: View {
             errorMessage = nil
         } catch is CancellationError {
         } catch {
+            guard generation == requestGeneration else { return }
             errorMessage = error.localizedDescription
         }
     }
 
     private func prepareCSV() async {
+        let generation = requestGeneration
+        let selectedKind = kind
+        let selectedStatus = status
+        let selectedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            exportURL = try await model.withCurrentClient {
+            let url = try await model.withCurrentClient {
                 try await $0.downloadJobsCSV(
-                    kind: kind.isEmpty ? nil : kind,
-                    status: status.isEmpty ? nil : status,
-                    query: query.trimmingCharacters(in: .whitespacesAndNewlines)
+                    kind: selectedKind.isEmpty ? nil : selectedKind,
+                    status: selectedStatus.isEmpty ? nil : selectedStatus,
+                    query: selectedQuery
                 )
             }
+            guard generation == requestGeneration else { return }
+            exportURL = url
         } catch is CancellationError {
         } catch {
+            guard generation == requestGeneration else { return }
             errorMessage = error.localizedDescription
         }
     }
