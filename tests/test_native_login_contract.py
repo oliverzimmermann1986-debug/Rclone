@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from app import config_store, db
 from app.config_store import Config
 from app.db import Database
-from app.jobs import locks
+from app.jobs import locks, runtime_state
 
 
 CONTRACT = json.loads(
@@ -48,6 +48,11 @@ def _client(tmp_path: Path, monkeypatch, *, max_failures: int = 10) -> TestClien
     monkeypatch.setattr(config_store, "_config", Config(config_path))
     monkeypatch.setattr(db, "_db", Database(tmp_path / "app.db"))
     monkeypatch.setattr(locks, "LOCK_DIR", tmp_path / "locks")
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(runtime_state, "STATE_DIR", runtime_dir)
+    monkeypatch.setattr(runtime_state, "RUN_FILE", runtime_dir / "current-run.json")
+    monkeypatch.setattr(runtime_state, "CANCEL_FILE", runtime_dir / "cancel.requested")
+    monkeypatch.setattr(runtime_state, "PROCS_DIR", runtime_dir / "processes")
     from app import main
 
     return TestClient(main.app, base_url="http://testserver")
