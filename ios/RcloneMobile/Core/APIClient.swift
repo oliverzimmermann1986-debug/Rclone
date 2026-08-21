@@ -144,7 +144,7 @@ final class APIClient: APIClientProtocol {
         // timeout and the login screen's explicit cancel action.
         configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = 15
-        configuration.timeoutIntervalForResource = 30
+        configuration.timeoutIntervalForResource = 90
         self.session = session ?? URLSession(configuration: configuration)
         self.decoder = JSONDecoder()
     }
@@ -245,7 +245,8 @@ final class APIClient: APIClientProtocol {
 
     func getStorage(includeSizes: Bool = true, forceRefresh: Bool = false) async throws -> StorageOverview {
         try await get(
-            "/api/storage/overview?include_remote=\(includeSizes ? "true" : "false")&refresh_sizes=\(forceRefresh ? "true" : "false")"
+            "/api/storage/overview?include_remote=\(includeSizes ? "true" : "false")&refresh_sizes=\(forceRefresh ? "true" : "false")",
+            timeout: forceRefresh ? 75 : nil
         )
     }
 
@@ -461,9 +462,10 @@ final class APIClient: APIClientProtocol {
         clearCookies()
     }
 
-    private func get<T: Decodable>(_ path: String) async throws -> T {
+    private func get<T: Decodable>(_ path: String, timeout: TimeInterval? = nil) async throws -> T {
         var request = URLRequest(url: url(for: path))
         request.httpMethod = "GET"
+        if let timeout { request.timeoutInterval = timeout }
         return try await send(request)
     }
 

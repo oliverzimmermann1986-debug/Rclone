@@ -211,6 +211,41 @@ final class APIClientSessionTests: XCTestCase {
         XCTAssertTrue(result.ok)
         XCTAssertEqual(result.jobID, 91)
     }
+
+    func testForcedStorageRefreshUsesServerCompatibleTimeout() async throws {
+        StorageTimeoutURLProtocol.timeout = nil
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StorageTimeoutURLProtocol.self]
+        let client = APIClient(
+            baseURL: try XCTUnwrap(URL(string: "https://storage.example")),
+            session: URLSession(configuration: configuration)
+        )
+
+        let result = try await client.getStorage(includeSizes: true, forceRefresh: true)
+
+        XCTAssertEqual(result.pairs.count, 0)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(StorageTimeoutURLProtocol.timeout), 60)
+    }
+}
+
+private final class StorageTimeoutURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var timeout: TimeInterval?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.timeout = request.timeoutInterval
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"pairs":[]}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class FailingURLProtocol: URLProtocol {

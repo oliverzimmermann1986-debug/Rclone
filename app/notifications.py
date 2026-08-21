@@ -8,8 +8,9 @@ import json
 import logging
 import socket
 import ssl
+import time
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any
 
 from . import __version__
@@ -306,15 +307,19 @@ def notify(event: str, title: str, message: str, **extra: Any) -> None:
     ]
     if not hooks:
         return
-    _allow_http, _allow_private, _timeout, workers = _notification_policy()
-    with ThreadPoolExecutor(
+    _allow_http, _allow_private, timeout, workers = _notification_policy()
+    pool = ThreadPoolExecutor(
         max_workers=min(workers, len(hooks)), thread_name_prefix="webhook"
-    ) as pool:
+    )
+    started = time.monotonic()
+    try:
         futures = {
             pool.submit(notify_one, hook, event, title, message, **extra): hook
             for hook in hooks
         }
-        for future in as_completed(futures):
+        remaining = max(0.0, timeout - (time.monotonic() - started))
+        completed, pending = wait(futures, timeout=remaining)
+        for future in completed:
             hook = futures[future]
             kind = str(hook.get("type") or "generic").lower()
             try:
@@ -322,3 +327,18 @@ def notify(event: str, title: str, message: str, **extra: Any) -> None:
                 logger.info("notify[%s] %s: ok", kind, event)
             except Exception as exc:
                 logger.warning("notify[%s] %s fehlgeschlagen: %s", kind, event, exc)
+        for future in pending:
+            hook = futures[future]
+            kind = str(hook.get("type") or "generic").lower()
+            future.cancel()
+            logger.warning(
+                "notify[%s] %s nach %.1f Sekunden abgebrochen",
+                kind,
+                event,
+                timeout,
+            )
+    finally:
+        # Laufende Netzwerkaufrufe lassen sich in Python nicht sicher abbrechen.
+        # Sie behalten ihre Socket-Zeitlimits, dürfen aber den Sync-Thread nicht
+        # über die gemeinsame Benachrichtigungs-Deadline hinaus blockieren.
+        pool.shutdown(wait=False, cancel_futures=True)

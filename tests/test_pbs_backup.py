@@ -361,6 +361,13 @@ def test_find_due_pbs_targets_uses_pair_runs(tmp_path, monkeypatch):
     assert due == ["docs"]
     assert {item["name"] for item in status} == {"docs", "manuell"}
 
+    # Der Scheduler prüft nach dem Lock mit einem unveränderlichen Dict-Snapshot
+    # erneut. Dieser Pfad muss dieselbe Fälligkeit liefern wie das Config-Objekt.
+    snapshot, _revision = cfg.snapshot_with_revision()
+    due, status = scheduler.find_due_pbs_targets(snapshot, db)
+    assert due == ["docs"]
+    assert {item["name"] for item in status} == {"docs", "manuell"}
+
     # Deaktiviert -> nichts fällig
     (tmp_path / "config.yaml").write_text(
         yaml.safe_dump(_base_config(tmp_path, {"enabled": False, "targets": []})),

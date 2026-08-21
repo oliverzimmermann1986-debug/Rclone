@@ -14,7 +14,7 @@ final class AppModelLifecycleTests: XCTestCase {
         await model.restoreSession()
 
         XCTAssertEqual(model.phase, .signedOut)
-        XCTAssertTrue(model.errorMessage?.contains("30 Sekunden") == true)
+        XCTAssertTrue(model.errorMessage?.contains("Zeitlimits") == true)
     }
 
     func testRefreshPublishesSuccessfulEndpointsWhenOthersFail() async {
@@ -35,6 +35,18 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.configState, .loaded)
         XCTAssertEqual(model.jobsState, .loaded)
         XCTAssertFalse(model.isRefreshing)
+    }
+
+    func testPBSFailurePublishesRetryableLoadState() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.pbsError = APIError.server(status: 503, message: "PBS nicht erreichbar")
+        let model = AppModel(defaults: defaults) { _ in client }
+
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        XCTAssertNil(model.pbs)
+        XCTAssertEqual(model.pbsState, .failed("PBS nicht erreichbar"))
     }
 
     func testStartupRestoreCanBeCancelledWithoutWaitingForNetworkTimeout() {
@@ -241,6 +253,7 @@ private final class StubAPIClient: APIClientProtocol {
     var updateConfigError: Error?
     var passwordChangeResponse: PasswordChangeResponse?
     var runAllResponse: ActionResponse?
+    var pbsError: Error?
     var baseConfig: ConfigSnapshot?
     private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
@@ -344,7 +357,8 @@ private final class StubAPIClient: APIClientProtocol {
     }
 
     func getPBSStatus() async throws -> PBSStatus {
-        PBSStatus(
+        if let pbsError { throw pbsError }
+        return PBSStatus(
             enabled: false,
             clientAvailable: false,
             repository: "",

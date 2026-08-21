@@ -7,6 +7,7 @@ from app.jobs.scheduler import (
     find_due_pairs,
     pbs_history_key,
     rclone_history_key,
+    restore_test_due,
 )
 
 
@@ -49,6 +50,23 @@ def _config():
             ],
         }
     }
+
+
+def test_restore_test_due_accepts_scheduler_snapshot_mapping():
+    snapshot = {
+        "backup": {
+            "timezone": "Europe/Berlin",
+            "scheduler_retry_minutes": 60,
+            "scheduler_grace_minutes": 15,
+            "restore_test": {"enabled": True, "schedule": "0 3 * * *"},
+        }
+    }
+    now = datetime(2026, 7, 10, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")).timestamp()
+
+    result = restore_test_due(snapshot, FakeDb(), now=now)
+
+    assert result["due"] is False
+    assert result["reason"] == "waiting_for_first_schedule"
 
 
 def test_scheduled_first_failure_retries_after_backoff():
@@ -285,6 +303,98 @@ def test_disabled_rclone_backup_does_not_disable_pbs_scheduler(tmp_path, monkeyp
     assert scheduler_cli.main() == 0
     assert database.started[0][0] == "pbs"
     assert database.started[0][1]["attempts"][0]["name"] == "pbs:docs"
+    assert database.finished[0][1] == "ok"
+
+
+def test_unsafe_backup_scope_does_not_block_independent_pbs_scope(
+    tmp_path, monkeypatch
+):
+    class Config:
+        data = {
+            "backup": {"enabled": True, "pairs": [{"name": "Fotos"}]},
+            "paths": {"logs_dir": str(tmp_path)},
+        }
+
+        def get(self, *keys, default=None):
+            value = self.data
+            for key in keys:
+                if not isinstance(value, dict) or key not in value:
+                    return default
+                value = value[key]
+            return value
+
+    class Db:
+        def __init__(self):
+            self.started = []
+            self.finished = []
+
+        def job_start(self, kind, **kwargs):
+            self.started.append((kind, kwargs))
+            return 42
+
+        def job_finish(self, job_id, status, summary):
+            self.finished.append((job_id, status, summary))
+            return True
+
+    @contextmanager
+    def lock(_name):
+        yield object()
+
+    database = Db()
+    pbs_status = [
+        {
+            "name": "docs",
+            "run_name": "pbs:docs",
+            "history_key": "pbs:id:docs",
+            "scheduled_slot": "slot",
+            "due": True,
+        }
+    ]
+    monkeypatch.setattr(scheduler_cli, "get_config", Config)
+    monkeypatch.setattr(scheduler_cli, "get_db", lambda: database)
+    monkeypatch.setattr(scheduler_cli, "_configure_logging", lambda _path=None: None)
+    monkeypatch.setattr(scheduler_cli, "check_overdue", lambda *_args: [])
+    monkeypatch.setattr(scheduler_cli, "scheduler_state", lambda _db: {"paused": False})
+    monkeypatch.setattr(
+        scheduler_cli,
+        "find_due_pairs",
+        lambda *_args, **_kwargs: (["Fotos"], [{"name": "Fotos", "due": True}]),
+    )
+    monkeypatch.setattr(
+        scheduler_cli,
+        "find_due_pbs_targets",
+        lambda *_args, **_kwargs: (["docs"], pbs_status),
+    )
+    monkeypatch.setattr(
+        scheduler_cli, "restore_test_due", lambda *_args: {"due": False}
+    )
+    monkeypatch.setattr(scheduler_cli, "file_lock_or_none", lock)
+    monkeypatch.setattr(
+        scheduler_cli,
+        "reconcile_locked_scope",
+        lambda _db, *, scope, kinds: {
+            "safe": scope == scheduler_cli.PBS_CANCEL_SCOPE,
+            "recovered_jobs": 0,
+        },
+    )
+    monkeypatch.setattr(
+        scheduler_cli,
+        "run_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unsicherer Backup-Scope darf nicht starten")
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler_cli,
+        "run_pbs_backup",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "pairs": [{"name": "pbs:docs", "ok": True}],
+        },
+    )
+
+    assert scheduler_cli.main() == 1
+    assert [kind for kind, _kwargs in database.started] == ["pbs"]
     assert database.finished[0][1] == "ok"
 
 

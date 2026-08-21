@@ -111,7 +111,7 @@ class _DB:
                 },
                 "last_success": {
                     "ended_at": 1_719_990_000,
-                    "pair": {"transferred": 2048},
+                    "pair": {"transferred": "2 KiB"},
                 },
             }
             for key in identities
@@ -346,6 +346,10 @@ def test_storage_fixtures_match_route_and_cache_states(
     _assert_shape(
         api_storage.overview(include_remote=False), _body("storage_without_sizes")
     )
+    assert (
+        api_storage.overview(include_remote=False)["pairs"][0]["last_transferred"]
+        == "2 KiB"
+    )
 
     pair = config.get("backup", "pairs")[0]
     examples = _body("storage_with_sizes")["pairs"]
@@ -461,6 +465,8 @@ def test_native_management_uses_canonical_routes_and_models_without_webview():
         "struct JobPlan: Decodable",
     ):
         assert model in models
+    assert "values.decodeIfPresent(String.self, forKey: .executionMode)" in models
+    assert "values.decodeIfPresent([String].self, forKey: .dataPathIDs)" in models
     for feature in (
         "Datenwege in Reihenfolge",
         "Nicht gespeicherte Änderungen",
@@ -509,6 +515,12 @@ def test_native_f14_revision_safety_history_and_run_all_contracts():
     assert "downloadJobLog(" in backups
     assert backups.count("model.withCurrentClient") >= 5
     assert "detailError" in backups and "logError" in backups
+    assert ".task(id: query)" in backups
+    assert backups.count("guard generation == requestGeneration else { return }") >= 3
+    assert "pbsState: ContentLoadState" in app_model
+    assert "PBS-Status nicht geladen" in (
+        ios_root / "Views" / "SystemView.swift"
+    ).read_text(encoding="utf-8")
 
 
 def test_native_pbs_configuration_is_revision_safe_and_feature_complete():

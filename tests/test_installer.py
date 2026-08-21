@@ -48,7 +48,8 @@ def test_installer_uses_pinned_requirements_and_services_have_safe_runtime_defau
             assert "==" in line, f"ungepinnte Laufzeitabhängigkeit: {line}"
     assert "--host 127.0.0.1" in web_service
     assert "TimeoutStartSec=infinity" in backup_service
-    assert "TimeoutStartSec=infinity" in scheduler_service
+    assert "TimeoutStartSec=6h" in scheduler_service
+    assert "TimeoutStartSec=infinity" not in scheduler_service
 
 
 def test_installer_fails_closed_for_source_and_backup_paths():
@@ -59,6 +60,11 @@ def test_installer_fails_closed_for_source_and_backup_paths():
     assert '[[ ! -d "$APP_DIR/.git" ]]' in script
     assert 'rm -rf "$APP_DIR"' not in script
     assert "ALLOW_DIRTY_UPGRADE" not in script
+    assert '[[ ! "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]' in script
+    assert 'checkout --detach "$SOURCE_COMMIT"' in script
+    assert '"$CHECKED_OUT_COMMIT" != "$SOURCE_COMMIT"' in script
+    assert "merge-base --is-ancestor" in script
+    assert "pull --ff-only" not in script
     assert 'git -c safe.directory="$APP_DIR" -C "$APP_DIR" status' in script
     assert 'case "$BACKUP_ROOT_CANONICAL" in' in script
     assert '"$APP_DIR_CANONICAL"|"$APP_DIR_CANONICAL"/*)' in script
