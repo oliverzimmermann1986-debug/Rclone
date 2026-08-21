@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "endpoint": "/api/auth/login",
+  "challenge": {
+    "http_status": 200,
+    "body": {
+      "status": "csrf_ready",
+      "login_csrf": "fixture-login-csrf-token-1234567890"
+    }
+  },
+  "outcomes": [
+    {
+      "name": "success",
+      "http_status": 200,
+      "body": { "status": "success" }
+    },
+    {
+      "name": "invalid_credentials",
+      "http_status": 401,
+      "body": { "status": "invalid_credentials" }
+    },
+    {
+      "name": "rate_limited",
+      "http_status": 429,
+      "body": { "status": "rate_limited", "retry_after_seconds": 60 }
+    },
+    {
+      "name": "csrf_failed",
+      "http_status": 403,
+      "body": { "status": "csrf_failed" }
+    },
+    {
+      "name": "origin_failed",
+      "http_status": 403,
+      "body": { "status": "origin_failed" }
+    }
+  ]
+}

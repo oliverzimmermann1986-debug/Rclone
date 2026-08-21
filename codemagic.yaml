@@ -20,6 +20,11 @@ workflows:
         - pattern: "ios-v*"
           include: true
     scripts:
+      - name: Validate release tag and set marketing version
+        script: |
+          test -n "${CM_TAG:-}" || { echo "TestFlight-Build benötigt einen ios-vX.Y.Z-Tag" >&2; exit 1; }
+          python3 "$CM_BUILD_DIR/scripts/ios_release_version.py" \
+            "$CM_TAG" "$CM_BUILD_DIR/ios/project.yml" --write
       - name: Install XcodeGen
         script: brew install xcodegen
       - name: Generate Xcode project
@@ -32,8 +37,20 @@ workflows:
             --project "$CM_BUILD_DIR/$XCODE_PROJECT"
       - name: Set unique build number
         script: |
+          case "${BUILD_NUMBER:-}" in
+            ''|*[!0-9]*) echo "BUILD_NUMBER muss eine positive Ganzzahl sein" >&2; exit 1 ;;
+          esac
+          test "$BUILD_NUMBER" -gt 0 || { echo "BUILD_NUMBER muss größer als 0 sein" >&2; exit 1; }
           cd "$CM_BUILD_DIR/ios"
           agvtool new-version -all "$BUILD_NUMBER"
+      - name: Verify generated release versions
+        script: |
+          EXPECTED_VERSION="${CM_TAG#ios-v}"
+          SETTINGS="$(xcodebuild -project "$CM_BUILD_DIR/$XCODE_PROJECT" -scheme "$XCODE_SCHEME" -showBuildSettings)"
+          ACTUAL_VERSION="$(printf '%s\n' "$SETTINGS" | awk -F ' = ' '/^[[:space:]]*MARKETING_VERSION = / { print $2; exit }')"
+          ACTUAL_BUILD="$(printf '%s\n' "$SETTINGS" | awk -F ' = ' '/^[[:space:]]*CURRENT_PROJECT_VERSION = / { print $2; exit }')"
+          test "$ACTUAL_VERSION" = "$EXPECTED_VERSION"
+          test "$ACTUAL_BUILD" = "$BUILD_NUMBER"
       - name: Run iOS unit tests
         script: |
           xcodebuild test \
@@ -53,6 +70,8 @@ workflows:
           unzip -q "$IPA_PATH" -d "$VERIFY_DIR"
           APP_PATH="$(find "$VERIFY_DIR/Payload" -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$APP_PATH"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Info.plist")" = "${CM_TAG#ios-v}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist")" = "$BUILD_NUMBER"
           test "$(/usr/libexec/PlistBuddy -c 'Print :UIDeviceFamily:0' "$APP_PATH/Info.plist")" = "1"
           test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchScreen:UIColorName' "$APP_PATH/Info.plist")" = "LaunchBackground"
           /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$APP_PATH/Info.plist" >/dev/null

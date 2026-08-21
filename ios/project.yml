@@ -33,6 +33,8 @@ targets:
     platform: iOS
     sources:
       - path: RcloneMobileTests
+    resources:
+      - path: ../contracts/native_login_contract.json
     dependencies:
       - target: RcloneMobile
     settings:

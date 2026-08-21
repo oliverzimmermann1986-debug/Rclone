@@ -33,6 +33,12 @@ from .auth import (
     session_user,
     verify_password,
 )
+from .auth_contract import (
+    NATIVE_LOGIN_PATH,
+    NativeLoginChallenge,
+    NativeLoginRequest,
+    NativeLoginResponse,
+)
 from .config_store import get_config
 from .db import get_db
 from .rclone_args import rclone_subprocess_env
@@ -99,6 +105,46 @@ def _set_csrf_cookie(response, request: Request, token: str) -> None:
         max_age=session_max_age(),
         path="/",
     )
+
+
+def _remove_initial_password_marker() -> None:
+    try:
+        data_dir = Path(
+            get_config().get("paths", "data_dir", default="/opt/rclone-sync/data")
+        )
+        (data_dir / ".initial-password").unlink(missing_ok=True)
+    except OSError:
+        logger.exception(
+            "Initialpasswort-Datei konnte nach dem Login nicht entfernt werden"
+        )
+
+
+def _authenticate_login(
+    request: Request, username: str, password: str
+) -> tuple[str, int]:
+    """Run the shared lockout/password flow for browser and native logins."""
+    key = login_key(request, username)
+    retry_after = login_retry_after(key)
+    if retry_after:
+        return "rate_limited", retry_after
+    if not verify_password(username, password):
+        return "invalid_credentials", record_login_failure(key)
+    clear_login_failures(key)
+    _remove_initial_password_marker()
+    return "success", 0
+
+
+def _set_authenticated_session(response, request: Request, username: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        create_session(username),
+        httponly=True,
+        samesite="lax",
+        max_age=session_max_age(),
+        secure=_cookie_secure(request),
+        path="/",
+    )
+    _set_csrf_cookie(response, request, new_csrf_token())
 
 
 def _production_security_warnings() -> list[str]:
@@ -349,6 +395,11 @@ async def security_middleware(request: Request, call_next):
     state_changing = method in {"POST", "PUT", "PATCH", "DELETE"}
     body_limit_exceeded = False
     if state_changing and not _same_origin(request):
+        if request.url.path == NATIVE_LOGIN_PATH:
+            response = JSONResponse(
+                status_code=403, content={"status": "origin_failed"}
+            )
+            return _apply_security_headers(response, request, request_id)
         return _error_response(
             request, request_id, 403, "Origin-Prüfung fehlgeschlagen"
         )
@@ -444,40 +495,64 @@ def login_submit(
     cookie_nonce = request.cookies.get(LOGIN_CSRF_COOKIE, "")
     if not cookie_nonce or not secrets.compare_digest(cookie_nonce, login_csrf):
         return RedirectResponse(url="/login?error=csrf", status_code=303)
-    key = login_key(request, username)
-    retry_after = login_retry_after(key)
-    if retry_after:
+    status, retry_after = _authenticate_login(request, username, password)
+    if status == "rate_limited":
         response = RedirectResponse(url="/login?error=rate", status_code=303)
         response.headers["Retry-After"] = str(retry_after)
         return response
-    if not verify_password(username, password):
-        record_login_failure(key)
+    if status != "success":
         return RedirectResponse(url="/login?error=1", status_code=303)
-
-    clear_login_failures(key)
-    try:
-        data_dir = Path(
-            get_config().get("paths", "data_dir", default="/opt/rclone-sync/data")
-        )
-        (data_dir / ".initial-password").unlink(missing_ok=True)
-    except OSError:
-        logger.exception(
-            "Initialpasswort-Datei konnte nach dem Login nicht entfernt werden"
-        )
-    token = create_session(username)
-    csrf = new_csrf_token()
     response = RedirectResponse(url="/", status_code=303)
-    response.set_cookie(
-        SESSION_COOKIE,
-        token,
-        httponly=True,
-        samesite="lax",
-        max_age=session_max_age(),
-        secure=_cookie_secure(request),
-        path="/",
-    )
-    _set_csrf_cookie(response, request, csrf)
+    _set_authenticated_session(response, request, username)
     response.delete_cookie(LOGIN_CSRF_COOKIE, path="/login")
+    return response
+
+
+@app.get(NATIVE_LOGIN_PATH, response_model=NativeLoginChallenge)
+def native_login_challenge(request: Request):
+    nonce = secrets.token_urlsafe(32)
+    response = JSONResponse(content=NativeLoginChallenge(login_csrf=nonce).model_dump())
+    response.set_cookie(
+        LOGIN_CSRF_COOKIE,
+        nonce,
+        httponly=True,
+        secure=_cookie_secure(request),
+        samesite="strict",
+        max_age=600,
+        path=NATIVE_LOGIN_PATH,
+    )
+    return response
+
+
+@app.post(NATIVE_LOGIN_PATH, response_model=NativeLoginResponse)
+def native_login_submit(request: Request, credentials: NativeLoginRequest):
+    cookie_nonce = request.cookies.get(LOGIN_CSRF_COOKIE, "")
+    if not cookie_nonce or not secrets.compare_digest(
+        cookie_nonce, credentials.login_csrf
+    ):
+        return JSONResponse(status_code=403, content={"status": "csrf_failed"})
+
+    status, retry_after = _authenticate_login(
+        request, credentials.username, credentials.password
+    )
+    if status == "rate_limited" or (
+        status == "invalid_credentials" and retry_after > 0
+    ):
+        response = JSONResponse(
+            status_code=429,
+            content={
+                "status": "rate_limited",
+                "retry_after_seconds": retry_after,
+            },
+        )
+        response.headers["Retry-After"] = str(retry_after)
+        return response
+    if status != "success":
+        return JSONResponse(status_code=401, content={"status": "invalid_credentials"})
+
+    response = JSONResponse(content={"status": "success"})
+    _set_authenticated_session(response, request, credentials.username)
+    response.delete_cookie(LOGIN_CSRF_COOKIE, path=NATIVE_LOGIN_PATH)
     return response
 
 

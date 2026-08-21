@@ -8,6 +8,7 @@ struct LoginView: View {
     @State private var username = "admin"
     @State private var password = ""
     @State private var loginTask: Task<Void, Never>?
+    @State private var showHTTPWarning = false
     @FocusState private var focusedField: LoginFieldID?
 
     var body: some View {
@@ -64,6 +65,12 @@ struct LoginView: View {
         .onAppear {
             server = model.serverAddress
             username = model.savedUsername
+        }
+        .alert("Passwort unverschlüsselt senden?", isPresented: $showHTTPWarning) {
+            Button("Abbrechen", role: .cancel) {}
+            Button("Über HTTP anmelden", role: .destructive, action: performLogin)
+        } message: {
+            Text("Diese Serveradresse verwendet kein HTTPS. Benutzername und Passwort können im Netzwerk mitgelesen werden. Bestätige dies für diesen Anmeldeversuch ausdrücklich.")
         }
     }
 
@@ -169,6 +176,18 @@ struct LoginView: View {
 
     private func login() {
         focusedField = nil
+        guard let url = try? APIClient.normalizedServerURL(server) else {
+            performLogin()
+            return
+        }
+        if url.scheme?.lowercased() == "http" {
+            showHTTPWarning = true
+            return
+        }
+        performLogin()
+    }
+
+    private func performLogin() {
         loginTask?.cancel()
         loginTask = Task {
             await model.login(server: server, username: username, password: password)
