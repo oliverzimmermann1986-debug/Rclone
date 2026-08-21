@@ -316,6 +316,7 @@ private final class StubAPIClient: APIClientProtocol {
     func checkPair(name: String) async throws -> ActionResponse { throw APIError.invalidResponse }
     func runRestoreTest(pair: String?) async throws -> ActionResponse { throw APIError.invalidResponse }
     func browseLocal(path: String) async throws -> BrowseResponse { throw APIError.invalidResponse }
+    func browseRemote(path: String) async throws -> BrowseResponse { throw APIError.invalidResponse }
     func getAuditEvents(limit: Int) async throws -> AuditResponse { throw APIError.invalidResponse }
     func getMaintenanceLogs(limit: Int) async throws -> MaintenanceLogsResponse { throw APIError.invalidResponse }
     func getDatabaseStatus() async throws -> DatabaseStatus { throw APIError.invalidResponse }
@@ -329,7 +330,6 @@ private final class StubAPIClient: APIClientProtocol {
         guard let passwordChangeResponse else { throw APIError.invalidResponse }
         return passwordChangeResponse
     }
-    func testWebhook(id: String) async throws -> ActionResponse { throw APIError.invalidResponse }
     func downloadSupportBundle() async throws -> URL { throw APIError.invalidResponse }
 
     func getJobs(limit: Int) async throws -> JobSearchResponse {

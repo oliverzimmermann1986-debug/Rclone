@@ -382,31 +382,6 @@ struct ConfigSnapshot: Codable {
         )
     }
 
-    var webhooks: [WebhookConfig] {
-        guard case let .object(notifications)? = extraSections["notifications"],
-              case let .array(values)? = notifications["webhooks"] else { return [] }
-        return values.compactMap { value in
-            guard let data = try? JSONEncoder().encode(value) else { return nil }
-            return try? JSONDecoder().decode(WebhookConfig.self, from: data)
-        }
-    }
-
-    func replacingWebhooks(_ webhooks: [WebhookConfig]) -> ConfigSnapshot {
-        var sections = extraSections
-        var notifications: [String: JSONValue]
-        if case let .object(existing)? = sections["notifications"] {
-            notifications = existing
-        } else {
-            notifications = [:]
-        }
-        notifications["webhooks"] = .array(webhooks.compactMap { webhook in
-            guard let data = try? JSONEncoder().encode(webhook) else { return nil }
-            return try? JSONDecoder().decode(JSONValue.self, from: data)
-        })
-        sections["notifications"] = .object(notifications)
-        return ConfigSnapshot(revision: revision, backup: backup, extraSections: sections)
-    }
-
     var pbsConfiguration: PBSConfiguration {
         guard let value = extraSections["pbs"],
               let data = try? JSONEncoder().encode(value),
@@ -879,65 +854,6 @@ struct JobDefinition: Codable, Identifiable {
     }
 }
 
-struct WebhookConfig: Codable, Identifiable {
-    let id: String
-    let enabled: Bool
-    let type: String
-    let url: String
-    let events: [String]
-    private let extras: [String: JSONValue]
-
-    init(
-        id: String, enabled: Bool, type: String, url: String,
-        events: [String], extras: [String: JSONValue] = [:]
-    ) {
-        self.id = id
-        self.enabled = enabled
-        self.type = type
-        self.url = url
-        self.events = events
-        self.extras = extras
-    }
-
-    init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: DynamicCodingKey.self)
-        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
-        id = try values.decode(String.self, forKey: key("id"))
-        enabled = try values.decodeIfPresent(Bool.self, forKey: key("enabled")) ?? true
-        type = try values.decodeIfPresent(String.self, forKey: key("type")) ?? "generic"
-        url = try values.decodeIfPresent(String.self, forKey: key("url")) ?? ""
-        events = try values.decodeIfPresent([String].self, forKey: key("events")) ?? []
-        let known = Set(["id", "enabled", "type", "url", "events"])
-        var preserved: [String: JSONValue] = [:]
-        for codingKey in values.allKeys where !known.contains(codingKey.stringValue) {
-            preserved[codingKey.stringValue] = try values.decode(JSONValue.self, forKey: codingKey)
-        }
-        extras = preserved
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var values = encoder.container(keyedBy: DynamicCodingKey.self)
-        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
-        for (name, value) in extras { try values.encode(value, forKey: key(name)) }
-        try values.encode(id, forKey: key("id"))
-        try values.encode(enabled, forKey: key("enabled"))
-        try values.encode(type, forKey: key("type"))
-        try values.encode(url, forKey: key("url"))
-        try values.encode(events, forKey: key("events"))
-    }
-
-    func replacing(enabled: Bool, type: String, url: String, events: [String]) -> WebhookConfig {
-        WebhookConfig(
-            id: id,
-            enabled: enabled,
-            type: type,
-            url: url,
-            events: events,
-            extras: extras
-        )
-    }
-}
-
 struct ConfigUpdateRequest: Encodable {
     let config: ConfigSnapshot
     let currentPassword: String?
@@ -1267,11 +1183,6 @@ struct PasswordChangeResponse: Decodable {
     let ok: Bool
     let message: String
     let reauthenticate: Bool
-}
-
-struct WebhookTestRequest: Encodable {
-    let id: String
-    let event = "sync_ok"
 }
 
 struct BackupProgress: Decodable {

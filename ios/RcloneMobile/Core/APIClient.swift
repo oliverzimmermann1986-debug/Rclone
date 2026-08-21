@@ -60,6 +60,7 @@ protocol APIClientProtocol: AnyObject {
     func checkPair(name: String) async throws -> ActionResponse
     func runRestoreTest(pair: String?) async throws -> ActionResponse
     func browseLocal(path: String) async throws -> BrowseResponse
+    func browseRemote(path: String) async throws -> BrowseResponse
     func getAuditEvents(limit: Int) async throws -> AuditResponse
     func getMaintenanceLogs(limit: Int) async throws -> MaintenanceLogsResponse
     func getDatabaseStatus() async throws -> DatabaseStatus
@@ -70,7 +71,6 @@ protocol APIClientProtocol: AnyObject {
     func getFilterFile() async throws -> FilterFile
     func saveFilterFile(_ request: FilterFileSaveRequest) async throws -> FilterFileSaveResponse
     func changePassword(current: String, new: String) async throws -> PasswordChangeResponse
-    func testWebhook(id: String) async throws -> ActionResponse
     func downloadSupportBundle() async throws -> URL
     func getJobs(limit: Int) async throws -> JobSearchResponse
     func searchJobs(kind: String?, status: String?, query: String, limit: Int, offset: Int) async throws -> JobSearchResponse
@@ -326,7 +326,10 @@ final class APIClient: APIClientProtocol {
     func getStorage(includeSizes: Bool = true, forceRefresh: Bool = false) async throws -> StorageOverview {
         try await get(
             "/api/storage/overview?include_remote=\(includeSizes ? "true" : "false")&refresh_sizes=\(forceRefresh ? "true" : "false")",
-            timeout: forceRefresh ? 75 : nil
+            // A cold rclone size traversal may legitimately take up to 45 seconds
+            // per endpoint. Keep every size request alive long enough, not only a
+            // manually forced refresh.
+            timeout: includeSizes ? 75 : nil
         )
     }
 
@@ -392,6 +395,10 @@ final class APIClient: APIClientProtocol {
         try await get("/api/browse/local?path=\(Self.queryEncode(path))")
     }
 
+    func browseRemote(path: String = "") async throws -> BrowseResponse {
+        try await get("/api/browse/rclone?path=\(Self.queryEncode(path))")
+    }
+
     func getAuditEvents(limit: Int = 100) async throws -> AuditResponse {
         try await get("/api/maintenance/audit?limit=\(limit)")
     }
@@ -433,10 +440,6 @@ final class APIClient: APIClientProtocol {
             "/api/config/change-password",
             body: PasswordChangeRequest(currentPassword: current, newPassword: new)
         )
-    }
-
-    func testWebhook(id: String) async throws -> ActionResponse {
-        try await post("/api/config/test-webhook", body: WebhookTestRequest(id: id))
     }
 
     func downloadSupportBundle() async throws -> URL {

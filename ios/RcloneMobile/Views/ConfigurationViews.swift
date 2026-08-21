@@ -525,9 +525,8 @@ private struct DataPathEditor: View {
                     HStack {
                         TextField("Remote oder Zielpfad", text: $remote)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        Image(systemName: "folder")
-                            .foregroundStyle(.secondary)
-                            .accessibilityHidden(true)
+                        Button { browseTarget = .remote } label: { Image(systemName: "folder") }
+                            .accessibilityLabel("Zielordner auswählen")
                     }
                     Toggle("Aktiv", isOn: $enabled)
                 }
@@ -582,8 +581,13 @@ private struct DataPathEditor: View {
                 }
             }
         }
-        .sheet(item: $browseTarget) { _ in
-            LocalPathBrowserSheet(initialPath: local) { local = $0 }
+        .sheet(item: $browseTarget) { target in
+            PathBrowserSheet(
+                kind: target == .local || remote.hasPrefix("/") ? .local : .remote,
+                initialPath: target == .local ? local : remote
+            ) {
+                if target == .local { local = $0 } else { remote = $0 }
+            }
         }
     }
 
@@ -649,7 +653,7 @@ private struct DataPathEditor: View {
 }
 
 private enum BrowseTarget: String, Identifiable {
-    case local
+    case local, remote
     var id: String { rawValue }
 }
 
