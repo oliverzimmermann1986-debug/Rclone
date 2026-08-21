@@ -8,6 +8,7 @@ struct RcloneMobileApp: App {
         WindowGroup {
             AppRootView()
                 .environmentObject(model)
+                .tint(.green)
                 .task { await model.restoreSession() }
         }
     }
@@ -37,7 +38,7 @@ private struct LaunchStatusView: View {
             VStack(spacing: 18) {
                 Image(systemName: "arrow.triangle.2.circlepath.icloud")
                     .font(.system(size: 42, weight: .semibold))
-                    .foregroundStyle(.teal)
+                    .foregroundStyle(.green)
                     .accessibilityHidden(true)
                 ProgressView("Verbindung wird geprüft …")
             }

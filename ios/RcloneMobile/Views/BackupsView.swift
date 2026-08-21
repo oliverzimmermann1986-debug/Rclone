@@ -1,37 +1,13 @@
 import SwiftUI
 
-struct BackupsView: View {
+struct JobsScreen: View {
     @EnvironmentObject private var model: AppModel
     @Binding var showingSettings: Bool
-    @State private var section: BackupSection = .jobs
     @State private var selectedPair: PairHealth?
 
-    private enum BackupSection: String, CaseIterable, Identifiable {
-        case jobs = "Jobs"
-        case runs = "Läufe"
-        case paths = "Datenwege"
-        var id: Self { self }
-    }
-
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("Bereich", selection: $section) {
-                ForEach(BackupSection.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-
-            Group {
-                switch section {
-                case .jobs: JobsView(selectedPair: $selectedPair)
-                case .runs: RunsView()
-                case .paths: DataPathsView()
-                }
-            }
-        }
-        .background(Color(.systemGroupedBackground))
-        .navigationTitle("Sicherungen")
+        JobsListView(selectedPair: $selectedPair)
+        .navigationTitle("Jobs")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
             ToolbarItem(placement: .topBarTrailing) {
@@ -60,7 +36,8 @@ struct BackupsView: View {
         }
     }
 }
-private struct JobsView: View {
+
+private struct JobsListView: View {
     @EnvironmentObject private var model: AppModel
     @Binding var selectedPair: PairHealth?
 
@@ -78,7 +55,7 @@ private struct JobsView: View {
             Section("Geplante Jobs") {
                 let pairs = model.overview?.pairs.health ?? []
                 if pairs.isEmpty {
-                    ContentUnavailableView("Keine Jobs", systemImage: "calendar.badge.exclamationmark", description: Text("Richte zuerst einen Datenweg im Web-Frontend ein."))
+                    ContentUnavailableView("Keine Jobs", systemImage: "calendar.badge.exclamationmark", description: Text("Sobald ein Job eingerichtet ist, erscheint er hier."))
                 } else {
                     ForEach(pairs) { pair in
                         Button { selectedPair = pair } label: {
@@ -101,7 +78,7 @@ private struct JobRow: View {
         HStack(spacing: 12) {
             Image(systemName: pair.overdue == true ? "calendar.badge.exclamationmark" : "calendar.badge.clock")
                 .font(.title3)
-                .foregroundStyle(pair.overdue == true ? Color.orange : Color.teal)
+                .foregroundStyle(pair.overdue == true ? Color.orange : Color.green)
                 .frame(width: 30)
             VStack(alignment: .leading, spacing: 4) {
                 Text(pair.name).font(.headline)
@@ -116,7 +93,25 @@ private struct JobRow: View {
     }
 }
 
-private struct RunsView: View {
+struct RunsScreen: View {
+    @EnvironmentObject private var model: AppModel
+    @Binding var showingSettings: Bool
+
+    var body: some View {
+        RunsListView()
+            .navigationTitle("Läufe")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
+                        .disabled(model.isRefreshing)
+                        .accessibilityLabel("Aktualisieren")
+                }
+            }
+    }
+}
+
+private struct RunsListView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
@@ -206,14 +201,32 @@ struct RunDetailView: View {
     }
 }
 
-private struct DataPathsView: View {
+struct DataPathsScreen: View {
+    @EnvironmentObject private var model: AppModel
+    @Binding var showingSettings: Bool
+
+    var body: some View {
+        DataPathsListView()
+            .navigationTitle("Datenwege")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
+                        .disabled(model.isRefreshing)
+                        .accessibilityLabel("Aktualisieren")
+                }
+            }
+    }
+}
+
+private struct DataPathsListView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         List {
             let pairs = model.config?.backup.pairs ?? []
             if pairs.isEmpty {
-                ContentUnavailableView("Keine Datenwege", systemImage: "point.3.connected.trianglepath.dotted", description: Text("Datenwege können derzeit im Web-Frontend bearbeitet werden."))
+                ContentUnavailableView("Keine Datenwege", systemImage: "arrow.left.arrow.right", description: Text("Eingerichtete Verbindungen zwischen lokalen und entfernten Ordnern erscheinen hier."))
             } else {
                 ForEach(pairs) { pair in
                     NavigationLink { DataPathDetailView(pair: pair, storage: model.storage?.pairs.first { $0.name == pair.name }) } label: {
