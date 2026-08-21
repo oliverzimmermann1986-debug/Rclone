@@ -7,8 +7,10 @@ workflows:
       app_store_connect: rclone-sync-testflight
     environment:
       ios_signing:
-        distribution_type: app_store
-        bundle_identifier: de.oliverzimmermann.rclonesync
+        provisioning_profiles:
+          - rclone-sync-app-store-push
+        certificates:
+          - rclone-sync-distribution
       vars:
         XCODE_PROJECT: ios/RcloneMobile.xcodeproj
         XCODE_SCHEME: RcloneMobile
