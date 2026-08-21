@@ -111,7 +111,7 @@ class _DB:
                 },
                 "last_success": {
                     "ended_at": 1_719_990_000,
-                    "pair": {"transferred": 2048},
+                    "pair": {"transferred": "2 KiB"},
                 },
             }
             for key in identities
@@ -345,6 +345,10 @@ def test_storage_fixtures_match_route_and_cache_states(
     )
     _assert_shape(
         api_storage.overview(include_remote=False), _body("storage_without_sizes")
+    )
+    assert (
+        api_storage.overview(include_remote=False)["pairs"][0]["last_transferred"]
+        == "2 KiB"
     )
 
     pair = config.get("backup", "pairs")[0]
