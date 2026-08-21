@@ -45,9 +45,9 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertEqual(url.absoluteString, "https://backup.example.de")
     }
 
-    func testLocalIPv4UsesHTTPAndBackendPort() throws {
-        let url = try APIClient.normalizedServerURL("192.168.1.97")
-        XCTAssertEqual(url.absoluteString, "http://192.168.1.97:8001")
+    func testLocalIPv4UsesHTTPReverseProxyPort() throws {
+        let url = try APIClient.normalizedServerURL("192.168.1.67")
+        XCTAssertEqual(url.absoluteString, "http://192.168.1.67")
     }
 
     func testLocalIPv4KeepsExplicitPort() throws {
@@ -55,9 +55,9 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertEqual(url.absoluteString, "http://192.168.1.97:9000")
     }
 
-    func testExplicitLocalHTTPAddsBackendPort() throws {
-        let url = try APIClient.normalizedServerURL("http://192.168.1.97")
-        XCTAssertEqual(url.absoluteString, "http://192.168.1.97:8001")
+    func testExplicitLocalHTTPKeepsDefaultPort() throws {
+        let url = try APIClient.normalizedServerURL("http://192.168.1.67")
+        XCTAssertEqual(url.absoluteString, "http://192.168.1.67")
     }
 
     func testExplicitHTTPSIsNotRewritten() throws {
