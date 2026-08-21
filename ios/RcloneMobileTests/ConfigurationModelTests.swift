@@ -79,6 +79,35 @@ final class ConfigurationModelTests: XCTestCase {
         XCTAssertEqual(decoded.retryMinutes, 30)
     }
 
+    func testLegacyMinimalJobDefinitionUsesServerDefaults() throws {
+        let data = Data(#"{"name":"Altbestand","schedule":"0 4 * * *"}"#.utf8)
+
+        let decoded = try JSONDecoder().decode(JobDefinition.self, from: data)
+
+        XCTAssertEqual(decoded.id, "")
+        XCTAssertEqual(decoded.name, "Altbestand")
+        XCTAssertTrue(decoded.enabled)
+        XCTAssertEqual(decoded.dataPathIDs, [])
+        XCTAssertEqual(decoded.schedule, "0 4 * * *")
+        XCTAssertEqual(decoded.executionMode, "sequential")
+        XCTAssertEqual(decoded.maxParallel, 1)
+        XCTAssertEqual(decoded.retryMinutes, 60)
+    }
+
+    func testConfigSnapshotWithLegacyMinimalJobStillDecodes() throws {
+        let data = Data(#"""
+        {
+          "_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "backup":{"pairs":[],"jobs":[{"name":"Altbestand","schedule":"manual"}]}
+        }
+        """#.utf8)
+
+        let snapshot = try JSONDecoder().decode(ConfigSnapshot.self, from: data)
+
+        XCTAssertEqual(snapshot.backup.jobs.first?.name, "Altbestand")
+        XCTAssertEqual(snapshot.backup.jobs.first?.executionMode, "sequential")
+    }
+
     func testWebhookEditPreservesUnknownNotificationAndHookFields() throws {
         let data = Data(#"""
         {

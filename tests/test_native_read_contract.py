@@ -465,6 +465,8 @@ def test_native_management_uses_canonical_routes_and_models_without_webview():
         "struct JobPlan: Decodable",
     ):
         assert model in models
+    assert "values.decodeIfPresent(String.self, forKey: .executionMode)" in models
+    assert "values.decodeIfPresent([String].self, forKey: .dataPathIDs)" in models
     for feature in (
         "Datenwege in Reihenfolge",
         "Nicht gespeicherte Änderungen",

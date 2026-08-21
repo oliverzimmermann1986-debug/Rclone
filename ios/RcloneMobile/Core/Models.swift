@@ -782,12 +782,43 @@ struct JobDefinition: Codable, Identifiable {
     let maxParallel: Int
     let retryMinutes: Int
 
+    init(
+        id: String = "", name: String = "", enabled: Bool = true,
+        dataPathIDs: [String] = [], schedule: String = "manual",
+        executionMode: String = "sequential", maxParallel: Int = 1,
+        retryMinutes: Int = 60
+    ) {
+        self.id = id
+        self.name = name
+        self.enabled = enabled
+        self.dataPathIDs = dataPathIDs
+        self.schedule = schedule
+        self.executionMode = executionMode
+        self.maxParallel = executionMode == "sequential" ? 1 : max(1, maxParallel)
+        self.retryMinutes = max(1, retryMinutes)
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, name, enabled, schedule
         case dataPathIDs = "data_path_ids"
         case executionMode = "execution_mode"
         case maxParallel = "max_parallel"
         case retryMinutes = "retry_minutes"
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedMode = try values.decodeIfPresent(String.self, forKey: .executionMode) ?? "sequential"
+        self.init(
+            id: try values.decodeIfPresent(String.self, forKey: .id) ?? "",
+            name: try values.decodeIfPresent(String.self, forKey: .name) ?? "",
+            enabled: try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
+            dataPathIDs: try values.decodeIfPresent([String].self, forKey: .dataPathIDs) ?? [],
+            schedule: try values.decodeIfPresent(String.self, forKey: .schedule) ?? "manual",
+            executionMode: decodedMode,
+            maxParallel: try values.decodeIfPresent(Int.self, forKey: .maxParallel) ?? 1,
+            retryMinutes: try values.decodeIfPresent(Int.self, forKey: .retryMinutes) ?? 60
+        )
     }
 }
 
