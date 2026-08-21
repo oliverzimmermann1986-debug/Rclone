@@ -12,7 +12,7 @@ workflows:
       vars:
         XCODE_PROJECT: ios/RcloneMobile.xcodeproj
         XCODE_SCHEME: RcloneMobile
-      xcode: latest
+      xcode: 26.5
     triggering:
       events:
         - tag
@@ -64,7 +64,7 @@ workflows:
           xcodebuild test \
             -project "$CM_BUILD_DIR/$XCODE_PROJECT" \
             -scheme "$XCODE_SCHEME" \
-            -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
+            -destination "platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5" \
             CODE_SIGNING_ALLOWED=NO
       - name: Build signed IPA
         script: |
