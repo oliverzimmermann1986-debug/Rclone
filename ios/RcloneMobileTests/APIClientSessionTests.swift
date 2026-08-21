@@ -324,7 +324,7 @@ private final class LegacyLoginURLProtocol: URLProtocol {
         } else {
             status = 200
             type = "text/html"
-            Self.postBody = request.httpBody.flatMap { String(data: $0, encoding: .utf8) }
+            Self.postBody = Self.bodyData(from: request).flatMap { String(data: $0, encoding: .utf8) }
             if let cookie = HTTPCookie(properties: [
                 .domain: request.url?.host ?? "192.168.1.67",
                 .path: "/",
@@ -345,6 +345,26 @@ private final class LegacyLoginURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    private static func bodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream else {
+            return nil
+        }
+
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 1_024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            body.append(contentsOf: buffer.prefix(count))
+        }
+        return body
+    }
 }
 
 private final class RecordingLoginURLProtocol: URLProtocol {
