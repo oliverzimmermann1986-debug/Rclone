@@ -50,7 +50,10 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = get_config()
-    log_dir = Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs"))
+    config_snapshot, config_revision = cfg.snapshot_with_revision()
+    log_dir = Path(
+        (config_snapshot.get("paths") or {}).get("logs_dir", "/opt/rclone-sync/logs")
+    )
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"backup-{datetime.now():%Y%m%d-%H%M%S}.log"
 
@@ -73,7 +76,7 @@ def main() -> int:
     pairs_filter = (
         [p.strip() for p in args.pairs.split(",") if p.strip()] if args.pairs else None
     )
-    backup = cfg.get("backup", default={}) or {}
+    backup = config_snapshot.get("backup") or {}
     wanted = set(pairs_filter or [])
     configured_pairs = [
         pair
@@ -115,6 +118,7 @@ def main() -> int:
             log_file=str(log_file),
             attempts=attempts,
             exclusive_scope=True,
+            config_revision=config_revision,
         )
         logger.info(
             "Backup-Job gestartet (ID=%s, via CLI, dry_run=%s, pairs=%s)",
@@ -131,6 +135,8 @@ def main() -> int:
                 job_id=job_id,
                 defer_runtime_finish=True,
                 reset_cancel_state=False,
+                config_revision=config_revision,
+                config_snapshot=config_snapshot,
             )
             summary = dict(summary)
             summary.setdefault("trigger", "cli")

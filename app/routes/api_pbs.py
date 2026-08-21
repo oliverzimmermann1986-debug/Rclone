@@ -86,6 +86,7 @@ def _run_thread(
     targets_filter: Optional[list[str]],
     history_keys: dict[str, str],
     scope_lock: HeldFileLock,
+    config_snapshot: dict[str, Any],
 ) -> None:
     db = None
     worker_error: str | None = None
@@ -98,6 +99,7 @@ def _run_thread(
             targets_filter,
             trigger="web",
             reset_cancel_state=False,
+            config_snapshot=config_snapshot,
         )
         summary["history_keys"] = history_keys
         status = (
@@ -131,7 +133,8 @@ def _run_thread(
 
 @router.post("/run")
 def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
-    settings = pbs_backup.pbs_settings()
+    config_snapshot, config_revision = get_config().snapshot_with_revision()
+    settings = pbs_backup.pbs_settings(rclone_sync._SnapshotConfig(config_snapshot))
     if not bool(settings.get("enabled", False)):
         raise HTTPException(400, "PBS-Integration ist in den Einstellungen deaktiviert")
     if not pbs_backup.client_path():
@@ -192,6 +195,7 @@ def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
             pbs_backup.JOB_KIND,
             attempts=attempts,
             exclusive_scope=True,
+            config_revision=config_revision,
         )
     except HTTPException:
         if scope_lock is not None:
@@ -212,7 +216,13 @@ def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
     try:
         thread = threading.Thread(
             target=_run_thread,
-            args=(job_id, targets_filter, history_keys, scope_lock),
+            args=(
+                job_id,
+                targets_filter,
+                history_keys,
+                scope_lock,
+                config_snapshot,
+            ),
             name="pbs-backup",
             daemon=True,
         )

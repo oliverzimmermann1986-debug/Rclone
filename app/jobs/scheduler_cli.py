@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from ..config_store import get_config
 from ..db import get_db
+from ..job_definitions import data_paths_by_id
 from ..overdue import check_and_notify as check_overdue
 from ..scheduler_control import scheduler_state
 from . import runtime_state
@@ -29,6 +31,7 @@ from .scheduler import (
     RESTORE_TEST_HISTORY_KEY,
     find_due_pairs,
     find_due_pbs_targets,
+    rclone_history_key,
     restore_test_due,
 )
 
@@ -85,6 +88,38 @@ def _with_metadata(
     return enriched
 
 
+def _definition_attempt_metadata(
+    definition: dict, cfg
+) -> tuple[list[str], list[dict], dict[str, str], dict[str, str]]:
+    indexed = data_paths_by_id(cfg)
+    names: list[str] = []
+    attempts: list[dict] = []
+    history_keys: dict[str, str] = {}
+    scheduler_slots: dict[str, str] = {}
+    slot = str(definition.get("scheduled_slot") or "").strip()
+    for path_id in definition.get("data_path_ids") or []:
+        pair = indexed.get(str(path_id))
+        if not pair or not pair.get("enabled", True):
+            continue
+        name = str(pair.get("name") or "").strip()
+        if not name:
+            continue
+        history_key = rclone_history_key(pair)
+        names.append(name)
+        history_keys[name] = history_key
+        if slot:
+            scheduler_slots[name] = slot
+        attempts.append(
+            {
+                "name": name,
+                "history_key": history_key,
+                "scheduled_slot": slot,
+                "trigger": "scheduler",
+            }
+        )
+    return names, attempts, history_keys, scheduler_slots
+
+
 def _finish_runtime_for_job(
     job_id: int, status: str, *, error: str | None = None
 ) -> None:
@@ -112,6 +147,22 @@ def _configure_logging(log_file: Path | None = None) -> None:
     )
 
 
+def _snapshot_with_revision(cfg) -> tuple[dict, str]:
+    capture = getattr(cfg, "snapshot_with_revision", None)
+    if callable(capture):
+        return capture()
+    snapshot = getattr(cfg, "snapshot", None)
+    if callable(snapshot):
+        return snapshot(), str(getattr(cfg, "revision", "") or "")
+    data = getattr(cfg, "data", None)
+    if isinstance(data, dict):
+        return copy.deepcopy(data), str(getattr(cfg, "revision", "") or "")
+    return {
+        "backup": cfg.get("backup", default={}) or {},
+        "paths": cfg.get("paths", default={}) or {},
+    }, str(getattr(cfg, "revision", "") or "")
+
+
 def _reconcile_available_scopes(db) -> None:
     logger = logging.getLogger("scheduler_cli")
     for scope, kinds in (
@@ -137,8 +188,9 @@ def _reconcile_available_scopes(db) -> None:
 
 def main() -> int:
     cfg = get_config()
+    scheduler_snapshot, scheduler_config_revision = _snapshot_with_revision(cfg)
     db = get_db()
-    backup = cfg.get("backup", default={}) or {}
+    backup = scheduler_snapshot.get("backup") or {}
     backup_enabled = bool(backup.get("enabled", True))
 
     _reconcile_available_scopes(db)
@@ -148,7 +200,7 @@ def main() -> int:
     # die Alarmierung, sonst meldete sie dauerhaft.
     if backup_enabled:
         try:
-            reported = check_overdue(cfg, db)
+            reported = check_overdue(scheduler_snapshot, db)
         except Exception:
             logging.getLogger("scheduler_cli").exception(
                 "Ausbleib-Prüfung fehlgeschlagen"
@@ -171,7 +223,7 @@ def main() -> int:
         return 0
 
     if backup_enabled:
-        due, status = find_due_pairs(cfg, db)
+        due, status = find_due_pairs(scheduler_snapshot, db)
     else:
         due, status = (
             [],
@@ -200,7 +252,9 @@ def main() -> int:
 
     rc = 0
 
-    log_dir = Path(cfg.get("paths", "logs_dir", default="/opt/rclone-sync/logs"))
+    log_dir = Path(
+        (scheduler_snapshot.get("paths") or {}).get("logs_dir", "/opt/rclone-sync/logs")
+    )
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"scheduler-{datetime.now():%Y%m%d-%H%M%S}.log"
     try:
@@ -231,73 +285,115 @@ def main() -> int:
                 # Nach einem gerade abgeschlossenen konkurrierenden Lauf kann
                 # ihr Ergebnis bereits veraltet sein, daher unter dem Lock mit
                 # frischer Historie erneut prüfen.
-                due, status = find_due_pairs(cfg, db)
-                if not due:
+                scheduler_snapshot, config_revision = _snapshot_with_revision(cfg)
+                due, status = find_due_pairs(scheduler_snapshot, db)
+                due_definitions = [
+                    item
+                    for item in status
+                    if item.get("due") and item.get("name") in set(due)
+                ]
+                if not due_definitions:
                     logger.info("Rclone-Fälligkeit nach Lock-Erwerb bereits erledigt")
                 else:
-                    attempts, history_keys, scheduler_slots = _attempt_metadata(
-                        due, status
-                    )
-                    reset_cancel()
-                    job_id = db.job_start(
-                        "backup",
-                        log_file=str(log_file),
-                        attempts=attempts,
-                        exclusive_scope=True,
-                    )
-                    try:
-                        summary = run_job(
-                            dry_run=False,
-                            pairs_filter=due,
-                            trigger="scheduler",
-                            job_id=job_id,
-                            defer_runtime_finish=True,
-                            reset_cancel_state=False,
-                        )
-                        summary = _with_metadata(
-                            summary,
-                            history_keys=history_keys,
-                            scheduler_slots=scheduler_slots,
-                        )
-                        status_name = _job_status(summary)
-                        transitioned = db.job_finish(job_id, status_name, summary)
-                        if transitioned:
-                            _finish_runtime_for_job(job_id, status_name)
-                        else:
-                            actual = db.job_get(job_id) or {}
-                            _finish_runtime_for_job(
-                                job_id, str(actual.get("status") or "stale")
+                    for definition in due_definitions:
+                        (
+                            pair_names,
+                            attempts,
+                            history_keys,
+                            scheduler_slots,
+                        ) = _definition_attempt_metadata(definition, scheduler_snapshot)
+                        if not pair_names:
+                            logger.warning(
+                                "Jobdefinition %s hat keine aktiven Datenwege",
+                                definition.get("name"),
                             )
-                        logger.info(
-                            "Scheduler-Run fertig: %s",
-                            json.dumps(summary, ensure_ascii=False, default=str)[:1000],
+                            continue
+                        reset_cancel()
+                        job_id = db.job_start(
+                            "backup",
+                            log_file=str(log_file),
+                            attempts=attempts,
+                            exclusive_scope=True,
+                            definition_id=str(definition.get("definition_id") or ""),
+                            definition_name=str(definition.get("name") or ""),
+                            config_revision=config_revision,
+                            scheduled_slot=str(definition.get("scheduled_slot") or ""),
                         )
-                        if status_name != "ok":
-                            rc = 1
-                    except Exception as e:
-                        logger.exception("Scheduler-Run gescheitert: %s", e)
-                        transitioned = db.job_finish(
-                            job_id,
-                            "error",
-                            {
-                                "ok": False,
-                                "error": str(e),
-                                "due": due,
-                                "trigger": "scheduler",
-                                "history_keys": history_keys,
-                                "scheduler_slots": scheduler_slots,
-                            },
-                        )
-                        if transitioned:
-                            _finish_runtime_for_job(job_id, "error", error=str(e))
-                        else:
-                            actual = db.job_get(job_id) or {}
-                            _finish_runtime_for_job(
+                        try:
+                            summary = run_job(
+                                dry_run=False,
+                                pairs_filter=pair_names,
+                                trigger="scheduler",
+                                job_id=job_id,
+                                defer_runtime_finish=True,
+                                reset_cancel_state=False,
+                                execution_mode=str(
+                                    definition.get("execution_mode") or "sequential"
+                                ),
+                                max_parallel_override=int(
+                                    definition.get("max_parallel") or 1
+                                ),
+                                definition_id=str(
+                                    definition.get("definition_id") or ""
+                                ),
+                                definition_name=str(definition.get("name") or ""),
+                                config_revision=config_revision,
+                                scheduled_slot=str(
+                                    definition.get("scheduled_slot") or ""
+                                ),
+                                config_snapshot=scheduler_snapshot,
+                            )
+                            summary = _with_metadata(
+                                summary,
+                                history_keys=history_keys,
+                                scheduler_slots=scheduler_slots,
+                            )
+                            status_name = _job_status(summary)
+                            transitioned = db.job_finish(job_id, status_name, summary)
+                            if transitioned:
+                                _finish_runtime_for_job(job_id, status_name)
+                            else:
+                                actual = db.job_get(job_id) or {}
+                                _finish_runtime_for_job(
+                                    job_id, str(actual.get("status") or "stale")
+                                )
+                            logger.info(
+                                "Scheduler-Job %s fertig: %s",
+                                definition.get("name"),
+                                json.dumps(summary, ensure_ascii=False, default=str)[
+                                    :1000
+                                ],
+                            )
+                            if status_name != "ok":
+                                rc = 1
+                        except Exception as e:
+                            logger.exception("Scheduler-Run gescheitert: %s", e)
+                            transitioned = db.job_finish(
                                 job_id,
-                                str(actual.get("status") or "stale"),
-                                error=str(e),
+                                "error",
+                                {
+                                    "ok": False,
+                                    "error": str(e),
+                                    "due": pair_names,
+                                    "trigger": "scheduler",
+                                    "history_keys": history_keys,
+                                    "scheduler_slots": scheduler_slots,
+                                    "definition_id": definition.get("definition_id"),
+                                    "definition_name": definition.get("name"),
+                                    "config_revision": config_revision,
+                                    "scheduled_slot": definition.get("scheduled_slot"),
+                                },
                             )
-                        rc = 1
+                            if transitioned:
+                                _finish_runtime_for_job(job_id, "error", error=str(e))
+                            else:
+                                actual = db.job_get(job_id) or {}
+                                _finish_runtime_for_job(
+                                    job_id,
+                                    str(actual.get("status") or "stale"),
+                                    error=str(e),
+                                )
+                            rc = 1
 
     if pbs_due:
         logger.info("Fällige PBS-Targets: %s", pbs_due)
@@ -315,7 +411,10 @@ def main() -> int:
                         "Registrierter PBS-Unterprozess ist noch aktiv; Tick abgebrochen"
                     )
                     return 1
-                pbs_due, _pbs_status = find_due_pbs_targets(cfg, db)
+                scheduler_snapshot, scheduler_config_revision = _snapshot_with_revision(
+                    cfg
+                )
+                pbs_due, _pbs_status = find_due_pbs_targets(scheduler_snapshot, db)
                 if not pbs_due:
                     logger.info("PBS-Fälligkeit nach Lock-Erwerb bereits erledigt")
                     return rc
@@ -331,12 +430,14 @@ def main() -> int:
                     log_file=str(log_file),
                     attempts=pbs_attempts,
                     exclusive_scope=True,
+                    config_revision=scheduler_config_revision,
                 )
                 try:
                     summary = run_pbs_backup(
                         pbs_due,
                         trigger="scheduler",
                         reset_cancel_state=False,
+                        config_snapshot=scheduler_snapshot,
                     )
                     summary = _with_metadata(
                         summary,
@@ -383,7 +484,10 @@ def main() -> int:
                         "Restore-Drill abgebrochen"
                     )
                     return 1
-                restore_due = restore_test_due(cfg, db)
+                scheduler_snapshot, scheduler_config_revision = _snapshot_with_revision(
+                    cfg
+                )
+                restore_due = restore_test_due(scheduler_snapshot, db)
                 if not restore_due.get("due"):
                     logger.info("Restore-Fälligkeit nach Lock-Erwerb bereits erledigt")
                     return rc
@@ -403,10 +507,13 @@ def main() -> int:
                         }
                     ],
                     exclusive_scope=True,
+                    config_revision=scheduler_config_revision,
                 )
                 try:
                     summary = run_restore_test(
-                        trigger="scheduler", reset_cancel_state=False
+                        trigger="scheduler",
+                        reset_cancel_state=False,
+                        config_snapshot=scheduler_snapshot,
                     )
                     summary = _with_metadata(
                         summary,

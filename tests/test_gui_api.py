@@ -25,7 +25,7 @@ def test_pbs_process_lock_contention_returns_409_without_leaking_web_lock(
         "enabled": True,
         "targets": [{"name": "Daten", "paths": ["/srv/data"]}],
     }
-    monkeypatch.setattr(api_pbs.pbs_backup, "pbs_settings", lambda: settings)
+    monkeypatch.setattr(api_pbs.pbs_backup, "pbs_settings", lambda _cfg=None: settings)
     monkeypatch.setattr(api_pbs.pbs_backup, "client_path", lambda: "/usr/bin/pbc")
     monkeypatch.setattr(
         api_pbs.pbs_backup,

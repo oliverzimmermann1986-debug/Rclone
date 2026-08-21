@@ -23,7 +23,11 @@ _MAX_TRACKED = 512
 
 
 def alert_settings(cfg) -> dict[str, Any]:
-    backup = cfg.get("backup", default={}) or {}
+    backup = (
+        cfg.get("backup") or {}
+        if isinstance(cfg, Mapping)
+        else cfg.get("backup", default={}) or {}
+    )
     raw = backup.get("overdue_alerts")
     if not isinstance(raw, Mapping):
         raw = {}
@@ -179,17 +183,21 @@ def is_scheduled(pair: Mapping[str, Any], default_schedule: str) -> bool:
 
 def check_and_notify(cfg, db, *, now: Optional[float] = None) -> list[str]:
     """Alle geplanten, aktiven Pairs prüfen und bei Bedarf alarmieren."""
+    from .job_definitions import scheduled_data_path_ids, stable_data_path_id
     from .jobs.scheduler import rclone_history_key
 
     now_value = float(time.time() if now is None else now)
-    backup = cfg.get("backup", default={}) or {}
-    default_schedule = str(backup.get("default_schedule") or "").strip()
+    if isinstance(cfg, Mapping):
+        backup = cfg.get("backup") or {}
+    else:
+        backup = cfg.get("backup", default={}) or {}
+    scheduled_ids = scheduled_data_path_ids(cfg)
     pairs = [
         pair
         for pair in (backup.get("pairs") or [])
         if isinstance(pair, Mapping)
         and pair.get("enabled", True)
-        and is_scheduled(pair, default_schedule)
+        and stable_data_path_id(pair) in scheduled_ids
     ]
     if not pairs:
         return notify_overdue(cfg, db, [], now=now_value)

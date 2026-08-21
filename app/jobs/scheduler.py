@@ -11,6 +11,12 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
+
+from ..job_definitions import (
+    data_paths_by_id,
+    definition_history_key,
+    effective_job_definitions,
+)
 from ..utils import bounded_int as _bounded_int
 
 logger = logging.getLogger(__name__)
@@ -175,12 +181,22 @@ def _evaluate_due(
     attempt_ts = float(
         last_attempt.get("ended_at") or last_attempt.get("started_at") or 0
     )
+    summary_result = last_attempt.get("summary") or {}
     pair_result = last_attempt.get("pair") or {}
+    attempt_context = summary_result if isinstance(summary_result, dict) else {}
+    if not attempt_context:
+        attempt_context = pair_result if isinstance(pair_result, dict) else {}
     scheduled_failure = bool(
         last_attempt
         and not last_attempt.get("ok")
-        and isinstance(pair_result, dict)
-        and pair_result.get("trigger") == "scheduler"
+        and (
+            str(last_attempt.get("trigger") or "") == "scheduler"
+            or attempt_context.get("trigger") == "scheduler"
+            or (
+                bool(last_attempt.get("definition_id"))
+                and bool(last_attempt.get("scheduled_slot"))
+            )
+        )
         and attempt_ts > (last_success or 0)
     )
     retry_due = scheduled_failure and now - attempt_ts >= retry_sec
@@ -202,8 +218,8 @@ def _evaluate_due(
         first_run_grace_minutes=grace_minutes,
     )
     previous_slot = ""
-    if isinstance(pair_result, dict):
-        previous_slot = str(pair_result.get("scheduled_slot") or "")
+    if isinstance(attempt_context, dict):
+        previous_slot = str(attempt_context.get("scheduled_slot") or "")
     previous_slot = previous_slot or str(last_attempt.get("scheduled_slot") or "")
 
     duplicate_slot = bool(
@@ -296,24 +312,30 @@ def _is_due(
     return due
 
 
-def find_due_pairs(
+def _load_job_history(
+    db, definitions: Mapping[str, str]
+) -> Dict[str, Dict[str, Optional[Dict[str, Any]]]]:
+    bulk = getattr(db, "job_definition_history", None)
+    if callable(bulk):
+        return bulk(definitions)
+    # Adapter für ältere DB-Testdoubles und externe Integrationen. Der
+    # produktive Database-Pfad verwendet ausschließlich Job-Run-Historie.
+    return _load_history(
+        db,
+        {
+            f"jobdef:id:{definition_id}": name
+            for definition_id, name in definitions.items()
+        },
+    )
+
+
+def find_due_jobs(
     cfg, db, *, now: Optional[float] = None
 ) -> Tuple[List[str], List[Dict]]:
+    """Bewertet persistierte Jobdefinitionen, niemals Pair-Zeitpläne."""
+
     backup = cfg.get("backup") or {}
-    pairs = backup.get("pairs") or []
-    default_schedule = str(
-        backup.get("default_schedule") or DEFAULT_GLOBAL_SCHEDULE
-    ).strip()
     timezone_name = str(backup.get("timezone") or DEFAULT_TIMEZONE)
-    retry_sec = (
-        _bounded_int(
-            backup.get("scheduler_retry_minutes", 60),
-            default=60,
-            minimum=1,
-            maximum=10080,
-        )
-        * 60
-    )
     grace_minutes = _bounded_int(
         backup.get("scheduler_grace_minutes", 15),
         default=15,
@@ -323,36 +345,57 @@ def find_due_pairs(
     run_on_first_tick = bool(backup.get("run_on_first_tick", False))
     now_value = float(time.time() if now is None else now)
 
-    prepared = []
-    for pair in pairs:
-        if not isinstance(pair, Mapping):
-            continue
-        name = str(pair.get("name") or "?")
-        prepared.append((pair, name, rclone_history_key(pair)))
-    histories = _load_history(
-        db, {history_key: name for _, name, history_key in prepared}
+    definitions = effective_job_definitions(cfg)
+    paths = data_paths_by_id(cfg)
+    histories = _load_job_history(
+        db,
+        {
+            str(definition.get("id") or ""): str(definition.get("name") or "?")
+            for definition in definitions
+            if str(definition.get("id") or "")
+        },
     )
 
     due: List[str] = []
     status: List[Dict] = []
-    for pair, name, history_key in prepared:
-        if not pair.get("enabled", True):
+    for definition in definitions:
+        definition_id = str(definition.get("id") or "").strip()
+        name = str(definition.get("name") or "?")
+        history_key = definition_history_key(definition)
+        base = {
+            "id": definition_id,
+            "definition_id": definition_id,
+            "name": name,
+            "history_key": history_key,
+            "data_path_ids": list(definition.get("data_path_ids") or []),
+            "execution_mode": definition.get("execution_mode", "sequential"),
+            "max_parallel": int(definition.get("max_parallel") or 1),
+            "retry_minutes": int(
+                definition.get("retry_minutes")
+                or backup.get("scheduler_retry_minutes")
+                or 60
+            ),
+        }
+        if not definition.get("enabled", True):
             status.append(
                 {
-                    "name": name,
-                    "history_key": history_key,
+                    **base,
                     "due": False,
                     "reason": "disabled",
                 }
             )
             continue
 
-        schedule = str(pair.get("schedule") or "").strip() or default_schedule
+        referenced = [paths.get(path_id) for path_id in base["data_path_ids"]]
+        if not any(path and path.get("enabled", True) for path in referenced):
+            status.append({**base, "due": False, "reason": "no_enabled_data_paths"})
+            continue
+
+        schedule = str(definition.get("schedule") or "manual").strip()
         if _is_disabled(schedule):
             status.append(
                 {
-                    "name": name,
-                    "history_key": history_key,
+                    **base,
                     "due": False,
                     "reason": f"schedule={schedule}",
                 }
@@ -361,8 +404,7 @@ def find_due_pairs(
         if not _is_valid_schedule(schedule):
             status.append(
                 {
-                    "name": name,
-                    "history_key": history_key,
+                    **base,
                     "due": False,
                     "reason": "invalid_schedule",
                     "error": schedule,
@@ -370,10 +412,11 @@ def find_due_pairs(
             )
             continue
 
+        retry_sec = max(1, min(base["retry_minutes"], 10080)) * 60
         try:
             evaluation = _evaluate_due(
                 schedule,
-                histories.get(history_key) or {},
+                histories.get(definition_id) or histories.get(history_key) or {},
                 history_key=history_key,
                 now=now_value,
                 timezone_name=timezone_name,
@@ -387,8 +430,7 @@ def find_due_pairs(
         except Exception as exc:
             status.append(
                 {
-                    "name": name,
-                    "history_key": history_key,
+                    **base,
                     "due": False,
                     "error": str(exc),
                 }
@@ -396,8 +438,7 @@ def find_due_pairs(
             continue
 
         item = {
-            "name": name,
-            "history_key": history_key,
+            **base,
             "schedule": schedule,
             "timezone": timezone_name,
             "next_run": next_run,
@@ -407,6 +448,14 @@ def find_due_pairs(
         if item["due"]:
             due.append(name)
     return due, status
+
+
+def find_due_pairs(
+    cfg, db, *, now: Optional[float] = None
+) -> Tuple[List[str], List[Dict]]:
+    """Kompatibilitätsname; die kanonische Auswertung erfolgt pro Job."""
+
+    return find_due_jobs(cfg, db, now=now)
 
 
 def find_due_pbs_targets(
