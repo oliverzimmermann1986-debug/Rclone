@@ -25,6 +25,13 @@ workflows:
           test -n "${CM_TAG:-}" || { echo "TestFlight-Build benötigt einen ios-vX.Y.Z-Tag" >&2; exit 1; }
           python3 "$CM_BUILD_DIR/scripts/ios_release_version.py" \
             "$CM_TAG" "$CM_BUILD_DIR/ios/project.yml" --write
+      - name: Install backend contract test dependencies
+        script: |
+          python3 -m pip install -r "$CM_BUILD_DIR/requirements-dev.txt"
+      - name: Validate shared native API contracts and release version tooling
+        script: |
+          cd "$CM_BUILD_DIR"
+          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_version.py
       - name: Install XcodeGen
         script: brew install xcodegen
       - name: Generate Xcode project

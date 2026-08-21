@@ -54,12 +54,38 @@ def test_codemagic_applies_tag_before_generation_and_keeps_monotonic_build_numbe
     assert "CFBundleVersion" in config
 
 
+def test_codemagic_validates_live_backend_contracts_before_xcode_build():
+    root = Path(__file__).parents[1]
+    config = (root / "codemagic.yaml").read_text(encoding="utf-8")
+    normalized = " ".join(config.split())
+    dependency_install = (
+        'python3 -m pip install -r "$CM_BUILD_DIR/requirements-dev.txt"'
+    )
+    contract_test_run = (
+        "python3 -m pytest tests/test_native_login_contract.py "
+        "tests/test_native_read_contract.py tests/test_ios_release_version.py"
+    )
+
+    assert dependency_install in normalized
+    assert contract_test_run in normalized
+    assert normalized.index(dependency_install) < normalized.index(contract_test_run)
+    assert normalized.index(contract_test_run) < normalized.index("xcodegen generate")
+    assert normalized.index(contract_test_run) < normalized.index(
+        "xcode-project build-ipa"
+    )
+
+
 def test_ios_ci_tracks_native_contract_sources():
     root = Path(__file__).parents[1]
     workflow = (root / ".github" / "workflows" / "ios.yml").read_text(encoding="utf-8")
     for expected_path in (
         '"app/main.py"',
         '"app/auth_contract.py"',
+        '"app/config_store.py"',
+        '"app/config_validation.py"',
+        '"app/db.py"',
+        '"app/job_definitions.py"',
+        '"app/jobs/**"',
         '"app/routes/**"',
         '"contracts/**"',
     ):
