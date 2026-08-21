@@ -25,6 +25,19 @@ def test_unsafe_override_is_explicit():
     ]
 
 
+@pytest.mark.parametrize(
+    "args",
+    (
+        ["--metadata-mapper", "/tmp/mapper"],
+        ["--metadata-mapper=/tmp/mapper"],
+    ),
+)
+@pytest.mark.parametrize("allow_unsafe", (False, True))
+def test_external_program_flags_are_always_blocked(args, allow_unsafe):
+    with pytest.raises(UnsafeRcloneArgument, match="externer Programme"):
+        validate_rclone_args(args, allow_unsafe=allow_unsafe)
+
+
 def test_rclone_subprocess_env_disables_interactive_prompt(monkeypatch):
     from app.rclone_args import rclone_subprocess_env
 
