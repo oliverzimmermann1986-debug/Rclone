@@ -41,7 +41,8 @@ workflows:
       - name: Apply App Store signing profiles
         script: |
           xcode-project use-profiles \
-            --project "$CM_BUILD_DIR/$XCODE_PROJECT"
+            --project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            --custom-export-options='{"testFlightInternalTestingOnly": true}'
       - name: Set unique build number
         script: |
           case "${BUILD_NUMBER:-}" in
@@ -90,5 +91,5 @@ workflows:
     publishing:
       app_store_connect:
         auth: integration
-        submit_to_testflight: true
+        submit_to_testflight: false
         submit_to_app_store: false
