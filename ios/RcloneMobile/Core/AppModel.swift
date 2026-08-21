@@ -222,6 +222,20 @@ final class AppModel: ObservableObject {
     }
 
     private func userMessage(for error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+                return "Server nicht erreichbar. Lokale Installationen verwenden normalerweise http://IP-ADRESSE:8001. Prüfe außerdem die lokale Netzwerkfreigabe in den iPhone-Einstellungen."
+            case .notConnectedToInternet, .networkConnectionLost:
+                return "Keine Netzwerkverbindung. Prüfe WLAN und die lokale Netzwerkfreigabe für Rclone Sync."
+            case .timedOut:
+                return "Die Verbindung hat zu lange gedauert. Prüfe Serveradresse, Port und WLAN."
+            case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot:
+                return "Die sichere Verbindung konnte nicht geprüft werden. Kontrolliere HTTPS-Adresse und Zertifikat."
+            default:
+                break
+            }
+        }
         if let localized = error as? LocalizedError, let message = localized.errorDescription {
             return message
         }

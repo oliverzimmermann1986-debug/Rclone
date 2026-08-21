@@ -42,6 +42,7 @@ final class APIClient {
         configuration.httpCookieStorage = cookieStorage
         configuration.httpShouldSetCookies = true
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = 120
         self.session = session ?? URLSession(configuration: configuration)
         self.decoder = JSONDecoder()
@@ -49,18 +50,46 @@ final class APIClient {
 
     static func normalizedServerURL(_ rawValue: String) throws -> URL {
         var value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !value.contains("://") { value = "https://" + value }
+        let suppliedScheme = value.contains("://")
+        if !suppliedScheme {
+            guard let host = URLComponents(string: "//" + value)?.host else {
+                throw APIError.invalidServer
+            }
+            value = (isLocalHost(host) ? "http://" : "https://") + value
+        }
         guard var components = URLComponents(string: value),
               let scheme = components.scheme?.lowercased(),
               ["http", "https"].contains(scheme),
-              components.host != nil else {
+              let host = components.host else {
             throw APIError.invalidServer
+        }
+        if scheme == "http", isLocalHost(host), components.port == nil {
+            components.port = 8001
         }
         components.path = ""
         components.query = nil
         components.fragment = nil
         guard let url = components.url else { throw APIError.invalidServer }
         return url
+    }
+
+    private static func isLocalHost(_ host: String) -> Bool {
+        let normalized = host.lowercased()
+        if normalized == "localhost" || normalized.hasSuffix(".local") || !normalized.contains(".") {
+            return true
+        }
+        let octets = normalized.split(separator: ".", omittingEmptySubsequences: false).compactMap { UInt8($0) }
+        if octets.count == 4 {
+            return octets[0] == 10
+                || octets[0] == 127
+                || (octets[0] == 169 && octets[1] == 254)
+                || (octets[0] == 172 && (16...31).contains(octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+        }
+        return normalized == "::1"
+            || normalized.hasPrefix("fc")
+            || normalized.hasPrefix("fd")
+            || ["fe8", "fe9", "fea", "feb"].contains { normalized.hasPrefix($0) }
     }
 
     func login(username: String, password: String) async throws {
