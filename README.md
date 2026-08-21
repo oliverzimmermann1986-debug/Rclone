@@ -135,21 +135,25 @@ Die mitgelieferte Unit startet absichtlich genau **einen Uvicorn-Worker**. Die z
 In einem frischen Debian-/Ubuntu-LXC als root:
 
 ```bash
+source_commit=$(git ls-remote \
+  https://github.com/oliverzimmermann1986-debug/Rclone.git refs/heads/main | cut -f1)
 install_script=$(mktemp)
-curl -fsSL https://raw.githubusercontent.com/oliverzimmermann1986-debug/Rclone/main/scripts/install.sh \
+curl -fsSL "https://raw.githubusercontent.com/oliverzimmermann1986-debug/Rclone/$source_commit/scripts/install.sh" \
   -o "$install_script"
 less "$install_script"
-bash "$install_script"
+sudo SOURCE_COMMIT="$source_commit" bash "$install_script"
 rm -f "$install_script"
 ```
 
-Damit lässt sich der heruntergeladene Root-Installer vor der Ausführung prüfen.
+Damit sind sowohl der geprüfte Installer als auch der später ausgecheckte
+Quellstand an dieselbe unveränderliche Commit-ID gebunden.
 Alternativ aus einem lokalen Checkout:
 
 ```bash
 git clone https://github.com/oliverzimmermann1986-debug/Rclone.git /opt/rclone-sync
 cd /opt/rclone-sync
-sudo bash scripts/install.sh
+source_commit=$(git rev-parse HEAD)
+sudo SOURCE_COMMIT="$source_commit" bash scripts/install.sh
 ```
 
 Der Installer:
@@ -184,7 +188,9 @@ erfolgreichen Login oder beim Ändern des Passworts automatisch entfernt.
 Normaler Upgrade-Aufruf:
 
 ```bash
-sudo bash /opt/rclone-sync/scripts/install.sh
+git -C /opt/rclone-sync fetch origin main
+source_commit=$(git -C /opt/rclone-sync rev-parse origin/main)
+sudo SOURCE_COMMIT="$source_commit" bash /opt/rclone-sync/scripts/install.sh
 ```
 
 Der Installer bricht bei lokalen Änderungen an getrackten Repository-Dateien
@@ -200,6 +206,7 @@ werden nicht gelöscht. `BACKUP_ROOT` darf nicht innerhalb von
 
 ```bash
 sudo BACKUP_KEEP=20 BACKUP_ROOT=/srv/backups/rclone-sync \
+  SOURCE_COMMIT="$source_commit" \
   bash /opt/rclone-sync/scripts/install.sh
 ```
 
