@@ -515,6 +515,8 @@ def test_native_f14_revision_safety_history_and_run_all_contracts():
     assert "downloadJobLog(" in backups
     assert backups.count("model.withCurrentClient") >= 5
     assert "detailError" in backups and "logError" in backups
+    assert ".task(id: query)" in backups
+    assert backups.count("guard generation == requestGeneration else { return }") >= 3
 
 
 def test_native_pbs_configuration_is_revision_safe_and_feature_complete():
