@@ -9,6 +9,10 @@ enum APIError: LocalizedError, Equatable {
     case loginRateLimited(retryAfterSeconds: Int)
     case loginSecurityFailed
     case missingCSRF
+    case configConflict(message: String, currentRevision: String?)
+    case configRevisionRequired(message: String, currentRevision: String?)
+    case configReauthenticationRequired(message: String)
+    case configValidation(errors: [String])
 
     var errorDescription: String? {
         switch self {
@@ -28,6 +32,12 @@ enum APIError: LocalizedError, Equatable {
             "Die Sicherheitsprüfung der Anmeldung ist fehlgeschlagen. Prüfe die Serveradresse und versuche es erneut."
         case .missingCSRF:
             "Die Sicherheitssitzung fehlt. Bitte erneut anmelden."
+        case let .configConflict(message, _), let .configRevisionRequired(message, _):
+            message
+        case let .configReauthenticationRequired(message):
+            message
+        case let .configValidation(errors):
+            errors.isEmpty ? "Die Konfiguration ist ungültig." : errors.joined(separator: "\n")
         }
     }
 }
@@ -37,6 +47,10 @@ protocol APIClientProtocol: AnyObject {
     func getOverview() async throws -> OverviewResponse
     func getStorage(includeSizes: Bool, forceRefresh: Bool) async throws -> StorageOverview
     func getConfig() async throws -> ConfigSnapshot
+    func getJobDefinitions() async throws -> [JobDefinition]
+    func updateConfig(_ config: ConfigSnapshot, currentPassword: String?) async throws -> ConfigSaveResponse
+    func getJobDefinitionPlan(id: String, dryRun: Bool) async throws -> JobPlan
+    func runJobDefinition(id: String, dryRun: Bool) async throws -> ActionResponse
     func getJobs(limit: Int) async throws -> JobSearchResponse
     func getJob(id: Int) async throws -> JobRecord
     func getJobLog(id: Int) async throws -> JobLogResponse
@@ -215,6 +229,32 @@ final class APIClient: APIClientProtocol {
         try await get("/api/config")
     }
 
+    func getJobDefinitions() async throws -> [JobDefinition] {
+        try await get("/api/jobs/definitions")
+    }
+
+    func updateConfig(
+        _ config: ConfigSnapshot,
+        currentPassword: String? = nil
+    ) async throws -> ConfigSaveResponse {
+        try await put(
+            "/api/config",
+            body: ConfigUpdateRequest(config: config, currentPassword: currentPassword)
+        )
+    }
+
+    func getJobDefinitionPlan(id: String, dryRun: Bool = true) async throws -> JobPlan {
+        try await get(
+            "/api/jobs/definitions/\(Self.pathEncode(id))/plan?dry_run=\(dryRun)"
+        )
+    }
+
+    func runJobDefinition(id: String, dryRun: Bool = false) async throws -> ActionResponse {
+        try await post(
+            "/api/jobs/definitions/\(Self.pathEncode(id))/run?dry_run=\(dryRun)"
+        )
+    }
+
     func getJobs(limit: Int = 50) async throws -> JobSearchResponse {
         try await get("/api/jobs/search?limit=\(limit)")
     }
@@ -318,11 +358,24 @@ final class APIClient: APIClientProtocol {
         return try await send(request)
     }
 
+    private func put<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
+        var request = URLRequest(url: url(for: path))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(origin, forHTTPHeaderField: "Origin")
+        try addCSRF(to: &request)
+        request.httpBody = try JSONEncoder().encode(body)
+        return try await send(request)
+    }
+
     private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         if http.statusCode == 401 { throw APIError.unauthenticated }
         if !(200..<300).contains(http.statusCode) {
+            if let structured = Self.structuredError(status: http.statusCode, data: data) {
+                throw structured
+            }
             throw APIError.server(status: http.statusCode, message: Self.errorMessage(data) ?? "Serverfehler (HTTP \(http.statusCode))")
         }
         do {
@@ -377,6 +430,26 @@ final class APIClient: APIClientProtocol {
               let detail = object["detail"] else { return nil }
         if let text = detail as? String { return text }
         if let dictionary = detail as? [String: Any], let message = dictionary["message"] as? String { return message }
+        return nil
+    }
+
+    private static func structuredError(status: Int, data: Data) -> APIError? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let detail = object["detail"] as? [String: Any] else { return nil }
+        let message = detail["message"] as? String ?? "Konfiguration konnte nicht gespeichert werden."
+        let currentRevision = detail["current_revision"] as? String
+        if status == 409, detail["reload_required"] as? Bool == true {
+            return .configConflict(message: message, currentRevision: currentRevision)
+        }
+        if status == 428, detail["reload_required"] as? Bool == true {
+            return .configRevisionRequired(message: message, currentRevision: currentRevision)
+        }
+        if status == 403, detail["reauth_required"] as? Bool == true {
+            return .configReauthenticationRequired(message: message)
+        }
+        if status == 422 {
+            return .configValidation(errors: detail["errors"] as? [String] ?? [message])
+        }
         return nil
     }
 }

@@ -34,6 +34,7 @@ final class FixtureDecodingTests: XCTestCase {
         let config: ConfigSnapshot = try decode("config")
         XCTAssertEqual(config.revision.count, 64)
         XCTAssertEqual(config.backup.pairs.first?.name, "Fotos")
+        XCTAssertEqual(config.backup.jobs.first?.dataPathIDs, ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
 
         let list: [JobRecord] = try decode("jobs_list")
         let search: JobSearchResponse = try decode("jobs_search")
@@ -65,7 +66,7 @@ final class FixtureDecodingTests: XCTestCase {
     }
 
     func testJobDefinitionsDecodeSharedContract() throws {
-        let definitions: [JobDefinitionContract] = try decode("job_definitions")
+        let definitions: [JobDefinition] = try decode("job_definitions")
 
         XCTAssertEqual(definitions.first?.id, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         XCTAssertEqual(definitions.first?.dataPathIDs, ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
@@ -161,24 +162,5 @@ private struct SchedulerStateContract: Decodable {
         case paused, until, reason, actor, enabled, timezone
         case remainingSeconds = "remaining_seconds"
         case updatedAt = "updated_at"
-    }
-}
-
-private struct JobDefinitionContract: Decodable {
-    let id: String
-    let name: String
-    let enabled: Bool
-    let dataPathIDs: [String]
-    let schedule: String
-    let executionMode: String
-    let maxParallel: Int
-    let retryMinutes: Int
-
-    enum CodingKeys: String, CodingKey {
-        case id, name, enabled, schedule
-        case dataPathIDs = "data_path_ids"
-        case executionMode = "execution_mode"
-        case maxParallel = "max_parallel"
-        case retryMinutes = "retry_minutes"
     }
 }

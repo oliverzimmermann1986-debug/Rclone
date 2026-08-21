@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct JobsScreen: View {
+struct LegacyJobsScreen: View {
     @EnvironmentObject private var model: AppModel
     @Binding var showingSettings: Bool
     @State private var selectedPair: PairHealth?
@@ -226,7 +226,7 @@ struct RunDetailView: View {
     }
 }
 
-struct DataPathsScreen: View {
+struct LegacyDataPathsScreen: View {
     @EnvironmentObject private var model: AppModel
     @Binding var showingSettings: Bool
 
@@ -291,8 +291,8 @@ private struct DataPathDetailView: View {
             Section("Datenweg") {
                 LabeledContent("Lokal", value: pair.local)
                 LabeledContent("Cloud", value: pair.remote)
-                LabeledContent("Richtung", value: (pair.direction ?? "bisync").uppercased())
-                LabeledContent("Modus", value: (pair.mode ?? "bisync").uppercased())
+                LabeledContent("Richtung", value: pair.direction.uppercased())
+                LabeledContent("Modus", value: pair.mode.uppercased())
             }
             Section("Bestand") {
                 LabeledContent("Quelle Dateien", value: AppFormat.count(storage?.sourceSize?.count))

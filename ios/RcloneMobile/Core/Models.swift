@@ -284,42 +284,337 @@ struct LogoutResult: Decodable, Equatable {
     }
 }
 
-struct ConfigSnapshot: Decodable {
-    let revision: String
-    let backup: BackupConfig
+private struct DynamicCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
 
-    enum CodingKeys: String, CodingKey {
-        case revision = "_revision"
-        case backup
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
     }
 }
 
-struct BackupConfig: Decodable {
+enum JSONValue: Codable, Equatable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case null
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        if value.decodeNil() { self = .null }
+        else if let decoded = try? value.decode(Bool.self) { self = .bool(decoded) }
+        else if let decoded = try? value.decode(Double.self) { self = .number(decoded) }
+        else if let decoded = try? value.decode(String.self) { self = .string(decoded) }
+        else if let decoded = try? value.decode([String: JSONValue].self) { self = .object(decoded) }
+        else if let decoded = try? value.decode([JSONValue].self) { self = .array(decoded) }
+        else { throw DecodingError.dataCorruptedError(in: value, debugDescription: "Unbekannter JSON-Wert") }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var value = encoder.singleValueContainer()
+        switch self {
+        case let .string(decoded): try value.encode(decoded)
+        case let .number(decoded): try value.encode(decoded)
+        case let .bool(decoded): try value.encode(decoded)
+        case let .object(decoded): try value.encode(decoded)
+        case let .array(decoded): try value.encode(decoded)
+        case .null: try value.encodeNil()
+        }
+    }
+}
+
+struct ConfigSnapshot: Codable {
+    let revision: String
+    let backup: BackupConfig
+    private let extraSections: [String: JSONValue]
+
+    init(revision: String, backup: BackupConfig, extraSections: [String: JSONValue] = [:]) {
+        self.revision = revision
+        self.backup = backup
+        self.extraSections = extraSections
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: DynamicCodingKey.self)
+        revision = try values.decode(String.self, forKey: DynamicCodingKey(stringValue: "_revision")!)
+        backup = try values.decode(BackupConfig.self, forKey: DynamicCodingKey(stringValue: "backup")!)
+        var extras: [String: JSONValue] = [:]
+        for key in values.allKeys where !["_revision", "backup"].contains(key.stringValue) {
+            extras[key.stringValue] = try values.decode(JSONValue.self, forKey: key)
+        }
+        extraSections = extras
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: DynamicCodingKey.self)
+        for (name, value) in extraSections {
+            try values.encode(value, forKey: DynamicCodingKey(stringValue: name)!)
+        }
+        try values.encode(revision, forKey: DynamicCodingKey(stringValue: "_revision")!)
+        try values.encode(backup, forKey: DynamicCodingKey(stringValue: "backup")!)
+    }
+
+    func replacing(pairs: [PairConfig], jobs: [JobDefinition]) -> ConfigSnapshot {
+        ConfigSnapshot(
+            revision: revision,
+            backup: backup.replacing(pairs: pairs, jobs: jobs),
+            extraSections: extraSections
+        )
+    }
+}
+
+struct BackupConfig: Codable {
     let enabled: Bool?
     let timezone: String?
     let defaultSchedule: String?
     let pairs: [PairConfig]
+    let jobs: [JobDefinition]
+    private let extras: [String: JSONValue]
 
-    enum CodingKeys: String, CodingKey {
-        case enabled, timezone, pairs
-        case defaultSchedule = "default_schedule"
+    init(
+        enabled: Bool?,
+        timezone: String?,
+        defaultSchedule: String?,
+        pairs: [PairConfig],
+        jobs: [JobDefinition] = [],
+        extras: [String: JSONValue] = [:]
+    ) {
+        self.enabled = enabled
+        self.timezone = timezone
+        self.defaultSchedule = defaultSchedule
+        self.pairs = pairs
+        self.jobs = jobs
+        self.extras = extras
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: DynamicCodingKey.self)
+        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
+        enabled = try values.decodeIfPresent(Bool.self, forKey: key("enabled"))
+        timezone = try values.decodeIfPresent(String.self, forKey: key("timezone"))
+        defaultSchedule = try values.decodeIfPresent(String.self, forKey: key("default_schedule"))
+        pairs = try values.decodeIfPresent([PairConfig].self, forKey: key("pairs")) ?? []
+        jobs = try values.decodeIfPresent([JobDefinition].self, forKey: key("jobs")) ?? []
+        let known = Set(["enabled", "timezone", "default_schedule", "pairs", "jobs"])
+        var preserved: [String: JSONValue] = [:]
+        for codingKey in values.allKeys where !known.contains(codingKey.stringValue) {
+            preserved[codingKey.stringValue] = try values.decode(JSONValue.self, forKey: codingKey)
+        }
+        extras = preserved
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: DynamicCodingKey.self)
+        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
+        for (name, value) in extras { try values.encode(value, forKey: key(name)) }
+        try values.encodeIfPresent(enabled, forKey: key("enabled"))
+        try values.encodeIfPresent(timezone, forKey: key("timezone"))
+        try values.encodeIfPresent(defaultSchedule, forKey: key("default_schedule"))
+        try values.encode(pairs, forKey: key("pairs"))
+        try values.encode(jobs, forKey: key("jobs"))
+    }
+
+    func replacing(pairs: [PairConfig], jobs: [JobDefinition]) -> BackupConfig {
+        BackupConfig(
+            enabled: enabled,
+            timezone: timezone,
+            defaultSchedule: defaultSchedule,
+            pairs: pairs,
+            jobs: jobs,
+            extras: extras
+        )
     }
 }
 
-struct PairConfig: Decodable, Identifiable {
-    var id: String { name }
+struct PairConfig: Codable, Identifiable {
+    let stableID: String?
+    var id: String { stableID ?? name }
     let name: String
     let local: String
     let remote: String
-    let direction: String?
-    let mode: String?
-    let enabled: Bool?
-    let allowDelete: Bool?
+    let direction: String
+    let mode: String
+    let enabled: Bool
+    let allowDelete: Bool
+    let maxDelete: Int?
+    let backupDir: String
+    let minLocalFiles: Int
+    let minRemoteFiles: Int
+    let requireMountpoint: Bool
+    let mountpoint: String
+    let sentinelFile: String
+    private let extras: [String: JSONValue]
+
+    init(
+        stableID: String?, name: String, local: String, remote: String,
+        direction: String = "push", mode: String = "copy", enabled: Bool = true,
+        allowDelete: Bool = false, maxDelete: Int? = nil, backupDir: String = "",
+        minLocalFiles: Int = 1, minRemoteFiles: Int = 0,
+        requireMountpoint: Bool = false, mountpoint: String = "", sentinelFile: String = "",
+        extras: [String: JSONValue] = [:]
+    ) {
+        self.stableID = stableID
+        self.name = name
+        self.local = local
+        self.remote = remote
+        self.direction = direction
+        self.mode = mode
+        self.enabled = enabled
+        self.allowDelete = allowDelete
+        self.maxDelete = maxDelete
+        self.backupDir = backupDir
+        self.minLocalFiles = minLocalFiles
+        self.minRemoteFiles = minRemoteFiles
+        self.requireMountpoint = requireMountpoint
+        self.mountpoint = mountpoint
+        self.sentinelFile = sentinelFile
+        self.extras = extras
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: DynamicCodingKey.self)
+        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
+        stableID = try values.decodeIfPresent(String.self, forKey: key("id"))
+        name = try values.decode(String.self, forKey: key("name"))
+        local = try values.decode(String.self, forKey: key("local"))
+        remote = try values.decode(String.self, forKey: key("remote"))
+        direction = try values.decodeIfPresent(String.self, forKey: key("direction")) ?? "push"
+        mode = try values.decodeIfPresent(String.self, forKey: key("mode")) ?? (direction == "bisync" ? "bisync" : "copy")
+        enabled = try values.decodeIfPresent(Bool.self, forKey: key("enabled")) ?? true
+        allowDelete = try values.decodeIfPresent(Bool.self, forKey: key("allow_delete")) ?? false
+        maxDelete = try values.decodeIfPresent(Int.self, forKey: key("max_delete"))
+        backupDir = try values.decodeIfPresent(String.self, forKey: key("backup_dir")) ?? ""
+        minLocalFiles = try values.decodeIfPresent(Int.self, forKey: key("min_local_files")) ?? 1
+        minRemoteFiles = try values.decodeIfPresent(Int.self, forKey: key("min_remote_files")) ?? 0
+        requireMountpoint = try values.decodeIfPresent(Bool.self, forKey: key("require_mountpoint")) ?? false
+        mountpoint = try values.decodeIfPresent(String.self, forKey: key("mountpoint")) ?? ""
+        sentinelFile = try values.decodeIfPresent(String.self, forKey: key("sentinel_file")) ?? ""
+        let known = Set(["id", "name", "local", "remote", "direction", "mode", "enabled", "allow_delete", "max_delete", "backup_dir", "min_local_files", "min_remote_files", "require_mountpoint", "mountpoint", "sentinel_file"])
+        var preserved: [String: JSONValue] = [:]
+        for codingKey in values.allKeys where !known.contains(codingKey.stringValue) {
+            preserved[codingKey.stringValue] = try values.decode(JSONValue.self, forKey: codingKey)
+        }
+        extras = preserved
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: DynamicCodingKey.self)
+        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
+        for (name, value) in extras { try values.encode(value, forKey: key(name)) }
+        try values.encodeIfPresent(stableID, forKey: key("id"))
+        try values.encode(name, forKey: key("name"))
+        try values.encode(local, forKey: key("local"))
+        try values.encode(remote, forKey: key("remote"))
+        try values.encode(direction, forKey: key("direction"))
+        try values.encode(mode, forKey: key("mode"))
+        try values.encode(enabled, forKey: key("enabled"))
+        try values.encode(allowDelete, forKey: key("allow_delete"))
+        try values.encodeIfPresent(maxDelete, forKey: key("max_delete"))
+        try values.encode(backupDir, forKey: key("backup_dir"))
+        try values.encode(minLocalFiles, forKey: key("min_local_files"))
+        try values.encode(minRemoteFiles, forKey: key("min_remote_files"))
+        try values.encode(requireMountpoint, forKey: key("require_mountpoint"))
+        try values.encode(mountpoint, forKey: key("mountpoint"))
+        try values.encode(sentinelFile, forKey: key("sentinel_file"))
+    }
+
+    func replacing(
+        name: String, local: String, remote: String, direction: String, mode: String,
+        enabled: Bool, allowDelete: Bool, maxDelete: Int?, backupDir: String,
+        minLocalFiles: Int, minRemoteFiles: Int, requireMountpoint: Bool,
+        mountpoint: String, sentinelFile: String
+    ) -> PairConfig {
+        PairConfig(
+            stableID: stableID,
+            name: name,
+            local: local,
+            remote: remote,
+            direction: direction,
+            mode: mode,
+            enabled: enabled,
+            allowDelete: allowDelete,
+            maxDelete: maxDelete,
+            backupDir: backupDir,
+            minLocalFiles: minLocalFiles,
+            minRemoteFiles: minRemoteFiles,
+            requireMountpoint: requireMountpoint,
+            mountpoint: mountpoint,
+            sentinelFile: sentinelFile,
+            extras: extras
+        )
+    }
+}
+
+struct JobDefinition: Codable, Identifiable {
+    let id: String
+    let name: String
+    let enabled: Bool
+    let dataPathIDs: [String]
+    let schedule: String
+    let executionMode: String
+    let maxParallel: Int
+    let retryMinutes: Int
 
     enum CodingKeys: String, CodingKey {
-        case name, local, remote, direction, mode, enabled
-        case allowDelete = "allow_delete"
+        case id, name, enabled, schedule
+        case dataPathIDs = "data_path_ids"
+        case executionMode = "execution_mode"
+        case maxParallel = "max_parallel"
+        case retryMinutes = "retry_minutes"
     }
+}
+
+struct ConfigUpdateRequest: Encodable {
+    let config: ConfigSnapshot
+    let currentPassword: String?
+
+    enum CodingKeys: String, CodingKey {
+        case config
+        case currentPassword = "current_password"
+    }
+}
+
+struct ConfigSaveResponse: Decodable {
+    let ok: Bool
+    let warnings: [String]
+    let config: ConfigSnapshot
+}
+
+struct JobPlan: Decodable {
+    let ok: Bool
+    let dryRun: Bool
+    let totalPairs: Int
+    let pairs: [JobPlanPair]
+    let warnings: [String]
+    let definitionID: String?
+    let definitionName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ok, pairs, warnings
+        case dryRun = "dry_run"
+        case totalPairs = "total_pairs"
+        case definitionID = "definition_id"
+        case definitionName = "definition_name"
+    }
+}
+
+struct JobPlanPair: Decodable, Identifiable {
+    var id: String { name }
+    let name: String
+    let enabled: Bool?
+    let direction: String?
+    let mode: String?
+    let command: String?
+    let warnings: [String]?
+    let error: String?
 }
 
 struct JobSearchResponse: Decodable {

@@ -368,3 +368,42 @@ def test_diagnostics_fixtures_match_generated_route_shapes(
     )
     doctor = api_diagnostics.doctor()
     _assert_shape(doctor, _body("doctor"))
+
+
+def test_native_management_uses_canonical_routes_and_models_without_webview():
+    ios_root = CONTRACT_PATH.parents[1] / "ios" / "RcloneMobile"
+    api = (ios_root / "Core" / "APIClient.swift").read_text(encoding="utf-8")
+    models = (ios_root / "Core" / "Models.swift").read_text(encoding="utf-8")
+    views = (ios_root / "Views" / "ConfigurationViews.swift").read_text(
+        encoding="utf-8"
+    )
+    production = "\n".join(
+        path.read_text(encoding="utf-8") for path in ios_root.rglob("*.swift")
+    )
+
+    for route in (
+        "/api/config",
+        "/api/jobs/definitions",
+        "/plan?dry_run=",
+        "/run?dry_run=",
+    ):
+        assert route in api
+    for status in ("status == 409", "status == 428", "status == 403", "status == 422"):
+        assert status in api
+    for model in (
+        "struct PairConfig: Codable",
+        "struct JobDefinition: Codable",
+        "struct ConfigSnapshot: Codable",
+        "struct JobPlan: Decodable",
+    ):
+        assert model in models
+    for feature in (
+        "Datenwege in Reihenfolge",
+        "Nicht gespeicherte Änderungen",
+        "Serverstand laden",
+        "Mit Passwort erneut speichern",
+        "Löschungen ausdrücklich freigeben",
+    ):
+        assert feature in views
+    assert "WKWebView" not in production
+    assert "UIWebView" not in production
