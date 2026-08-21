@@ -1,4 +1,4 @@
-from app.jobs.pair_planner import has_overlapping_pairs, pairs_conflict
+from app.jobs.pair_planner import has_overlapping_pairs, pairs_conflict, paths_overlap
 from app.jobs.rclone_sync import _next_runnable_pair_index
 
 
@@ -34,3 +34,9 @@ def test_remote_overlap_is_detected_across_endpoint_roles_and_slash_spelling():
 
     assert pairs_conflict(first, second) is True
     assert pairs_conflict(first, third) is False
+
+
+def test_local_overlap_is_fail_closed_across_case_variants():
+    assert paths_overlap("/srv/Photos", "/srv/photos") is True
+    assert paths_overlap("/srv/Photos", "/srv/PHOTOS/2026") is True
+    assert paths_overlap("/srv/Photos", "/srv/Photographs") is False
