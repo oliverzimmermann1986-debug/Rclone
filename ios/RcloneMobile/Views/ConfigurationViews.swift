@@ -17,7 +17,7 @@ struct DataPathsScreen: View {
                 ConfigIssuePanel(
                     issue: issue,
                     password: $currentPassword,
-                    reload: reload,
+                    reload: { await reload(discardDirty: true) },
                     retryWithPassword: saveWithPassword
                 )
             }
@@ -87,7 +87,7 @@ struct DataPathsScreen: View {
                     .disabled(!isDirty || model.isSavingConfig)
             }
         }
-        .refreshable { await reload() }
+        .refreshable { await reload(discardDirty: false) }
         .sheet(item: $editor) { request in
             DataPathEditor(pair: request.pair) { updated in
                 if let index = request.index, pairs.indices.contains(index) {
@@ -155,7 +155,11 @@ struct DataPathsScreen: View {
         isDirty = false
     }
 
-    private func reload() async {
+    private func reload(discardDirty: Bool) async {
+        if isDirty && !discardDirty {
+            localError = "Ungespeicherte Änderungen wurden nicht verworfen. Speichere sie zuerst oder nutze bei einem Konflikt bewusst „Serverstand laden“."
+            return
+        }
         await model.reloadConfiguration()
         loadFromModel(force: true)
     }
@@ -205,6 +209,7 @@ struct JobsScreen: View {
     @State private var plan: PlanPresentation?
     @State private var pendingRun: PendingJobRun?
     @State private var currentPassword = ""
+    @State private var localError: String?
 
     var body: some View {
         List {
@@ -212,7 +217,7 @@ struct JobsScreen: View {
                 ConfigIssuePanel(
                     issue: issue,
                     password: $currentPassword,
-                    reload: reload,
+                    reload: { await reload(discardDirty: true) },
                     retryWithPassword: saveWithPassword
                 )
             }
@@ -277,7 +282,7 @@ struct JobsScreen: View {
                     .disabled(!isDirty || model.isSavingConfig)
             }
         }
-        .refreshable { await reload() }
+        .refreshable { await reload(discardDirty: false) }
         .sheet(item: $editor) { request in
             JobDefinitionEditor(
                 definition: request.definition,
@@ -320,6 +325,14 @@ struct JobsScreen: View {
         }
         .task { loadFromModel(force: false) }
         .onChange(of: model.config?.revision) { _, _ in loadFromModel(force: false) }
+        .alert("Entwurf behalten", isPresented: Binding(
+            get: { localError != nil },
+            set: { if !$0 { localError = nil } }
+        )) {
+            Button("OK", role: .cancel) { localError = nil }
+        } message: {
+            Text(localError ?? "")
+        }
     }
 
     private func pathNames(for definition: JobDefinition) -> String {
@@ -335,7 +348,11 @@ struct JobsScreen: View {
         isDirty = false
     }
 
-    private func reload() async {
+    private func reload(discardDirty: Bool) async {
+        if isDirty && !discardDirty {
+            localError = "Ungespeicherte Job-Änderungen wurden nicht verworfen. Speichere sie zuerst oder nutze bei einem Konflikt bewusst „Serverstand laden“."
+            return
+        }
         await model.reloadConfiguration()
         loadFromModel(force: true)
     }

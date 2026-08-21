@@ -177,6 +177,51 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertTrue(model.errorMessage?.contains("erneut") == true)
     }
 
+    func testRunAllDefinitionsUsesDedicatedCanonicalClientCall() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.runAllResponse = ActionResponse(ok: true, jobID: 91, error: nil)
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        let started = await model.runAllJobDefinitions()
+
+        XCTAssertTrue(started)
+        XCTAssertEqual(client.runAllCallCount, 1)
+        XCTAssertEqual(model.actionMessage, "Alle aktiven Jobs wurden gestartet.")
+    }
+
+    func testJobDefinitionsAreAcceptedOnlyFromRevisionBoundConfigSnapshot() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        let definition = JobDefinition(
+            id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            name: "Revisionstreu",
+            enabled: true,
+            dataPathIDs: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+            schedule: "manual",
+            executionMode: "sequential",
+            maxParallel: 1,
+            retryMinutes: 60
+        )
+        client.baseConfig = ConfigSnapshot(
+            revision: "revision-bound",
+            backup: BackupConfig(
+                enabled: true,
+                timezone: "Europe/Berlin",
+                defaultSchedule: nil,
+                pairs: [],
+                jobs: [definition]
+            )
+        )
+        let model = AppModel(defaults: defaults) { _ in client }
+
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        XCTAssertEqual(model.jobDefinitions.first?.name, "Revisionstreu")
+        XCTAssertEqual(client.definitionsCallCount, 0)
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suite = "AppModelLifecycleTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -195,10 +240,14 @@ private final class StubAPIClient: APIClientProtocol {
     var progressResults: [Result<BackupProgress, Error>] = []
     var updateConfigError: Error?
     var passwordChangeResponse: PasswordChangeResponse?
+    var runAllResponse: ActionResponse?
+    var baseConfig: ConfigSnapshot?
     private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
     private(set) var jobsCallCount = 0
     private(set) var doctorCallCount = 0
+    private(set) var runAllCallCount = 0
+    private(set) var definitionsCallCount = 0
 
     func login(username: String, password: String) async throws {}
 
@@ -216,6 +265,7 @@ private final class StubAPIClient: APIClientProtocol {
     func getConfig() async throws -> ConfigSnapshot {
         if let configError { throw configError }
         if let updatedConfig { return updatedConfig }
+        if let baseConfig { return baseConfig }
         return ConfigSnapshot(
             revision: "revision-1",
             backup: BackupConfig(enabled: true, timezone: "Europe/Berlin", defaultSchedule: nil, pairs: [])
@@ -223,7 +273,8 @@ private final class StubAPIClient: APIClientProtocol {
     }
 
     func getJobDefinitions() async throws -> [JobDefinition] {
-        updatedConfig?.backup.jobs ?? []
+        definitionsCallCount += 1
+        return updatedConfig?.backup.jobs ?? []
     }
 
     func updateConfig(
@@ -241,6 +292,11 @@ private final class StubAPIClient: APIClientProtocol {
 
     func runJobDefinition(id: String, dryRun: Bool) async throws -> ActionResponse {
         throw APIError.invalidResponse
+    }
+    func runAllJobDefinitions(dryRun: Bool) async throws -> ActionResponse {
+        runAllCallCount += 1
+        guard let runAllResponse else { throw APIError.invalidResponse }
+        return runAllResponse
     }
 
     func runQuickSync(_ request: QuickSyncRequest) async throws -> ActionResponse { throw APIError.invalidResponse }
@@ -267,9 +323,14 @@ private final class StubAPIClient: APIClientProtocol {
         jobsCallCount += 1
         JobSearchResponse(items: [], total: 0, limit: limit, offset: 0)
     }
+    func searchJobs(kind: String?, status: String?, query: String, limit: Int, offset: Int) async throws -> JobSearchResponse {
+        try await getJobs(limit: limit)
+    }
+    func downloadJobsCSV(kind: String?, status: String?, query: String) async throws -> URL { throw APIError.invalidResponse }
 
     func getJob(id: Int) async throws -> JobRecord { throw APIError.invalidResponse }
     func getJobLog(id: Int) async throws -> JobLogResponse { throw APIError.invalidResponse }
+    func downloadJobLog(id: Int) async throws -> URL { throw APIError.invalidResponse }
     func getDoctor() async throws -> DoctorResponse {
         doctorCallCount += 1
         return DoctorResponse(ok: true, level: "ok", checks: [], generatedAt: 1_720_000_000)

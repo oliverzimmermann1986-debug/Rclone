@@ -55,6 +55,7 @@ protocol APIClientProtocol: AnyObject {
     func updateConfig(_ config: ConfigSnapshot, currentPassword: String?) async throws -> ConfigSaveResponse
     func getJobDefinitionPlan(id: String, dryRun: Bool) async throws -> JobPlan
     func runJobDefinition(id: String, dryRun: Bool) async throws -> ActionResponse
+    func runAllJobDefinitions(dryRun: Bool) async throws -> ActionResponse
     func runQuickSync(_ request: QuickSyncRequest) async throws -> ActionResponse
     func checkPair(name: String) async throws -> ActionResponse
     func runRestoreTest(pair: String?) async throws -> ActionResponse
@@ -72,8 +73,11 @@ protocol APIClientProtocol: AnyObject {
     func testWebhook(id: String) async throws -> ActionResponse
     func downloadSupportBundle() async throws -> URL
     func getJobs(limit: Int) async throws -> JobSearchResponse
+    func searchJobs(kind: String?, status: String?, query: String, limit: Int, offset: Int) async throws -> JobSearchResponse
+    func downloadJobsCSV(kind: String?, status: String?, query: String) async throws -> URL
     func getJob(id: Int) async throws -> JobRecord
     func getJobLog(id: Int) async throws -> JobLogResponse
+    func downloadJobLog(id: Int) async throws -> URL
     func getDoctor() async throws -> DoctorResponse
     func getProgress() async throws -> BackupProgress
     func getPBSStatus() async throws -> PBSStatus
@@ -275,6 +279,10 @@ final class APIClient: APIClientProtocol {
         )
     }
 
+    func runAllJobDefinitions(dryRun: Bool = false) async throws -> ActionResponse {
+        try await post("/api/jobs/definitions/run-all?dry_run=\(dryRun)")
+    }
+
     func runQuickSync(_ request: QuickSyncRequest) async throws -> ActionResponse {
         try await post("/api/jobs/backup/quick", body: request)
     }
@@ -340,20 +348,35 @@ final class APIClient: APIClientProtocol {
     }
 
     func downloadSupportBundle() async throws -> URL {
-        var request = URLRequest(url: url(for: "/api/maintenance/support-bundle"))
-        request.httpMethod = "GET"
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
-        if http.statusCode == 401 { throw APIError.unauthenticated }
-        try validate(response, data: data, allowed: 200..<300)
-        let target = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rclone-sync-support-\(UUID().uuidString).zip")
-        try data.write(to: target, options: .atomic)
-        return target
+        try await download(
+            "/api/maintenance/support-bundle",
+            filename: "rclone-sync-support-\(UUID().uuidString).zip"
+        )
     }
 
     func getJobs(limit: Int = 50) async throws -> JobSearchResponse {
         try await get("/api/jobs/search?limit=\(limit)")
+    }
+
+    func searchJobs(
+        kind: String?, status: String?, query: String, limit: Int = 50, offset: Int = 0
+    ) async throws -> JobSearchResponse {
+        var parameters = ["limit=\(limit)", "offset=\(offset)"]
+        if let kind, !kind.isEmpty { parameters.append("kind=\(Self.queryEncode(kind))") }
+        if let status, !status.isEmpty { parameters.append("status=\(Self.queryEncode(status))") }
+        if !query.isEmpty { parameters.append("q=\(Self.queryEncode(query))") }
+        return try await get("/api/jobs/search?\(parameters.joined(separator: "&"))")
+    }
+
+    func downloadJobsCSV(kind: String?, status: String?, query: String) async throws -> URL {
+        var parameters = ["limit=10000"]
+        if let kind, !kind.isEmpty { parameters.append("kind=\(Self.queryEncode(kind))") }
+        if let status, !status.isEmpty { parameters.append("status=\(Self.queryEncode(status))") }
+        if !query.isEmpty { parameters.append("q=\(Self.queryEncode(query))") }
+        return try await download(
+            "/api/jobs/export.csv?\(parameters.joined(separator: "&"))",
+            filename: "rclone-sync-jobs-\(UUID().uuidString).csv"
+        )
     }
 
     func getJob(id: Int) async throws -> JobRecord {
@@ -362,6 +385,13 @@ final class APIClient: APIClientProtocol {
 
     func getJobLog(id: Int) async throws -> JobLogResponse {
         try await get("/api/jobs/\(id)/log?tail=600")
+    }
+
+    func downloadJobLog(id: Int) async throws -> URL {
+        try await download(
+            "/api/jobs/\(id)/log/download",
+            filename: "rclone-sync-job-\(id)-\(UUID().uuidString).log"
+        )
     }
 
     func getDoctor() async throws -> DoctorResponse {
@@ -453,6 +483,21 @@ final class APIClient: APIClientProtocol {
         try addCSRF(to: &request)
         request.httpBody = try JSONEncoder().encode(body)
         return try await send(request)
+    }
+
+    private func download(_ path: String, filename: String) async throws -> URL {
+        var request = URLRequest(url: url(for: path))
+        request.httpMethod = "GET"
+        let (temporary, response) = try await session.download(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 401 { throw APIError.unauthenticated }
+        if !(200..<300).contains(http.statusCode) {
+            let errorData = (try? Data(contentsOf: temporary)) ?? Data()
+            try validate(response, data: errorData, allowed: 200..<300)
+        }
+        let target = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        try FileManager.default.moveItem(at: temporary, to: target)
+        return target
     }
 
     private func put<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {

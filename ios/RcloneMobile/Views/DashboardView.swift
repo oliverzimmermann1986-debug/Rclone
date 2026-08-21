@@ -118,7 +118,7 @@ struct DashboardView: View {
         .refreshable { await model.refresh() }
         .confirmationDialog("Alle Jobs jetzt starten?", isPresented: $confirmRunAll, titleVisibility: .visible) {
             Button("Sicherung starten") {
-                Task { if await model.runBackup() { successFeedback += 1 } }
+                Task { if await model.runAllJobDefinitions() { successFeedback += 1 } }
             }
             Button("Abbrechen", role: .cancel) {}
         } message: {

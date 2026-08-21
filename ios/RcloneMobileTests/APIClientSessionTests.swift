@@ -187,6 +187,30 @@ final class APIClientSessionTests: XCTestCase {
             XCTAssertEqual(error, .reauthenticationRequired(message: "Aktuelles Passwort falsch"))
         }
     }
+
+    func testRunAllDefinitionsUsesCanonicalRouteAndDryRunQuery() async throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://run-all.example"))
+        let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
+            forGroupContainerIdentifier: "APIClientRunAllTests-\(UUID().uuidString)"
+        )
+        cookieStorage.setCookie(try XCTUnwrap(cookie(
+            named: APIClient.csrfCookie,
+            value: "csrf",
+            domain: "run-all.example"
+        )))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RunAllURLProtocol.self]
+        let client = APIClient(
+            baseURL: baseURL,
+            session: URLSession(configuration: configuration),
+            cookieStorage: cookieStorage
+        )
+
+        let result = try await client.runAllJobDefinitions(dryRun: false)
+
+        XCTAssertTrue(result.ok)
+        XCTAssertEqual(result.jobID, 91)
+    }
 }
 
 private final class FailingURLProtocol: URLProtocol {
@@ -266,6 +290,29 @@ private final class OperationErrorURLProtocol: URLProtocol {
         )!
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(response.1.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RunAllURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let components = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+        let valid = request.httpMethod == "POST"
+            && request.url?.path == "/api/jobs/definitions/run-all"
+            && components?.queryItems?.first(where: { $0.name == "dry_run" })?.value == "false"
+        let status = valid ? 200 : 404
+        let body = Data((valid ? #"{"ok":true,"job_id":91}"# : #"{"detail":"wrong route"}"#).utf8)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: status, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
     }
 

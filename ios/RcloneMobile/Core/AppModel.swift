@@ -6,7 +6,6 @@ private enum RefreshPayload {
     case baseStorage(Result<StorageOverview, Error>)
     case detailedStorage(Result<StorageOverview, Error>)
     case config(Result<ConfigSnapshot, Error>)
-    case definitions(Result<[JobDefinition], Error>)
     case jobs(Result<JobSearchResponse, Error>)
     case progress(Result<BackupProgress, Error>)
     case pbs(Result<PBSStatus, Error>)
@@ -195,7 +194,6 @@ final class AppModel: ObservableObject {
             group.addTask { .baseStorage(await Self.capture { try await refreshClient.getStorage(includeSizes: false, forceRefresh: false) }) }
             group.addTask { .detailedStorage(await Self.capture { try await refreshClient.getStorage(includeSizes: true, forceRefresh: false) }) }
             group.addTask { .config(await Self.capture { try await refreshClient.getConfig() }) }
-            group.addTask { .definitions(await Self.capture { try await refreshClient.getJobDefinitions() }) }
             group.addTask { .jobs(await Self.capture { try await refreshClient.getJobs(limit: 50) }) }
             group.addTask { .progress(await Self.capture { try await refreshClient.getProgress() }) }
             group.addTask { .pbs(await Self.capture { try await refreshClient.getPBSStatus() }) }
@@ -239,15 +237,6 @@ final class AppModel: ObservableObject {
                     case let .failure(error):
                         configState = .failed(userMessage(for: error))
                         handle(error, firstError: &firstError)
-                    }
-                case let .definitions(result):
-                    switch result {
-                    case let .success(value):
-                        jobDefinitions = value
-                    case let .failure(error):
-                        if error as? APIError == .unauthenticated {
-                            handle(error, firstError: &firstError)
-                        }
                     }
                 case let .jobs(result):
                     switch result {
@@ -355,12 +344,10 @@ final class AppModel: ObservableObject {
         let activity = beginActivity()
         defer { endActivity(activity) }
         do {
-            async let configRequest = currentClient.getConfig()
-            async let definitionsRequest = currentClient.getJobDefinitions()
-            let (newConfig, newDefinitions) = try await (configRequest, definitionsRequest)
+            let newConfig = try await currentClient.getConfig()
             guard isCurrentSession(session) else { return }
             config = newConfig
-            jobDefinitions = newDefinitions
+            jobDefinitions = newConfig.backup.jobs
             configState = .loaded
             configSaveIssue = nil
             configWarnings = []
@@ -458,6 +445,14 @@ final class AppModel: ObservableObject {
             errorMessage = userMessage(for: error)
         }
         return false
+    }
+
+    func runAllJobDefinitions(dryRun: Bool = false) async -> Bool {
+        await runOperationalAction(
+            success: dryRun ? "Probeläufe für alle Jobs wurden gestartet." : "Alle aktiven Jobs wurden gestartet."
+        ) { client in
+            try await client.runAllJobDefinitions(dryRun: dryRun)
+        }
     }
 
     func runQuickSync(_ request: QuickSyncRequest) async -> Bool {
