@@ -270,7 +270,7 @@ final class APIClientSessionTests: XCTestCase {
         XCTAssertEqual(result.jobID, 91)
     }
 
-    func testForcedStorageRefreshUsesServerCompatibleTimeout() async throws {
+    func testEveryStorageSizeRequestUsesServerCompatibleTimeout() async throws {
         StorageTimeoutURLProtocol.timeout = nil
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StorageTimeoutURLProtocol.self]
@@ -279,10 +279,31 @@ final class APIClientSessionTests: XCTestCase {
             session: URLSession(configuration: configuration)
         )
 
-        let result = try await client.getStorage(includeSizes: true, forceRefresh: true)
+        let result = try await client.getStorage(includeSizes: true, forceRefresh: false)
 
         XCTAssertEqual(result.pairs.count, 0)
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(StorageTimeoutURLProtocol.timeout), 60)
+    }
+
+    func testRemoteBrowserUsesCanonicalRcloneRouteAndPreservesPath() async throws {
+        BrowseURLProtocol.requestURL = nil
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [BrowseURLProtocol.self]
+        let client = APIClient(
+            baseURL: try XCTUnwrap(URL(string: "https://browse.example")),
+            session: URLSession(configuration: configuration)
+        )
+
+        let result = try await client.browseRemote(path: "pcloud:/Fotos & Familie")
+
+        XCTAssertEqual(result.path, "pcloud:/Fotos & Familie")
+        let components = try XCTUnwrap(
+            BrowseURLProtocol.requestURL.flatMap {
+                URLComponents(url: $0, resolvingAgainstBaseURL: false)
+            }
+        )
+        XCTAssertEqual(components.path, "/api/browse/rclone")
+        XCTAssertEqual(components.queryItems?.first(where: { $0.name == "path" })?.value, "pcloud:/Fotos & Familie")
     }
 }
 
@@ -426,6 +447,35 @@ private final class StorageTimeoutURLProtocol: URLProtocol {
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(#"{"pairs":[]}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class BrowseURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var requestURL: URL?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.requestURL = request.url
+        let path = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "path" })?.value ?? ""
+        let body = try! JSONSerialization.data(withJSONObject: [
+            "path": path,
+            "parent": "pcloud:",
+            "is_root": false,
+            "entries": [],
+            "truncated": false
+        ])
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
     }
 

@@ -277,6 +277,20 @@ def test_size_recalculation_is_explicit_and_measurement_age_is_visible():
     assert "pairSizeAge(pair.name, 'target')" in html
 
 
+def test_webhook_management_is_not_exposed_in_the_user_interface():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "settings-tab-notifications" not in html
+    assert "settings-panel-notifications" not in html
+    assert "Webhook" not in html
+    assert "addWebhook()" not in javascript
+    assert "testWebhook(" not in javascript
+    # The raw notification section remains normalized so older server fields are
+    # preserved when another setting is saved.
+    assert "result.notifications.webhooks ||= []" in javascript
+
+
 def test_canonical_jobs_ui_separates_data_paths_definitions_and_runs():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     javascript = (STATIC / "app.js").read_text(encoding="utf-8")

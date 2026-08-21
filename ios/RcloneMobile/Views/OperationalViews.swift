@@ -26,7 +26,7 @@ struct QuickSyncView: View {
                     TextField("Remote oder lokaler Zielpfad", text: $remote)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                     Button { browseTarget = .remote } label: { Image(systemName: "folder") }
-                        .accessibilityLabel("Lokalen Zielordner auswählen")
+                        .accessibilityLabel("Zielordner auswählen")
                 }
             }
             Section("Übertragung") {
@@ -68,7 +68,10 @@ struct QuickSyncView: View {
         .navigationTitle("Quick Sync")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $browseTarget) { target in
-            LocalPathBrowserSheet(initialPath: target == .local ? local : remote) {
+            PathBrowserSheet(
+                kind: target == .local || remote.hasPrefix("/") ? .local : .remote,
+                initialPath: target == .local ? local : remote
+            ) {
                 if target == .local { local = $0 } else { remote = $0 }
             }
         }
@@ -112,9 +115,14 @@ private enum QuickBrowseTarget: String, Identifiable {
     var id: String { rawValue }
 }
 
-struct LocalPathBrowserSheet: View {
+enum PathBrowserKind: Equatable {
+    case local, remote
+}
+
+struct PathBrowserSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    let kind: PathBrowserKind
     let initialPath: String
     let select: (String) -> Void
     @State private var result: BrowseResponse?
@@ -151,17 +159,27 @@ struct LocalPathBrowserSheet: View {
                     ProgressView("Ordner werden geladen …")
                 }
             }
-            .navigationTitle("Lokalen Ordner wählen")
+            .navigationTitle(kind == .local ? "Lokalen Ordner wählen" : "Remote-Ordner wählen")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Abbrechen") { dismiss() } } }
-            .task { await load(initialPath.hasPrefix("/") ? initialPath : "") }
+            .task {
+                let path = kind == .local
+                    ? (initialPath.hasPrefix("/") ? initialPath : "")
+                    : (initialPath.contains(":") ? initialPath : "")
+                await load(path)
+            }
         }
     }
 
     private func load(_ path: String) async {
         isLoading = true
         errorMessage = nil
-        do { result = try await model.withCurrentClient { try await $0.browseLocal(path: path) } }
+        do {
+            result = try await model.withCurrentClient {
+                if kind == .local { return try await $0.browseLocal(path: path) }
+                return try await $0.browseRemote(path: path)
+            }
+        }
         catch is CancellationError {}
         catch { errorMessage = error.localizedDescription }
         isLoading = false
@@ -184,7 +202,6 @@ struct OperationsHubView: View {
             }
             Section("Konfiguration") {
                 NavigationLink { FilterFileView() } label: { Label("Filter-Datei", systemImage: "line.3.horizontal.decrease.circle") }
-                NavigationLink { WebhookManagementView() } label: { Label("Webhooks", systemImage: "bell.badge") }
                 NavigationLink { PasswordChangeView() } label: { Label("Passwort ändern", systemImage: "key") }
             }
         }
@@ -450,131 +467,6 @@ private struct FilterFileView: View {
     }
 
     private var isDirty: Bool { filter?.content != content }
-}
-
-private struct WebhookManagementView: View {
-    @EnvironmentObject private var model: AppModel
-    @State private var hooks: [WebhookConfig] = []
-    @State private var editor: WebhookEditorRequest?
-    @State private var isDirty = false
-    @State private var password = ""
-
-    var body: some View {
-        List {
-            if let issue = model.configSaveIssue { Section("Speichern") { Text(issueText(issue)).foregroundStyle(.orange); if case .passwordRequired = issue { SecureField("Aktuelles Passwort", text: $password) } } }
-            Section("Webhooks") {
-                ForEach(Array(hooks.enumerated()), id: \.element.id) { index, hook in
-                    Button { editor = WebhookEditorRequest(index: index, hook: hook) } label: {
-                        HStack { Label(hook.type.capitalized, systemImage: hook.enabled ? "bell.fill" : "bell.slash"); Spacer(); Text("\(hook.events.count) Events").foregroundStyle(.secondary) }
-                    }.foregroundStyle(.primary)
-                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                        Button { Task { await test(hook) } } label: { Label("Test", systemImage: "paperplane") }
-                            .tint(.blue)
-                            .disabled(isDirty || !hook.enabled)
-                    }
-                }
-                .onDelete { hooks.remove(atOffsets: $0); isDirty = true }
-                Button { editor = WebhookEditorRequest(index: nil, hook: nil) } label: { Label("Webhook hinzufügen", systemImage: "plus") }
-            }
-            Section {
-                Button("Speichern") { Task { await save() } }.disabled(!isDirty || model.isSavingConfig)
-                if case .passwordRequired? = model.configSaveIssue {
-                    Button("Mit Passwort speichern") { Task { await save(password: password) } }.disabled(password.isEmpty)
-                }
-                Button("Serverstand neu laden") { Task { await reload() } }
-            }
-        }
-        .navigationTitle("Webhooks")
-        .task { if !isDirty { hooks = model.config?.webhooks ?? [] } }
-        .sheet(item: $editor) { request in
-            WebhookEditor(hook: request.hook) { value in
-                if let index = request.index { hooks[index] = value } else { hooks.append(value) }
-                isDirty = true
-            }
-        }
-    }
-
-    private func save(password: String? = nil) async {
-        if await model.saveWebhooks(hooks, currentPassword: password) { isDirty = false; self.password = "" }
-    }
-
-    private func reload() async { await model.reloadConfiguration(); hooks = model.config?.webhooks ?? []; isDirty = false }
-
-    private func test(_ hook: WebhookConfig) async {
-        do {
-            let response = try await model.withCurrentClient { try await $0.testWebhook(id: hook.id) }
-            model.actionMessage = response.ok ? "Webhook-Test wurde gesendet." : (response.error ?? "Webhook-Test fehlgeschlagen.")
-        } catch { model.errorMessage = error.localizedDescription }
-    }
-
-    private func issueText(_ issue: ConfigSaveIssue) -> String {
-        switch issue { case let .conflict(value), let .passwordRequired(value): value; case let .validation(values): values.joined(separator: "\n") }
-    }
-}
-
-private struct WebhookEditorRequest: Identifiable { let id = UUID(); let index: Int?; let hook: WebhookConfig? }
-
-private struct WebhookEditor: View {
-    @Environment(\.dismiss) private var dismiss
-    let original: WebhookConfig?
-    let save: (WebhookConfig) -> Void
-    @State private var enabled: Bool
-    @State private var type: String
-    @State private var url: String
-    @State private var events: Set<String>
-    private let availableEvents = ["sync_started", "sync_ok", "sync_error", "conflict", "mount_check_failed", "cancelled", "pair_overdue", "restore_test_ok", "restore_test_error"]
-
-    init(hook: WebhookConfig?, save: @escaping (WebhookConfig) -> Void) {
-        original = hook; self.save = save
-        _enabled = State(initialValue: hook?.enabled ?? true)
-        _type = State(initialValue: hook?.type ?? "generic")
-        _url = State(initialValue: hook?.url == "***SET***" ? "" : (hook?.url ?? ""))
-        _events = State(initialValue: Set(hook?.events ?? ["sync_error"]))
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Ziel") {
-                    Toggle("Aktiv", isOn: $enabled)
-                    Picker("Typ", selection: $type) { Text("Generisch").tag("generic"); Text("Discord").tag("discord"); Text("Telegram").tag("telegram") }
-                    TextField(original == nil ? "HTTPS-URL" : "Neue HTTPS-URL (leer = unverändert)", text: $url)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled().textContentType(.URL)
-                }
-                Section("Ereignisse") {
-                    ForEach(availableEvents, id: \.self) { event in
-                        Toggle(event, isOn: Binding(get: { events.contains(event) }, set: { if $0 { events.insert(event) } else { events.remove(event) } }))
-                    }
-                }
-            }
-            .navigationTitle(original == nil ? "Webhook hinzufügen" : "Webhook bearbeiten")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Abbrechen") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Übernehmen") { commit() }.disabled(!valid) }
-            }
-        }
-    }
-
-    private var valid: Bool {
-        let validURL = (original != nil && url.isEmpty) || URL(string: url)?.scheme == "https"
-        return validURL && !events.isEmpty
-    }
-    private func commit() {
-        let orderedEvents = availableEvents.filter(events.contains)
-        let storedURL = original != nil && url.isEmpty ? "***SET***" : url
-        if let original {
-            save(original.replacing(enabled: enabled, type: type, url: storedURL, events: orderedEvents))
-        } else {
-            save(WebhookConfig(
-                id: UUID().uuidString.replacingOccurrences(of: "-", with: ""),
-                enabled: enabled,
-                type: type,
-                url: storedURL,
-                events: orderedEvents
-            ))
-        }
-        dismiss()
-    }
 }
 
 private struct PasswordChangeView: View {
