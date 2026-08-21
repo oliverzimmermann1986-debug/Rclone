@@ -7,6 +7,7 @@ from app.jobs.scheduler import (
     find_due_pairs,
     pbs_history_key,
     rclone_history_key,
+    restore_test_due,
 )
 
 
@@ -49,6 +50,23 @@ def _config():
             ],
         }
     }
+
+
+def test_restore_test_due_accepts_scheduler_snapshot_mapping():
+    snapshot = {
+        "backup": {
+            "timezone": "Europe/Berlin",
+            "scheduler_retry_minutes": 60,
+            "scheduler_grace_minutes": 15,
+            "restore_test": {"enabled": True, "schedule": "0 3 * * *"},
+        }
+    }
+    now = datetime(2026, 7, 10, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")).timestamp()
+
+    result = restore_test_due(snapshot, FakeDb(), now=now)
+
+    assert result["due"] is False
+    assert result["reason"] == "waiting_for_first_schedule"
 
 
 def test_scheduled_first_failure_retries_after_backoff():
