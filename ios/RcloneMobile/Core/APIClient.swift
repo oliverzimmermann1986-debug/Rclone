@@ -42,8 +42,11 @@ final class APIClient {
         configuration.httpCookieStorage = cookieStorage
         configuration.httpShouldSetCookies = true
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.waitsForConnectivity = true
-        configuration.timeoutIntervalForRequest = 120
+        // A login screen must never wait indefinitely for a LAN route. If the
+        // server is offline, fail quickly and let the user correct the address.
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 8
+        configuration.timeoutIntervalForResource = 12
         self.session = session ?? URLSession(configuration: configuration)
         self.decoder = JSONDecoder()
     }

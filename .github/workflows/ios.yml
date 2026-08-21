@@ -32,6 +32,12 @@ jobs:
       - name: Generate Xcode project
         working-directory: ios
         run: xcodegen generate
+
+      - name: Validate iPhone launch metadata
+        run: |
+          /usr/libexec/PlistBuddy -c 'Print :UILaunchScreen:UIColorName' ios/RcloneMobile/Info.plist | grep -qx 'LaunchBackground'
+          /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' ios/RcloneMobile/Info.plist >/dev/null
+          grep -q 'TARGETED_DEVICE_FAMILY: "1"' ios/project.yml
       - name: Build and run unit tests
         run: |
           set -o pipefail

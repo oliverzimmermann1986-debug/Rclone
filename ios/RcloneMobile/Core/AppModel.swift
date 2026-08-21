@@ -55,6 +55,7 @@ final class AppModel: ObservableObject {
     }
 
     func login(server: String, username: String, password: String) async {
+        guard !isRefreshing else { return }
         isRefreshing = true
         errorMessage = nil
         defer { isRefreshing = false }
@@ -67,6 +68,10 @@ final class AppModel: ObservableObject {
             client = candidate
             phase = .signedIn
             await refresh()
+        } catch is CancellationError {
+            // Cancelling is an explicit user action, not an error condition.
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            // URLSession translates task cancellation to NSURLErrorCancelled.
         } catch {
             errorMessage = userMessage(for: error)
         }
@@ -229,7 +234,7 @@ final class AppModel: ObservableObject {
             case .notConnectedToInternet, .networkConnectionLost:
                 return "Keine Netzwerkverbindung. Prüfe WLAN und die lokale Netzwerkfreigabe für Rclone Sync."
             case .timedOut:
-                return "Die Verbindung hat zu lange gedauert. Prüfe Serveradresse, Port und WLAN."
+                return "Keine Antwort innerhalb von 12 Sekunden. Prüfe Serveradresse, Port 8001, WLAN und ob der Server im Netzwerk freigegeben ist."
             case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot:
                 return "Die sichere Verbindung konnte nicht geprüft werden. Kontrolliere HTTPS-Adresse und Zertifikat."
             default:
