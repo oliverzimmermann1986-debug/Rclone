@@ -11,72 +11,11 @@ struct PBSConfigurationView: View {
 
     var body: some View {
         Form {
-            if let issue = model.configSaveIssue {
-                Section("Speichern nicht abgeschlossen") {
-                    Text(issueText(issue)).foregroundStyle(.orange)
-                    if case .passwordRequired = issue {
-                        SecureField("Aktuelles App-Passwort", text: $currentPassword)
-                            .textContentType(.password)
-                        Button("Mit Passwort speichern") { Task { await save(currentPassword: currentPassword) } }
-                            .disabled(currentPassword.isEmpty || validationMessage != nil)
-                    }
-                    Button("Serverstand neu laden") { Task { await reload(discardDirty: true) } }
-                }
-            }
-
-            Section("PBS-Server") {
-                Toggle("PBS-Integration aktiv", isOn: $draft.enabled)
-                TextField("user@realm!token@host:datastore", text: $draft.repository)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("Namespace (optional)", text: $draft.namespace)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("Standard Backup-ID (optional)", text: $draft.backupID)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("SHA-256-Fingerprint (optional)", text: $draft.fingerprint)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                SecureField(
-                    draft.password == "***SET***" ? "Neues Token/Passwort (leer = unverändert)" : "Token/Passwort",
-                    text: $replacementPassword
-                )
-                .textContentType(.password)
-                Stepper(
-                    "Zeitlimit: \(draft.timeoutHours.formatted(.number.precision(.fractionLength(1)))) h",
-                    value: $draft.timeoutHours,
-                    in: 0.5...168,
-                    step: 0.5
-                )
-            }
-
-            Section("Aufbewahrung") {
-                retentionStepper("Letzte", value: $draft.keep.last)
-                retentionStepper("Täglich", value: $draft.keep.daily)
-                retentionStepper("Wöchentlich", value: $draft.keep.weekly)
-                retentionStepper("Monatlich", value: $draft.keep.monthly)
-                retentionStepper("Jährlich", value: $draft.keep.yearly)
-            }
-
-            Section("Targets") {
-                ForEach(Array(draft.targets.enumerated()), id: \.element.id) { index, target in
-                    Button { editor = PBSTargetEditorRequest(index: index, target: target) } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(target.name.isEmpty ? "Unbenanntes Target" : target.name).font(.headline)
-                            Text("\(target.paths.count) Pfade · \(target.schedule == "manual" ? "manuell" : target.schedule)")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    .foregroundStyle(.primary)
-                }
-                .onDelete { draft.targets.remove(atOffsets: $0) }
-                Button { editor = PBSTargetEditorRequest(index: nil, target: nil) } label: {
-                    Label("Target hinzufügen", systemImage: "plus")
-                }
-            } footer: {
-                Text("Mehrere Targets brauchen jeweils eine eigene Backup-ID. Pfade beziehen sich auf den Server, nicht auf das iPhone.")
-            }
-
-            if let validationMessage {
-                Section { Label(validationMessage, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
-            }
+            saveIssueSection
+            serverSection
+            retentionSection
+            targetsSection
+            validationSection
         }
         .navigationTitle("PBS konfigurieren")
         .navigationBarTitleDisplayMode(.inline)
@@ -104,6 +43,85 @@ struct PBSConfigurationView: View {
         )) { Button("OK", role: .cancel) {} } message: { Text(localError ?? "") }
     }
 
+    @ViewBuilder
+    private var saveIssueSection: some View {
+        if let issue = model.configSaveIssue {
+            Section("Speichern nicht abgeschlossen") {
+                Text(issueText(issue)).foregroundStyle(.orange)
+                if case .passwordRequired = issue {
+                    SecureField("Aktuelles App-Passwort", text: $currentPassword)
+                        .textContentType(.password)
+                    Button("Mit Passwort speichern") { Task { await save(currentPassword: currentPassword) } }
+                        .disabled(currentPassword.isEmpty || validationMessage != nil)
+                }
+                Button("Serverstand neu laden") { Task { await reload(discardDirty: true) } }
+            }
+        }
+    }
+
+    private var serverSection: some View {
+        Section("PBS-Server") {
+            Toggle("PBS-Integration aktiv", isOn: $draft.enabled)
+            TextField("user@realm!token@host:datastore", text: $draft.repository)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            TextField("Namespace (optional)", text: $draft.namespace)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            TextField("Standard Backup-ID (optional)", text: $draft.backupID)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            TextField("SHA-256-Fingerprint (optional)", text: $draft.fingerprint)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            SecureField(
+                draft.password == "***SET***" ? "Neues Token/Passwort (leer = unverändert)" : "Token/Passwort",
+                text: $replacementPassword
+            )
+            .textContentType(.password)
+            Stepper(
+                "Zeitlimit: \(draft.timeoutHours.formatted(.number.precision(.fractionLength(1)))) h",
+                value: $draft.timeoutHours,
+                in: 0.5...168,
+                step: 0.5
+            )
+        }
+    }
+
+    private var retentionSection: some View {
+        Section("Aufbewahrung") {
+            retentionStepper("Letzte", keyPath: \.last)
+            retentionStepper("Täglich", keyPath: \.daily)
+            retentionStepper("Wöchentlich", keyPath: \.weekly)
+            retentionStepper("Monatlich", keyPath: \.monthly)
+            retentionStepper("Jährlich", keyPath: \.yearly)
+        }
+    }
+
+    private var targetsSection: some View {
+        Section("Targets") {
+            ForEach(Array(draft.targets.enumerated()), id: \.element.id) { index, target in
+                Button { editor = PBSTargetEditorRequest(index: index, target: target) } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(target.name.isEmpty ? "Unbenanntes Target" : target.name).font(.headline)
+                        Text("\(target.paths.count) Pfade · \(target.schedule == "manual" ? "manuell" : target.schedule)")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .foregroundStyle(.primary)
+            }
+            .onDelete { draft.targets.remove(atOffsets: $0) }
+            Button { editor = PBSTargetEditorRequest(index: nil, target: nil) } label: {
+                Label("Target hinzufügen", systemImage: "plus")
+            }
+        } footer: {
+            Text("Mehrere Targets brauchen jeweils eine eigene Backup-ID. Pfade beziehen sich auf den Server, nicht auf das iPhone.")
+        }
+    }
+
+    @ViewBuilder
+    private var validationSection: some View {
+        if let validationMessage {
+            Section { Label(validationMessage, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
+        }
+    }
+
     private var isDirty: Bool {
         guard let loaded else { return false }
         return draft != loaded || !replacementPassword.isEmpty
@@ -125,9 +143,15 @@ struct PBSConfigurationView: View {
         return nil
     }
 
-    @ViewBuilder
-    private func retentionStepper(_ title: String, value: Binding<Int>) -> some View {
-        Stepper("\(title): \(value.wrappedValue)", value: value, in: 0...3650)
+    private func retentionStepper(
+        _ title: String,
+        keyPath: WritableKeyPath<PBSKeepConfiguration, Int>
+    ) -> some View {
+        let value = Binding(
+            get: { draft.keep[keyPath: keyPath] },
+            set: { draft.keep[keyPath: keyPath] = $0 }
+        )
+        return Stepper("\(title): \(value.wrappedValue)", value: value, in: 0...3650)
     }
 
     private func loadFromModel(force: Bool) {
