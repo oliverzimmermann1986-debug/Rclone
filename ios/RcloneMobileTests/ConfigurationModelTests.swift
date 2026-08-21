@@ -78,4 +78,37 @@ final class ConfigurationModelTests: XCTestCase {
         XCTAssertEqual(decoded.maxParallel, 2)
         XCTAssertEqual(decoded.retryMinutes, 30)
     }
+
+    func testWebhookEditPreservesUnknownNotificationAndHookFields() throws {
+        let data = Data(#"""
+        {
+          "_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "backup":{"pairs":[],"jobs":[]},
+          "notifications":{
+            "timeout_seconds":9,
+            "webhooks":[{
+              "id":"webhook01","enabled":true,"type":"generic",
+              "url":"https://example.invalid/hook","events":["sync_error"],
+              "custom_header":"preserve-me"
+            }]
+          }
+        }
+        """#.utf8)
+        let snapshot = try JSONDecoder().decode(ConfigSnapshot.self, from: data)
+        let original = try XCTUnwrap(snapshot.webhooks.first)
+        let edited = original.replacing(
+            enabled: false,
+            type: original.type,
+            url: original.url,
+            events: original.events
+        )
+        let encoded = try JSONEncoder().encode(snapshot.replacingWebhooks([edited]))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let notifications = try XCTUnwrap(root["notifications"] as? [String: Any])
+        let hook = try XCTUnwrap((notifications["webhooks"] as? [[String: Any]])?.first)
+
+        XCTAssertEqual((notifications["timeout_seconds"] as? NSNumber)?.intValue, 9)
+        XCTAssertEqual(hook["enabled"] as? Bool, false)
+        XCTAssertEqual(hook["custom_header"] as? String, "preserve-me")
+    }
 }

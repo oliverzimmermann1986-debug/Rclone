@@ -57,3 +57,12 @@ def test_diagnostics_retry_and_app_build_are_visible():
     )
     assert 'object(forInfoDictionaryKey: "CFBundleShortVersionString")' in settings
     assert 'object(forInfoDictionaryKey: "CFBundleVersion")' in settings
+
+
+def test_operations_hub_is_always_reachable_once_and_filter_dirty_state_is_derived():
+    system = _swift("Views/SystemView.swift")
+    operations = _swift("Views/OperationalViews.swift")
+
+    assert system.count("NavigationLink { OperationsHubView() }") == 1
+    assert "private var isDirty: Bool { filter?.content != content }" in operations
+    assert ".onChange(of: content) { _, _ in isDirty = true }" not in operations

@@ -13,6 +13,8 @@ enum APIError: LocalizedError, Equatable {
     case configRevisionRequired(message: String, currentRevision: String?)
     case configReauthenticationRequired(message: String)
     case configValidation(errors: [String])
+    case revisionConflict(message: String, currentRevision: String?)
+    case reauthenticationRequired(message: String)
 
     var errorDescription: String? {
         switch self {
@@ -38,6 +40,8 @@ enum APIError: LocalizedError, Equatable {
             message
         case let .configValidation(errors):
             errors.isEmpty ? "Die Konfiguration ist ungültig." : errors.joined(separator: "\n")
+        case let .revisionConflict(message, _), let .reauthenticationRequired(message):
+            message
         }
     }
 }
@@ -51,6 +55,22 @@ protocol APIClientProtocol: AnyObject {
     func updateConfig(_ config: ConfigSnapshot, currentPassword: String?) async throws -> ConfigSaveResponse
     func getJobDefinitionPlan(id: String, dryRun: Bool) async throws -> JobPlan
     func runJobDefinition(id: String, dryRun: Bool) async throws -> ActionResponse
+    func runQuickSync(_ request: QuickSyncRequest) async throws -> ActionResponse
+    func checkPair(name: String) async throws -> ActionResponse
+    func runRestoreTest(pair: String?) async throws -> ActionResponse
+    func browseLocal(path: String) async throws -> BrowseResponse
+    func getAuditEvents(limit: Int) async throws -> AuditResponse
+    func getMaintenanceLogs(limit: Int) async throws -> MaintenanceLogsResponse
+    func getDatabaseStatus() async throws -> DatabaseStatus
+    func pruneDatabase(days: Int, keepLatest: Int) async throws -> DatabasePruneResponse
+    func getConfigSnapshots() async throws -> SnapshotListResponse
+    func createConfigSnapshot() async throws -> SnapshotCreateResponse
+    func restoreConfigSnapshot(_ request: SnapshotRestoreRequest) async throws -> SnapshotRestoreResponse
+    func getFilterFile() async throws -> FilterFile
+    func saveFilterFile(_ request: FilterFileSaveRequest) async throws -> FilterFileSaveResponse
+    func changePassword(current: String, new: String) async throws -> PasswordChangeResponse
+    func testWebhook(id: String) async throws -> ActionResponse
+    func downloadSupportBundle() async throws -> URL
     func getJobs(limit: Int) async throws -> JobSearchResponse
     func getJob(id: Int) async throws -> JobRecord
     func getJobLog(id: Int) async throws -> JobLogResponse
@@ -255,6 +275,83 @@ final class APIClient: APIClientProtocol {
         )
     }
 
+    func runQuickSync(_ request: QuickSyncRequest) async throws -> ActionResponse {
+        try await post("/api/jobs/backup/quick", body: request)
+    }
+
+    func checkPair(name: String) async throws -> ActionResponse {
+        try await post("/api/jobs/backup/check/\(Self.pathEncode(name))")
+    }
+
+    func runRestoreTest(pair: String? = nil) async throws -> ActionResponse {
+        let query = pair.map { "?pairs=\(Self.queryEncode($0))" } ?? ""
+        return try await post("/api/jobs/backup/restore-test\(query)")
+    }
+
+    func browseLocal(path: String = "") async throws -> BrowseResponse {
+        try await get("/api/browse/local?path=\(Self.queryEncode(path))")
+    }
+
+    func getAuditEvents(limit: Int = 100) async throws -> AuditResponse {
+        try await get("/api/maintenance/audit?limit=\(limit)")
+    }
+
+    func getMaintenanceLogs(limit: Int = 200) async throws -> MaintenanceLogsResponse {
+        try await get("/api/maintenance/logs?limit=\(limit)")
+    }
+
+    func getDatabaseStatus() async throws -> DatabaseStatus {
+        try await get("/api/maintenance/database")
+    }
+
+    func pruneDatabase(days: Int, keepLatest: Int) async throws -> DatabasePruneResponse {
+        try await post("/api/maintenance/database/prune?days=\(days)&keep_latest=\(keepLatest)")
+    }
+
+    func getConfigSnapshots() async throws -> SnapshotListResponse {
+        try await get("/api/maintenance/config/snapshots")
+    }
+
+    func createConfigSnapshot() async throws -> SnapshotCreateResponse {
+        try await post("/api/maintenance/config/snapshots")
+    }
+
+    func restoreConfigSnapshot(_ request: SnapshotRestoreRequest) async throws -> SnapshotRestoreResponse {
+        try await post("/api/maintenance/config/snapshots/restore", body: request)
+    }
+
+    func getFilterFile() async throws -> FilterFile {
+        try await get("/api/config/filter-file")
+    }
+
+    func saveFilterFile(_ request: FilterFileSaveRequest) async throws -> FilterFileSaveResponse {
+        try await put("/api/config/filter-file", body: request)
+    }
+
+    func changePassword(current: String, new: String) async throws -> PasswordChangeResponse {
+        try await post(
+            "/api/config/change-password",
+            body: PasswordChangeRequest(currentPassword: current, newPassword: new)
+        )
+    }
+
+    func testWebhook(id: String) async throws -> ActionResponse {
+        try await post("/api/config/test-webhook", body: WebhookTestRequest(id: id))
+    }
+
+    func downloadSupportBundle() async throws -> URL {
+        var request = URLRequest(url: url(for: "/api/maintenance/support-bundle"))
+        request.httpMethod = "GET"
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 401 { throw APIError.unauthenticated }
+        try validate(response, data: data, allowed: 200..<300)
+        let target = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rclone-sync-support-\(UUID().uuidString).zip")
+        try data.write(to: target, options: .atomic)
+        return target
+    }
+
     func getJobs(limit: Int = 50) async throws -> JobSearchResponse {
         try await get("/api/jobs/search?limit=\(limit)")
     }
@@ -373,7 +470,11 @@ final class APIClient: APIClientProtocol {
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         if http.statusCode == 401 { throw APIError.unauthenticated }
         if !(200..<300).contains(http.statusCode) {
-            if let structured = Self.structuredError(status: http.statusCode, data: data) {
+            if let structured = Self.structuredError(
+                status: http.statusCode,
+                path: request.url?.path ?? "",
+                data: data
+            ) {
                 throw structured
             }
             throw APIError.server(status: http.statusCode, message: Self.errorMessage(data) ?? "Serverfehler (HTTP \(http.statusCode))")
@@ -433,11 +534,28 @@ final class APIClient: APIClientProtocol {
         return nil
     }
 
-    private static func structuredError(status: Int, data: Data) -> APIError? {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let detail = object["detail"] as? [String: Any] else { return nil }
-        let message = detail["message"] as? String ?? "Konfiguration konnte nicht gespeichert werden."
-        let currentRevision = detail["current_revision"] as? String
+    private static func queryEncode(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&=+?#"))) ?? value
+    }
+
+    private static func structuredError(status: Int, path: String, data: Data) -> APIError? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let detail = object["detail"] as? [String: Any]
+        let plainDetail = object["detail"] as? String
+        let validationDetails = object["detail"] as? [[String: Any]]
+        if status == 422, let validationDetails {
+            let errors = validationDetails.compactMap { $0["msg"] as? String }
+            return .configValidation(errors: errors.isEmpty ? ["Eingaben sind ungültig."] : errors)
+        }
+        let message = detail?["message"] as? String ?? plainDetail ?? "Anfrage konnte nicht abgeschlossen werden."
+        let currentRevision = detail?["current_revision"] as? String
+        if status == 403, path.hasSuffix("/change-password") || path.hasSuffix("/snapshots/restore") {
+            return .reauthenticationRequired(message: message)
+        }
+        if status == 409, path.hasSuffix("/filter-file") || path.hasSuffix("/snapshots/restore") {
+            return .revisionConflict(message: message, currentRevision: currentRevision)
+        }
+        guard let detail else { return nil }
         if status == 409, detail["reload_required"] as? Bool == true {
             return .configConflict(message: message, currentRevision: currentRevision)
         }

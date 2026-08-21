@@ -11,9 +11,11 @@ from typing import Any
 import pytest
 
 from app.routes import (
+    api_browse,
     api_config,
     api_diagnostics,
     api_jobs,
+    api_maintenance,
     api_pbs,
     api_storage,
 )
@@ -156,11 +158,65 @@ def test_contract_manifest_is_versioned_and_covers_native_reads():
         "scheduler_state",
         "doctor",
         "job_definitions",
+        "browse_local",
+        "maintenance_audit",
+        "maintenance_logs",
+        "maintenance_database",
+        "config_snapshots",
+        "filter_file",
     }
     assert set(contract["endpoints"]) == expected
     for endpoint in contract["endpoints"].values():
         assert endpoint["method"] == "GET"
         assert endpoint["path"].startswith("/api/")
+
+
+def test_new_native_operations_fixtures_match_supported_read_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: _Config
+):
+    browse_root = tmp_path / "browse"
+    browse_root.mkdir()
+    monkeypatch.setattr(api_browse, "_browse_roots", lambda: [browse_root])
+    _assert_shape(api_browse.browse_local(""), _body("browse_local"))
+
+    class OperationsDB:
+        def audit_list(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return copy.deepcopy(_body("maintenance_audit")["events"])
+
+        def stats(self) -> dict[str, Any]:
+            return copy.deepcopy(_body("maintenance_database")["stats"])
+
+        def integrity_check(self) -> dict[str, Any]:
+            return copy.deepcopy(_body("maintenance_database")["integrity"])
+
+    monkeypatch.setattr(api_maintenance, "get_db", lambda: OperationsDB())
+    _assert_shape(
+        api_maintenance.audit_events(limit=100, event_type=""),
+        _body("maintenance_audit"),
+    )
+    _assert_shape(api_maintenance.database_status(), _body("maintenance_database"))
+
+    log_root = tmp_path / "logs"
+    log_root.mkdir()
+    log_path = log_root / "backup.log"
+    log_path.write_bytes(b"log")
+    monkeypatch.setattr(api_maintenance, "logs_root", lambda: log_root)
+    monkeypatch.setattr(api_maintenance, "iter_logs", lambda _root: [log_path])
+    _assert_shape(
+        api_maintenance.list_logs(limit=200, query=""), _body("maintenance_logs")
+    )
+
+    monkeypatch.setattr(
+        api_maintenance,
+        "_snapshot_entries",
+        lambda: copy.deepcopy(_body("config_snapshots")["snapshots"]),
+    )
+    _assert_shape(api_maintenance.list_config_snapshots(), _body("config_snapshots"))
+
+    filter_path = tmp_path / "filter.txt"
+    filter_path.write_text("- *.tmp\n", encoding="utf-8")
+    monkeypatch.setattr(api_config, "_filter_path", lambda: filter_path)
+    _assert_shape(api_config.get_filter_file(), _body("filter_file"))
 
 
 def test_config_and_job_definition_fixtures_match_route_outputs(
@@ -386,6 +442,14 @@ def test_native_management_uses_canonical_routes_and_models_without_webview():
         "/api/jobs/definitions",
         "/plan?dry_run=",
         "/run?dry_run=",
+        "/api/jobs/backup/quick",
+        "/api/jobs/backup/check/",
+        "/api/jobs/backup/restore-test",
+        "/api/browse/local?path=",
+        "/api/maintenance/audit?limit=",
+        "/api/maintenance/config/snapshots",
+        "/api/config/filter-file",
+        "/api/config/change-password",
     ):
         assert route in api
     for status in ("status == 409", "status == 428", "status == 403", "status == 422"):
@@ -405,5 +469,19 @@ def test_native_management_uses_canonical_routes_and_models_without_webview():
         "Löschungen ausdrücklich freigeben",
     ):
         assert feature in views
+    operations = (ios_root / "Views" / "OperationalViews.swift").read_text(
+        encoding="utf-8"
+    )
+    for feature in (
+        "Quick Sync",
+        "Systemweiten Restore-Test",
+        "Audit-Protokoll",
+        "Konfigurations-Snapshots",
+        "Support-Bundle",
+        "Filter-Datei",
+        "Webhooks",
+        "Passwort ändern",
+    ):
+        assert feature in operations or feature in views
     assert "WKWebView" not in production
     assert "UIWebView" not in production

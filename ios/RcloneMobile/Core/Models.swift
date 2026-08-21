@@ -369,6 +369,31 @@ struct ConfigSnapshot: Codable {
             extraSections: extraSections
         )
     }
+
+    var webhooks: [WebhookConfig] {
+        guard case let .object(notifications)? = extraSections["notifications"],
+              case let .array(values)? = notifications["webhooks"] else { return [] }
+        return values.compactMap { value in
+            guard let data = try? JSONEncoder().encode(value) else { return nil }
+            return try? JSONDecoder().decode(WebhookConfig.self, from: data)
+        }
+    }
+
+    func replacingWebhooks(_ webhooks: [WebhookConfig]) -> ConfigSnapshot {
+        var sections = extraSections
+        var notifications: [String: JSONValue]
+        if case let .object(existing)? = sections["notifications"] {
+            notifications = existing
+        } else {
+            notifications = [:]
+        }
+        notifications["webhooks"] = .array(webhooks.compactMap { webhook in
+            guard let data = try? JSONEncoder().encode(webhook) else { return nil }
+            return try? JSONDecoder().decode(JSONValue.self, from: data)
+        })
+        sections["notifications"] = .object(notifications)
+        return ConfigSnapshot(revision: revision, backup: backup, extraSections: sections)
+    }
 }
 
 struct BackupConfig: Codable {
@@ -572,6 +597,65 @@ struct JobDefinition: Codable, Identifiable {
     }
 }
 
+struct WebhookConfig: Codable, Identifiable {
+    let id: String
+    let enabled: Bool
+    let type: String
+    let url: String
+    let events: [String]
+    private let extras: [String: JSONValue]
+
+    init(
+        id: String, enabled: Bool, type: String, url: String,
+        events: [String], extras: [String: JSONValue] = [:]
+    ) {
+        self.id = id
+        self.enabled = enabled
+        self.type = type
+        self.url = url
+        self.events = events
+        self.extras = extras
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: DynamicCodingKey.self)
+        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
+        id = try values.decode(String.self, forKey: key("id"))
+        enabled = try values.decodeIfPresent(Bool.self, forKey: key("enabled")) ?? true
+        type = try values.decodeIfPresent(String.self, forKey: key("type")) ?? "generic"
+        url = try values.decodeIfPresent(String.self, forKey: key("url")) ?? ""
+        events = try values.decodeIfPresent([String].self, forKey: key("events")) ?? []
+        let known = Set(["id", "enabled", "type", "url", "events"])
+        var preserved: [String: JSONValue] = [:]
+        for codingKey in values.allKeys where !known.contains(codingKey.stringValue) {
+            preserved[codingKey.stringValue] = try values.decode(JSONValue.self, forKey: codingKey)
+        }
+        extras = preserved
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: DynamicCodingKey.self)
+        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
+        for (name, value) in extras { try values.encode(value, forKey: key(name)) }
+        try values.encode(id, forKey: key("id"))
+        try values.encode(enabled, forKey: key("enabled"))
+        try values.encode(type, forKey: key("type"))
+        try values.encode(url, forKey: key("url"))
+        try values.encode(events, forKey: key("events"))
+    }
+
+    func replacing(enabled: Bool, type: String, url: String, events: [String]) -> WebhookConfig {
+        WebhookConfig(
+            id: id,
+            enabled: enabled,
+            type: type,
+            url: url,
+            events: events,
+            extras: extras
+        )
+    }
+}
+
 struct ConfigUpdateRequest: Encodable {
     let config: ConfigSnapshot
     let currentPassword: String?
@@ -674,6 +758,219 @@ struct ActionResponse: Decodable {
         case ok, error
         case jobID = "job_id"
     }
+}
+
+struct QuickSyncRequest: Encodable {
+    let remote: String
+    let local: String
+    let direction: String
+    let mode: String
+    let dryRun: Bool
+    let allowDelete: Bool
+    let maxDelete: Int?
+    let minLocalFiles: Int
+
+    enum CodingKeys: String, CodingKey {
+        case remote, local, direction, mode
+        case dryRun = "dry_run"
+        case allowDelete = "allow_delete"
+        case maxDelete = "max_delete"
+        case minLocalFiles = "min_local_files"
+    }
+}
+
+struct BrowseResponse: Decodable {
+    let path: String
+    let parent: String?
+    let isRoot: Bool?
+    let entries: [BrowseEntry]
+    let truncated: Bool?
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case path, parent, entries, truncated, error
+        case isRoot = "is_root"
+    }
+}
+
+struct BrowseEntry: Decodable, Identifiable {
+    var id: String { path }
+    let name: String
+    let path: String
+    let isDir: Bool
+    let isRoot: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case name, path
+        case isDir = "is_dir"
+        case isRoot = "is_root"
+    }
+}
+
+struct AuditResponse: Decodable {
+    let ok: Bool
+    let events: [AuditEvent]
+}
+
+struct AuditEvent: Decodable, Identifiable {
+    let id: Int
+    let eventType: String
+    let actor: String
+    let createdAt: Double
+    let details: [String: JSONValue]
+
+    enum CodingKeys: String, CodingKey {
+        case id, actor, details
+        case eventType = "event_type"
+        case createdAt = "created_at"
+    }
+}
+
+struct MaintenanceLogsResponse: Decodable {
+    let root: String
+    let logs: [MaintenanceLog]
+}
+
+struct MaintenanceLog: Decodable, Identifiable {
+    var id: String { path }
+    let path: String
+    let size: Int64
+    let mtime: Double
+}
+
+struct DatabaseStatus: Decodable {
+    let ok: Bool
+    let stats: DatabaseStats
+    let integrity: DatabaseIntegrity
+}
+
+struct DatabaseStats: Decodable {
+    let jobs: Int
+    let pairRuns: Int
+    let authFailures: Int
+    let running: Int
+    let auditEvents: Int
+    let runtimeSettings: Int
+    let bytes: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case jobs, running, bytes
+        case pairRuns = "pair_runs"
+        case authFailures = "auth_failures"
+        case auditEvents = "audit_events"
+        case runtimeSettings = "runtime_settings"
+    }
+}
+
+struct DatabaseIntegrity: Decodable {
+    let ok: Bool
+    let quickCheck: String
+    let foreignKeyErrors: Int
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case quickCheck = "quick_check"
+        case foreignKeyErrors = "foreign_key_errors"
+    }
+}
+
+struct DatabasePruneResponse: Decodable {
+    let ok: Bool
+    let deletedJobs: Int
+    let deletedAuthRows: Int
+    let deletedAuditEvents: Int
+    let stats: DatabaseStats
+
+    enum CodingKeys: String, CodingKey {
+        case ok, stats
+        case deletedJobs = "deleted_jobs"
+        case deletedAuthRows = "deleted_auth_rows"
+        case deletedAuditEvents = "deleted_audit_events"
+    }
+}
+
+struct SnapshotListResponse: Decodable {
+    let ok: Bool
+    let snapshots: [ConfigSnapshotEntry]
+    let maxSnapshots: Int
+
+    enum CodingKeys: String, CodingKey {
+        case ok, snapshots
+        case maxSnapshots = "max_snapshots"
+    }
+}
+
+struct ConfigSnapshotEntry: Decodable, Identifiable {
+    var id: String { name }
+    let name: String
+    let size: Int64
+    let mtime: Double
+    let sha256: String
+}
+
+struct SnapshotCreateResponse: Decodable {
+    let ok: Bool
+    let snapshot: ConfigSnapshotEntry
+}
+
+struct SnapshotRestoreRequest: Encodable {
+    let name: String
+    let currentPassword: String
+    let expectedRevision: String
+    let sha256: String
+
+    enum CodingKeys: String, CodingKey {
+        case name, sha256
+        case currentPassword = "current_password"
+        case expectedRevision = "expected_revision"
+    }
+}
+
+struct SnapshotRestoreResponse: Decodable {
+    let ok: Bool
+    let warnings: [String]
+    let revision: String
+    let reauthenticate: Bool
+}
+
+struct FilterFile: Decodable {
+    let path: String
+    let exists: Bool
+    let content: String
+    let revision: String
+}
+
+struct FilterFileSaveRequest: Encodable {
+    let content: String
+    let revision: String
+}
+
+struct FilterFileSaveResponse: Decodable {
+    let ok: Bool
+    let path: String
+    let bytes: Int
+    let revision: String
+}
+
+struct PasswordChangeRequest: Encodable {
+    let currentPassword: String
+    let newPassword: String
+
+    enum CodingKeys: String, CodingKey {
+        case currentPassword = "current_password"
+        case newPassword = "new_password"
+    }
+}
+
+struct PasswordChangeResponse: Decodable {
+    let ok: Bool
+    let message: String
+    let reauthenticate: Bool
+}
+
+struct WebhookTestRequest: Encodable {
+    let id: String
+    let event = "sync_ok"
 }
 
 struct BackupProgress: Decodable {

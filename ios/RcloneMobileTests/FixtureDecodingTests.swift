@@ -73,11 +73,27 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertEqual(definitions.first?.executionMode, "sequential")
     }
 
+    func testMaintenanceAndBrowseModelsDecodeSharedContract() throws {
+        let browse: BrowseResponse = try decode("browse_local")
+        let audit: AuditResponse = try decode("maintenance_audit")
+        let logs: MaintenanceLogsResponse = try decode("maintenance_logs")
+        let database: DatabaseStatus = try decode("maintenance_database")
+        let snapshots: SnapshotListResponse = try decode("config_snapshots")
+        let filter: FilterFile = try decode("filter_file")
+
+        XCTAssertEqual(browse.entries.first?.path, "/mnt")
+        XCTAssertEqual(audit.events.first?.eventType, "config_saved")
+        XCTAssertEqual(logs.logs.first?.size, 2_048)
+        XCTAssertTrue(database.integrity.ok)
+        XCTAssertEqual(snapshots.maxSnapshots, 30)
+        XCTAssertEqual(filter.content, "- *.tmp\n")
+    }
+
     func testEverySharedEndpointHasVersionedGetMetadata() throws {
         let root = try contractRoot()
         XCTAssertEqual(root["contract_version"] as? Int, 1)
         let endpoints = try XCTUnwrap(root["endpoints"] as? [String: [String: Any]])
-        XCTAssertEqual(endpoints.count, 14)
+        XCTAssertEqual(endpoints.count, 20)
         for endpoint in endpoints.values {
             XCTAssertEqual(endpoint["method"] as? String, "GET")
             XCTAssertTrue((endpoint["path"] as? String)?.hasPrefix("/api/") == true)

@@ -125,6 +125,36 @@
       "method": "GET",
       "path": "/api/jobs/definitions",
       "body": [{"id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "name": "Fotos täglich", "enabled": true, "data_path_ids": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], "schedule": "0 3 * * *", "execution_mode": "sequential", "max_parallel": 1, "retry_minutes": 60}]
+    },
+    "browse_local": {
+      "method": "GET",
+      "path": "/api/browse/local?path=",
+      "body": {"path": "/", "parent": null, "is_root": true, "entries": [{"name": "/mnt", "path": "/mnt", "is_dir": true, "is_root": true}]}
+    },
+    "maintenance_audit": {
+      "method": "GET",
+      "path": "/api/maintenance/audit?limit=100",
+      "body": {"ok": true, "events": [{"id": 7, "event_type": "config_saved", "actor": "admin", "created_at": 1720000000, "details": {"pairs": 1}}]}
+    },
+    "maintenance_logs": {
+      "method": "GET",
+      "path": "/api/maintenance/logs?limit=200",
+      "body": {"root": "/var/log/rclone-sync", "logs": [{"path": "backup-41.log", "size": 2048, "mtime": 1720000000}]}
+    },
+    "maintenance_database": {
+      "method": "GET",
+      "path": "/api/maintenance/database",
+      "body": {"ok": true, "stats": {"jobs": 41, "pair_runs": 80, "auth_failures": 0, "running": 0, "audit_events": 7, "runtime_settings": 1, "bytes": 65536}, "integrity": {"ok": true, "quick_check": "ok", "foreign_key_errors": 0}}
+    },
+    "config_snapshots": {
+      "method": "GET",
+      "path": "/api/maintenance/config/snapshots",
+      "body": {"ok": true, "snapshots": [{"name": "config-20240703T094640Z-aaaaaaaa-1a2b.yaml", "size": 4096, "mtime": 1720000000, "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}], "max_snapshots": 30}
+    },
+    "filter_file": {
+      "method": "GET",
+      "path": "/api/config/filter-file",
+      "body": {"path": "/opt/rclone-sync/data/rclone-filters.txt", "exists": true, "content": "- *.tmp\n", "revision": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
     }
   }
 }
