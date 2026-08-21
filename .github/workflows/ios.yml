@@ -4,11 +4,29 @@ on:
   push:
     paths:
       - "ios/**"
+      - "app/main.py"
+      - "app/auth.py"
+      - "app/auth_contract.py"
+      - "app/security.py"
+      - "app/routes/**"
+      - "contracts/**"
+      - "tests/test_native_login_contract.py"
+      - "tests/test_ios_release_version.py"
+      - "scripts/ios_release_version.py"
       - "codemagic.yaml"
       - ".github/workflows/ios.yml"
   pull_request:
     paths:
       - "ios/**"
+      - "app/main.py"
+      - "app/auth.py"
+      - "app/auth_contract.py"
+      - "app/security.py"
+      - "app/routes/**"
+      - "contracts/**"
+      - "tests/test_native_login_contract.py"
+      - "tests/test_ios_release_version.py"
+      - "scripts/ios_release_version.py"
       - "codemagic.yaml"
       - ".github/workflows/ios.yml"
 
@@ -27,6 +45,14 @@ jobs:
       - uses: actions/checkout@v7
       - name: Toolchain
         run: xcodebuild -version
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install backend contract test dependencies
+        run: python3 -m pip install -r requirements-dev.txt
+      - name: Validate native login contract and release version tooling
+        run: python3 -m pytest tests/test_native_login_contract.py tests/test_ios_release_version.py
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project

@@ -1,6 +1,6 @@
 # Rclone Sync für iPhone
 
-Native SwiftUI-App für das vorhandene rclone-sync-Backend. Sie verwendet dieselbe gehärtete Cookie-Sitzung wie das Web-Frontend, übernimmt den Login-CSRF-Nonce aus `/login` und sendet bei schreibenden Aufrufen den Double-Submit-CSRF-Header.
+Native SwiftUI-App für das vorhandene rclone-sync-Backend. Sie verwendet dieselbe gehärtete Cookie-Sitzung wie das Web-Frontend, bezieht den Login-CSRF-Nonce über den strukturierten JSON-Vertrag `/api/auth/login` und sendet bei schreibenden Aufrufen den Double-Submit-CSRF-Header.
 
 ## Enthalten
 
@@ -26,7 +26,7 @@ Danach im Target `RcloneMobile` ein Apple-Entwicklungsteam wählen und auf einem
 
 Die Datei [`../codemagic.yaml`](../codemagic.yaml) erzeugt das Xcode-Projekt auf einem Cloud-Mac, führt die Unit-Tests aus, signiert die App und lädt die IPA zu TestFlight. Die einmalige Apple-/Codemagic-Einrichtung steht in [`TESTFLIGHT.md`](TESTFLIGHT.md).
 
-Jeder Tag im Format `ios-v*`, beispielsweise `ios-v1.0.0`, startet danach automatisch einen Release. Pull Requests und Änderungen unter `ios/` werden zusätzlich über GitHub Actions mit Xcode 26 kompiliert und getestet, jedoch nicht veröffentlicht.
+Jeder Tag im Format `ios-vX.Y.Z`, beispielsweise `ios-v1.0.0`, startet danach automatisch einen Release. Pull Requests und vertragsrelevante Backend-/iOS-Änderungen werden zusätzlich über GitHub Actions mit Xcode 26 kompiliert und getestet, jedoch nicht veröffentlicht.
 
 ## Verbindung
 

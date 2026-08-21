@@ -3,6 +3,35 @@ import XCTest
 @testable import RcloneMobile
 
 final class APIClientSessionTests: XCTestCase {
+    func testSharedNativeLoginContractFixturesDecode() throws {
+        let url = try XCTUnwrap(
+            Bundle(for: Self.self).url(
+                forResource: "native_login_contract",
+                withExtension: "json"
+            )
+        )
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        let challengeFixture = try XCTUnwrap(root["challenge"] as? [String: Any])
+        let challengeBody = try XCTUnwrap(challengeFixture["body"])
+        let challengeData = try JSONSerialization.data(withJSONObject: challengeBody)
+        let challenge = try JSONDecoder().decode(NativeLoginChallenge.self, from: challengeData)
+        XCTAssertEqual(challenge.status, "csrf_ready")
+        XCTAssertFalse(challenge.loginCSRF.isEmpty)
+
+        let outcomes = try XCTUnwrap(root["outcomes"] as? [[String: Any]])
+        XCTAssertEqual(Set(outcomes.compactMap { $0["name"] as? String }), Set([
+            "success", "invalid_credentials", "rate_limited", "csrf_failed", "origin_failed"
+        ]))
+        for fixture in outcomes {
+            let body = try XCTUnwrap(fixture["body"])
+            let data = try JSONSerialization.data(withJSONObject: body)
+            let decoded = try JSONDecoder().decode(NativeLoginResponse.self, from: data)
+            XCTAssertEqual(decoded.status, fixture["name"] as? String)
+        }
+    }
+
     func testLogoutClearsOnlyServerCookiesWhenRequestFails() async throws {
         let baseURL = try XCTUnwrap(URL(string: "https://backup.example.de"))
         let unrelatedURL = try XCTUnwrap(URL(string: "https://notbackup.example.de"))

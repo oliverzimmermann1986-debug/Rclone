@@ -6,6 +6,8 @@ enum APIError: LocalizedError, Equatable {
     case invalidResponse
     case server(status: Int, message: String)
     case loginFailed
+    case loginRateLimited(retryAfterSeconds: Int)
+    case loginSecurityFailed
     case missingCSRF
 
     var errorDescription: String? {
@@ -20,6 +22,10 @@ enum APIError: LocalizedError, Equatable {
             message
         case .loginFailed:
             "Benutzername oder Passwort ist falsch."
+        case let .loginRateLimited(seconds):
+            "Zu viele Anmeldeversuche. Bitte in \(seconds) Sekunden erneut versuchen."
+        case .loginSecurityFailed:
+            "Die Sicherheitsprüfung der Anmeldung ist fehlgeschlagen. Prüfe die Serveradresse und versuche es erneut."
         case .missingCSRF:
             "Die Sicherheitssitzung fehlt. Bitte erneut anmelden."
         }
@@ -45,6 +51,37 @@ protocol APIClientProtocol: AnyObject {
     func resumeScheduler() async throws -> SchedulerControl
     func logout() async throws
     func clearLocalSession()
+}
+
+struct NativeLoginChallenge: Decodable, Equatable {
+    let status: String
+    let loginCSRF: String
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case loginCSRF = "login_csrf"
+    }
+}
+
+struct NativeLoginResponse: Decodable, Equatable {
+    let status: String
+    let retryAfterSeconds: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case retryAfterSeconds = "retry_after_seconds"
+    }
+}
+
+private struct NativeLoginRequest: Encodable {
+    let username: String
+    let password: String
+    let loginCSRF: String
+
+    private enum CodingKeys: String, CodingKey {
+        case username, password
+        case loginCSRF = "login_csrf"
+    }
 }
 
 final class APIClient: APIClientProtocol {
@@ -119,29 +156,47 @@ final class APIClient: APIClientProtocol {
 
     func login(username: String, password: String) async throws {
         clearCookies()
-        let (loginData, loginResponse) = try await session.data(from: url(for: "/login"))
-        try validate(loginResponse, data: loginData, allowed: 200..<300)
-        guard let html = String(data: loginData, encoding: .utf8),
-              let nonce = Self.loginNonce(in: html) else {
-            throw APIError.invalidResponse
+        let challenge: NativeLoginChallenge = try await get("/api/auth/login")
+        guard challenge.status == "csrf_ready", !challenge.loginCSRF.isEmpty else {
+            throw APIError.loginSecurityFailed
         }
 
-        var request = URLRequest(url: url(for: "/login"))
+        var request = URLRequest(url: url(for: "/api/auth/login"))
         request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(origin, forHTTPHeaderField: "Origin")
-        request.httpBody = [
-            "username": username,
-            "password": password,
-            "login_csrf": nonce
-        ]
-        .map { "\(Self.formEncode($0.key))=\(Self.formEncode($0.value))" }
-        .sorted()
-        .joined(separator: "&")
-        .data(using: .utf8)
+        request.httpBody = try JSONEncoder().encode(
+            NativeLoginRequest(
+                username: username,
+                password: password,
+                loginCSRF: challenge.loginCSRF
+            )
+        )
 
         let (data, response) = try await session.data(for: request)
-        try validate(response, data: data, allowed: 200..<400)
+        guard let http = response as? HTTPURLResponse,
+              let result = try? decoder.decode(NativeLoginResponse.self, from: data) else {
+            throw APIError.invalidResponse
+        }
+        switch result.status {
+        case "success" where (200..<300).contains(http.statusCode):
+            break
+        case "invalid_credentials":
+            throw APIError.loginFailed
+        case "rate_limited":
+            let headerSeconds = Int(http.value(forHTTPHeaderField: "Retry-After") ?? "")
+            throw APIError.loginRateLimited(
+                retryAfterSeconds: max(1, result.retryAfterSeconds ?? headerSeconds ?? 1)
+            )
+        case "csrf_failed", "origin_failed":
+            throw APIError.loginSecurityFailed
+        default:
+            throw APIError.server(
+                status: http.statusCode,
+                message: "Der Server unterstützt die sichere native Anmeldung nicht vollständig."
+            )
+        }
         guard cookie(named: Self.sessionCookie) != nil else { throw APIError.loginFailed }
         _ = try await getConfig()
     }
@@ -295,18 +350,6 @@ final class APIClient: APIClientProtocol {
         guard allowed.contains(http.statusCode) else {
             throw APIError.server(status: http.statusCode, message: Self.errorMessage(data) ?? "HTTP \(http.statusCode)")
         }
-    }
-
-    private static func loginNonce(in html: String) -> String? {
-        let pattern = #"name=[\"']login_csrf[\"'][^>]*value=[\"']([^\"']+)[\"']"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
-              let range = Range(match.range(at: 1), in: html) else { return nil }
-        return String(html[range])
-    }
-
-    private static func formEncode(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? ""
     }
 
     private static func pathEncode(_ value: String) -> String {
