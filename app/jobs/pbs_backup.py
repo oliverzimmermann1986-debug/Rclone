@@ -47,8 +47,11 @@ def client_path() -> Optional[str]:
 
 def pbs_settings(cfg=None) -> dict[str, Any]:
     cfg = cfg or get_config()
-    section = cfg.get("pbs", default={}) or {}
-    return section if isinstance(section, dict) else {}
+    if isinstance(cfg, Mapping):
+        section = cfg.get("pbs") or {}
+    else:
+        section = cfg.get("pbs", default={}) or {}
+    return dict(section) if isinstance(section, Mapping) else {}
 
 
 def pbs_targets(settings: dict[str, Any]) -> list[dict[str, Any]]:
