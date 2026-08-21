@@ -158,6 +158,7 @@ def _run_backup_thread(
     history_keys: dict[str, str],
     scope_lock: HeldFileLock,
     run_metadata: dict[str, Any],
+    release_locks: bool = True,
 ) -> None:
     db = None
     handler: logging.FileHandler | None = None
@@ -225,8 +226,9 @@ def _run_backup_thread(
             except Exception:
                 logger.exception("Runtime-Abschluss konnte nicht abgeglichen werden")
         _remove_job_logger(handler)
-        scope_lock.release()
-        _locks["backup"].release()
+        if release_locks:
+            scope_lock.release()
+            _locks["backup"].release()
 
 
 def _reserve_backup_job(
@@ -440,16 +442,233 @@ def _queue_backup(
     }
 
 
+def _enabled_definition_specs(
+    snapshot: dict[str, Any], *, dry_run: bool
+) -> list[dict[str, Any]]:
+    """Resolve every enabled definition before taking the global run lock.
+
+    Rejecting an invalid enabled definition keeps the batch atomic: no earlier
+    definition may start before the caller learns that a later one has no
+    active data path.
+    """
+
+    specs: list[dict[str, Any]] = []
+    invalid: list[str] = []
+    for definition in effective_job_definitions(snapshot):
+        if not definition.get("enabled", True):
+            continue
+        pairs = [
+            pair
+            for pair in definition_pairs(snapshot, definition)
+            if pair.get("enabled", True)
+        ]
+        pair_names = [
+            str(pair.get("name") or "").strip()
+            for pair in pairs
+            if str(pair.get("name") or "").strip()
+        ]
+        if not pair_names:
+            invalid.append(str(definition.get("name") or definition.get("id") or "?"))
+            continue
+        history_keys = {
+            str(pair.get("name")): rclone_history_key(pair) for pair in pairs
+        }
+        specs.append(
+            {
+                "definition": definition,
+                "pair_names": pair_names,
+                "history_keys": history_keys,
+                "attempts": [
+                    {
+                        "name": name,
+                        "history_key": history_keys[name],
+                        "trigger": "web",
+                        "dry_run": dry_run,
+                    }
+                    for name in pair_names
+                ],
+            }
+        )
+    if invalid:
+        raise HTTPException(
+            409,
+            "Aktivierte Jobdefinition(en) ohne aktive Datenwege: " + ", ".join(invalid),
+        )
+    if not specs:
+        raise HTTPException(409, "Keine aktivierte Jobdefinition vorhanden")
+    return specs
+
+
+def _acquire_definition_batch_scope() -> HeldFileLock:
+    if not _locks["backup"].acquire(blocking=False):
+        raise HTTPException(409, "Backup läuft bereits")
+    try:
+        scope_lock = try_file_lock(runtime_state.DEFAULT_CANCEL_SCOPE)
+    except Exception:
+        _locks["backup"].release()
+        raise
+    if scope_lock is None:
+        _locks["backup"].release()
+        raise HTTPException(409, "Ein anderer Sync hält den Prozess-Lock")
+    try:
+        reconciliation = reconcile_locked_scope(
+            get_db(),
+            scope=runtime_state.DEFAULT_CANCEL_SCOPE,
+            kinds=BACKUP_KINDS,
+        )
+        if not reconciliation.get("safe"):
+            raise HTTPException(
+                409, "Ein registrierter Sync-Unterprozess ist noch aktiv"
+            )
+        rclone_job.reset_cancel()
+        return scope_lock
+    except Exception:
+        scope_lock.release()
+        _locks["backup"].release()
+        raise
+
+
+def _run_definition_batch_thread(
+    specs: list[dict[str, Any]],
+    dry_run: bool,
+    snapshot: dict[str, Any],
+    config_revision: str,
+    scope_lock: HeldFileLock,
+    first_job_id: int,
+) -> None:
+    """Run definitions serially while one process-wide backup scope is held."""
+
+    try:
+        for index, spec in enumerate(specs):
+            if index > 0 and rclone_job.is_cancelled():
+                break
+            definition = spec["definition"]
+            definition_id = str(definition.get("id") or "") or None
+            definition_name = str(definition.get("name") or "") or None
+            if index == 0:
+                job_id = first_job_id
+            else:
+                try:
+                    job_id = get_db().job_start(
+                        "backup",
+                        attempts=spec["attempts"],
+                        exclusive_scope=True,
+                        definition_id=definition_id,
+                        definition_name=definition_name,
+                        config_revision=config_revision,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Jobdefinition %s konnte nicht reserviert werden",
+                        definition_name,
+                    )
+                    break
+            _run_backup_thread(
+                job_id,
+                dry_run,
+                spec["pair_names"],
+                spec["history_keys"],
+                scope_lock,
+                {
+                    "execution_mode": str(
+                        definition.get("execution_mode") or "sequential"
+                    ),
+                    "max_parallel_override": int(definition.get("max_parallel") or 1),
+                    "definition_id": definition_id,
+                    "definition_name": definition_name,
+                    "config_revision": config_revision,
+                    "config_snapshot": snapshot,
+                },
+                release_locks=False,
+            )
+    finally:
+        scope_lock.release()
+        _locks["backup"].release()
+
+
+def _queue_enabled_job_definitions(*, dry_run: bool) -> dict[str, Any]:
+    snapshot, revision = get_config().snapshot_with_revision()
+    snapshot = copy.deepcopy(snapshot)
+    revision = str(revision or "")
+    specs = _enabled_definition_specs(snapshot, dry_run=dry_run)
+    scope_lock = _acquire_definition_batch_scope()
+    definitions = [spec["definition"] for spec in specs]
+    first = specs[0]
+    first_definition = first["definition"]
+    try:
+        first_job_id = get_db().job_start(
+            "backup",
+            attempts=first["attempts"],
+            exclusive_scope=True,
+            definition_id=str(first_definition.get("id") or "") or None,
+            definition_name=str(first_definition.get("name") or "") or None,
+            config_revision=revision,
+        )
+    except JobAlreadyRunningError as exc:
+        scope_lock.release()
+        _locks["backup"].release()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        scope_lock.release()
+        _locks["backup"].release()
+        logger.exception("Erste Jobdefinition konnte nicht reserviert werden")
+        raise HTTPException(500, "Jobs konnten nicht reserviert werden") from exc
+    _audit_best_effort(
+        "job_definition_batch_requested",
+        actor="web",
+        details={
+            "dry_run": dry_run,
+            "definition_ids": [str(item.get("id") or "") for item in definitions],
+        },
+    )
+    try:
+        thread = threading.Thread(
+            target=_run_definition_batch_thread,
+            args=(specs, dry_run, snapshot, revision, scope_lock, first_job_id),
+            name="job-definition-batch",
+            daemon=True,
+        )
+        thread.start()
+    except Exception as exc:
+        scope_lock.release()
+        _locks["backup"].release()
+        try:
+            get_db().job_finish(
+                first_job_id,
+                "error",
+                {"error": f"Batch-Thread konnte nicht gestartet werden: {exc}"},
+            )
+        except Exception:
+            logger.exception("Thread-Startfehler konnte nicht gespeichert werden")
+        logger.exception("Jobdefinitions-Batch konnte nicht gestartet werden")
+        raise HTTPException(500, "Jobs konnten nicht gestartet werden") from exc
+    return {
+        "ok": True,
+        "job_id": first_job_id,
+        "definition_ids": [str(item.get("id") or "") for item in definitions],
+        "definition_names": [str(item.get("name") or "") for item in definitions],
+        "config_revision": revision,
+        "dry_run": dry_run,
+    }
+
+
 @router.post("/backup/run")
 def run_backup(
     dry_run: bool = Query(False), pairs: Optional[str] = Query(None)
 ) -> dict[str, Any]:
-    return _queue_backup(dry_run=dry_run, pairs_filter=_parse_pair_filter(pairs))
+    if pairs is not None:
+        return _queue_backup(dry_run=dry_run, pairs_filter=_parse_pair_filter(pairs))
+    return _queue_enabled_job_definitions(dry_run=dry_run)
 
 
 @router.get("/definitions")
 def list_job_definitions() -> list[dict[str, Any]]:
     return effective_job_definitions(get_config())
+
+
+@router.post("/definitions/run-all")
+def run_all_job_definitions(dry_run: bool = Query(False)) -> dict[str, Any]:
+    return _queue_enabled_job_definitions(dry_run=dry_run)
 
 
 def _resolved_definition(
