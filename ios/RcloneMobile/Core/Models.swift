@@ -394,6 +394,200 @@ struct ConfigSnapshot: Codable {
         sections["notifications"] = .object(notifications)
         return ConfigSnapshot(revision: revision, backup: backup, extraSections: sections)
     }
+
+    var pbsConfiguration: PBSConfiguration {
+        guard let value = extraSections["pbs"],
+              let data = try? JSONEncoder().encode(value),
+              let decoded = try? JSONDecoder().decode(PBSConfiguration.self, from: data)
+        else { return PBSConfiguration() }
+        return decoded
+    }
+
+    func replacingPBSConfiguration(_ configuration: PBSConfiguration) -> ConfigSnapshot {
+        var sections = extraSections
+        if let data = try? JSONEncoder().encode(configuration),
+           let value = try? JSONDecoder().decode(JSONValue.self, from: data) {
+            sections["pbs"] = value
+        }
+        return ConfigSnapshot(revision: revision, backup: backup, extraSections: sections)
+    }
+}
+
+struct PBSConfiguration: Codable, Equatable {
+    var enabled: Bool
+    var repository: String
+    var namespace: String
+    var backupID: String
+    var fingerprint: String
+    var password: String
+    var timeoutHours: Double
+    var keep: PBSKeepConfiguration
+    var targets: [PBSTargetConfiguration]
+    private var extras: [String: JSONValue]
+
+    init(
+        enabled: Bool = false,
+        repository: String = "",
+        namespace: String = "",
+        backupID: String = "",
+        fingerprint: String = "",
+        password: String = "",
+        timeoutHours: Double = 4,
+        keep: PBSKeepConfiguration = PBSKeepConfiguration(),
+        targets: [PBSTargetConfiguration] = [],
+        extras: [String: JSONValue] = [:]
+    ) {
+        self.enabled = enabled
+        self.repository = repository
+        self.namespace = namespace
+        self.backupID = backupID
+        self.fingerprint = fingerprint
+        self.password = password
+        self.timeoutHours = timeoutHours
+        self.keep = keep
+        self.targets = targets
+        self.extras = extras
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: DynamicCodingKey.self)
+        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
+        enabled = try values.decodeIfPresent(Bool.self, forKey: key("enabled")) ?? false
+        repository = try values.decodeIfPresent(String.self, forKey: key("repository")) ?? ""
+        namespace = try values.decodeIfPresent(String.self, forKey: key("namespace")) ?? ""
+        backupID = try values.decodeIfPresent(String.self, forKey: key("backup_id")) ?? ""
+        fingerprint = try values.decodeIfPresent(String.self, forKey: key("fingerprint")) ?? ""
+        password = try values.decodeIfPresent(String.self, forKey: key("password")) ?? ""
+        timeoutHours = try values.decodeIfPresent(Double.self, forKey: key("timeout_hours")) ?? 4
+        keep = try values.decodeIfPresent(PBSKeepConfiguration.self, forKey: key("keep")) ?? PBSKeepConfiguration()
+        targets = try values.decodeIfPresent([PBSTargetConfiguration].self, forKey: key("targets")) ?? []
+        let known = Set(["enabled", "repository", "namespace", "backup_id", "fingerprint", "password", "timeout_hours", "keep", "targets"])
+        var preserved: [String: JSONValue] = [:]
+        for codingKey in values.allKeys {
+            if !known.contains(codingKey.stringValue) {
+                preserved[codingKey.stringValue] = try values.decode(JSONValue.self, forKey: codingKey)
+            }
+        }
+        extras = preserved
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: DynamicCodingKey.self)
+        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
+        for (name, value) in extras { try values.encode(value, forKey: key(name)) }
+        try values.encode(enabled, forKey: key("enabled"))
+        try values.encode(repository, forKey: key("repository"))
+        try values.encode(namespace, forKey: key("namespace"))
+        try values.encode(backupID, forKey: key("backup_id"))
+        try values.encode(fingerprint, forKey: key("fingerprint"))
+        try values.encode(password, forKey: key("password"))
+        try values.encode(timeoutHours, forKey: key("timeout_hours"))
+        try values.encode(keep, forKey: key("keep"))
+        try values.encode(targets, forKey: key("targets"))
+    }
+}
+
+struct PBSKeepConfiguration: Codable, Equatable {
+    var last: Int
+    var daily: Int
+    var weekly: Int
+    var monthly: Int
+    var yearly: Int
+
+    init(last: Int = 3, daily: Int = 7, weekly: Int = 4, monthly: Int = 12, yearly: Int = 3) {
+        self.last = last
+        self.daily = daily
+        self.weekly = weekly
+        self.monthly = monthly
+        self.yearly = yearly
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case last = "keep_last"
+        case daily = "keep_daily"
+        case weekly = "keep_weekly"
+        case monthly = "keep_monthly"
+        case yearly = "keep_yearly"
+    }
+}
+
+struct PBSTargetConfiguration: Codable, Equatable, Identifiable {
+    var id: String
+    var name: String
+    var paths: [String]
+    var schedule: String
+    var namespace: String
+    var backupID: String
+    var requireMountpoint: Bool
+    var mountpoint: String
+    var sentinelFile: String
+    var minFiles: Int
+    private var extras: [String: JSONValue]
+
+    init(
+        id: String = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+        name: String = "",
+        paths: [String] = [],
+        schedule: String = "manual",
+        namespace: String = "",
+        backupID: String = "",
+        requireMountpoint: Bool = false,
+        mountpoint: String = "",
+        sentinelFile: String = "",
+        minFiles: Int = 1,
+        extras: [String: JSONValue] = [:]
+    ) {
+        self.id = id
+        self.name = name
+        self.paths = paths
+        self.schedule = schedule
+        self.namespace = namespace
+        self.backupID = backupID
+        self.requireMountpoint = requireMountpoint
+        self.mountpoint = mountpoint
+        self.sentinelFile = sentinelFile
+        self.minFiles = minFiles
+        self.extras = extras
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: DynamicCodingKey.self)
+        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
+        id = try values.decodeIfPresent(String.self, forKey: key("id")) ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        name = try values.decodeIfPresent(String.self, forKey: key("name")) ?? ""
+        paths = try values.decodeIfPresent([String].self, forKey: key("paths")) ?? []
+        schedule = try values.decodeIfPresent(String.self, forKey: key("schedule")) ?? "manual"
+        namespace = try values.decodeIfPresent(String.self, forKey: key("namespace")) ?? ""
+        backupID = try values.decodeIfPresent(String.self, forKey: key("backup_id")) ?? ""
+        requireMountpoint = try values.decodeIfPresent(Bool.self, forKey: key("require_mountpoint")) ?? false
+        mountpoint = try values.decodeIfPresent(String.self, forKey: key("mountpoint")) ?? ""
+        sentinelFile = try values.decodeIfPresent(String.self, forKey: key("sentinel_file")) ?? ""
+        minFiles = try values.decodeIfPresent(Int.self, forKey: key("min_files")) ?? 1
+        let known = Set(["id", "name", "paths", "schedule", "namespace", "backup_id", "require_mountpoint", "mountpoint", "sentinel_file", "min_files"])
+        var preserved: [String: JSONValue] = [:]
+        for codingKey in values.allKeys {
+            if !known.contains(codingKey.stringValue) {
+                preserved[codingKey.stringValue] = try values.decode(JSONValue.self, forKey: codingKey)
+            }
+        }
+        extras = preserved
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: DynamicCodingKey.self)
+        func key(_ value: String) -> DynamicCodingKey { DynamicCodingKey(stringValue: value)! }
+        for (name, value) in extras { try values.encode(value, forKey: key(name)) }
+        try values.encode(id, forKey: key("id"))
+        try values.encode(name, forKey: key("name"))
+        try values.encode(paths, forKey: key("paths"))
+        try values.encode(schedule, forKey: key("schedule"))
+        try values.encode(namespace, forKey: key("namespace"))
+        try values.encode(backupID, forKey: key("backup_id"))
+        try values.encode(requireMountpoint, forKey: key("require_mountpoint"))
+        try values.encode(mountpoint, forKey: key("mountpoint"))
+        try values.encode(sentinelFile, forKey: key("sentinel_file"))
+        try values.encode(minFiles, forKey: key("min_files"))
+    }
 }
 
 struct BackupConfig: Codable {

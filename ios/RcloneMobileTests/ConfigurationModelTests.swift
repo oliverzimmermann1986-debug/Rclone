@@ -111,4 +111,39 @@ final class ConfigurationModelTests: XCTestCase {
         XCTAssertEqual(hook["enabled"] as? Bool, false)
         XCTAssertEqual(hook["custom_header"] as? String, "preserve-me")
     }
+
+    func testPBSEditPreservesSecretPlaceholderAndUnknownFields() throws {
+        let data = Data(#"""
+        {
+          "_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "backup":{"pairs":[],"jobs":[]},
+          "pbs":{
+            "enabled":true,"repository":"token@pbs@host:store","namespace":"rclone",
+            "backup_id":"main","fingerprint":"","password":"***SET***","timeout_hours":4,
+            "keep":{"keep_last":3,"keep_daily":7,"keep_weekly":4,"keep_monthly":12,"keep_yearly":3},
+            "custom_server_flag":"preserve-server",
+            "targets":[{
+              "id":"11111111111111111111111111111111","name":"Daten","paths":["/srv/data"],
+              "schedule":"0 4 * * *","namespace":"","backup_id":"data","require_mountpoint":true,
+              "mountpoint":"/srv","sentinel_file":".mounted","min_files":1,
+              "custom_target_flag":"preserve-target"
+            }]
+          }
+        }
+        """#.utf8)
+        let snapshot = try JSONDecoder().decode(ConfigSnapshot.self, from: data)
+        var pbs = snapshot.pbsConfiguration
+        pbs.enabled = false
+        pbs.targets[0].schedule = "manual"
+
+        let encoded = try JSONEncoder().encode(snapshot.replacingPBSConfiguration(pbs))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let section = try XCTUnwrap(root["pbs"] as? [String: Any])
+        let target = try XCTUnwrap((section["targets"] as? [[String: Any]])?.first)
+
+        XCTAssertEqual(section["password"] as? String, "***SET***")
+        XCTAssertEqual(section["custom_server_flag"] as? String, "preserve-server")
+        XCTAssertEqual(target["custom_target_flag"] as? String, "preserve-target")
+        XCTAssertEqual(target["schedule"] as? String, "manual")
+    }
 }

@@ -509,3 +509,30 @@ def test_native_f14_revision_safety_history_and_run_all_contracts():
     assert "downloadJobLog(" in backups
     assert backups.count("model.withCurrentClient") >= 5
     assert "detailError" in backups and "logError" in backups
+
+
+def test_native_pbs_configuration_is_revision_safe_and_feature_complete():
+    ios_root = CONTRACT_PATH.parents[1] / "ios" / "RcloneMobile"
+    models = (ios_root / "Core" / "Models.swift").read_text(encoding="utf-8")
+    app_model = (ios_root / "Core" / "AppModel.swift").read_text(encoding="utf-8")
+    system = (ios_root / "Views" / "SystemView.swift").read_text(encoding="utf-8")
+    view = (ios_root / "Views" / "PBSConfigurationView.swift").read_text(
+        encoding="utf-8"
+    )
+
+    assert "var pbsConfiguration: PBSConfiguration" in models
+    assert "replacingPBSConfiguration" in models
+    assert "struct PBSTargetConfiguration: Codable, Equatable, Identifiable" in models
+    assert "saveCompleteConfig(" in app_model
+    assert "savePBSConfiguration" in app_model
+    assert "PBSConfigurationView()" in system
+    for feature in (
+        "PBS-Integration aktiv",
+        "Aufbewahrung",
+        "Target hinzufügen",
+        "Serverpfade – einer pro Zeile",
+        "Mountpoint verlangen",
+        "Mit Passwort speichern",
+        "if isDirty && !discardDirty",
+    ):
+        assert feature in view

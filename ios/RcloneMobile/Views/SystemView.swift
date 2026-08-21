@@ -168,6 +168,11 @@ private struct PBSToolsView: View {
             } else {
                 LoadingSection(label: "PBS-Status wird geladen …")
             }
+            Section("Konfiguration") {
+                NavigationLink { PBSConfigurationView() } label: {
+                    Label("PBS konfigurieren", systemImage: "slider.horizontal.3")
+                }
+            }
         }
         .navigationTitle("PBS")
         .navigationBarTitleDisplayMode(.inline)
