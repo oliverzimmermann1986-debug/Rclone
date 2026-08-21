@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import copy
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -297,3 +298,217 @@ def test_definition_plan_uses_ordered_paths_and_consistent_errors(
     with pytest.raises(HTTPException) as disabled:
         api_jobs.plan_job_definition(definition["id"])
     assert disabled.value.status_code == 409
+
+
+def test_backup_run_without_pair_filter_uses_canonical_definition_batch(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        api_jobs,
+        "_queue_enabled_job_definitions",
+        lambda *, dry_run: (
+            calls.append(("definitions", dry_run)) or {"ok": True, "canonical": True}
+        ),
+    )
+    monkeypatch.setattr(api_jobs, "_known_pair_names", lambda: {"Fotos"})
+    monkeypatch.setattr(
+        api_jobs,
+        "_queue_backup",
+        lambda *, dry_run, pairs_filter: (
+            calls.append(("pairs", (dry_run, pairs_filter)))
+            or {"ok": True, "canonical": False}
+        ),
+    )
+
+    assert api_jobs.run_backup(dry_run=True, pairs=None)["canonical"] is True
+    assert api_jobs.run_all_job_definitions(dry_run=False)["canonical"] is True
+    assert api_jobs.run_backup(dry_run=True, pairs="Fotos")["canonical"] is False
+    assert calls == [
+        ("definitions", True),
+        ("definitions", False),
+        ("pairs", (True, ["Fotos"])),
+    ]
+
+
+def test_definition_batch_creates_separate_ordered_runs_under_one_global_lock(
+    tmp_path: Path, monkeypatch
+):
+    config, _ = validate_config(_config(tmp_path))
+    path_ids = [pair["id"] for pair in config["backup"]["pairs"]]
+    config["backup"]["jobs"] = [
+        {
+            "id": "1" * 32,
+            "name": "Seriell",
+            "enabled": True,
+            "data_path_ids": list(reversed(path_ids)),
+            "schedule": "manual",
+            "execution_mode": "sequential",
+            "max_parallel": 1,
+            "retry_minutes": 60,
+        },
+        {
+            "id": "2" * 32,
+            "name": "Parallel",
+            "enabled": True,
+            "data_path_ids": [path_ids[0]],
+            "schedule": "manual",
+            "execution_mode": "parallel",
+            "max_parallel": 4,
+            "retry_minutes": 60,
+        },
+        {
+            "id": "3" * 32,
+            "name": "Aus",
+            "enabled": False,
+            "data_path_ids": [path_ids[1]],
+            "schedule": "manual",
+            "execution_mode": "sequential",
+            "max_parallel": 1,
+            "retry_minutes": 60,
+        },
+    ]
+
+    class Store:
+        def snapshot_with_revision(self):
+            return copy.deepcopy(config), "rev-batch"
+
+    class FakeDb:
+        def __init__(self):
+            self.rows: dict[int, dict] = {}
+            self.starts: list[dict] = []
+            self.finishes: list[tuple[int, str, dict]] = []
+            self.audits: list[tuple[str, dict]] = []
+
+        def job_start(self, kind, **kwargs):
+            job_id = len(self.rows) + 1
+            self.rows[job_id] = {"id": job_id, "kind": kind, "status": "running"}
+            self.starts.append({"kind": kind, **kwargs})
+            return job_id
+
+        def job_get(self, job_id):
+            return dict(self.rows[job_id])
+
+        def job_set_log_file(self, job_id, log_file):
+            self.rows[job_id]["log_file"] = log_file
+
+        def job_finish(self, job_id, status, summary):
+            self.rows[job_id]["status"] = status
+            self.finishes.append((job_id, status, summary))
+            return True
+
+        def audit_add(self, event, **kwargs):
+            self.audits.append((event, kwargs))
+
+    class FakeScopeLock:
+        def __init__(self):
+            self.releases = 0
+
+        def release(self):
+            self.releases += 1
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    database = FakeDb()
+    scope_lock = FakeScopeLock()
+    runs: list[dict] = []
+
+    def fake_run_job(**kwargs):
+        runs.append(kwargs)
+        return {
+            "ok": True,
+            "pairs": [{"name": name, "ok": True} for name in kwargs["pairs_filter"]],
+        }
+
+    monkeypatch.setattr(api_jobs, "get_config", lambda: Store())
+    monkeypatch.setattr(api_jobs, "get_db", lambda: database)
+    monkeypatch.setattr(api_jobs, "try_file_lock", lambda _scope: scope_lock)
+    monkeypatch.setattr(
+        api_jobs, "reconcile_locked_scope", lambda *_args, **_kwargs: {"safe": True}
+    )
+    monkeypatch.setattr(api_jobs.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        api_jobs, "_setup_job_logger", lambda *_args: (tmp_path / "run.log", None)
+    )
+    monkeypatch.setattr(
+        api_jobs, "_finish_runtime_for_job", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(api_jobs.rclone_job, "run_job", fake_run_job)
+    monkeypatch.setattr(api_jobs.rclone_job, "reset_cancel", lambda: None)
+    monkeypatch.setattr(api_jobs.rclone_job, "is_cancelled", lambda: False)
+
+    result = api_jobs._queue_enabled_job_definitions(dry_run=True)
+
+    assert result["definition_ids"] == ["1" * 32, "2" * 32]
+    assert result["config_revision"] == "rev-batch"
+    assert [item["definition_id"] for item in database.starts] == [
+        "1" * 32,
+        "2" * 32,
+    ]
+    assert all(item["exclusive_scope"] is True for item in database.starts)
+    assert [run["pairs_filter"] for run in runs] == [
+        ["Dokumente", "Fotos"],
+        ["Fotos"],
+    ]
+    assert [(run["execution_mode"], run["max_parallel_override"]) for run in runs] == [
+        ("sequential", 1),
+        ("parallel", 4),
+    ]
+    assert all(run["config_revision"] == "rev-batch" for run in runs)
+    assert [status for _job_id, status, _summary in database.finishes] == ["ok", "ok"]
+    assert scope_lock.releases == 1
+    assert api_jobs._locks["backup"].locked() is False
+
+
+def test_definition_batch_rejects_enabled_job_without_active_data_path(
+    tmp_path: Path, monkeypatch
+):
+    config, _ = validate_config(_config(tmp_path))
+    config["backup"]["pairs"][0]["enabled"] = False
+    config["backup"]["jobs"] = [
+        {
+            "id": "a" * 32,
+            "name": "Ohne aktiven Weg",
+            "enabled": True,
+            "data_path_ids": [config["backup"]["pairs"][0]["id"]],
+            "schedule": "manual",
+            "execution_mode": "sequential",
+            "max_parallel": 1,
+            "retry_minutes": 60,
+        }
+    ]
+
+    class Store:
+        def snapshot_with_revision(self):
+            return config, "rev-invalid"
+
+    monkeypatch.setattr(api_jobs, "get_config", lambda: Store())
+    with pytest.raises(HTTPException) as caught:
+        api_jobs._queue_enabled_job_definitions(dry_run=True)
+    assert caught.value.status_code == 409
+    assert "ohne aktive Datenwege" in str(caught.value.detail)
+    assert api_jobs._locks["backup"].locked() is False
+
+
+def test_definition_batch_process_lock_contention_releases_web_lock(
+    tmp_path: Path, monkeypatch
+):
+    config, _ = validate_config(_config(tmp_path))
+
+    class Store:
+        def snapshot_with_revision(self):
+            return config, "rev-contention"
+
+    monkeypatch.setattr(api_jobs, "get_config", lambda: Store())
+    monkeypatch.setattr(api_jobs, "try_file_lock", lambda _scope: None)
+
+    with pytest.raises(HTTPException) as caught:
+        api_jobs._queue_enabled_job_definitions(dry_run=True)
+    assert caught.value.status_code == 409
+    assert "Prozess-Lock" in str(caught.value.detail)
+    assert api_jobs._locks["backup"].locked() is False
