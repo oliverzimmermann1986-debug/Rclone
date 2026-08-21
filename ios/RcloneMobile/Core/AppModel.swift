@@ -485,6 +485,19 @@ final class AppModel: ObservableObject {
         )
     }
 
+    func savePBSConfiguration(
+        _ configuration: PBSConfiguration,
+        currentPassword: String? = nil
+    ) async -> Bool {
+        guard let currentConfig = config else { return false }
+        let saved = await saveCompleteConfig(
+            currentConfig.replacingPBSConfiguration(configuration),
+            currentPassword: currentPassword
+        )
+        if saved { await refresh() }
+        return saved
+    }
+
     func changePassword(current: String, new: String) async -> Bool {
         do {
             let response = try await withCurrentClient {
