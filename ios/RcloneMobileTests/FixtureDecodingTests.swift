@@ -32,12 +32,14 @@ final class FixtureDecodingTests: XCTestCase {
 
     func testStorageDecodesCopyCountsAndSizes() throws {
         let data = Data(#"""
-        {"pairs":[{"name":"Fotos","local":"/mnt/fotos","remote":"cloud:Fotos","direction":"push","source":"/mnt/fotos","target":"cloud:Fotos","source_size":{"path":"/mnt/fotos","count":12,"bytes":2048},"target_size":{"path":"cloud:Fotos","count":9,"bytes":1024}}]}
+        {"pairs":[{"name":"Fotos","local":"/mnt/fotos","remote":"cloud:Fotos","direction":"push","source":"/mnt/fotos","target":"cloud:Fotos","source_size":{"path":"/mnt/fotos","count":12,"bytes":2048,"measured_at":1720000000,"measurement_status":"fresh"},"target_size":{"path":"cloud:Fotos","count":9,"bytes":1024,"measured_at":1719999900,"measurement_status":"cached"}}]}
         """#.utf8)
 
         let storage = try JSONDecoder().decode(StorageOverview.self, from: data)
         XCTAssertEqual(storage.pairs.first?.sourceSize?.count, 12)
         XCTAssertEqual(storage.pairs.first?.targetSize?.bytes, 1024)
+        XCTAssertEqual(storage.pairs.first?.sourceSize?.measurementStatus, "fresh")
+        XCTAssertEqual(storage.pairs.first?.targetSize?.measuredAt, 1_719_999_900)
     }
 
     func testServerURLAddsHTTPS() throws {

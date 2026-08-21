@@ -38,6 +38,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var storageState: ContentLoadState = .idle
     @Published private(set) var configState: ContentLoadState = .idle
     @Published private(set) var jobsState: ContentLoadState = .idle
+    @Published private(set) var progressLastSuccessAt: Date?
+    @Published private(set) var progressConsecutiveFailures = 0
+    @Published private(set) var doctorLastCheckedAt: Date?
+    @Published private(set) var doctorIsRefreshing = false
     @Published private(set) var isRefreshing = false
     @Published var errorMessage: String?
     @Published var actionMessage: String?
@@ -57,6 +61,13 @@ final class AppModel: ObservableObject {
 
     var savedUsername: String {
         defaults.string(forKey: "username") ?? "admin"
+    }
+
+    var progressIsStale: Bool {
+        guard progressConsecutiveFailures > 0 else { return false }
+        if progressConsecutiveFailures >= 3 { return true }
+        guard progress?.running == true, let progressLastSuccessAt else { return false }
+        return Date().timeIntervalSince(progressLastSuccessAt) >= 15
     }
 
     init(
@@ -169,8 +180,8 @@ final class AppModel: ObservableObject {
         var firstError: Error?
         await withTaskGroup(of: RefreshPayload.self) { group in
             group.addTask { .overview(await Self.capture { try await refreshClient.getOverview() }) }
-            group.addTask { .baseStorage(await Self.capture { try await refreshClient.getStorage(includeSizes: false) }) }
-            group.addTask { .detailedStorage(await Self.capture { try await refreshClient.getStorage(includeSizes: true) }) }
+            group.addTask { .baseStorage(await Self.capture { try await refreshClient.getStorage(includeSizes: false, forceRefresh: false) }) }
+            group.addTask { .detailedStorage(await Self.capture { try await refreshClient.getStorage(includeSizes: true, forceRefresh: false) }) }
             group.addTask { .config(await Self.capture { try await refreshClient.getConfig() }) }
             group.addTask { .jobs(await Self.capture { try await refreshClient.getJobs(limit: 50) }) }
             group.addTask { .progress(await Self.capture { try await refreshClient.getProgress() }) }
@@ -226,8 +237,11 @@ final class AppModel: ObservableObject {
                     }
                 case let .progress(result):
                     switch result {
-                    case let .success(value): progress = value
-                    case let .failure(error): handle(error, firstError: &firstError)
+                    case let .success(value):
+                        acceptProgress(value)
+                    case let .failure(error):
+                        recordProgressFailure()
+                        handle(error, firstError: &firstError)
                     }
                 case let .pbs(result):
                     switch result {
@@ -254,27 +268,58 @@ final class AppModel: ObservableObject {
         do {
             let newProgress = try await currentClient.getProgress()
             guard isCurrentSession(session) else { return }
-            progress = newProgress
-            if newProgress.running == false, jobs.first?.status == "running" {
+            let completedRunningJob = progress?.running == true && newProgress.running == false
+            acceptProgress(newProgress)
+            if completedRunningJob {
                 let response = try await currentClient.getJobs(limit: 50)
                 guard isCurrentSession(session) else { return }
                 jobs = response.items
+                jobsState = .loaded
             }
         } catch APIError.unauthenticated {
             guard isCurrentSession(session) else { return }
             signOutLocally()
         } catch {
             // Der Poll darf eine anderweitig nutzbare Ansicht nicht mit Meldungen fluten.
+            guard isCurrentSession(session) else { return }
+            recordProgressFailure()
+        }
+    }
+
+    func refreshStorageSizes() async {
+        guard let currentClient = client else { return }
+        let session = sessionGeneration
+        let activity = beginActivity()
+        defer { endActivity(activity) }
+        do {
+            let detailed = try await currentClient.getStorage(
+                includeSizes: true,
+                forceRefresh: true
+            )
+            guard isCurrentSession(session) else { return }
+            storage = detailed.preservingSizes(from: storage)
+            storageState = .loaded
+        } catch APIError.unauthenticated {
+            guard isCurrentSession(session) else { return }
+            signOutLocally()
+        } catch {
+            guard isCurrentSession(session) else { return }
+            errorMessage = userMessage(for: error)
         }
     }
 
     func refreshDoctor() async {
         guard let currentClient = client else { return }
         let session = sessionGeneration
+        doctorIsRefreshing = true
+        defer {
+            if isCurrentSession(session) { doctorIsRefreshing = false }
+        }
         do {
             let newDoctor = try await currentClient.getDoctor()
             guard isCurrentSession(session) else { return }
             doctor = newDoctor
+            doctorLastCheckedAt = Date()
         } catch {
             guard isCurrentSession(session) else { return }
             errorMessage = userMessage(for: error)
@@ -376,8 +421,15 @@ final class AppModel: ObservableObject {
     func logout() async {
         let exitingClient = client
         beginSessionTransition()
+        errorMessage = nil
         clearSessionState()
-        do { try await exitingClient?.logout() } catch { /* defer im Client löscht lokale Cookies */ }
+        do {
+            if let result = try await exitingClient?.logout(), !result.globalRevocation {
+                errorMessage = result.detail ?? "Du wurdest auf diesem Gerät abgemeldet, aber andere Sitzungen konnten nicht sicher beendet werden. Bitte später erneut anmelden und noch einmal abmelden."
+            }
+        } catch {
+            errorMessage = "Du wurdest auf diesem Gerät abgemeldet. Ob andere Sitzungen beendet wurden, konnte nicht bestätigt werden: \(userMessage(for: error))"
+        }
         exitingClient?.clearLocalSession()
     }
 
@@ -446,6 +498,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func acceptProgress(_ value: BackupProgress) {
+        progress = value
+        progressLastSuccessAt = Date()
+        progressConsecutiveFailures = 0
+    }
+
+    private func recordProgressFailure() {
+        progressConsecutiveFailures = min(progressConsecutiveFailures + 1, 999)
+    }
+
     private func signOutLocally() {
         client?.clearLocalSession()
         beginSessionTransition()
@@ -460,6 +522,10 @@ final class AppModel: ObservableObject {
         jobs = []
         doctor = nil
         progress = nil
+        progressLastSuccessAt = nil
+        progressConsecutiveFailures = 0
+        doctorLastCheckedAt = nil
+        doctorIsRefreshing = false
         pbs = nil
         overviewState = .idle
         storageState = .idle

@@ -100,9 +100,26 @@ struct SystemView: View {
                         if let message = check.message ?? check.detail { Text(message).font(.caption).foregroundStyle(.secondary) }
                     }
                 }
-            } else {
-                Button { Task { await model.refreshDoctor() } } label: { Label("Systemdiagnose ausführen", systemImage: "stethoscope") }
             }
+            if let checkedAt = model.doctorLastCheckedAt {
+                LabeledContent(
+                    "Zuletzt geprüft",
+                    value: AppFormat.date(checkedAt.timeIntervalSince1970)
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Button { Task { await model.refreshDoctor() } } label: {
+                HStack(spacing: 10) {
+                    if model.doctorIsRefreshing { ProgressView() }
+                    Label(
+                        model.doctor == nil ? "Systemdiagnose ausführen" : "Erneut prüfen",
+                        systemImage: "stethoscope"
+                    )
+                }
+            }
+            .disabled(model.doctorIsRefreshing)
+            .accessibilityIdentifier("refreshDoctorButton")
         }
     }
 }

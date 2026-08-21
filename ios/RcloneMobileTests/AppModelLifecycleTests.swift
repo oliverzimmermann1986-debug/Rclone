@@ -48,6 +48,70 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertTrue(model.errorMessage?.contains("abgebrochen") == true)
     }
 
+    func testPartialGlobalLogoutRemainsVisibleAfterImmediateLocalSignOut() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.logoutResult = LogoutResult(
+            globalRevocation: false,
+            localSessionCleared: true,
+            detail: "Andere Sitzungen konnten nicht widerrufen werden."
+        )
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        await model.logout()
+
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertTrue(client.clearedLocalSession)
+        XCTAssertEqual(model.errorMessage, "Andere Sitzungen konnten nicht widerrufen werden.")
+    }
+
+    func testProgressBecomesStaleAndCompletionRefreshesJobsWithoutFirstRowHeuristic() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.progressResults = [
+            .success(.fixture(running: true)),
+            .failure(URLError(.timedOut)),
+            .failure(URLError(.timedOut)),
+            .failure(URLError(.timedOut)),
+            .success(.fixture(running: false))
+        ]
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+        XCTAssertEqual(client.jobsCallCount, 1)
+
+        await model.refreshProgress()
+        await model.refreshProgress()
+        await model.refreshProgress()
+
+        XCTAssertEqual(model.progressConsecutiveFailures, 3)
+        XCTAssertTrue(model.progressIsStale)
+        XCTAssertTrue(model.progress?.running == true)
+        XCTAssertEqual(client.jobsCallCount, 1)
+
+        await model.refreshProgress()
+
+        XCTAssertFalse(model.progressIsStale)
+        XCTAssertTrue(model.progress?.running == false)
+        XCTAssertEqual(client.jobsCallCount, 2)
+    }
+
+    func testDoctorRecordsLastCheckedAndSupportsRepeatedChecks() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        await model.refreshDoctor()
+        let first = model.doctorLastCheckedAt
+        await model.refreshDoctor()
+
+        XCTAssertNotNil(first)
+        XCTAssertNotNil(model.doctor)
+        XCTAssertEqual(client.doctorCallCount, 2)
+        XCTAssertFalse(model.doctorIsRefreshing)
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suite = "AppModelLifecycleTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -58,7 +122,15 @@ final class AppModelLifecycleTests: XCTestCase {
 
 private final class StubAPIClient: APIClientProtocol {
     var configError: Error?
+    var logoutResult = LogoutResult(
+        globalRevocation: true,
+        localSessionCleared: true,
+        detail: nil
+    )
+    var progressResults: [Result<BackupProgress, Error>] = []
     private(set) var clearedLocalSession = false
+    private(set) var jobsCallCount = 0
+    private(set) var doctorCallCount = 0
 
     func login(username: String, password: String) async throws {}
 
@@ -66,7 +138,7 @@ private final class StubAPIClient: APIClientProtocol {
         throw APIError.server(status: 503, message: "Overview nicht verfügbar")
     }
 
-    func getStorage(includeSizes: Bool) async throws -> StorageOverview {
+    func getStorage(includeSizes: Bool, forceRefresh: Bool) async throws -> StorageOverview {
         if includeSizes {
             throw URLError(.timedOut)
         }
@@ -82,24 +154,22 @@ private final class StubAPIClient: APIClientProtocol {
     }
 
     func getJobs(limit: Int) async throws -> JobSearchResponse {
+        jobsCallCount += 1
         JobSearchResponse(items: [], total: 0, limit: limit, offset: 0)
     }
 
     func getJob(id: Int) async throws -> JobRecord { throw APIError.invalidResponse }
     func getJobLog(id: Int) async throws -> JobLogResponse { throw APIError.invalidResponse }
-    func getDoctor() async throws -> DoctorResponse { throw APIError.invalidResponse }
+    func getDoctor() async throws -> DoctorResponse {
+        doctorCallCount += 1
+        return DoctorResponse(ok: true, level: "ok", checks: [], generatedAt: 1_720_000_000)
+    }
 
     func getProgress() async throws -> BackupProgress {
-        BackupProgress(
-            running: false,
-            jobID: nil,
-            startedAt: nil,
-            elapsedSeconds: nil,
-            pairs: nil,
-            totalPairs: nil,
-            donePairs: nil,
-            last: nil
-        )
+        if !progressResults.isEmpty {
+            return try progressResults.removeFirst().get()
+        }
+        return .fixture(running: false)
     }
 
     func getPBSStatus() async throws -> PBSStatus {
@@ -120,9 +190,24 @@ private final class StubAPIClient: APIClientProtocol {
     func cancelPBS() async throws -> ActionResponse { throw APIError.invalidResponse }
     func pauseScheduler(minutes: Int) async throws -> SchedulerControl { throw APIError.invalidResponse }
     func resumeScheduler() async throws -> SchedulerControl { throw APIError.invalidResponse }
-    func logout() async throws { throw URLError(.notConnectedToInternet) }
+    func logout() async throws -> LogoutResult { logoutResult }
 
     func clearLocalSession() {
         clearedLocalSession = true
+    }
+}
+
+private extension BackupProgress {
+    static func fixture(running: Bool) -> BackupProgress {
+        BackupProgress(
+            running: running,
+            jobID: running ? 42 : nil,
+            startedAt: running ? 1_720_000_000 : nil,
+            elapsedSeconds: running ? 30 : nil,
+            pairs: nil,
+            totalPairs: running ? 1 : nil,
+            donePairs: running ? 0 : nil,
+            last: nil
+        )
     }
 }

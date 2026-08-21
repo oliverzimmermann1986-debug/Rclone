@@ -243,3 +243,14 @@ def test_sensitive_config_save_uses_transient_password_and_strips_web_secrets():
     assert "localStorage.setItem('current_password'" not in javascript
     assert 'x-model="config.web.username" readonly aria-readonly="true"' in html
     assert 'autocomplete="current-password"' in html
+
+
+def test_size_recalculation_is_explicit_and_measurement_age_is_visible():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "loadStorage(true, true)" in javascript
+    assert "refresh_sizes=${refreshSizes ? 'true' : 'false'}" in javascript
+    assert "pairSizeAge(name, side)" in javascript
+    assert "pairSizeAge(pair.name, 'source')" in html
+    assert "pairSizeAge(pair.name, 'target')" in html

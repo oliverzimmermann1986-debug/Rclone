@@ -375,9 +375,9 @@
                 </div>
 
                 <div class="pair-size-row" x-show="pairSize(pair.name)" x-cloak>
-                  <span class="pair-size-cell"><small>Quelle</small><strong x-text="pairSizeText(pair.name, 'source')"></strong></span>
+                  <span class="pair-size-cell"><small>Quelle</small><strong x-text="pairSizeText(pair.name, 'source')"></strong><small x-text="pairSizeAge(pair.name, 'source')"></small></span>
                   <span class="pair-size-arrow" aria-hidden="true">→</span>
-                  <span class="pair-size-cell"><small>Ziel</small><strong x-text="pairSizeText(pair.name, 'target')"></strong></span>
+                  <span class="pair-size-cell"><small>Ziel</small><strong x-text="pairSizeText(pair.name, 'target')"></strong><small x-text="pairSizeAge(pair.name, 'target')"></small></span>
                 </div>
 
                 <div class="pair-quick-actions">
