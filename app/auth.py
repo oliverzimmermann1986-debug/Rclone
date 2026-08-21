@@ -168,10 +168,18 @@ def clear_login_failures(key: str) -> None:
         _login_blocked_until.pop(key, None)
 
 
+def _constant_time_text_equal(first: str, second: str) -> bool:
+    """Vergleicht beliebigen Unicode-Text ohne den ASCII-only-Stringpfad."""
+    try:
+        return secrets.compare_digest(first.encode("utf-8"), second.encode("utf-8"))
+    except UnicodeError:
+        return False
+
+
 def verify_password(username: str, password: str) -> bool:
     cfg = get_config()
     cfg_user = str(cfg.get("web", "username", default="admin") or "admin")
-    user_ok = secrets.compare_digest(username.casefold(), cfg_user.casefold())
+    user_ok = _constant_time_text_equal(username.casefold(), cfg_user.casefold())
     hashed = str(cfg.get("web", "password_hash", default="") or "")
     encoded_password = password.encode("utf-8")
     if len(encoded_password) > 72:
@@ -181,7 +189,7 @@ def verify_password(username: str, password: str) -> bool:
         plain = str(cfg.get("web", "password", default="") or "")
         if not plain or plain == "changeme":
             return False
-        password_ok = secrets.compare_digest(password, plain)
+        password_ok = _constant_time_text_equal(password, plain)
         if user_ok and password_ok:
             try:
                 new_hash = bcrypt.hashpw(
@@ -228,7 +236,7 @@ def session_user(token: str) -> Optional[str]:
         configured = str(
             get_config().get("web", "username", default="admin") or "admin"
         )
-        if not user or not secrets.compare_digest(
+        if not user or not _constant_time_text_equal(
             user.casefold(), configured.casefold()
         ):
             return None
