@@ -103,18 +103,23 @@ def run_automatic_maintenance() -> dict[str, Any]:
     log_days = _bounded_int(
         settings.get("log_retention_days", 90), default=90, minimum=1, maximum=3650
     )
-    deleted_jobs = get_db().jobs_prune(retention_days, keep_latest)
-    deleted_auth = get_db().auth_prune(7)
-    deleted_audit = get_db().audit_prune(
+    database = get_db()
+    deleted_jobs = database.jobs_prune(retention_days, keep_latest)
+    deleted_auth = database.auth_prune(7)
+    deleted_audit = database.audit_prune(
         max(retention_days, 365), max(keep_latest, 1000)
     )
+    deleted_push_devices = database.push_device_prune_expired()
+    deleted_push_outbox = database.push_outbox_prune(older_than_days=30)
     logs = prune_logs(days=log_days, dry_run=False, limit_details=0)
-    get_db().checkpoint()
+    database.checkpoint()
     return {
         "enabled": True,
         "deleted_jobs": deleted_jobs,
         "deleted_auth_rows": deleted_auth,
         "deleted_audit_events": deleted_audit,
+        "deleted_push_devices": deleted_push_devices,
+        "deleted_push_outbox": deleted_push_outbox,
         "deleted_logs": logs["deleted"],
         "deleted_log_bytes": logs["bytes_deleted"],
     }

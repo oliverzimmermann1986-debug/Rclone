@@ -70,6 +70,135 @@ _STATS_RE = re.compile(
     r"Transferred:\s*([^,\n]+?)(?:\s*/\s*([^,\n]+?))?"
     r"(?:,\s*(?:([\d.]+)%|-))?(?:,\s*([^,\n]+?/s))?(?:,\s*ETA\s*(\S+))?\s*$"
 )
+_LOG_PREFIX_RE = re.compile(
+    r"^(?:\d{4}[/.-]\d{2}[/.-]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\s+)?"
+    r"(?:(?:DEBUG|INFO|NOTICE|WARNING|ERROR|CRITICAL)\s*:\s*)?",
+    re.IGNORECASE,
+)
+_COUNTER_RE = re.compile(
+    r"\b(Checks|Deleted|Renamed|Listed|Errors|Transferred)\s*:\s*"
+    r"([\d,]+)(?:\s*/\s*([\d,]+))?",
+    re.IGNORECASE,
+)
+_MAX_PROGRESS_READ_BYTES = 512 * 1024
+
+_SINGLE_VALUE_RCLONE_FLAGS = {
+    "--bwlimit",
+    "--checkers",
+    "--conflict-resolve",
+    "--contimeout",
+    "--log-level",
+    "--low-level-retries",
+    "--max-delete",
+    "--max-delete-size",
+    "--max-duration",
+    "--max-lock",
+    "--max-transfer",
+    "--retries",
+    "--timeout",
+    "--tpslimit",
+    "--tpslimit-burst",
+    "--transfers",
+}
+
+
+class RcloneWatchdogTimeout(subprocess.TimeoutExpired):
+    """Kennzeichnet, welcher anwendungsseitige Watchdog ausgelöst hat."""
+
+    def __init__(self, cmd: list[str], limit_sec: float, *, reason: str):
+        super().__init__(cmd, limit_sec)
+        self.watchdog_reason = reason
+
+
+def _progress_marker(raw_line: str) -> tuple[str, tuple[str, ...] | str] | None:
+    """Extrahiert stabilen Fortschritt und ignoriert reine Stats-Herzschläge."""
+
+    line = _LOG_PREFIX_RE.sub("", raw_line.strip()).strip()
+    if not line:
+        return None
+
+    transferred = _STATS_RE.search(line)
+    if transferred:
+        return (
+            "transferred",
+            tuple(
+                (transferred.group(index) or "").strip().casefold()
+                for index in (1, 2, 3)
+            ),
+        )
+
+    counters = tuple(
+        (
+            match.group(1).casefold(),
+            match.group(2).replace(",", ""),
+            (match.group(3) or "").replace(",", ""),
+        )
+        for match in _COUNTER_RE.finditer(line)
+    )
+    if counters:
+        return ("counters", tuple("|".join(item) for item in counters))
+
+    folded = line.casefold()
+    if folded.startswith(("elapsed time:", "eta ")):
+        return None
+    # Unstrukturierte Ausgaben (z. B. einzelne kopierte Dateien) zählen genau
+    # einmal. Zeitstempel wurden oben entfernt, damit derselbe Fehler/Heartbeat
+    # den Stall-Watchdog nicht unbegrenzt verschiebt.
+    return ("log", line)
+
+
+class _LogProgressTracker:
+    def __init__(self) -> None:
+        self._partial = ""
+        self._structured: dict[str, tuple[str, ...] | str] = {}
+        self._recent_logs: list[str] = []
+
+    def feed(self, chunk: str) -> bool:
+        text = self._partial + chunk
+        lines = re.split(r"[\r\n]+", text)
+        if text and not text.endswith(("\r", "\n")):
+            self._partial = lines.pop()
+        else:
+            self._partial = ""
+        advanced = False
+        for raw_line in lines:
+            marker = _progress_marker(raw_line)
+            if marker is None:
+                continue
+            kind, value = marker
+            if kind == "log":
+                normalized = str(value)
+                if normalized in self._recent_logs:
+                    continue
+                self._recent_logs.append(normalized)
+                del self._recent_logs[:-64]
+                advanced = True
+                continue
+            if self._structured.get(kind) != value:
+                self._structured[kind] = value
+                advanced = True
+        return advanced
+
+
+def _read_new_log_output(log_file: Path, offset: int) -> tuple[str, int]:
+    try:
+        size = log_file.stat().st_size
+    except OSError:
+        return "", offset
+    if size < offset:
+        offset = 0
+    if size <= offset:
+        return "", size
+    start = offset
+    if size - start > _MAX_PROGRESS_READ_BYTES:
+        start = size - _MAX_PROGRESS_READ_BYTES
+    try:
+        with log_file.open("rb") as reader:
+            reader.seek(start)
+            raw = reader.read(_MAX_PROGRESS_READ_BYTES)
+    except OSError:
+        return "", offset
+    return raw.decode("utf-8", errors="replace"), size
 
 
 def _rclone_cache_args(verb: Optional[str] = None) -> list[str]:
@@ -154,7 +283,7 @@ def _terminate_proc(proc: subprocess.Popen, *, graceful_sec: int = 10) -> None:
         return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
+    except (AttributeError, ProcessLookupError, PermissionError, OSError):
         try:
             proc.terminate()
         except OSError:
@@ -166,7 +295,7 @@ def _terminate_proc(proc: subprocess.Popen, *, graceful_sec: int = 10) -> None:
         pass
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    except (AttributeError, ProcessLookupError, PermissionError, OSError):
         try:
             proc.kill()
         except OSError:
@@ -238,7 +367,7 @@ def cancel_job(scope: str = DEFAULT_CANCEL_SCOPE) -> dict[str, Any]:
         except Exception:
             logger.exception("Cancel-Benachrichtigung fehlgeschlagen")
 
-    # Webhooks (bis zu 60s Timeout) dürfen den Cancel-Request nicht blockieren.
+    # Benachrichtigungen dürfen den Cancel-Request nicht blockieren.
     threading.Thread(
         target=_notify_cancelled, name="notify-cancelled", daemon=True
     ).start()
@@ -357,6 +486,41 @@ def _structured_rclone_args(
     return args
 
 
+def _dedupe_single_value_rclone_args(args: list[str]) -> list[str]:
+    """Behält für strukturierte Einzelwert-Flags nur die letzte Vorgabe.
+
+    Freie Legacy-Argumente stehen vor den kanonischen globalen/Pair-Werten. Ohne
+    diese Normalisierung erscheinen z. B. ``--transfers`` und ``--checkers``
+    doppelt im Befehl; rclone nimmt zwar den letzten Wert, Plan und Logs sind dann
+    aber missverständlich. Wiederholbare Filter-Flags bleiben unangetastet.
+    """
+
+    chunks: list[tuple[Optional[str], list[str]]] = []
+    index = 0
+    while index < len(args):
+        token = str(args[index])
+        flag = token.split("=", 1)[0]
+        if flag not in _SINGLE_VALUE_RCLONE_FLAGS:
+            chunks.append((None, [token]))
+            index += 1
+            continue
+        if "=" in token or index + 1 >= len(args):
+            chunks.append((flag, [token]))
+            index += 1
+            continue
+        chunks.append((flag, [token, str(args[index + 1])]))
+        index += 2
+
+    last_occurrence = {
+        flag: index for index, (flag, _tokens) in enumerate(chunks) if flag is not None
+    }
+    normalized: list[str] = []
+    for index, (flag, tokens) in enumerate(chunks):
+        if flag is None or last_occurrence[flag] == index:
+            normalized.extend(tokens)
+    return normalized
+
+
 def _filter_args(cfg, pair: dict[str, Any], verb: str) -> list[str]:
     args: list[str] = []
     for pattern in _split_lines(pair.get("include")):
@@ -449,7 +613,8 @@ def _run_rclone_command(
     cmd: list[str],
     log_file: Path,
     *,
-    timeout_sec: int,
+    timeout_sec: float,
+    max_runtime_sec: float | None = None,
     append: bool = False,
     header: Optional[str] = None,
     pair_name: str = "",
@@ -500,7 +665,25 @@ def _run_rclone_command(
             _terminate_proc(proc, graceful_sec=2)
             _unregister_proc(proc)
             raise
-        deadline = time.monotonic() + timeout_sec
+        # ``timeout_hours`` ist ein Stall-Watchdog, kein pauschales Laufzeitlimit.
+        # Regelmäßige, aber unveränderte rclone-Stats sind nur Herzschläge und
+        # dürfen die Frist nicht verlängern. Ein separates absolutes Limit ist
+        # optional und wird unabhängig von echtem Fortschritt durchgesetzt.
+        inactivity_timeout = max(0.01, float(timeout_sec))
+        now = time.monotonic()
+        deadline = now + inactivity_timeout
+        try:
+            log_offset = log_file.stat().st_size
+        except OSError:
+            log_offset = 0
+        progress_tracker = _LogProgressTracker()
+        hard_deadline = (
+            now + float(max_runtime_sec)
+            if max_runtime_sec is not None and float(max_runtime_sec) > 0
+            else None
+        )
+        activity_check_interval = min(1.0, max(0.01, inactivity_timeout / 10.0))
+        next_activity_check = now + activity_check_interval
         try:
             while True:
                 rc = proc.poll()
@@ -509,10 +692,36 @@ def _run_rclone_command(
                 if is_cancelled(normalized_scope):
                     _terminate_proc(proc)
                     return 130
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if now >= next_activity_check:
+                    chunk, log_offset = _read_new_log_output(log_file, log_offset)
+                    if chunk and progress_tracker.feed(chunk):
+                        deadline = now + inactivity_timeout
+                        if pair_name and run_id:
+                            try:
+                                runtime_state.update_pair(
+                                    run_id,
+                                    pair_name,
+                                    "running",
+                                    last_progress_at=time.time(),
+                                )
+                            except OSError:
+                                logger.warning(
+                                    "[%s] Fortschrittsstatus konnte nicht gespeichert werden",
+                                    pair_name,
+                                )
+                    next_activity_check = now + activity_check_interval
+                if hard_deadline is not None and now >= hard_deadline:
                     _terminate_proc(proc)
-                    raise subprocess.TimeoutExpired(cmd, timeout_sec)
-                time.sleep(0.25)
+                    raise RcloneWatchdogTimeout(
+                        cmd, float(max_runtime_sec), reason="max_runtime"
+                    )
+                if now >= deadline:
+                    _terminate_proc(proc)
+                    raise RcloneWatchdogTimeout(
+                        cmd, inactivity_timeout, reason="stalled"
+                    )
+                time.sleep(min(0.25, activity_check_interval))
         finally:
             _unregister_proc(proc)
 
@@ -705,6 +914,7 @@ def _build_pair_command(
         pair.get("rclone_args"), allow_unsafe=allow_unsafe
     )
     effective_args += _backup_dir_args(cfg, pair, verb, src, dst)
+    effective_args = _dedupe_single_value_rclone_args(effective_args)
 
     if verb in {"sync", "bisync"} and not dry_run:
         if backup.get("require_delete_confirmation", True) and not pair.get(
@@ -1051,6 +1261,7 @@ def _sync_pair(
     log_dir: Path,
     dry_run: bool,
     timeout_sec: int,
+    max_runtime_sec: int | None,
     run_id: str,
     config_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1073,14 +1284,9 @@ def _sync_pair(
         logger.error("[%s] %s", name, message)
         summary.update({"error": message, "skipped": True})
         runtime_state.update_pair(run_id, name, "error", error=message)
-        try:
-            from ..notifications import notify
-
-            notify(
-                "mount_check_failed", f"Pair '{name}' abgebrochen", message, pair=name
-            )
-        except Exception:
-            pass
+        # Der aggregierte ``sync_error`` am Laufende enthält Job-ID und alle
+        # fehlgeschlagenen Datenwege. Eine zusätzliche sofortige APNs-Meldung
+        # würde denselben Fehler doppelt anzeigen.
         return summary
 
     try:
@@ -1102,7 +1308,14 @@ def _sync_pair(
     summary["log_file"] = str(log_file)
     _set_active_pair_log(name, log_file)
     runtime_state.update_pair(
-        run_id, name, "running", log_file=str(log_file), started_at=time.time()
+        run_id,
+        name,
+        "running",
+        log_file=str(log_file),
+        started_at=time.time(),
+        last_progress_at=time.time(),
+        stall_timeout_sec=timeout_sec,
+        max_runtime_sec=max_runtime_sec,
     )
 
     backup = config_snapshot.get("backup") or {}
@@ -1143,6 +1356,7 @@ def _sync_pair(
             cmd,
             log_file,
             timeout_sec=timeout_sec,
+            max_runtime_sec=max_runtime_sec,
             pair_name=name,
             run_id=run_id,
             pre_spawn_check=lambda: _recheck_local_endpoint_guards(
@@ -1180,6 +1394,7 @@ def _sync_pair(
                 resync_cmd,
                 log_file,
                 timeout_sec=timeout_sec,
+                max_runtime_sec=max_runtime_sec,
                 append=True,
                 header="\n\n=== AUTO RESYNC ===\n\n",
                 pair_name=name,
@@ -1226,9 +1441,18 @@ def _sync_pair(
             run_id, name, state, ok=summary["ok"], error=summary.get("error", "")
         )
         return summary
-    except subprocess.TimeoutExpired:
-        summary["error"] = f"Timeout nach {round(timeout_sec / 3600, 1)}h"
-        logger.error("[%s] Timeout", name)
+    except subprocess.TimeoutExpired as exc:
+        if getattr(exc, "watchdog_reason", "stalled") == "max_runtime":
+            limit = float(max_runtime_sec or 0)
+            summary["error"] = (
+                f"Maximale Laufzeit von {round(limit / 3600, 1)}h überschritten"
+            )
+            logger.error("[%s] Maximale Laufzeit überschritten", name)
+        else:
+            summary["error"] = (
+                f"Kein rclone-Fortschritt seit {round(timeout_sec / 3600, 1)}h"
+            )
+            logger.error("[%s] Fortschritts-Timeout", name)
         runtime_state.update_pair(run_id, name, "error", error=summary["error"])
         return summary
     except Exception as exc:
@@ -1342,6 +1566,17 @@ def run_job(
         )
         * 3600
     )
+    max_runtime_hours = float(
+        _bounded_number(
+            backup.get("max_runtime_hours", 0),
+            default=0,
+            minimum=0,
+            maximum=720,
+        )
+    )
+    max_runtime_sec = (
+        max(1, int(max_runtime_hours * 3600)) if max_runtime_hours > 0 else None
+    )
     max_parallel = int(
         _bounded_number(backup.get("max_parallel", 2), default=2, minimum=1, maximum=16)
     )
@@ -1417,6 +1652,7 @@ def run_job(
                         log_dir,
                         dry_run,
                         timeout_sec,
+                        max_runtime_sec,
                         run_id,
                         effective_snapshot,
                     )
@@ -1467,6 +1703,7 @@ def run_job(
         "cancelled": cancelled,
         "warnings": warnings,
         "run_id": run_id,
+        "job_id": job_id,
         "trigger": trigger,
         "definition_id": str(definition_id or "") or None,
         "definition_name": str(definition_name or "") or None,
@@ -1683,7 +1920,12 @@ def run_pair_check(
             )
     except subprocess.TimeoutExpired:
         result.update(
-            {"ok": False, "error": f"Timeout nach {round(timeout_sec / 3600, 1)}h"}
+            {
+                "ok": False,
+                "error": (
+                    f"Kein rclone-Fortschritt seit {round(timeout_sec / 3600, 1)}h"
+                ),
+            }
         )
     except Exception as exc:
         logger.exception("Pair-Check fehlgeschlagen")
@@ -1828,10 +2070,16 @@ def run_quick(
                 * 3600
             ),
         )
+        max_runtime_hours = float(
+            (cfg.get("backup", default={}) or {}).get("max_runtime_hours", 0) or 0
+        )
         rc = _run_rclone_command(
             cmd,
             log_file,
             timeout_sec=timeout_sec,
+            max_runtime_sec=(
+                max(1, int(max_runtime_hours * 3600)) if max_runtime_hours > 0 else None
+            ),
             pair_name="quick",
             pre_spawn_check=lambda: _recheck_local_endpoint_guards(
                 pair, endpoint_guards
@@ -1857,8 +2105,17 @@ def run_quick(
                     "rclone verlangt --resync" if needs_resync else f"rclone exit {rc}"
                 )
             )
-    except subprocess.TimeoutExpired:
-        summary.update({"ok": False, "error": "Timeout"})
+    except subprocess.TimeoutExpired as exc:
+        summary.update(
+            {
+                "ok": False,
+                "error": (
+                    "Maximale Laufzeit überschritten"
+                    if getattr(exc, "watchdog_reason", "stalled") == "max_runtime"
+                    else "Kein rclone-Fortschritt innerhalb des Zeitlimits"
+                ),
+            }
+        )
     except Exception as exc:
         logger.exception("Quick-Sync fehlgeschlagen")
         summary.update({"ok": False, "error": str(exc)})

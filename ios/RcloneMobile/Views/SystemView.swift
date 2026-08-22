@@ -29,6 +29,9 @@ struct SystemView: View {
                             StatusBadge(status: model.pbs?.running == true ? "running" : model.pbs?.enabled == true ? "ok" : nil)
                         }
                     }
+                    NavigationLink { PushStatusView() } label: {
+                        Label("Push-Mitteilungen", systemImage: "bell.badge")
+                    }
                 }
                 diagnosticsSection
                 Section("Software") {
@@ -123,6 +126,122 @@ struct SystemView: View {
             NavigationLink { OperationsHubView() } label: {
                 Label("Betrieb & Wartung", systemImage: "wrench.and.screwdriver")
             }
+        }
+    }
+}
+
+private struct PushStatusView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var status: PushStatus?
+    @State private var isLoading = false
+    @State private var isTesting = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        List {
+            if let status {
+                Section("Bereitschaft") {
+                    LabeledContent("APNs-Konfiguration") {
+                        StatusBadge(status: status.configured ? "ok" : "warning")
+                    }
+                    LabeledContent("Registrierte Geräte", value: "\(status.registeredDevices)")
+                    LabeledContent("Gerätebindung", value: "\(status.deviceLeaseDays) Tage")
+                    if !status.configured {
+                        Label("APNs ist auf dem Server nicht vollständig eingerichtet.", systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else if status.registeredDevices == 0 {
+                        Label("Kein aktives iPhone ist registriert.", systemImage: "iphone")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Section("Zustellung") {
+                    LabeledContent("Ausstehend", value: "\(status.outbox.pending)")
+                    LabeledContent("Zugestellt", value: "\(status.outbox.sent)")
+                    LabeledContent("Endgültig fehlgeschlagen", value: "\(status.outbox.failed)")
+                    if let lastError = status.outbox.lastError, !lastError.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label("Letzter Zustellfehler", systemImage: "exclamationmark.triangle")
+                                .font(.subheadline.weight(.semibold))
+                            Text(lastError).font(.caption).textSelection(.enabled)
+                            if let timestamp = status.outbox.lastErrorAt {
+                                Text(AppFormat.date(timestamp)).font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                        .foregroundStyle(.orange)
+                    }
+                }
+                Section("Fehlerereignisse") {
+                    if status.events.isEmpty {
+                        Text("Keine Ereignisse aktiviert").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(status.events, id: \.self) { event in
+                            Label(eventLabel(event), systemImage: "exclamationmark.bubble")
+                        }
+                    }
+                }
+                Section {
+                    Button { Task { await sendTest() } } label: {
+                        HStack(spacing: 10) {
+                            if isTesting { ProgressView() }
+                            Label("Testmitteilung senden", systemImage: "paperplane")
+                        }
+                    }
+                    .disabled(isTesting || !status.configured || status.registeredDevices == 0)
+                } footer: {
+                    Text("Der Test prüft die echte Zustellung über APNs bis zu einem registrierten Gerät.")
+                }
+            } else if isLoading {
+                LoadingSection(label: "Push-Status wird geladen …")
+            } else if let errorMessage {
+                LoadFailureView(title: "Push-Status nicht geladen", message: errorMessage) {
+                    Task { await load() }
+                }
+            }
+        }
+        .navigationTitle("Push-Mitteilungen")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable { await load() }
+        .task { await load() }
+    }
+
+    private func load() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            status = try await model.withCurrentClient { try await $0.getPushStatus() }
+            errorMessage = nil
+        } catch is CancellationError {
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func sendTest() async {
+        isTesting = true
+        defer { isTesting = false }
+        do {
+            let response = try await model.withCurrentClient { try await $0.testPushNotification() }
+            guard response.ok else {
+                errorMessage = response.error ?? "Die Testmitteilung konnte nicht gesendet werden."
+                return
+            }
+            model.actionMessage = "Testmitteilung wurde über APNs zugestellt."
+            await load()
+        } catch is CancellationError {
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func eventLabel(_ event: String) -> String {
+        switch event {
+        case "sync_error": "Sicherungsfehler"
+        case "check_error": "Prüffehler"
+        case "restore_test_error": "Restore-Test fehlgeschlagen"
+        case "pbs_error": "PBS-Fehler"
+        default: event
         }
     }
 }

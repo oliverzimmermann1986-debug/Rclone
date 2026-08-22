@@ -27,17 +27,7 @@ def _config(password: str) -> dict:
         },
         "paths": {"data_dir": "/tmp", "logs_dir": "/tmp", "temp_dir": "/tmp"},
         "backup": {"enabled": True, "pairs": [], "default_schedule": "manual"},
-        "notifications": {
-            "webhooks": [
-                {
-                    "id": "hooktest1234",
-                    "enabled": True,
-                    "type": "discord",
-                    "url": "https://example.com/secret",
-                    "events": ["sync_error"],
-                }
-            ]
-        },
+        "notifications": {"custom_delivery": {"api_key": "private-api-key-canary"}},
     }
 
 
@@ -151,7 +141,8 @@ def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeyp
         )
         assert precondition.status_code == 428
         assert cfg["web"]["password_hash"] == "***SET***"
-        assert cfg["notifications"]["webhooks"][0]["url"] == "***SET***"
+        assert cfg["notifications"]["custom_delivery"]["api_key"] == "***SET***"
+        assert "webhooks" not in cfg["notifications"]
         stale = cfg["_revision"]
 
         csrf = client.cookies.get("rclone_sync_csrf")
@@ -161,8 +152,8 @@ def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeyp
         )
         assert saved.status_code == 200
         assert (
-            store.get("notifications", "webhooks")[0]["url"]
-            == "https://example.com/secret"
+            store.get("notifications", "custom_delivery", "api_key")
+            == "private-api-key-canary"
         )
 
         cfg["backup"]["max_parallel"] = 4
@@ -347,6 +338,5 @@ def test_gui_validation_job_exports_snapshots_and_support_bundle(
         assert support.status_code == 200
         with zipfile.ZipFile(io.BytesIO(support.content)) as archive:
             redacted = archive.read("config-redacted.yaml").decode("utf-8")
-            assert "private-webhook-token" not in redacted
-            assert "https://example.com/secret" not in redacted
+            assert "private-api-key-canary" not in redacted
             assert "***REDACTED***" in redacted

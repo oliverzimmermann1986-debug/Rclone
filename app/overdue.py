@@ -151,7 +151,7 @@ def notify_overdue(
         _store_state(db, state)
 
     if reported:
-        # Ein Webhook pro Tick statt einer je Pair — sonst ist der Kanal bei
+        # Eine Sammelmeldung pro Tick statt einer je Pair — sonst ist der Kanal bei
         # einem toten Scheduler mit identischen Meldungen geflutet.
         from .notifications import notify
 

@@ -106,7 +106,7 @@ def redact_command_text(text: str) -> str:
     """Maskiert Zugangsdaten in bereits formatierten rclone-Kommandos.
 
     Die Funktion arbeitet auch auf eingebetteten Command-Strings in JSON, CSV
-    oder Webhook-Payloads und deckt sowohl ``--flag=value`` als auch
+    oder Benachrichtigungs-Payloads und deckt sowohl ``--flag=value`` als auch
     ``--flag value`` ab. Der Flag-Name bleibt für die Diagnose sichtbar.
     """
 

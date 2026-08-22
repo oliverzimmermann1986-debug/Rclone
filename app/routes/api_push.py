@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -51,11 +52,17 @@ def push_status() -> dict[str, object]:
         and apns.get("key_file")
         and apns.get("topic")
     )
-    devices = get_db().push_devices(limit=128)
+    database = get_db()
+    devices = database.push_devices(limit=128)
+    outbox = database.push_outbox_status()
     return {
         "configured": configured,
         "registered_devices": len(devices),
         "events": list(apns.get("events") or []) if isinstance(apns, dict) else [],
+        "device_lease_days": (
+            int(apns.get("device_lease_days") or 7) if isinstance(apns, dict) else 7
+        ),
+        "outbox": outbox,
     }
 
 
@@ -70,6 +77,15 @@ def register_push_device(
         token,
         body.environment,
         app_version=body.app_version.strip(),
+        lease_seconds=int(
+            (
+                get_config().get(
+                    "notifications", "apns", "device_lease_days", default=7
+                )
+                or 7
+            )
+            * 86400
+        ),
     )
     database.audit_add(
         "push_device_registered",
@@ -95,6 +111,7 @@ def test_push_notification() -> dict[str, object]:
             "sync_error",
             "Rclone Sync Test",
             "Fehler-Pushs sind auf diesem iPhone eingerichtet.",
+            dedupe_key=f"push-test:{uuid.uuid4().hex}",
         )
     except (OSError, ValueError, PermissionError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

@@ -30,7 +30,7 @@ function app() {
     configError: '',
     pending: {
       backup: false, plan: false, quick: false, pbs: false, pbsCancel: false,
-      save: false, validate: false, filter: false, password: false, definition: false,
+      save: false, validate: false, filter: false, password: false, definition: false, retry: false,
     },
     currentPasswordDialog: { show: false, password: '', error: '' },
 
@@ -47,8 +47,11 @@ function app() {
 
     config: {
       web: {}, paths: {},
-      backup: { pairs: [], jobs: [], rclone_args: [], tuning: {} },
-      notifications: { webhooks: [] },
+      backup: {
+        pairs: [], jobs: [], rclone_args: [], tuning: {},
+        timeout_hours: 4, max_runtime_hours: 0,
+      },
+      notifications: {},
       maintenance: {},
       pbs: {
         enabled: false, repository: '', password: '', fingerprint: '',
@@ -84,6 +87,7 @@ function app() {
     pwChange: { current: '', new: '', confirm: '' },
     snapshots: { loading: false, items: [], max: 30, restoreName: '', password: '' },
     pbs: { loading: false, status: null },
+    push: { loading: false, testing: false, status: null, error: '' },
     schedulerControl: { loading: false, paused: false, until: null, remaining_seconds: null, reason: '', enabled: true },
     schedulerPause: { minutes: 60, reason: 'Wartungsfenster' },
     audit: { loading: false, items: [], eventType: '' },
@@ -304,7 +308,7 @@ function app() {
       } else if (page === 'runs') {
         this.loadJobs(true);
       } else if (page === 'doctor') {
-        this.loadOverview(true); if (!configAlreadyLoaded) this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadCopies(); this.loadSchedulerState(true);
+        this.loadOverview(true); if (!configAlreadyLoaded) this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadCopies(); this.loadSchedulerState(true); this.loadPushStatus(true);
       } else if (page === 'settings') {
         if (!configAlreadyLoaded) this.loadConfig(); this.loadFilterFile(); this.loadSchedulerState(true);
       }
@@ -921,6 +925,29 @@ function app() {
       if (this.jobModal.job?.id) window.location.assign(`/api/jobs/${this.jobModal.job.id}/log/download`);
     },
 
+    canRetryJob(job = this.jobModal.job) {
+      return job?.kind === 'backup'
+        && ['error', 'cancelled', 'stale'].includes(job?.status)
+        && Boolean(job?.definition_id)
+        && Boolean(job?.config_revision);
+    },
+
+    async retryJob(job = this.jobModal.job) {
+      if (!this.canRetryJob(job) || this.pending.retry) return;
+      if (!confirm('Job erneut starten?\n\nDer Server startet nur dieselbe Jobdefinition, wenn sich die Konfiguration seit diesem Lauf nicht geändert hat. Andernfalls wird der Start sicher abgelehnt.')) return;
+      this.pending.retry = true;
+      try {
+        const result = await this.api('POST', `/api/jobs/${job.id}/retry?dry_run=false`);
+        if (!result?.ok) return;
+        this.showToast(`Job #${result.job_id} wurde erneut gestartet`);
+        this.closeJob();
+        await Promise.all([this.refreshStatus(true), this.loadJobs(false), this.loadOverview(true)]);
+        if (result.job_id) this.showJob({ id: result.job_id });
+      } finally {
+        this.pending.retry = false;
+      }
+    },
+
     async cleanupFailed() {
       if (!confirm('Fehlgeschlagene, abgebrochene und verwaiste Jobs aus der Datenbank löschen? Die Logdateien bleiben bestehen.')) return;
       const result = await this.api('POST', '/api/jobs/cleanup-failed');
@@ -1034,12 +1061,15 @@ function app() {
       result.backup.timezone ||= 'Europe/Berlin';
       result.backup.max_parallel ??= 2;
       result.backup.timeout_hours ??= 4;
+      result.backup.max_runtime_hours ??= 0;
       result.backup.scheduler_grace_minutes ??= 15;
       result.backup.scheduler_retry_minutes ??= 60;
-      result.notifications ||= { webhooks: [] };
-      result.notifications.allow_http ??= false;
-      result.notifications.allow_private_targets ??= false;
-      result.notifications.webhooks ||= [];
+      result.notifications ||= {};
+      delete result.notifications.webhooks;
+      delete result.notifications.allow_http;
+      delete result.notifications.allow_private_targets;
+      delete result.notifications.timeout_seconds;
+      delete result.notifications.max_parallel;
       result.maintenance ||= { auto_prune: true, job_retention_days: 180, keep_latest_jobs: 500, log_retention_days: 90 };
       for (const pair of (result.backup?.pairs || [])) {
         pair.two_way = pair.direction === 'bisync';
@@ -1067,7 +1097,6 @@ function app() {
       }
       for (const pair of result.backup.pairs) this.normalizePair(pair);
       for (const job of result.backup.jobs) this.normalizeJobDefinition(job);
-      for (const hook of result.notifications.webhooks) if (hook.enabled === undefined) hook.enabled = true;
       this.config = result;
       this.rcloneArgsText = (result.backup.rclone_args || []).join('\n');
       this.allowedHostsText = (result.web.allowed_hosts || []).join('\n');
@@ -1787,6 +1816,28 @@ function app() {
       if (this.isStale(result)) return;
       if (result) this.doctor.data = result;
       this.doctor.loading = false;
+    },
+
+    async loadPushStatus(silent = false) {
+      this.push.loading = true;
+      const result = await this.api('GET', '/api/push/status', undefined, { silent, requestKey: 'push-status' });
+      if (this.isStale(result)) return;
+      if (result) {
+        this.push.status = result;
+        this.push.error = '';
+      } else if (!silent) {
+        this.push.error = 'Push-Status konnte nicht geladen werden.';
+      }
+      this.push.loading = false;
+    },
+
+    async testPushNotification() {
+      this.push.testing = true;
+      const result = await this.api('POST', '/api/push/test');
+      this.push.testing = false;
+      if (!result?.ok) return;
+      this.showToast('Testmitteilung wurde über APNs zugestellt');
+      await this.loadPushStatus(true);
     },
 
     async loadCopies() {

@@ -913,12 +913,18 @@ struct JobRecord: Decodable, Identifiable {
     let startedAt: Double
     let endedAt: Double?
     let logFile: String?
+    let definitionID: String?
+    let definitionName: String?
+    let configRevision: String?
 
     enum CodingKeys: String, CodingKey {
         case id, kind, status
         case startedAt = "started_at"
         case endedAt = "ended_at"
         case logFile = "log_file"
+        case definitionID = "definition_id"
+        case definitionName = "definition_name"
+        case configRevision = "config_revision"
     }
 }
 
@@ -975,6 +981,34 @@ struct PushDeviceRemoval: Encodable {
 
 struct PushRegistrationResponse: Decodable {
     let ok: Bool
+}
+
+struct PushStatus: Decodable {
+    let configured: Bool
+    let registeredDevices: Int
+    let events: [String]
+    let deviceLeaseDays: Int
+    let outbox: PushOutboxStatus
+
+    enum CodingKeys: String, CodingKey {
+        case configured, events, outbox
+        case registeredDevices = "registered_devices"
+        case deviceLeaseDays = "device_lease_days"
+    }
+}
+
+struct PushOutboxStatus: Decodable {
+    let pending: Int
+    let sent: Int
+    let failed: Int
+    let lastError: String?
+    let lastErrorAt: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case pending, sent, failed
+        case lastError = "last_error"
+        case lastErrorAt = "last_error_at"
+    }
 }
 
 struct QuickSyncRequest: Encodable {
@@ -1215,6 +1249,16 @@ struct BackupPairProgress: Decodable, Identifiable {
     let speed: String?
     let eta: String?
     let error: String?
+    let lastProgressAt: Double?
+    let stallTimeoutSeconds: Int?
+    let maxRuntimeSeconds: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case name, status, transferred, total, percent, speed, eta, error
+        case lastProgressAt = "last_progress_at"
+        case stallTimeoutSeconds = "stall_timeout_sec"
+        case maxRuntimeSeconds = "max_runtime_sec"
+    }
 }
 
 struct PBSStatus: Decodable {

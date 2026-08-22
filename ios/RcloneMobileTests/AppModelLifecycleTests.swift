@@ -78,6 +78,28 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.errorMessage, "Andere Sitzungen konnten nicht widerrufen werden.")
     }
 
+    func testOfflinePushRevocationIsPersistedAndRetriedOnNextLogin() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+        await model.registerPushDevice(token: String(repeating: "ab", count: 32), environment: "production")
+        client.unregisterPushError = URLError(.notConnectedToInternet)
+
+        await model.logout()
+
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertTrue(model.errorMessage?.contains("Push-Registrierung") == true)
+        XCTAssertNotNil(defaults.data(forKey: "pendingPushRevocations"))
+        XCTAssertEqual(client.unregisterPushCallCount, 1)
+
+        client.unregisterPushError = nil
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        XCTAssertEqual(client.unregisterPushCallCount, 2)
+        XCTAssertNil(defaults.data(forKey: "pendingPushRevocations"))
+    }
+
     func testProgressBecomesStaleAndCompletionRefreshesJobsWithoutFirstRowHeuristic() async {
         let defaults = makeDefaults()
         let client = StubAPIClient()
@@ -203,6 +225,24 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.actionMessage, "Alle aktiven Jobs wurden gestartet.")
     }
 
+    func testRetryJobUsesDedicatedClientCallAndKeepsPushNavigationTarget() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.retryResponse = ActionResponse(ok: true, jobID: 43, error: nil)
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        model.requestRunNavigation(id: 42)
+        let started = await model.retryJob(id: 42)
+
+        XCTAssertTrue(started)
+        XCTAssertEqual(client.retriedJobIDs, [42])
+        XCTAssertEqual(model.actionMessage, "Job wurde erneut gestartet.")
+        XCTAssertEqual(model.requestedRunID, 42)
+        model.consumeRequestedRun(id: 42)
+        XCTAssertNil(model.requestedRunID)
+    }
+
     func testJobDefinitionsAreAcceptedOnlyFromRevisionBoundConfigSnapshot() async {
         let defaults = makeDefaults()
         let client = StubAPIClient()
@@ -253,14 +293,18 @@ private final class StubAPIClient: APIClientProtocol {
     var updateConfigError: Error?
     var passwordChangeResponse: PasswordChangeResponse?
     var runAllResponse: ActionResponse?
+    var retryResponse: ActionResponse?
     var pbsError: Error?
+    var unregisterPushError: Error?
     var baseConfig: ConfigSnapshot?
     private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
     private(set) var jobsCallCount = 0
     private(set) var doctorCallCount = 0
     private(set) var runAllCallCount = 0
+    private(set) var retriedJobIDs: [Int] = []
     private(set) var definitionsCallCount = 0
+    private(set) var unregisterPushCallCount = 0
 
     func login(username: String, password: String) async throws {}
 
@@ -344,6 +388,11 @@ private final class StubAPIClient: APIClientProtocol {
     func getJob(id: Int) async throws -> JobRecord { throw APIError.invalidResponse }
     func getJobLog(id: Int) async throws -> JobLogResponse { throw APIError.invalidResponse }
     func downloadJobLog(id: Int) async throws -> URL { throw APIError.invalidResponse }
+    func retryJob(id: Int, dryRun: Bool) async throws -> ActionResponse {
+        retriedJobIDs.append(id)
+        guard let retryResponse else { throw APIError.invalidResponse }
+        return retryResponse
+    }
     func getDoctor() async throws -> DoctorResponse {
         doctorCallCount += 1
         return DoctorResponse(ok: true, level: "ok", checks: [], generatedAt: 1_720_000_000)
@@ -375,6 +424,14 @@ private final class StubAPIClient: APIClientProtocol {
     func cancelPBS() async throws -> ActionResponse { throw APIError.invalidResponse }
     func pauseScheduler(minutes: Int) async throws -> SchedulerControl { throw APIError.invalidResponse }
     func resumeScheduler() async throws -> SchedulerControl { throw APIError.invalidResponse }
+    func registerPushDevice(token: String, environment: String, appVersion: String) async throws -> PushRegistrationResponse {
+        PushRegistrationResponse(ok: true)
+    }
+    func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
+        unregisterPushCallCount += 1
+        if let unregisterPushError { throw unregisterPushError }
+        return PushRegistrationResponse(ok: true)
+    }
     func logout() async throws -> LogoutResult { logoutResult }
 
     func clearLocalSession() {

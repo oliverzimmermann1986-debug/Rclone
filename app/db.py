@@ -8,13 +8,14 @@ import sqlite3
 import stat
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -109,9 +110,36 @@ CREATE TABLE IF NOT EXISTS push_devices (
     environment TEXT NOT NULL,
     app_version TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    expires_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_push_devices_updated ON push_devices(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS push_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedupe_key TEXT NOT NULL,
+    token TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    event TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    lease_until REAL NOT NULL DEFAULT 0,
+    last_error TEXT,
+    apns_id TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    sent_at REAL,
+    UNIQUE(dedupe_key, token)
+);
+CREATE INDEX IF NOT EXISTS idx_push_outbox_due
+ON push_outbox(status, next_attempt_at, lease_until, id);
+CREATE INDEX IF NOT EXISTS idx_push_outbox_created
+ON push_outbox(created_at DESC);
 """
 
 
@@ -297,6 +325,44 @@ class Database:
                 "ON push_devices(updated_at DESC)"
             )
             connection.execute("PRAGMA user_version=5")
+            version = 5
+        if version < 6:
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(push_devices)"
+                ).fetchall()
+            }
+            if "expires_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE push_devices ADD COLUMN expires_at REAL"
+                )
+            connection.execute(
+                "UPDATE push_devices SET expires_at=COALESCE(expires_at, updated_at + ?) ",
+                (30 * 86400,),
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS push_outbox ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, dedupe_key TEXT NOT NULL, "
+                "token TEXT NOT NULL, environment TEXT NOT NULL, event TEXT NOT NULL, "
+                "title TEXT NOT NULL, message TEXT NOT NULL, "
+                "payload_json TEXT NOT NULL DEFAULT '{}', "
+                "status TEXT NOT NULL DEFAULT 'pending', "
+                "attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at REAL NOT NULL, "
+                "expires_at REAL NOT NULL, lease_until REAL NOT NULL DEFAULT 0, "
+                "last_error TEXT, apns_id TEXT NOT NULL, created_at REAL NOT NULL, "
+                "updated_at REAL NOT NULL, sent_at REAL, "
+                "UNIQUE(dedupe_key, token))"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_push_outbox_due "
+                "ON push_outbox(status, next_attempt_at, lease_until, id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_push_outbox_created "
+                "ON push_outbox(created_at DESC)"
+            )
+            connection.execute("PRAGMA user_version=6")
 
     @classmethod
     def _migrate_pair_history_columns(cls, connection: sqlite3.Connection) -> None:
@@ -1530,33 +1596,257 @@ class Database:
         environment: str,
         *,
         app_version: str = "",
+        lease_seconds: int = 7 * 86400,
         now: Optional[float] = None,
     ) -> None:
         now_value = float(time.time() if now is None else now)
+        expires_at = now_value + max(3600, min(int(lease_seconds), 90 * 86400))
         with self.conn() as connection:
             connection.execute(
-                "INSERT INTO push_devices(token, environment, app_version, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(token) DO UPDATE SET "
+                "INSERT INTO push_devices(token, environment, app_version, created_at, "
+                "updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(token) DO UPDATE SET "
                 "environment=excluded.environment, app_version=excluded.app_version, "
-                "updated_at=excluded.updated_at",
-                (token, environment, app_version, now_value, now_value),
+                "updated_at=excluded.updated_at, expires_at=excluded.expires_at",
+                (
+                    token,
+                    environment,
+                    app_version,
+                    now_value,
+                    now_value,
+                    expires_at,
+                ),
             )
 
     def push_device_delete(self, token: str) -> bool:
         with self.conn() as connection:
+            connection.execute("DELETE FROM push_outbox WHERE token=?", (token,))
             cursor = connection.execute(
                 "DELETE FROM push_devices WHERE token=?", (token,)
             )
             return bool(cursor.rowcount)
 
-    def push_devices(self, *, limit: int = 32) -> List[Dict[str, Any]]:
+    def push_devices(
+        self, *, limit: int = 32, now: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
+        now_value = float(time.time() if now is None else now)
         with self.conn() as connection:
             rows = connection.execute(
                 "SELECT token, environment, app_version, created_at, updated_at "
-                "FROM push_devices ORDER BY updated_at DESC LIMIT ?",
-                (max(1, min(int(limit), 128)),),
+                "FROM push_devices WHERE expires_at>? "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (now_value, max(1, min(int(limit), 128))),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def push_device_prune_expired(self, *, now: Optional[float] = None) -> int:
+        now_value = float(time.time() if now is None else now)
+        with self.conn() as connection:
+            expired_tokens = [
+                str(row["token"])
+                for row in connection.execute(
+                    "SELECT token FROM push_devices WHERE expires_at<=?",
+                    (now_value,),
+                ).fetchall()
+            ]
+            if expired_tokens:
+                placeholders = ",".join("?" for _ in expired_tokens)
+                connection.execute(
+                    f"DELETE FROM push_outbox WHERE token IN ({placeholders})",
+                    expired_tokens,
+                )
+            cursor = connection.execute(
+                "DELETE FROM push_devices WHERE expires_at<=?", (now_value,)
+            )
+            return int(cursor.rowcount or 0)
+
+    def push_outbox_enqueue(
+        self,
+        *,
+        event: str,
+        title: str,
+        message: str,
+        payload: Mapping[str, Any],
+        dedupe_key: str,
+        retention_seconds: int,
+        device_limit: int = 128,
+        now: Optional[float] = None,
+    ) -> int:
+        now_value = float(time.time() if now is None else now)
+        expires_at = now_value + max(60, min(int(retention_seconds), 7 * 86400))
+        payload_json = _json_dumps_bounded(dict(payload), 8 * 1024)
+        inserted = 0
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT token, environment FROM push_devices WHERE expires_at>? "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (now_value, max(1, min(int(device_limit), 128))),
+            ).fetchall()
+            for row in rows:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO push_outbox "
+                    "(dedupe_key, token, environment, event, title, message, "
+                    "payload_json, status, attempts, next_attempt_at, expires_at, "
+                    "lease_until, apns_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?, ?, ?)",
+                    (
+                        str(dedupe_key)[:256],
+                        str(row["token"]),
+                        str(row["environment"]),
+                        str(event)[:64],
+                        str(title)[:120],
+                        str(message)[:900],
+                        payload_json,
+                        now_value,
+                        expires_at,
+                        str(uuid.uuid4()),
+                        now_value,
+                        now_value,
+                    ),
+                )
+                inserted += int(cursor.rowcount or 0)
+        return inserted
+
+    def push_outbox_claim_due(
+        self,
+        *,
+        limit: int = 32,
+        lease_seconds: int = 60,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        now_value = float(time.time() if now is None else now)
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE push_outbox SET status='pending', lease_until=0, "
+                "updated_at=? WHERE status='sending' AND lease_until<=? "
+                "AND expires_at>?",
+                (now_value, now_value, now_value),
+            )
+            connection.execute(
+                "UPDATE push_outbox SET status='failed', lease_until=0, "
+                "last_error=COALESCE(last_error, 'Benachrichtigung abgelaufen'), "
+                "updated_at=? WHERE status IN ('pending', 'sending') AND expires_at<=?",
+                (now_value, now_value),
+            )
+            rows = connection.execute(
+                "SELECT id FROM push_outbox WHERE status='pending' "
+                "AND next_attempt_at<=? AND expires_at>? "
+                "ORDER BY next_attempt_at, id LIMIT ?",
+                (now_value, now_value, max(1, min(int(limit), 128))),
+            ).fetchall()
+            ids = [int(row["id"]) for row in rows]
+            if not ids:
+                return []
+            placeholders = ",".join("?" for _ in ids)
+            lease_until = now_value + max(10, min(int(lease_seconds), 300))
+            connection.execute(
+                f"UPDATE push_outbox SET status='sending', attempts=attempts+1, "
+                f"lease_until=?, updated_at=? WHERE id IN ({placeholders})",
+                (lease_until, now_value, *ids),
+            )
+            claimed = connection.execute(
+                f"SELECT * FROM push_outbox WHERE id IN ({placeholders}) "
+                "ORDER BY next_attempt_at, id",
+                ids,
+            ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for row in claimed:
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.pop("payload_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                item["payload"] = {}
+            result.append(item)
+        return result
+
+    def push_outbox_finish(
+        self,
+        outbox_id: int,
+        *,
+        sent: bool,
+        retry: bool = False,
+        retry_delay_seconds: int = 60,
+        error: str = "",
+        max_attempts: int = 8,
+        now: Optional[float] = None,
+    ) -> str:
+        now_value = float(time.time() if now is None else now)
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT attempts, expires_at FROM push_outbox WHERE id=?",
+                (int(outbox_id),),
+            ).fetchone()
+            if not row:
+                return "missing"
+            if sent:
+                status = "sent"
+                next_attempt_at = now_value
+                sent_at: float | None = now_value
+            elif (
+                retry
+                and int(row["attempts"] or 0) < max(1, int(max_attempts))
+                and float(row["expires_at"] or 0) > now_value
+            ):
+                status = "pending"
+                next_attempt_at = now_value + max(
+                    1, min(int(retry_delay_seconds), 86400)
+                )
+                sent_at = None
+            else:
+                status = "failed"
+                next_attempt_at = now_value
+                sent_at = None
+            connection.execute(
+                "UPDATE push_outbox SET status=?, next_attempt_at=?, lease_until=0, "
+                "last_error=?, updated_at=?, sent_at=? WHERE id=?",
+                (
+                    status,
+                    next_attempt_at,
+                    str(error)[:1000] or None,
+                    now_value,
+                    sent_at,
+                    int(outbox_id),
+                ),
+            )
+            return status
+
+    def push_outbox_status(self) -> Dict[str, Any]:
+        with self.conn() as connection:
+            counts = {
+                str(row["status"]): int(row["count"])
+                for row in connection.execute(
+                    "SELECT status, COUNT(*) AS count FROM push_outbox GROUP BY status"
+                ).fetchall()
+            }
+            latest_error = connection.execute(
+                "SELECT last_error, updated_at FROM push_outbox "
+                "WHERE last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+        return {
+            "pending": counts.get("pending", 0) + counts.get("sending", 0),
+            "sent": counts.get("sent", 0),
+            "failed": counts.get("failed", 0),
+            "last_error": str(latest_error["last_error"]) if latest_error else None,
+            "last_error_at": float(latest_error["updated_at"])
+            if latest_error
+            else None,
+        }
+
+    def push_outbox_prune(
+        self, *, older_than_days: int = 30, now: Optional[float] = None
+    ) -> int:
+        now_value = float(time.time() if now is None else now)
+        cutoff = now_value - max(1, int(older_than_days)) * 86400
+        with self.conn() as connection:
+            cursor = connection.execute(
+                "DELETE FROM push_outbox WHERE status IN ('sent', 'failed') "
+                "AND updated_at<?",
+                (cutoff,),
+            )
+            return int(cursor.rowcount or 0)
 
     def auth_retry_after(self, client_key: str, *, now: Optional[float] = None) -> int:
         now_value = float(time.time() if now is None else now)

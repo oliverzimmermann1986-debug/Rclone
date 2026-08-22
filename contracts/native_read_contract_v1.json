@@ -89,7 +89,7 @@
     "job_detail": {
       "method": "GET",
       "path": "/api/jobs/41",
-      "body": {"id": 41, "kind": "backup", "status": "ok", "started_at": 1719989900, "ended_at": 1719990000, "log_file": "/logs/41.log", "summary": {"ok": true}}
+      "body": {"id": 41, "kind": "backup", "status": "ok", "started_at": 1719989900, "ended_at": 1719990000, "log_file": "/logs/41.log", "definition_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "definition_name": "Fotos täglich", "config_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "summary": {"ok": true}}
     },
     "job_log": {
       "method": "GET",
@@ -104,7 +104,7 @@
     "backup_progress": {
       "method": "GET",
       "path": "/api/jobs/backup/progress",
-      "body": {"running": true, "job_id": 42, "started_at": 1720000000, "elapsed_sec": 30, "pairs": [{"name": "Fotos", "status": "running", "log_file": "/logs/42-fotos.log", "error": null, "transferred": "2 KiB", "total": "4 KiB", "percent": 50.0, "speed": "1 KiB/s", "eta": "2s"}], "total_pairs": 1, "done_pairs": 0}
+      "body": {"running": true, "job_id": 42, "started_at": 1720000000, "elapsed_sec": 30, "pairs": [{"name": "Fotos", "status": "running", "log_file": "/logs/42-fotos.log", "error": null, "last_progress_at": 1720000025, "stall_timeout_sec": 14400, "max_runtime_sec": null, "transferred": "2 KiB", "total": "4 KiB", "percent": 50.0, "speed": "1 KiB/s", "eta": "2s"}], "total_pairs": 1, "done_pairs": 0}
     },
     "pbs_status": {
       "method": "GET",
@@ -145,6 +145,11 @@
       "method": "GET",
       "path": "/api/maintenance/database",
       "body": {"ok": true, "stats": {"jobs": 41, "pair_runs": 80, "auth_failures": 0, "running": 0, "audit_events": 7, "runtime_settings": 1, "bytes": 65536}, "integrity": {"ok": true, "quick_check": "ok", "foreign_key_errors": 0}}
+    },
+    "push_status": {
+      "method": "GET",
+      "path": "/api/push/status",
+      "body": {"configured": true, "registered_devices": 1, "events": ["sync_error"], "device_lease_days": 7, "outbox": {"pending": 1, "sent": 12, "failed": 2, "last_error": "HTTP 503 ServiceUnavailable", "last_error_at": 1720000000}}
     },
     "config_snapshots": {
       "method": "GET",

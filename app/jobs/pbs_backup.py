@@ -347,6 +347,7 @@ def run_pbs_backup(
                 cmd,
                 log_file,
                 timeout_sec=timeout_sec,
+                max_runtime_sec=timeout_sec,
                 header=f"# PBS-Backup {name} um {datetime.now().isoformat()}\n"
                 f"# {command_to_string(cmd)}\n\n",
                 pair_name=f"{PAIR_PREFIX}{name}",
@@ -372,6 +373,7 @@ def run_pbs_backup(
                         prune_cmd,
                         log_file,
                         timeout_sec=min(timeout_sec, 1800),
+                        max_runtime_sec=min(timeout_sec, 1800),
                         append=True,
                         header=f"\n# Prune: {command_to_string(prune_cmd)}\n\n",
                         pair_name=f"{PAIR_PREFIX}{name}",

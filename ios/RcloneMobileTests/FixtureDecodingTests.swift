@@ -46,6 +46,8 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertEqual(list.first?.status, "running")
         XCTAssertEqual(search.total, 1)
         XCTAssertEqual(detail.id, 41)
+        XCTAssertEqual(detail.definitionName, "Fotos täglich")
+        XCTAssertEqual(detail.configRevision?.count, 64)
         XCTAssertTrue(log.log.contains("Transferred"))
         XCTAssertEqual(current.backup?.id, 42)
         XCTAssertNil(current.restoretest)
@@ -79,6 +81,7 @@ final class FixtureDecodingTests: XCTestCase {
         let audit: AuditResponse = try decode("maintenance_audit")
         let logs: MaintenanceLogsResponse = try decode("maintenance_logs")
         let database: DatabaseStatus = try decode("maintenance_database")
+        let push: PushStatus = try decode("push_status")
         let snapshots: SnapshotListResponse = try decode("config_snapshots")
         let filter: FilterFile = try decode("filter_file")
 
@@ -86,6 +89,8 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertEqual(audit.events.first?.eventType, "config_saved")
         XCTAssertEqual(logs.logs.first?.size, 2_048)
         XCTAssertTrue(database.integrity.ok)
+        XCTAssertTrue(push.configured)
+        XCTAssertEqual(push.outbox.pending, 1)
         XCTAssertEqual(snapshots.maxSnapshots, 30)
         XCTAssertEqual(filter.content, "- *.tmp\n")
     }
@@ -94,7 +99,7 @@ final class FixtureDecodingTests: XCTestCase {
         let root = try contractRoot()
         XCTAssertEqual(root["contract_version"] as? Int, 1)
         let endpoints = try XCTUnwrap(root["endpoints"] as? [String: [String: Any]])
-        XCTAssertEqual(endpoints.count, 20)
+        XCTAssertEqual(endpoints.count, 21)
         for endpoint in endpoints.values {
             XCTAssertEqual(endpoint["method"] as? String, "GET")
             XCTAssertTrue((endpoint["path"] as? String)?.hasPrefix("/api/") == true)
