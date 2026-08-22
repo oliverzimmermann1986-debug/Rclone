@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,8 @@ from .scheduler import (
     rclone_history_key,
     restore_test_due,
 )
+
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
 def _job_status(summary: dict) -> str:
@@ -141,10 +144,40 @@ def _configure_logging(log_file: Path | None = None) -> None:
         handlers.insert(0, logging.FileHandler(log_file, encoding="utf-8"))
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format=_LOG_FORMAT,
         handlers=handlers,
         force=True,
     )
+
+
+def _job_log_file(log_dir: Path, kind: str, name: str) -> Path:
+    job_log_dir = log_dir / "scheduler-jobs"
+    job_log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name)).strip("._")[:80]
+    safe_kind = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(kind)).strip("._")[:24]
+    path = job_log_dir / (
+        f"{safe_kind or 'job'}-{safe_name or 'run'}-"
+        f"{datetime.now():%Y%m%d-%H%M%S-%f}.log"
+    )
+    path.touch(mode=0o600, exist_ok=False)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
+
+
+def _attach_job_log(path: Path) -> logging.FileHandler:
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    logging.getLogger().addHandler(handler)
+    return handler
+
+
+def _detach_job_log(handler: logging.FileHandler) -> None:
+    logging.getLogger().removeHandler(handler)
+    handler.flush()
+    handler.close()
 
 
 def _snapshot_with_revision(cfg) -> tuple[dict, str]:
@@ -329,16 +362,30 @@ def main() -> int:
                             )
                             continue
                         reset_cancel()
-                        job_id = db.job_start(
+                        job_log_file = _job_log_file(
+                            log_dir,
                             "backup",
-                            log_file=str(log_file),
-                            attempts=attempts,
-                            exclusive_scope=True,
-                            definition_id=str(definition.get("definition_id") or ""),
-                            definition_name=str(definition.get("name") or ""),
-                            config_revision=config_revision,
-                            scheduled_slot=str(definition.get("scheduled_slot") or ""),
+                            str(definition.get("name") or "job"),
                         )
+                        job_log_handler = _attach_job_log(job_log_file)
+                        try:
+                            job_id = db.job_start(
+                                "backup",
+                                log_file=str(job_log_file),
+                                attempts=attempts,
+                                exclusive_scope=True,
+                                definition_id=str(
+                                    definition.get("definition_id") or ""
+                                ),
+                                definition_name=str(definition.get("name") or ""),
+                                config_revision=config_revision,
+                                scheduled_slot=str(
+                                    definition.get("scheduled_slot") or ""
+                                ),
+                            )
+                        except Exception:
+                            _detach_job_log(job_log_handler)
+                            raise
                         try:
                             summary = run_job(
                                 dry_run=False,
@@ -414,6 +461,8 @@ def main() -> int:
                                     error=str(e),
                                 )
                             rc = 1
+                        finally:
+                            _detach_job_log(job_log_handler)
 
     if pbs_due:
         logger.info("Fällige PBS-Targets: %s", pbs_due)
@@ -445,13 +494,23 @@ def main() -> int:
                 ) = _attempt_metadata(pbs_due, _pbs_status)
                 pbs_run_names = [str(item["name"]) for item in pbs_attempts]
                 reset_cancel(PBS_CANCEL_SCOPE)
-                job_id = db.job_start(
+                job_log_file = _job_log_file(
+                    log_dir,
                     "pbs",
-                    log_file=str(log_file),
-                    attempts=pbs_attempts,
-                    exclusive_scope=True,
-                    config_revision=scheduler_config_revision,
+                    "-".join(pbs_due) or "targets",
                 )
+                job_log_handler = _attach_job_log(job_log_file)
+                try:
+                    job_id = db.job_start(
+                        "pbs",
+                        log_file=str(job_log_file),
+                        attempts=pbs_attempts,
+                        exclusive_scope=True,
+                        config_revision=scheduler_config_revision,
+                    )
+                except Exception:
+                    _detach_job_log(job_log_handler)
+                    raise
                 try:
                     summary = run_pbs_backup(
                         pbs_due,
@@ -483,6 +542,8 @@ def main() -> int:
                         },
                     )
                     rc = 1
+                finally:
+                    _detach_job_log(job_log_handler)
 
     # Der Drill teilt sich den Backup-Scope. Lief in diesem Tick bereits ein
     # Sync, wartet er auf den nächsten — seine Fälligkeit bleibt bestehen, weil
@@ -515,20 +576,30 @@ def main() -> int:
                 history_keys = {RESTORE_AGGREGATE_NAME: RESTORE_TEST_HISTORY_KEY}
                 scheduler_slots = {RESTORE_AGGREGATE_NAME: slot} if slot else {}
                 reset_cancel()
-                job_id = db.job_start(
+                job_log_file = _job_log_file(
+                    log_dir,
                     RESTORE_JOB_KIND,
-                    log_file=str(log_file),
-                    attempts=[
-                        {
-                            "name": RESTORE_AGGREGATE_NAME,
-                            "history_key": RESTORE_TEST_HISTORY_KEY,
-                            "scheduled_slot": slot,
-                            "trigger": "scheduler",
-                        }
-                    ],
-                    exclusive_scope=True,
-                    config_revision=scheduler_config_revision,
+                    RESTORE_AGGREGATE_NAME,
                 )
+                job_log_handler = _attach_job_log(job_log_file)
+                try:
+                    job_id = db.job_start(
+                        RESTORE_JOB_KIND,
+                        log_file=str(job_log_file),
+                        attempts=[
+                            {
+                                "name": RESTORE_AGGREGATE_NAME,
+                                "history_key": RESTORE_TEST_HISTORY_KEY,
+                                "scheduled_slot": slot,
+                                "trigger": "scheduler",
+                            }
+                        ],
+                        exclusive_scope=True,
+                        config_revision=scheduler_config_revision,
+                    )
+                except Exception:
+                    _detach_job_log(job_log_handler)
+                    raise
                 try:
                     summary = run_restore_test(
                         trigger="scheduler",
@@ -566,6 +637,8 @@ def main() -> int:
                         },
                     )
                     rc = 1
+                finally:
+                    _detach_job_log(job_log_handler)
 
     return rc
 
