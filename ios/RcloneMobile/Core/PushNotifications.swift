@@ -30,6 +30,11 @@ final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUser
         }
     }
 
+    func unregisterLocally() {
+        UIApplication.shared.unregisterForRemoteNotifications()
+        registration = nil
+    }
+
     func application(
         _ application: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data

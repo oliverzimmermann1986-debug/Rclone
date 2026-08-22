@@ -39,7 +39,7 @@ def test_database_backfills_and_indexes_pair_history(tmp_path: Path):
     assert db.stats()["pair_runs"] == 1
     assert db.integrity_check()["ok"] is True
     with db.conn() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
         indexes = {
             row["name"]
             for row in connection.execute("PRAGMA index_list(jobs)").fetchall()
@@ -176,8 +176,67 @@ def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(pair_runs)").fetchall()
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
     assert {"history_key", "dry_run", "scheduled_slot"} <= columns
+
+
+def test_push_outbox_claim_retry_dedupe_and_device_lease(tmp_path: Path):
+    database = Database(tmp_path / "push-outbox.db")
+    token = "ab" * 32
+    database.push_device_upsert(
+        token,
+        "production",
+        app_version="1.2.3",
+        lease_seconds=3600,
+        now=100,
+    )
+
+    assert (
+        database.push_outbox_enqueue(
+            event="sync_error",
+            title="Fehler",
+            message="Fotos fehlgeschlagen",
+            payload={"job_id": 7},
+            dedupe_key="sync_error:job-7",
+            retention_seconds=86400,
+            now=100,
+        )
+        == 1
+    )
+    assert (
+        database.push_outbox_enqueue(
+            event="sync_error",
+            title="Fehler",
+            message="Fotos fehlgeschlagen",
+            payload={"job_id": 7},
+            dedupe_key="sync_error:job-7",
+            retention_seconds=86400,
+            now=101,
+        )
+        == 0
+    )
+
+    claimed = database.push_outbox_claim_due(now=100)
+    assert len(claimed) == 1
+    assert claimed[0]["attempts"] == 1
+    assert claimed[0]["payload"] == {"job_id": 7}
+    assert (
+        database.push_outbox_finish(
+            claimed[0]["id"],
+            sent=False,
+            retry=True,
+            retry_delay_seconds=60,
+            error="HTTP 503",
+            now=100,
+        )
+        == "pending"
+    )
+    assert database.push_outbox_claim_due(now=159) == []
+    assert len(database.push_outbox_claim_due(now=160)) == 1
+
+    assert database.push_devices(now=3_699)
+    assert database.push_devices(now=3_700) == []
+    assert database.push_device_prune_expired(now=3_700) == 1
 
 
 def test_persistent_login_backoff(tmp_path: Path):

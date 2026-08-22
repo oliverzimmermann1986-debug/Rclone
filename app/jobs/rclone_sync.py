@@ -1284,14 +1284,9 @@ def _sync_pair(
         logger.error("[%s] %s", name, message)
         summary.update({"error": message, "skipped": True})
         runtime_state.update_pair(run_id, name, "error", error=message)
-        try:
-            from ..notifications import notify
-
-            notify(
-                "mount_check_failed", f"Pair '{name}' abgebrochen", message, pair=name
-            )
-        except Exception:
-            pass
+        # Der aggregierte ``sync_error`` am Laufende enthält Job-ID und alle
+        # fehlgeschlagenen Datenwege. Eine zusätzliche sofortige APNs-Meldung
+        # würde denselben Fehler doppelt anzeigen.
         return summary
 
     try:
@@ -1708,6 +1703,7 @@ def run_job(
         "cancelled": cancelled,
         "warnings": warnings,
         "run_id": run_id,
+        "job_id": job_id,
         "trigger": trigger,
         "definition_id": str(definition_id or "") or None,
         "definition_name": str(definition_name or "") or None,

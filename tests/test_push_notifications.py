@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import time
 
 import pytest
 
@@ -30,7 +32,7 @@ def test_push_device_registry_is_idempotent_and_removable(tmp_path: Path):
     database.push_device_upsert(TOKEN, "sandbox", app_version="1.0.9", now=10)
     database.push_device_upsert(TOKEN, "production", app_version="1.0.10", now=20)
 
-    assert database.push_devices() == [
+    assert database.push_devices(now=20) == [
         {
             "token": TOKEN,
             "environment": "production",
@@ -69,6 +71,9 @@ def test_apns_config_is_fail_closed_and_restricted_to_data_dir(tmp_path: Path):
     normalized, _warnings = validate_config(valid)
     assert normalized["notifications"]["apns"]["enabled"] is True
     assert normalized["notifications"]["apns"]["events"] == ["sync_error"]
+    assert normalized["notifications"]["apns"]["retention_hours"] == 24
+    assert normalized["notifications"]["apns"]["max_attempts"] == 8
+    assert normalized["notifications"]["apns"]["device_lease_days"] == 7
 
 
 def test_push_route_validates_and_registers_device(monkeypatch, tmp_path: Path):
@@ -91,9 +96,10 @@ def test_push_route_validates_and_registers_device(monkeypatch, tmp_path: Path):
 
 
 class _Response:
-    def __init__(self, status_code: int, reason: str = ""):
+    def __init__(self, status_code: int, reason: str = "", headers=None):
         self.status_code = status_code
         self._reason = reason
+        self.headers = headers or {}
 
     def json(self):
         return {"reason": self._reason}
@@ -121,8 +127,9 @@ def test_apns_delivery_uses_http2_and_prunes_rejected_tokens(
 ):
     database = Database(tmp_path / "delivery.db")
     rejected = "cd" * 32
-    database.push_device_upsert(TOKEN, "production", now=20)
-    database.push_device_upsert(rejected, "sandbox", now=10)
+    now = time.time()
+    database.push_device_upsert(TOKEN, "production", now=now)
+    database.push_device_upsert(rejected, "sandbox", now=now - 1)
     monkeypatch.setattr(
         push_notifications,
         "_settings",
@@ -146,7 +153,13 @@ def test_apns_delivery_uses_http2_and_prunes_rejected_tokens(
         client_factory=lambda **kwargs: _Client(responses, calls, **kwargs),
     )
 
-    assert result == {"sent": 1, "failed": 1, "removed": 1}
+    assert result == {
+        "queued": 2,
+        "sent": 1,
+        "failed": 1,
+        "removed": 1,
+        "retrying": 0,
+    }
     assert calls[0] == ("init", {"http2": True, "timeout": 5.0})
     urls = [call[0] for call in calls[1:]]
     assert any(url.startswith("https://api.push.apple.com/3/device/") for url in urls)
@@ -154,3 +167,58 @@ def test_apns_delivery_uses_http2_and_prunes_rejected_tokens(
         url.startswith("https://api.sandbox.push.apple.com/3/device/") for url in urls
     )
     assert [item["token"] for item in database.push_devices()] == [TOKEN]
+    request_headers = calls[1][2]
+    assert int(request_headers["apns-expiration"]) > int(now)
+    assert len(request_headers["apns-collapse-id"]) == 64
+    assert request_headers["apns-id"]
+
+
+def test_apns_retry_is_persisted_and_duplicate_event_is_not_requeued(
+    monkeypatch, tmp_path: Path
+):
+    database = Database(tmp_path / "retry.db")
+    database.push_device_upsert(TOKEN, "production")
+    monkeypatch.setattr(
+        push_notifications,
+        "_settings",
+        lambda _event: {
+            "team_id": "ABCDEFGHIJ",
+            "key_id": "KLMNOPQRST",
+            "key_file": str(tmp_path / "AuthKey.p8"),
+            "topic": "de.oliverzimmermann.rclonesync",
+            "timeout": 5,
+            "retention_seconds": 86400,
+            "max_attempts": 8,
+        },
+    )
+    monkeypatch.setattr(push_notifications, "_provider_token", lambda _settings: "jwt")
+    calls = []
+
+    first = push_notifications.send_push_notifications(
+        "sync_error",
+        "Fehler",
+        "Fotos fehlgeschlagen",
+        extra={"summary": {"job_id": 42, "run_id": "run-42"}},
+        dedupe_key="sync_error:job-42",
+        db=database,
+        client_factory=lambda **kwargs: _Client(
+            [_Response(503, "ServiceUnavailable")], calls, **kwargs
+        ),
+    )
+    duplicate = push_notifications.send_push_notifications(
+        "sync_error",
+        "Fehler",
+        "Fotos fehlgeschlagen",
+        extra={"summary": {"job_id": 42, "run_id": "run-42"}},
+        dedupe_key="sync_error:job-42",
+        db=database,
+        client_factory=lambda **kwargs: _Client([], calls, **kwargs),
+    )
+
+    assert first["queued"] == 1
+    assert first["retrying"] == 1
+    assert duplicate["queued"] == 0
+    assert database.push_outbox_status()["pending"] == 1
+    payload = json.loads(calls[1][1])
+    assert payload["job_id"] == 42
+    assert payload["run_id"] == "run-42"
