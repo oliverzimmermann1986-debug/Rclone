@@ -8,7 +8,6 @@ import re
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from croniter import croniter
 
@@ -49,13 +48,11 @@ _STABLE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _PBS_BACKUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _DURATION_RE = re.compile(r"^\d+(?:\.\d+)?(?:ms|s|m|h|d|w)?$")
 _REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,127}:.*$")
-_WEBHOOK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _APNS_IDENTIFIER_RE = re.compile(r"^[A-Z0-9]{10}$")
 _APNS_TOPIC_RE = re.compile(r"^[A-Za-z0-9.-]{3,255}$")
 _MAX_PAIRS = 256
 _MAX_JOBS = 256
 _MAX_PBS_TARGETS = 128
-_MAX_WEBHOOKS = 64
 _MAX_PBS_PATHS = 64
 CONFIG_SCHEMA_VERSION = 3
 _NOTIFICATION_EVENTS = {
@@ -1021,82 +1018,18 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(notifications, dict):
         errors.append("notifications muss ein Mapping sein")
         notifications = cfg["notifications"] = {}
-    notifications["allow_http"] = _boolean(notifications.get("allow_http", False))
-    notifications["allow_private_targets"] = _boolean(
-        notifications.get("allow_private_targets", False)
-    )
-    hooks = notifications.get("webhooks") or []
-    if not isinstance(hooks, list):
-        errors.append("notifications.webhooks muss eine Liste sein")
-        hooks = []
-    elif len(hooks) > _MAX_WEBHOOKS:
-        errors.append(
-            f"notifications.webhooks darf höchstens {_MAX_WEBHOOKS} Einträge enthalten"
+    legacy_hooks = notifications.pop("webhooks", None)
+    if legacy_hooks:
+        warnings.append(
+            "Legacy-Webhooks wurden entfernt; Fehlerbenachrichtigungen laufen über APNs."
         )
-        hooks = hooks[:_MAX_WEBHOOKS]
-    seen_hook_ids: set[str] = set()
-    normalized_hooks: list[dict[str, Any]] = []
-    for idx, hook in enumerate(hooks):
-        if not isinstance(hook, dict):
-            errors.append(f"notifications.webhooks[{idx}] muss ein Mapping sein")
-            continue
-        hook_id = str(hook.get("id") or "").strip()
-        if not _WEBHOOK_ID_RE.match(hook_id) or hook_id in seen_hook_ids:
-            hook_id = uuid.uuid4().hex
-        seen_hook_ids.add(hook_id)
-        hook["id"] = hook_id
-        hook["enabled"] = _boolean(hook.get("enabled", True), default=True)
-        url = str(hook.get("url") or "").strip()
-        if url:
-            parsed = urlsplit(url.replace("{message}", "message"))
-            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                errors.append(f"notifications.webhooks[{idx}].url ist ungültig")
-            elif parsed.scheme == "http" and not notifications["allow_http"]:
-                errors.append(f"notifications.webhooks[{idx}].url muss HTTPS verwenden")
-            if parsed.username or parsed.password:
-                errors.append(
-                    f"notifications.webhooks[{idx}].url darf keine Zugangsdaten im Hostteil enthalten"
-                )
-        hook["url"] = url
-        kind = str(hook.get("type") or "generic").lower()
-        if kind not in {"discord", "telegram", "generic"}:
-            errors.append(f"notifications.webhooks[{idx}].type ist ungültig")
-        hook["type"] = kind
-        events = hook.get("events") or []
-        if not isinstance(events, list):
-            errors.append(f"notifications.webhooks[{idx}].events muss eine Liste sein")
-        else:
-            normalized_events = list(
-                dict.fromkeys(str(event) for event in events if str(event))
-            )
-            invalid_events = [
-                event
-                for event in normalized_events
-                if event not in _NOTIFICATION_EVENTS
-            ]
-            if invalid_events:
-                errors.append(
-                    f"notifications.webhooks[{idx}].events enthält unbekannte Events: {', '.join(invalid_events)}"
-                )
-            hook["events"] = [
-                event for event in normalized_events if event in _NOTIFICATION_EVENTS
-            ]
-        normalized_hooks.append(hook)
-    notifications["webhooks"] = normalized_hooks
-    notifications["timeout_seconds"] = float(
-        _number(
-            notifications.get("timeout_seconds", 10), default=10, minimum=1, maximum=60
-        )
-    )
-    notifications["max_parallel"] = int(
-        _number(
-            notifications.get("max_parallel", 4),
-            default=4,
-            minimum=1,
-            maximum=16,
-            integer=True,
-        )
-    )
+    for legacy_key in (
+        "allow_http",
+        "allow_private_targets",
+        "timeout_seconds",
+        "max_parallel",
+    ):
+        notifications.pop(legacy_key, None)
     apns = notifications.get("apns") or {}
     if not isinstance(apns, dict):
         errors.append("notifications.apns muss ein Mapping sein")

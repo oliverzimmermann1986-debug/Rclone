@@ -217,12 +217,6 @@ backup:
   resync_mode: path1
 
 notifications:
-  # HTTP oder lokale/private Ziele nur bewusst freischalten.
-  allow_http: false
-  allow_private_targets: false
-  timeout_seconds: 10
-  max_parallel: 4
-  webhooks: []
   # Native iPhone-Pushs bei Fehlern. AuthKey_XXXXXXXXXX.p8 mit Modus 0600
   # innerhalb von paths.data_dir ablegen. Team-ID und Key-ID stammen aus dem
   # Apple Developer Portal; der Schlüssel selbst gehört nie ins Git-Repository.
@@ -240,12 +234,6 @@ notifications:
     # Offline-Logout verschwindet ein altes Gerät spätestens nach dieser Frist.
     device_lease_days: 7
     events: [sync_error, mount_check_failed, pair_overdue, restore_test_error]
-  # Beispiel (URL wird im Browser nach dem Speichern maskiert):
-  # - id: webhook_prod_01
-  #   enabled: true
-  #   type: discord
-  #   url: https://discord.com/api/webhooks/REDACTED
-  #   events: [sync_error, mount_check_failed]
 
 maintenance:
   auto_prune: true

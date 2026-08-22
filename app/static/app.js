@@ -51,7 +51,7 @@ function app() {
         pairs: [], jobs: [], rclone_args: [], tuning: {},
         timeout_hours: 4, max_runtime_hours: 0,
       },
-      notifications: { webhooks: [] },
+      notifications: {},
       maintenance: {},
       pbs: {
         enabled: false, repository: '', password: '', fingerprint: '',
@@ -1040,10 +1040,12 @@ function app() {
       result.backup.max_runtime_hours ??= 0;
       result.backup.scheduler_grace_minutes ??= 15;
       result.backup.scheduler_retry_minutes ??= 60;
-      result.notifications ||= { webhooks: [] };
-      result.notifications.allow_http ??= false;
-      result.notifications.allow_private_targets ??= false;
-      result.notifications.webhooks ||= [];
+      result.notifications ||= {};
+      delete result.notifications.webhooks;
+      delete result.notifications.allow_http;
+      delete result.notifications.allow_private_targets;
+      delete result.notifications.timeout_seconds;
+      delete result.notifications.max_parallel;
       result.maintenance ||= { auto_prune: true, job_retention_days: 180, keep_latest_jobs: 500, log_retention_days: 90 };
       for (const pair of (result.backup?.pairs || [])) {
         pair.two_way = pair.direction === 'bisync';
@@ -1071,7 +1073,6 @@ function app() {
       }
       for (const pair of result.backup.pairs) this.normalizePair(pair);
       for (const job of result.backup.jobs) this.normalizeJobDefinition(job);
-      for (const hook of result.notifications.webhooks) if (hook.enabled === undefined) hook.enabled = true;
       this.config = result;
       this.rcloneArgsText = (result.backup.rclone_args || []).join('\n');
       this.allowedHostsText = (result.web.allowed_hosts || []).join('\n');
