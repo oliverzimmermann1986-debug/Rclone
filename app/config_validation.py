@@ -1135,6 +1135,32 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     apns["timeout_seconds"] = float(
         _number(apns.get("timeout_seconds", 10), default=10, minimum=1, maximum=30)
     )
+    apns["retention_hours"] = float(
+        _number(
+            apns.get("retention_hours", 24),
+            default=24,
+            minimum=1,
+            maximum=168,
+        )
+    )
+    apns["max_attempts"] = int(
+        _number(
+            apns.get("max_attempts", 8),
+            default=8,
+            minimum=1,
+            maximum=20,
+            integer=True,
+        )
+    )
+    apns["device_lease_days"] = int(
+        _number(
+            apns.get("device_lease_days", 7),
+            default=7,
+            minimum=1,
+            maximum=90,
+            integer=True,
+        )
+    )
     if apns["enabled"]:
         if not _APNS_IDENTIFIER_RE.fullmatch(apns["team_id"]):
             errors.append(

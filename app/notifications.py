@@ -322,7 +322,15 @@ def notify(event: str, title: str, message: str, **extra: Any) -> None:
             )
             for hook in hooks
         }
-        futures[pool.submit(send_push_notifications, event, title, message)] = (
+        futures[
+            pool.submit(
+                send_push_notifications,
+                event,
+                title,
+                message,
+                extra=extra,
+            )
+        ] = (
             "apns",
             None,
         )

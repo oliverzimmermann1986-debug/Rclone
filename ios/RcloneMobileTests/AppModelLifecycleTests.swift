@@ -78,6 +78,28 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.errorMessage, "Andere Sitzungen konnten nicht widerrufen werden.")
     }
 
+    func testOfflinePushRevocationIsPersistedAndRetriedOnNextLogin() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+        await model.registerPushDevice(token: String(repeating: "ab", count: 32), environment: "production")
+        client.unregisterPushError = URLError(.notConnectedToInternet)
+
+        await model.logout()
+
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertTrue(model.errorMessage?.contains("Push-Registrierung") == true)
+        XCTAssertNotNil(defaults.data(forKey: "pendingPushRevocations"))
+        XCTAssertEqual(client.unregisterPushCallCount, 1)
+
+        client.unregisterPushError = nil
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        XCTAssertEqual(client.unregisterPushCallCount, 2)
+        XCTAssertNil(defaults.data(forKey: "pendingPushRevocations"))
+    }
+
     func testProgressBecomesStaleAndCompletionRefreshesJobsWithoutFirstRowHeuristic() async {
         let defaults = makeDefaults()
         let client = StubAPIClient()
@@ -254,6 +276,7 @@ private final class StubAPIClient: APIClientProtocol {
     var passwordChangeResponse: PasswordChangeResponse?
     var runAllResponse: ActionResponse?
     var pbsError: Error?
+    var unregisterPushError: Error?
     var baseConfig: ConfigSnapshot?
     private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
@@ -261,6 +284,7 @@ private final class StubAPIClient: APIClientProtocol {
     private(set) var doctorCallCount = 0
     private(set) var runAllCallCount = 0
     private(set) var definitionsCallCount = 0
+    private(set) var unregisterPushCallCount = 0
 
     func login(username: String, password: String) async throws {}
 
@@ -375,6 +399,14 @@ private final class StubAPIClient: APIClientProtocol {
     func cancelPBS() async throws -> ActionResponse { throw APIError.invalidResponse }
     func pauseScheduler(minutes: Int) async throws -> SchedulerControl { throw APIError.invalidResponse }
     func resumeScheduler() async throws -> SchedulerControl { throw APIError.invalidResponse }
+    func registerPushDevice(token: String, environment: String, appVersion: String) async throws -> PushRegistrationResponse {
+        PushRegistrationResponse(ok: true)
+    }
+    func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
+        unregisterPushCallCount += 1
+        if let unregisterPushError { throw unregisterPushError }
+        return PushRegistrationResponse(ok: true)
+    }
     func logout() async throws -> LogoutResult { logoutResult }
 
     func clearLocalSession() {

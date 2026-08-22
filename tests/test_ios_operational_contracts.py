@@ -88,3 +88,15 @@ def test_legacy_jobs_feedback_and_native_push_contracts_are_wired():
     assert '"/api/push/devices"' in api
     assert "registerForRemoteNotifications" in push
     assert "pushDeviceTokenReady" in app
+
+
+def test_offline_logout_bounds_and_retries_push_revocation():
+    model = _swift("Core/AppModel.swift")
+    push = _swift("Core/PushNotifications.swift")
+    app = _swift("RcloneMobileApp.swift")
+
+    assert 'pendingPushRevocationsKey = "pendingPushRevocations"' in model
+    assert "rememberPendingPushRevocation" in model
+    assert "await retryPendingPushRevocations" in model
+    assert "unregisterForRemoteNotifications" in push
+    assert "pushCoordinator.unregisterLocally()" in app

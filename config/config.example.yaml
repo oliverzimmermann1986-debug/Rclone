@@ -233,6 +233,12 @@ notifications:
     key_file: /opt/rclone-sync/data/AuthKey_APNS.p8
     topic: de.oliverzimmermann.rclonesync
     timeout_seconds: 10
+    # APNs darf Meldungen bei kurzzeitiger Nichterreichbarkeit zwischenspeichern.
+    retention_hours: 24
+    max_attempts: 8
+    # Die App erneuert diese Lease bei jeder Anmeldung/jedem Start. Nach einem
+    # Offline-Logout verschwindet ein altes Gerät spätestens nach dieser Frist.
+    device_lease_days: 7
     events: [sync_error, mount_check_failed, pair_overdue, restore_test_error]
   # Beispiel (URL wird im Browser nach dem Speichern maskiert):
   # - id: webhook_prod_01

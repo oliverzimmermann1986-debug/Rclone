@@ -190,6 +190,18 @@ def main() -> int:
     cfg = get_config()
     scheduler_snapshot, scheduler_config_revision = _snapshot_with_revision(cfg)
     db = get_db()
+    try:
+        from ..push_notifications import dispatch_pending_pushes
+
+        push_result = dispatch_pending_pushes(db=db)
+        if push_result.get("sent") or push_result.get("retrying"):
+            logging.getLogger("scheduler_cli").info(
+                "APNs-Outbox verarbeitet: %s", push_result
+            )
+    except Exception:
+        logging.getLogger("scheduler_cli").exception(
+            "APNs-Outbox konnte nicht verarbeitet werden"
+        )
     backup = scheduler_snapshot.get("backup") or {}
     backup_enabled = bool(backup.get("enabled", True))
 

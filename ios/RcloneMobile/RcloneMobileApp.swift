@@ -31,7 +31,12 @@ private struct AppRootView: View {
         }
         .animation(.smooth(duration: 0.32), value: model.phase)
         .task(id: model.phase) {
-            guard model.phase == .signedIn else { return }
+            guard model.phase == .signedIn else {
+                if model.phase == .signedOut {
+                    pushCoordinator.unregisterLocally()
+                }
+                return
+            }
             await pushCoordinator.requestAuthorizationAndRegister()
             if let registration = pushCoordinator.registration {
                 await model.registerPushDevice(
