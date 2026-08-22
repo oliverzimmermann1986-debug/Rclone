@@ -289,7 +289,16 @@ private struct RunRow: View {
         if let definitionName = job.definitionName, !definitionName.isEmpty {
             return definitionName
         }
-        switch job.kind { case "backup": "Sicherung #\(job.id)"; case "check": "Prüfung #\(job.id)"; case "pbs": "PBS #\(job.id)"; default: "Lauf #\(job.id)" }
+        switch job.kind {
+        case "backup":
+            return "Sicherung #\(job.id)"
+        case "check":
+            return "Prüfung #\(job.id)"
+        case "pbs":
+            return "PBS #\(job.id)"
+        default:
+            return "Lauf #\(job.id)"
+        }
     }
     private var symbol: String { job.kind == "check" ? "checkmark.shield" : "arrow.triangle.2.circlepath" }
 }
