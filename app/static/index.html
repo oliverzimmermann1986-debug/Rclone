@@ -791,9 +791,10 @@
                       <div class="settings-section-head"><div><span class="section-kicker">Ausführung</span><h3>Parallelität und Fehlerbehandlung</h3><p>Diese Werte bestimmen, wie viele Jobs gleichzeitig laufen und wie der Scheduler auf Verzögerungen oder Fehler reagiert.</p></div></div>
                       <div class="explain-grid">
                         <label class="explain-field"><span class="explain-number">1</span><span class="field-copy"><strong>Globale Parallelitätsgrenze</strong><small>Systemweite Obergrenze; die tatsächliche Parallelität wird je Job festgelegt.</small></span><input type="number" min="1" max="16" x-model.number="config.backup.max_parallel"></label>
-                        <label class="explain-field"><span class="explain-number">2</span><span class="field-copy"><strong>Maximale Laufzeit je Job</strong><small>Danach wird ein festhängender Lauf beendet.</small></span><div class="number-with-unit compact"><input type="number" min="0.1" max="168" step="0.5" x-model.number="config.backup.timeout_hours"><span>Std.</span></div></label>
-                        <label class="explain-field"><span class="explain-number">3</span><span class="field-copy"><strong>Nachholfenster</strong><small>War der Gast zum Termin kurz aus, darf der Scheduler den Lauf so lange nachholen.</small></span><div class="number-with-unit compact"><input type="number" min="1" max="1440" x-model.number="config.backup.scheduler_grace_minutes"><span>Min.</span></div></label>
-                        <div class="explain-field" x-show="false" aria-hidden="true"><span class="explain-number">4</span><span class="field-copy"><strong>Legacy-Fehler-Retry</strong></span></div>
+                        <label class="explain-field"><span class="explain-number">2</span><span class="field-copy"><strong>Stillstand erkennen</strong><small>Nur wenn Bytes, Checks und Dateiaktionen so lange unverändert bleiben, wird rclone beendet. Reine Statistik-Herzschläge zählen nicht.</small></span><div class="number-with-unit compact"><input type="number" min="0.1" max="168" step="0.5" x-model.number="config.backup.timeout_hours"><span>Std.</span></div></label>
+                        <label class="explain-field"><span class="explain-number">3</span><span class="field-copy"><strong>Absolute Laufzeitgrenze</strong><small>Optionaler Not-Aus unabhängig vom Fortschritt. 0 deaktiviert die Grenze.</small></span><div class="number-with-unit compact"><input type="number" min="0" max="720" step="0.5" x-model.number="config.backup.max_runtime_hours"><span>Std.</span></div></label>
+                        <label class="explain-field"><span class="explain-number">4</span><span class="field-copy"><strong>Nachholfenster</strong><small>War der Gast zum Termin kurz aus, darf der Scheduler den Lauf so lange nachholen.</small></span><div class="number-with-unit compact"><input type="number" min="1" max="1440" x-model.number="config.backup.scheduler_grace_minutes"><span>Min.</span></div></label>
+                        <div class="explain-field" x-show="false" aria-hidden="true"><span class="explain-number">5</span><span class="field-copy"><strong>Legacy-Fehler-Retry</strong></span></div>
                       </div>
                       <div class="load-advice" :class="schedulerRiskLevel()"><span class="load-meter"><i></i></span><div><strong x-text="schedulerRiskLevel() === 'high' ? 'Hohe Systemlast' : (schedulerRiskLevel() === 'medium' ? 'Mittlere Systemlast' : 'Moderate Systemlast')"></strong><small x-text="schedulerRiskText()"></small></div></div>
                     </section>
@@ -835,7 +836,8 @@
                       <div><dt>Automatik</dt><dd x-text="schedulerControlLabel()"></dd></div>
                       <div><dt>Zeitzone</dt><dd x-text="config.backup.timezone || 'Europe/Berlin'"></dd></div>
                       <div><dt>Parallel</dt><dd><span x-text="config.backup.max_parallel || 1"></span> Pair(s)</dd></div>
-                      <div><dt>Timeout</dt><dd><span x-text="config.backup.timeout_hours || 4"></span> Stunden</dd></div>
+                      <div><dt>Stillstandsgrenze</dt><dd><span x-text="config.backup.timeout_hours || 4"></span> Stunden</dd></div>
+                      <div><dt>Absolute Laufzeitgrenze</dt><dd x-text="config.backup.max_runtime_hours > 0 ? `${config.backup.max_runtime_hours} Stunden` : 'Deaktiviert'"></dd></div>
                       <div x-show="false" aria-hidden="true"><dt>Legacy-Fehler-Retry</dt><dd>—</dd></div>
                     </dl>
                     <div class="next-runs">

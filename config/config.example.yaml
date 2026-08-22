@@ -1,9 +1,9 @@
 # ============================================================
-# rclone-sync-container – Beispielkonfiguration (v2)
+# rclone-sync-container – Beispielkonfiguration (v3)
 # Wird bei Neuinstallation nach data/config.yaml kopiert.
 # ============================================================
 
-schema_version: 2
+schema_version: 3
 
 web:
   # Native pCloud-Crypto-Ordner sind über die normale pCloud-API nicht beschreibbar.
@@ -48,7 +48,11 @@ backup:
   enabled: true
   timezone: Europe/Berlin
   max_parallel: 2
+  # Beendet nur echten Stillstand. Unveränderte Statistik-Herzschläge zählen
+  # nicht als Fortschritt.
   timeout_hours: 4
+  # Optionaler absoluter Not-Aus auch bei Fortschritt; 0 = deaktiviert.
+  max_runtime_hours: 0
 
   # Zusätzliche vollständige Größen-Traversierungen vor/nach jedem Sync.
   # Standardmäßig aus Performance-Gründen deaktiviert.

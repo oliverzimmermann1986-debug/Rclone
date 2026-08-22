@@ -229,7 +229,8 @@ Wichtige globale Werte:
 
 - `backup.timezone`: Zeitzone für Cron-Auswertung, standardmäßig `Europe/Berlin`
 - `backup.max_parallel`: maximale Zahl paralleler, nicht überlappender Pairs
-- `backup.timeout_hours`: Timeout pro rclone-Lauf
+- `backup.timeout_hours`: Stillstands-Timeout; nur echter Transfer-/Check-/Dateifortschritt verlängert die Frist
+- `backup.max_runtime_hours`: optionale absolute Laufzeitgrenze (`0` = deaktiviert); systemd setzt kein zusätzliches Hardlimit
 - `backup.scheduler_retry_minutes`: Backoff nach fehlgeschlagenen geplanten Läufen
 - `backup.scheduler_grace_minutes`: zulässiges Startfenster rund um den Cron-Zeitpunkt
 - `backup.run_on_first_tick`: noch nie gelaufene Pairs nicht sofort beim ersten Timer-Tick starten
