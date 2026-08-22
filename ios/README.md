@@ -5,9 +5,11 @@ Native SwiftUI-App für das vorhandene rclone-sync-Backend. Sie verwendet diesel
 ## Enthalten
 
 - **Lagebild:** Systemzustand, Warnungen, Live-Fortschritt und kontrollierter Abbruch, Datenwege, letzter Lauf und Kopienübersicht mit lokalem/cloudseitigem Ordner, Dateizahl und Größe.
-- **Sicherungen:** Jobs, unveränderliche Läufe samt Protokoll und getrennte Datenwege ohne Zeitplan-Darstellung.
-- **System:** Ressourcen, Dienste, Diagnose, Wartungsfenster für den Scheduler sowie PBS-Status, Target-Starts und Abbruch in einer separaten Detailansicht.
-- **Sichere Aktionen:** Bestätigungsdialoge für Sicherungsstarts, Zeitplansteuerung und globale Abmeldung.
+- **Konfiguration:** native Datenweg- und Jobverwaltung mit geordneter Zuweisung, Zeitplan, Parallelität, Löschschutz, Plan und Probelauf; unbekannte neue Serverfelder bleiben beim Speichern erhalten.
+- **Läufe:** unveränderliche Historie mit Suche, Filtern, CSV, redigiertem Log-Download und revisionssicherem Retry für Fehlerläufe.
+- **System:** Ressourcen, Dienste, Diagnose, Push-Zustellung/Test, Wartungsfenster, Audit, Snapshots, Datenbank-/Logwartung, Support-Bundle sowie PBS-Konfiguration, Starts und Abbruch.
+- **Sichere Aktionen:** Bestätigungsdialoge für produktive Sicherungen, Restore-Tests, Snapshots, Zeitplansteuerung und globale Abmeldung.
+- **Push:** Fehlerbenachrichtigungen über APNs öffnen direkt den betroffenen Lauf; Offline-Abmeldungen werden lokal beendet und die serverseitige Token-Löschung später nachgeholt.
 - **Native Bedienung:** Dynamic Type, VoiceOver-Beschriftungen, Pull-to-refresh, Systemmaterialien, Dark Mode und haptische Erfolgsrückmeldung.
 
 ## Projekt erzeugen
@@ -34,6 +36,6 @@ Die Serveradresse muss auf den von außen erreichbaren Reverse Proxy der rclone-
 
 Das Passwort wird nur für den Login übertragen und nicht gespeichert. Serveradresse und Benutzername liegen in `UserDefaults`; die Sitzung bleibt in Apples Cookie-Speicher. Der Privacy-Manifest deklariert diesen ausschließlich app-internen `UserDefaults`-Zugriff mit Apples Grund `CA92.1`; Tracking und Datensammlung sind deaktiviert.
 
-## Aktuelle Backend-Grenze
+## Backend-Vertrag
 
-Das heutige Backend speichert Zeitpläne noch an den Sync-Paaren. Die App trennt die Darstellung bereits sauber in **Jobs**, **Läufe** und **Datenwege**, schreibt aber keine erfundenen Job-Definitionen. Das Bearbeiten von Datenwegen bleibt daher bis zur geplanten Backend-Migration im Web-Frontend.
+Die App verwendet die kanonische Trennung **Datenwege → Jobs → Läufe**. Schreibvorgänge sind an die gelesene Konfigurationsrevision gebunden; HTTP 409 erzwingt ein bewusstes Neuladen statt stillen Überschreibens. Die gemeinsam versionierte Fixture [`../contracts/native_read_contract_v1.json`](../contracts/native_read_contract_v1.json) wird sowohl vom Backend als auch von den Swift-Decodierungstests geprüft.

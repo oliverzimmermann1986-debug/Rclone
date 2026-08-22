@@ -1,4 +1,7 @@
 from pathlib import Path
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -206,6 +209,36 @@ def test_hidden_pair_options_are_not_consumed(monkeypatch):
     assert "--ignore-errors" not in cmd
 
 
+def test_structured_single_value_flags_replace_legacy_duplicates(monkeypatch):
+    cfg = FakeConfig(
+        {
+            "backup": {
+                "rclone_args": ["--transfers=2", "--checkers", "3"],
+                "tuning": {"transfers": 4, "checkers": 8},
+            }
+        }
+    )
+    monkeypatch.setattr(rclone_sync, "get_config", lambda: cfg)
+    pair = {
+        "name": "canonical",
+        "remote": "cloud:/target",
+        "local": "/mnt/source",
+        "direction": "push",
+        "mode": "copy",
+    }
+
+    cmd, *_ = rclone_sync._build_pair_command(
+        pair,
+        cfg.get("backup")["rclone_args"],
+        False,
+    )
+
+    assert cmd.count("--transfers=4") == 1
+    assert cmd.count("--checkers=8") == 1
+    assert "--transfers=2" not in cmd
+    assert "--checkers" not in cmd
+
+
 def test_pre_spawn_recheck_blocks_process_creation(tmp_path: Path, monkeypatch):
     def unexpected_popen(*_args, **_kwargs):
         raise AssertionError("Popen darf nach fehlgeschlagenem Recheck nicht laufen")
@@ -249,6 +282,100 @@ def test_cancel_after_safety_recheck_still_blocks_process_creation(
     )
 
     assert rc == 130
+
+
+def test_active_process_may_run_longer_than_inactivity_timeout(tmp_path: Path):
+    rclone_sync.reset_cancel()
+    log_file = tmp_path / "active.log"
+    script = (
+        "import sys,time\n"
+        "for index in range(8):\n"
+        " print(f'progress {index}', flush=True)\n"
+        " time.sleep(0.04)\n"
+    )
+
+    started = time.monotonic()
+    rc = rclone_sync._run_rclone_command(
+        [sys.executable, "-c", script],
+        log_file,
+        timeout_sec=0.12,
+    )
+
+    assert rc == 0
+    assert time.monotonic() - started > 0.12
+    assert "progress 7" in log_file.read_text(encoding="utf-8")
+
+
+def test_silent_process_hits_inactivity_timeout(tmp_path: Path):
+    rclone_sync.reset_cancel()
+    log_file = tmp_path / "silent.log"
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        rclone_sync._run_rclone_command(
+            [sys.executable, "-c", "import time; time.sleep(1)"],
+            log_file,
+            timeout_sec=0.1,
+        )
+
+
+def test_repeated_stats_heartbeat_does_not_hide_stalled_process(tmp_path: Path):
+    rclone_sync.reset_cancel()
+    log_file = tmp_path / "heartbeat.log"
+    script = (
+        "import time\n"
+        "for _ in range(20):\n"
+        " print('Transferred: 0 B / 100 B, 0%, 0 B/s, ETA -', flush=True)\n"
+        " time.sleep(0.03)\n"
+    )
+
+    with pytest.raises(rclone_sync.RcloneWatchdogTimeout) as caught:
+        rclone_sync._run_rclone_command(
+            [sys.executable, "-c", script],
+            log_file,
+            timeout_sec=0.12,
+        )
+
+    assert caught.value.watchdog_reason == "stalled"
+
+
+def test_changed_transfer_stats_count_as_real_progress(tmp_path: Path):
+    rclone_sync.reset_cancel()
+    log_file = tmp_path / "transfer-progress.log"
+    script = (
+        "import time\n"
+        "for index in range(8):\n"
+        " print(f'Transferred: {index} B / 8 B, {index * 12.5}%, 1 B/s, ETA 1s', flush=True)\n"
+        " time.sleep(0.04)\n"
+    )
+
+    rc = rclone_sync._run_rclone_command(
+        [sys.executable, "-c", script],
+        log_file,
+        timeout_sec=0.12,
+    )
+
+    assert rc == 0
+
+
+def test_absolute_runtime_limit_wins_even_with_progress(tmp_path: Path):
+    rclone_sync.reset_cancel()
+    log_file = tmp_path / "hard-limit.log"
+    script = (
+        "import time\n"
+        "for index in range(50):\n"
+        " print(f'progress {index}', flush=True)\n"
+        " time.sleep(0.03)\n"
+    )
+
+    with pytest.raises(rclone_sync.RcloneWatchdogTimeout) as caught:
+        rclone_sync._run_rclone_command(
+            [sys.executable, "-c", script],
+            log_file,
+            timeout_sec=0.2,
+            max_runtime_sec=0.16,
+        )
+
+    assert caught.value.watchdog_reason == "max_runtime"
 
 
 def test_local_source_identity_swap_is_detected(tmp_path: Path):

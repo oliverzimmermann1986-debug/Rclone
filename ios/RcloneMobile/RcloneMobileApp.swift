@@ -31,7 +31,15 @@ private struct AppRootView: View {
         }
         .animation(.smooth(duration: 0.32), value: model.phase)
         .task(id: model.phase) {
-            guard model.phase == .signedIn else { return }
+            if let jobID = pushCoordinator.consumePendingNavigationJobID() {
+                model.requestRunNavigation(id: jobID)
+            }
+            guard model.phase == .signedIn else {
+                if model.phase == .signedOut {
+                    pushCoordinator.unregisterLocally()
+                }
+                return
+            }
             await pushCoordinator.requestAuthorizationAndRegister()
             if let registration = pushCoordinator.registration {
                 await model.registerPushDevice(
@@ -44,6 +52,11 @@ private struct AppRootView: View {
             guard let token = notification.userInfo?["token"] as? String,
                   let environment = notification.userInfo?["environment"] as? String else { return }
             Task { await model.registerPushDevice(token: token, environment: environment) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pushNavigationRequested)) { notification in
+            guard let jobID = notification.userInfo?["job_id"] as? Int else { return }
+            model.requestRunNavigation(id: jobID)
+            _ = pushCoordinator.consumePendingNavigationJobID()
         }
     }
 }

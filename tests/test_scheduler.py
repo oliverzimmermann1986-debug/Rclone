@@ -1,5 +1,8 @@
 from datetime import datetime
 from contextlib import contextmanager
+import logging
+import os
+import stat
 from zoneinfo import ZoneInfo
 
 from app.jobs import scheduler_cli
@@ -67,6 +70,32 @@ def test_restore_test_due_accepts_scheduler_snapshot_mapping():
 
     assert result["due"] is False
     assert result["reason"] == "waiting_for_first_schedule"
+
+
+def test_scheduler_job_logs_are_unique_private_and_isolated(tmp_path):
+    root_logger = logging.getLogger()
+    previous_level = root_logger.level
+    root_logger.setLevel(logging.INFO)
+    try:
+        first = scheduler_cli._job_log_file(tmp_path, "backup", "Fotos täglich")
+        first_handler = scheduler_cli._attach_job_log(first)
+        logging.getLogger("scheduler-test").info("nur erster Job")
+        scheduler_cli._detach_job_log(first_handler)
+
+        second = scheduler_cli._job_log_file(tmp_path, "backup", "Dokumente")
+        second_handler = scheduler_cli._attach_job_log(second)
+        logging.getLogger("scheduler-test").info("nur zweiter Job")
+        scheduler_cli._detach_job_log(second_handler)
+    finally:
+        root_logger.setLevel(previous_level)
+
+    assert first != second
+    assert "nur erster Job" in first.read_text(encoding="utf-8")
+    assert "nur zweiter Job" not in first.read_text(encoding="utf-8")
+    assert "nur zweiter Job" in second.read_text(encoding="utf-8")
+    assert "nur erster Job" not in second.read_text(encoding="utf-8")
+    if os.name != "nt":
+        assert stat.S_IMODE(first.stat().st_mode) == 0o600
 
 
 def test_scheduled_first_failure_retries_after_backoff():
@@ -303,6 +332,7 @@ def test_disabled_rclone_backup_does_not_disable_pbs_scheduler(tmp_path, monkeyp
     assert scheduler_cli.main() == 0
     assert database.started[0][0] == "pbs"
     assert database.started[0][1]["attempts"][0]["name"] == "pbs:docs"
+    assert "scheduler-jobs" in database.started[0][1]["log_file"]
     assert database.finished[0][1] == "ok"
 
 

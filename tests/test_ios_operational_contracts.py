@@ -32,6 +32,10 @@ def test_progress_staleness_and_running_completion_are_explicit():
     assert "progress?.running == true && newProgress.running == false" in model
     assert "if completedRunningJob" in model
     assert 'model.progressIsStale ? "Status veraltet"' in dashboard
+    assert 'case lastProgressAt = "last_progress_at"' in _swift("Core/Models.swift")
+    assert "Letzter echter Fortschritt" in dashboard
+    assert "Stillstands-Watchdog" in dashboard
+    assert "Maximale Laufzeit" in dashboard
 
 
 def test_storage_measurements_support_cache_age_and_explicit_recalculation():
@@ -88,3 +92,50 @@ def test_legacy_jobs_feedback_and_native_push_contracts_are_wired():
     assert '"/api/push/devices"' in api
     assert "registerForRemoteNotifications" in push
     assert "pushDeviceTokenReady" in app
+
+
+def test_offline_logout_bounds_and_retries_push_revocation():
+    model = _swift("Core/AppModel.swift")
+    push = _swift("Core/PushNotifications.swift")
+    app = _swift("RcloneMobileApp.swift")
+
+    assert 'pendingPushRevocationsKey = "pendingPushRevocations"' in model
+    assert "rememberPendingPushRevocation" in model
+    assert "await retryPendingPushRevocations" in model
+    assert "unregisterForRemoteNotifications" in push
+    assert "pushCoordinator.unregisterLocally()" in app
+
+
+def test_failed_run_retry_and_push_deep_link_are_revision_safe():
+    api = _swift("Core/APIClient.swift")
+    model = _swift("Core/AppModel.swift")
+    push = _swift("Core/PushNotifications.swift")
+    app = _swift("RcloneMobileApp.swift")
+    root = _swift("Views/RootTabView.swift")
+    runs = _swift("Views/BackupsView.swift")
+
+    assert 'post("/api/jobs/\\(id)/retry?dry_run=\\(dryRun)")' in api
+    assert "func retryJob(id: Int) async -> Bool" in model
+    assert "requestedRunID" in model
+    assert "pushNavigationRequested" in push
+    assert 'userInfo["job_id"]' in push
+    assert "consumePendingNavigationJobID" in push
+    assert "pendingNavigationJobID = jobID" in push
+    assert "model.requestRunNavigation(id: jobID)" in app
+    assert "selectedTab = 3" in root
+    assert "await openRequestedRun()" in runs
+    assert "Job erneut starten" in runs
+    assert "configRevision" in runs
+
+
+def test_push_delivery_status_and_real_test_are_visible_in_system():
+    api = _swift("Core/APIClient.swift")
+    models = _swift("Core/Models.swift")
+    system = _swift("Views/SystemView.swift")
+
+    assert 'get("/api/push/status")' in api
+    assert 'post("/api/push/test")' in api
+    assert "struct PushStatus: Decodable" in models
+    assert "PushStatusView()" in system
+    assert "Endgültig fehlgeschlagen" in system
+    assert "Testmitteilung senden" in system

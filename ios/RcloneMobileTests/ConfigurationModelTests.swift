@@ -12,7 +12,7 @@ final class ConfigurationModelTests: XCTestCase {
           "paths":{"data_dir":"/data","logs_dir":"/logs","temp_dir":"/tmp"},
           "notifications":{
             "apns":{"enabled":true,"topic":"de.oliverzimmermann.rclonesync"},
-            "webhooks":[{"id":"legacy","url":"***SET***"}]
+            "delivery_policy":{"future_field":"preserved"}
           },
           "backup":{
             "enabled":true,
@@ -58,7 +58,10 @@ final class ConfigurationModelTests: XCTestCase {
         XCTAssertEqual((root["schema_version"] as? NSNumber)?.intValue, 3)
         XCTAssertEqual((web["session_version"] as? NSNumber)?.intValue, 7)
         XCTAssertEqual(apns["enabled"] as? Bool, true)
-        XCTAssertEqual((notifications["webhooks"] as? [[String: Any]])?.count, 1)
+        XCTAssertEqual(
+            (notifications["delivery_policy"] as? [String: Any])?["future_field"] as? String,
+            "preserved"
+        )
         XCTAssertEqual((tuning["transfers"] as? NSNumber)?.intValue, 4)
         XCTAssertEqual(pair["name"] as? String, "Neu")
         XCTAssertEqual(pair["include"] as? String, "*.jpg")

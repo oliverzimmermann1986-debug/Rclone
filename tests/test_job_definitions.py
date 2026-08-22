@@ -512,3 +512,95 @@ def test_definition_batch_process_lock_contention_releases_web_lock(
     assert caught.value.status_code == 409
     assert "Prozess-Lock" in str(caught.value.detail)
     assert api_jobs._locks["backup"].locked() is False
+
+
+def test_failed_definition_job_can_retry_only_against_same_revision(
+    tmp_path: Path, monkeypatch
+):
+    config, _ = validate_config(_config(tmp_path))
+    definition = config["backup"]["jobs"][0]
+    queued: list[dict] = []
+
+    class Store:
+        def snapshot_with_revision(self):
+            return config, "rev-same"
+
+    class Db:
+        def job_get(self, job_id):
+            assert job_id == 41
+            return {
+                "id": 41,
+                "kind": "backup",
+                "status": "error",
+                "definition_id": definition["id"],
+                "config_revision": "rev-same",
+            }
+
+    monkeypatch.setattr(api_jobs, "get_config", lambda: Store())
+    monkeypatch.setattr(api_jobs, "get_db", lambda: Db())
+    monkeypatch.setattr(
+        api_jobs,
+        "_queue_backup",
+        lambda **kwargs: queued.append(kwargs) or {"ok": True, "job_id": 42},
+    )
+    monkeypatch.setattr(api_jobs, "_audit_best_effort", lambda *_args, **_kwargs: None)
+
+    result = api_jobs.retry_job(41)
+
+    assert result["job_id"] == 42
+    assert result["retry_of_job_id"] == 41
+    assert queued[0]["definition"]["id"] == definition["id"]
+    assert queued[0]["config_revision"] == "rev-same"
+    assert queued[0]["pairs_filter"] == ["Fotos"]
+
+
+def test_retry_rejects_configuration_drift_before_queueing(tmp_path: Path, monkeypatch):
+    config, _ = validate_config(_config(tmp_path))
+    definition = config["backup"]["jobs"][0]
+
+    class Store:
+        def snapshot_with_revision(self):
+            return config, "rev-new"
+
+    class Db:
+        def job_get(self, _job_id):
+            return {
+                "kind": "backup",
+                "status": "error",
+                "definition_id": definition["id"],
+                "config_revision": "rev-old",
+            }
+
+    monkeypatch.setattr(api_jobs, "get_config", lambda: Store())
+    monkeypatch.setattr(api_jobs, "get_db", lambda: Db())
+    monkeypatch.setattr(
+        api_jobs,
+        "_queue_backup",
+        lambda **_kwargs: pytest.fail("Bei Revision-Drift darf kein Job starten"),
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        api_jobs.retry_job(41)
+
+    assert caught.value.status_code == 409
+    assert "neu planen" in str(caught.value.detail)
+
+
+@pytest.mark.parametrize("status", ["ok", "skipped"])
+def test_retry_rejects_non_failed_job_status(status: str, monkeypatch):
+    class Db:
+        def job_get(self, _job_id):
+            return {
+                "kind": "backup",
+                "status": status,
+                "definition_id": "a" * 32,
+                "config_revision": "rev-same",
+            }
+
+    monkeypatch.setattr(api_jobs, "get_db", lambda: Db())
+
+    with pytest.raises(HTTPException) as caught:
+        api_jobs.retry_job(41)
+
+    assert caught.value.status_code == 409
+    assert "fehlgeschlagene" in str(caught.value.detail)

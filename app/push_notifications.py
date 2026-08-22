@@ -1,7 +1,8 @@
-"""APNs provider for authenticated native iPhone error notifications."""
+"""Durable APNs delivery for authenticated native iPhone notifications."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -9,13 +10,14 @@ import stat
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import httpx
 import jwt
 
 from .config_store import get_config
 from .db import Database, get_db
+from .rclone_args import redact_command_text
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +29,23 @@ DEFAULT_ERROR_EVENTS = (
 )
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: tuple[tuple[str, str, str, int], str, float] | None = None
+_BACKGROUND_DISPATCH_LOCK = threading.Lock()
 _INVALID_TOKEN_REASONS = {
     "BadDeviceToken",
     "DeviceTokenNotForTopic",
     "Unregistered",
+}
+_RETRYABLE_STATUS_CODES = {429, 500, 503}
+_RETRYABLE_REASONS = {"ExpiredProviderToken", "TooManyProviderTokenUpdates"}
+_SENSITIVE_CONTEXT_KEYS = {
+    "authorization",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "private_key",
+    "secret",
+    "token",
 }
 
 
@@ -43,8 +58,10 @@ def _settings(event: str) -> dict[str, Any] | None:
         return None
     try:
         timeout = max(1.0, min(float(raw.get("timeout_seconds") or 10), 30.0))
-    except (TypeError, ValueError):
-        logger.warning("APNs timeout_seconds ist ungültig")
+        retention_hours = max(1.0, min(float(raw.get("retention_hours") or 24), 168.0))
+        max_attempts = max(1, min(int(raw.get("max_attempts") or 8), 20))
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("APNs Timeout-/Retry-Konfiguration ist ungültig")
         return None
     settings = {
         "team_id": str(raw.get("team_id") or "").strip(),
@@ -52,6 +69,8 @@ def _settings(event: str) -> dict[str, Any] | None:
         "key_file": str(raw.get("key_file") or "").strip(),
         "topic": str(raw.get("topic") or "de.oliverzimmermann.rclonesync").strip(),
         "timeout": timeout,
+        "retention_seconds": int(retention_hours * 3600),
+        "max_attempts": max_attempts,
     }
     if not all(settings[key] for key in ("team_id", "key_id", "key_file", "topic")):
         logger.warning(
@@ -96,79 +115,335 @@ def _provider_token(settings: dict[str, Any], *, now: float | None = None) -> st
         return token
 
 
-def send_push_notifications(
+def _reset_provider_token() -> None:
+    global _TOKEN_CACHE
+    with _TOKEN_LOCK:
+        _TOKEN_CACHE = None
+
+
+def _safe_context(value: Any, *, depth: int = 0) -> Any:
+    if depth > 3:
+        return None
+    if isinstance(value, str):
+        return redact_command_text(value)[:500]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, list):
+        return [_safe_context(item, depth=depth + 1) for item in value[:20]]
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for raw_key, item in list(value.items())[:30]:
+            key = str(raw_key)[:80]
+            if key.casefold() in _SENSITIVE_CONTEXT_KEYS:
+                continue
+            result[key] = _safe_context(item, depth=depth + 1)
+        return result
+    return str(value)[:500]
+
+
+def _push_context(extra: Mapping[str, Any]) -> dict[str, Any]:
+    """Reduziert große Job-Summaries auf navigierbare, unkritische Felder."""
+
+    summary = extra.get("summary")
+    source: Mapping[str, Any] = summary if isinstance(summary, Mapping) else extra
+    context: dict[str, Any] = {}
+    for key in (
+        "job_id",
+        "run_id",
+        "definition_id",
+        "definition_name",
+        "scheduled_slot",
+        "trigger",
+        "pair",
+        "pairs",
+    ):
+        value = source.get(key, extra.get(key))
+        if value not in (None, "", []):
+            context[key] = _safe_context(value)
+    return context
+
+
+def notification_dedupe_key(
     event: str,
     title: str,
     message: str,
+    extra: Mapping[str, Any],
     *,
-    db: Database | None = None,
-    client_factory: Callable[..., httpx.Client] = httpx.Client,
-) -> dict[str, int]:
-    """Sends one alert per registered device and prunes rejected tokens."""
+    now: float | None = None,
+) -> str:
+    context = _push_context(extra)
+    identity = {
+        key: context[key]
+        for key in (
+            "job_id",
+            "run_id",
+            "definition_id",
+            "scheduled_slot",
+            "pair",
+            "pairs",
+        )
+        if key in context
+    }
+    if not identity:
+        # Identische statuslose Alarme werden in einem Fünf-Minuten-Fenster
+        # zusammengefasst, bleiben in späteren Störfällen aber erneut sichtbar.
+        now_value = float(time.time() if now is None else now)
+        identity = {
+            "content": hashlib.sha256(
+                f"{title}\0{message}".encode("utf-8", errors="replace")
+            ).hexdigest()[:24],
+            "bucket": int(now_value // 300),
+        }
+    raw = json.dumps(identity, ensure_ascii=False, sort_keys=True, default=str)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"{event}:{digest}"
 
-    settings = _settings(event)
-    database = db or get_db()
-    devices = database.push_devices(limit=32) if settings else []
-    result = {"sent": 0, "failed": 0, "removed": 0}
-    if not settings or not devices:
-        return result
 
-    provider_token = _provider_token(settings)
+def _payload(row: Mapping[str, Any]) -> bytes:
+    context = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
     payload = {
         "aps": {
-            "alert": {"title": str(title)[:120], "body": str(message)[:900]},
+            "alert": {
+                "title": str(row.get("title") or "")[:120],
+                "body": str(row.get("message") or "")[:900],
+            },
             "sound": "default",
             "thread-id": "rclone-errors",
         },
-        "event": event,
+        "event": str(row.get("event") or ""),
+        **dict(context),
     }
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
-    headers = {
-        "authorization": f"bearer {provider_token}",
-        "apns-topic": str(settings["topic"]),
-        "apns-push-type": "alert",
-        "apns-priority": "10",
-        "apns-expiration": "0",
-        "content-type": "application/json",
-    }
-    with client_factory(http2=True, timeout=float(settings["timeout"])) as client:
-        for device in devices:
-            token = str(device["token"])
+    if len(body) <= 4_096:
+        return body
+    payload = {"aps": payload["aps"], "event": payload["event"]}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+
+
+def _response_reason(response: Any) -> str:
+    try:
+        value = response.json()
+    except (ValueError, AttributeError):
+        return ""
+    return str(value.get("reason") or "") if isinstance(value, Mapping) else ""
+
+
+def _retry_delay(row: Mapping[str, Any], response: Any | None = None) -> int:
+    attempts = max(1, int(row.get("attempts") or 1))
+    delay = min(3600, 30 * (2 ** min(attempts - 1, 7)))
+    if response is not None:
+        headers = getattr(response, "headers", {}) or {}
+        try:
+            delay = max(delay, int(headers.get("retry-after") or 0))
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return delay
+
+
+def dispatch_pending_pushes(
+    *,
+    db: Database | None = None,
+    client_factory: Callable[..., httpx.Client] = httpx.Client,
+    limit: int = 32,
+) -> dict[str, int]:
+    """Claimt fällige Outbox-Zeilen atomar und stellt sie best-effort zu."""
+
+    database = db or get_db()
+    database.push_device_prune_expired()
+    rows = database.push_outbox_claim_due(limit=limit)
+    result = {"sent": 0, "failed": 0, "removed": 0, "retrying": 0}
+    if not rows:
+        return result
+
+    row_settings = [_settings(str(row.get("event") or "")) for row in rows]
+    timeouts = [float(item["timeout"]) for item in row_settings if item]
+    client_timeout = max(timeouts, default=10.0)
+    with client_factory(http2=True, timeout=client_timeout) as client:
+        for row, settings in zip(rows, row_settings):
+            row_id = int(row["id"])
+            if settings is None:
+                database.push_outbox_finish(
+                    row_id,
+                    sent=False,
+                    error="APNs ist für dieses Event nicht mehr konfiguriert",
+                )
+                result["failed"] += 1
+                continue
+            token = str(row["token"])
             host = (
                 "https://api.sandbox.push.apple.com"
-                if device["environment"] == "sandbox"
+                if row["environment"] == "sandbox"
                 else "https://api.push.apple.com"
             )
+            collapse_id = hashlib.sha256(
+                str(row["dedupe_key"]).encode("utf-8")
+            ).hexdigest()[:64]
+            try:
+                headers = {
+                    "authorization": f"bearer {_provider_token(settings)}",
+                    "apns-topic": str(settings["topic"]),
+                    "apns-push-type": "alert",
+                    "apns-priority": "10",
+                    "apns-expiration": str(int(float(row["expires_at"]))),
+                    "apns-collapse-id": collapse_id,
+                    "apns-id": str(row["apns_id"]),
+                    "content-type": "application/json",
+                }
+            except (OSError, ValueError, PermissionError, jwt.PyJWTError) as exc:
+                status = database.push_outbox_finish(
+                    row_id,
+                    sent=False,
+                    retry=True,
+                    retry_delay_seconds=_retry_delay(row),
+                    error=str(exc),
+                    max_attempts=int(settings.get("max_attempts") or 8),
+                )
+                result["retrying" if status == "pending" else "failed"] += 1
+                logger.warning("APNs Provider-Token fehlgeschlagen: %s", exc)
+                continue
             try:
                 response = client.post(
-                    f"{host}/3/device/{token}", content=body, headers=headers
+                    f"{host}/3/device/{token}",
+                    content=_payload(row),
+                    headers=headers,
                 )
+                reason = _response_reason(response)
                 if response.status_code == 200:
+                    database.push_outbox_finish(row_id, sent=True)
                     result["sent"] += 1
                     continue
-                result["failed"] += 1
-                try:
-                    reason = str(response.json().get("reason") or "")
-                except (ValueError, AttributeError):
-                    reason = ""
                 if (
                     response.status_code in {400, 410}
                     and reason in _INVALID_TOKEN_REASONS
                 ):
                     if database.push_device_delete(token):
                         result["removed"] += 1
+                    result["failed"] += 1
+                    continue
+                retryable = (
+                    response.status_code in _RETRYABLE_STATUS_CODES
+                    or reason in _RETRYABLE_REASONS
+                )
+                if reason == "ExpiredProviderToken":
+                    _reset_provider_token()
+                status = database.push_outbox_finish(
+                    row_id,
+                    sent=False,
+                    retry=retryable,
+                    retry_delay_seconds=_retry_delay(row, response),
+                    error=f"HTTP {response.status_code} {reason}".strip(),
+                    max_attempts=int(settings.get("max_attempts") or 8),
+                )
+                result["retrying" if status == "pending" else "failed"] += 1
                 logger.warning(
                     "APNs %s für Gerät abgelehnt: HTTP %s %s",
-                    event,
+                    row["event"],
                     response.status_code,
                     reason,
                 )
-            except httpx.HTTPError as exc:
-                result["failed"] += 1
-                logger.warning("APNs %s fehlgeschlagen: %s", event, exc)
+            except (httpx.HTTPError, OSError) as exc:
+                status = database.push_outbox_finish(
+                    row_id,
+                    sent=False,
+                    retry=True,
+                    retry_delay_seconds=_retry_delay(row),
+                    error=str(exc),
+                    max_attempts=int(settings.get("max_attempts") or 8),
+                )
+                result["retrying" if status == "pending" else "failed"] += 1
+                logger.warning("APNs %s fehlgeschlagen: %s", row["event"], exc)
     return result
 
 
-__all__ = ["DEFAULT_ERROR_EVENTS", "send_push_notifications"]
+def send_push_notifications(
+    event: str,
+    title: str,
+    message: str,
+    *,
+    extra: Mapping[str, Any] | None = None,
+    dedupe_key: str | None = None,
+    db: Database | None = None,
+    client_factory: Callable[..., httpx.Client] = httpx.Client,
+) -> dict[str, int]:
+    """Persistiert eine Meldung vor dem ersten APNs-Versuch und drainiert sofort."""
+
+    settings = _settings(event)
+    database = db or get_db()
+    result = {
+        "queued": 0,
+        "sent": 0,
+        "failed": 0,
+        "removed": 0,
+        "retrying": 0,
+    }
+    if settings is None:
+        return result
+    context = _push_context(extra or {})
+    key = dedupe_key or notification_dedupe_key(event, title, message, extra or {})
+    result["queued"] = database.push_outbox_enqueue(
+        event=event,
+        title=redact_command_text(str(title)),
+        message=redact_command_text(str(message)),
+        payload=context,
+        dedupe_key=key,
+        retention_seconds=int(settings.get("retention_seconds") or 86400),
+    )
+    result.update(dispatch_pending_pushes(db=database, client_factory=client_factory))
+    return result
+
+
+def queue_push_notification(
+    event: str,
+    title: str,
+    message: str,
+    *,
+    extra: Mapping[str, Any] | None = None,
+    dedupe_key: str | None = None,
+    db: Database | None = None,
+) -> dict[str, int]:
+    """Persistiert sofort; ein Daemon-Worker übernimmt den ersten Netzversuch."""
+
+    settings = _settings(event)
+    database = db or get_db()
+    if settings is None:
+        return {"queued": 0}
+    key = dedupe_key or notification_dedupe_key(event, title, message, extra or {})
+    queued = database.push_outbox_enqueue(
+        event=event,
+        title=redact_command_text(str(title)),
+        message=redact_command_text(str(message)),
+        payload=_push_context(extra or {}),
+        dedupe_key=key,
+        retention_seconds=int(settings.get("retention_seconds") or 86400),
+    )
+
+    def dispatch() -> None:
+        if not _BACKGROUND_DISPATCH_LOCK.acquire(blocking=False):
+            return
+        try:
+            dispatch_pending_pushes(db=database)
+        except Exception:
+            logger.exception("APNs-Hintergrundzustellung fehlgeschlagen")
+        finally:
+            _BACKGROUND_DISPATCH_LOCK.release()
+
+    if queued:
+        threading.Thread(
+            target=dispatch,
+            name="push-dispatch",
+            daemon=True,
+        ).start()
+    return {"queued": queued}
+
+
+__all__ = [
+    "DEFAULT_ERROR_EVENTS",
+    "dispatch_pending_pushes",
+    "notification_dedupe_key",
+    "queue_push_notification",
+    "send_push_notifications",
+]

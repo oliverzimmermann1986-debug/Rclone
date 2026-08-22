@@ -48,8 +48,7 @@ def test_installer_uses_pinned_requirements_and_services_have_safe_runtime_defau
             assert "==" in line, f"ungepinnte Laufzeitabhängigkeit: {line}"
     assert "--host 127.0.0.1" in web_service
     assert "TimeoutStartSec=infinity" in backup_service
-    assert "TimeoutStartSec=6h" in scheduler_service
-    assert "TimeoutStartSec=infinity" not in scheduler_service
+    assert "TimeoutStartSec=infinity" in scheduler_service
 
 
 def test_installer_fails_closed_for_source_and_backup_paths():

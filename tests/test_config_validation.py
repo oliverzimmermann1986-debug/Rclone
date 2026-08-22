@@ -51,7 +51,7 @@ def test_mountpoint_must_be_parent_of_local_path(tmp_path: Path):
         validate_config(cfg)
 
 
-def test_duplicate_webhook_ids_are_replaced(tmp_path: Path):
+def test_legacy_webhooks_are_removed_with_migration_warning(tmp_path: Path):
     cfg = _base(tmp_path)
     hook = {
         "id": "duplicate123",
@@ -60,9 +60,10 @@ def test_duplicate_webhook_ids_are_replaced(tmp_path: Path):
         "events": ["sync_ok"],
     }
     cfg["notifications"]["webhooks"] = [dict(hook), dict(hook)]
-    normalized, _ = validate_config(cfg)
-    ids = [item["id"] for item in normalized["notifications"]["webhooks"]]
-    assert len(ids) == len(set(ids)) == 2
+    normalized, warnings = validate_config(cfg)
+
+    assert "webhooks" not in normalized["notifications"]
+    assert any("Legacy-Webhooks wurden entfernt" in item for item in warnings)
 
 
 def test_example_config_is_valid_and_examples_are_disabled():
@@ -74,6 +75,17 @@ def test_example_config_is_valid_and_examples_are_disabled():
     assert warnings == []
     assert normalized["backup"]["pairs"]
     assert all(pair["enabled"] is False for pair in normalized["backup"]["pairs"])
+
+
+def test_backup_watchdogs_have_separate_bounded_limits(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["timeout_hours"] = 2.5
+    cfg["backup"]["max_runtime_hours"] = 10_000
+
+    normalized, _ = validate_config(cfg)
+
+    assert normalized["backup"]["timeout_hours"] == 2.5
+    assert normalized["backup"]["max_runtime_hours"] == 720
 
 
 def test_pair_success_age_is_bounded(tmp_path: Path):

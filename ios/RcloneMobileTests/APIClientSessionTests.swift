@@ -270,6 +270,30 @@ final class APIClientSessionTests: XCTestCase {
         XCTAssertEqual(result.jobID, 91)
     }
 
+    func testRetryJobUsesCanonicalRevisionSafeRoute() async throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://retry.example"))
+        let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
+            forGroupContainerIdentifier: "APIClientRetryTests-\(UUID().uuidString)"
+        )
+        cookieStorage.setCookie(try XCTUnwrap(cookie(
+            named: APIClient.csrfCookie,
+            value: "csrf",
+            domain: "retry.example"
+        )))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RetryJobURLProtocol.self]
+        let client = APIClient(
+            baseURL: baseURL,
+            session: URLSession(configuration: configuration),
+            cookieStorage: cookieStorage
+        )
+
+        let result = try await client.retryJob(id: 42, dryRun: false)
+
+        XCTAssertTrue(result.ok)
+        XCTAssertEqual(result.jobID, 43)
+    }
+
     func testEveryStorageSizeRequestUsesServerCompatibleTimeout() async throws {
         StorageTimeoutURLProtocol.timeout = nil
         let configuration = URLSessionConfiguration.ephemeral
@@ -576,6 +600,29 @@ private final class RunAllURLProtocol: URLProtocol {
             && components?.queryItems?.first(where: { $0.name == "dry_run" })?.value == "false"
         let status = valid ? 200 : 404
         let body = Data((valid ? #"{"ok":true,"job_id":91}"# : #"{"detail":"wrong route"}"#).utf8)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: status, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RetryJobURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let components = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+        let valid = request.httpMethod == "POST"
+            && request.url?.path == "/api/jobs/42/retry"
+            && components?.queryItems?.first(where: { $0.name == "dry_run" })?.value == "false"
+        let status = valid ? 200 : 404
+        let body = Data((valid ? #"{"ok":true,"job_id":43}"# : #"{"detail":"wrong route"}"#).utf8)
         let response = HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]

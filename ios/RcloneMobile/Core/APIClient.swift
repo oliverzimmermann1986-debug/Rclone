@@ -78,6 +78,7 @@ protocol APIClientProtocol: AnyObject {
     func getJob(id: Int) async throws -> JobRecord
     func getJobLog(id: Int) async throws -> JobLogResponse
     func downloadJobLog(id: Int) async throws -> URL
+    func retryJob(id: Int, dryRun: Bool) async throws -> ActionResponse
     func getDoctor() async throws -> DoctorResponse
     func getProgress() async throws -> BackupProgress
     func getPBSStatus() async throws -> PBSStatus
@@ -89,6 +90,8 @@ protocol APIClientProtocol: AnyObject {
     func resumeScheduler() async throws -> SchedulerControl
     func registerPushDevice(token: String, environment: String, appVersion: String) async throws -> PushRegistrationResponse
     func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse
+    func getPushStatus() async throws -> PushStatus
+    func testPushNotification() async throws -> ActionResponse
     func logout() async throws -> LogoutResult
     func clearLocalSession()
 }
@@ -99,6 +102,14 @@ extension APIClientProtocol {
     }
 
     func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
+        throw APIError.invalidResponse
+    }
+
+    func getPushStatus() async throws -> PushStatus {
+        throw APIError.invalidResponse
+    }
+
+    func testPushNotification() async throws -> ActionResponse {
         throw APIError.invalidResponse
     }
 }
@@ -348,6 +359,14 @@ final class APIClient: APIClientProtocol {
         try await delete("/api/push/devices", body: PushDeviceRemoval(token: token))
     }
 
+    func getPushStatus() async throws -> PushStatus {
+        try await get("/api/push/status")
+    }
+
+    func testPushNotification() async throws -> ActionResponse {
+        try await post("/api/push/test")
+    }
+
     func getJobDefinitions() async throws -> [JobDefinition] {
         try await get("/api/jobs/definitions")
     }
@@ -487,6 +506,10 @@ final class APIClient: APIClientProtocol {
             "/api/jobs/\(id)/log/download",
             filename: "rclone-sync-job-\(id)-\(UUID().uuidString).log"
         )
+    }
+
+    func retryJob(id: Int, dryRun: Bool = false) async throws -> ActionResponse {
+        try await post("/api/jobs/\(id)/retry?dry_run=\(dryRun)")
     }
 
     func getDoctor() async throws -> DoctorResponse {

@@ -4,7 +4,7 @@
 
 ## Kernfunktionen
 
-- Mehrere Sync-Pairs mit Cron-Zeitplan, manuellen Läufen und begrenzter Parallelität
+- Mehrere Datenwege, geordnete Jobdefinitionen mit Cron-Zeitplan sowie manuelle Läufe mit begrenzter Parallelität
 - Persistente Scheduler-Wartungsfenster mit automatischer Fortsetzung
 - Frischeüberwachung pro Pair für zu alte oder fehlende erfolgreiche Läufe
 - Ausbleib-Alarm: meldet auch den Fall, dass ein Lauf gar nicht erst startet
@@ -17,7 +17,7 @@
 - Per-Pair-Logs, indexierte Pair-Historie, Job-Historie und Live-Fortschritt
 - Read-only `rclone check`, Diagnosebereich und Speicherübersicht
 - Pair-Filter, zentrale Filterdatei, Tuning und optionale Backup-Verzeichnisse
-- Discord-, Telegram- und generische JSON-Webhooks
+- Native APNs-Fehlerbenachrichtigungen mit dauerhafter Outbox, Deduplizierung und Retry
 - Automatische Log-/Datenbankaufbewahrung
 - Konfigurationsrevisionen, Rollbackdatei und sichere Upgrade-Sicherung
 - Responsive Proxmox-Betriebskonsole mit Desktop-Sidebar und mobiler Bottom-Navigation
@@ -34,10 +34,11 @@ Die Oberfläche ist als Betriebszentrale statt als reine Konfigurationsmaske auf
 - **Übersicht:** laufender Job, letzte Ergebnisse, Warnungen, Pair-Gesundheit, nächste Ausführungen und 24-Stunden-Kennzahlen
 - **Proxmox-Systemkarte:** Virtualisierungstyp, Gast-Hostname, IP-Adressen, Uptime, CPU-Load, RAM und Datenträgerauslastung; cgroup-v2-Limits werden berücksichtigt
 - **Startzentrale:** Planvorschau, Dry-Run, produktiver Lauf und Abbruch klar getrennt
-- **Pair-Verwaltung:** responsive Karten, Suche, Statusfilter, sichere Copy-/Restore-/Bi-Sync-/Mirror-Vorlagen, Alle-öffnen/-schließen, Laufzeitfehler, nächste Ausführungen, Klonen, Sortieren, Dry-Run, Produktivlauf und Read-only-Check pro Pair
+- **Datenwege:** responsive Karten, Suche, Statusfilter, sichere Copy-/Bi-Sync-/Mirror-Vorlagen, Klonen, Sortieren, Dry-Run und Read-only-Check
 - **Entwurfsprüfung:** ungespeicherte Pair-Änderungen können direkt gegen rclone geprüft werden; Plan, Check und Start speichern offene Änderungen erst bewusst, damit nie versehentlich ein veralteter Stand läuft
-- **Jobs:** Filter nach Typ und Status, Volltextsuche nach Pair/Fehler/Job-ID, Pagination, CSV-Export, Ergebnisdetails, Live-Log, Logsuche, Kopier- und Downloadfunktion
-- **System:** Doctor-Prüfung, Servicezustände, Speicherübersicht, redigiertes Support-Bundle sowie kontrollierte Log-/Datenbankwartung
+- **Jobs:** geordnete Datenweg-Zuweisung, Zeitplan, sequenzielle oder parallele Ausführung, Retry-Intervall, Planvorschau und bewusster Start
+- **Läufe:** Filter nach Typ und Status, Volltextsuche nach Datenweg/Definition/Fehler/ID, Pagination, CSV-Export, sicherer Retry, Ergebnisdetails, Live-Log, Logsuche, Kopier- und Downloadfunktion
+- **System:** Doctor-Prüfung, Servicezustände, Speicherübersicht, Push-Status/Test, redigiertes Support-Bundle sowie kontrollierte Log-/Datenbankwartung
 - **Recovery:** lokale, vollständige Konfigurations-Snapshots mit SHA-256-Prüfung, Pre-Restore-Sicherung, Revisionsschutz und erzwungener Neuanmeldung nach Restore
 - **Einstellungen:** klar beschriftete Bereiche mit Änderungsstatus, Validierung und kurzen fachlichen Erklärungen
 - **Scheduler-Betriebssteuerung:** Automatik dauerhaft deaktivieren oder für Wartungsfenster von 30 Minuten bis 31 Tage pausieren; manuelle Läufe bleiben möglich
@@ -45,7 +46,7 @@ Die Oberfläche ist als Betriebszentrale statt als reine Konfigurationsmaske auf
 - **Audit:** wichtige Aktionen werden ohne Secrets lokal und filterbar protokolliert
 - **Scheduler-Assistent:** verständliche Auswahl für manuell, täglich, werktags, wöchentlich oder Intervalle; Cron wird automatisch erzeugt, übersetzt und mit den nächsten fünf Terminen in der gewählten Zeitzone geprüft
 - **Leistungsprofile:** „Schonend“, „Ausgewogen“ und „Schnell“ setzen rclone-Parallelität gemeinsam; eine Lastwarnung berücksichtigt aktive Pairs, Transfers und Checkers
-- **Pair-Zeitpläne:** können den globalen Standard ausdrücklich übernehmen oder weiterhin einen eigenen verständlichen Zeitplan verwenden
+- **Job-Zeitpläne:** werden gemeinsam mit Datenweg-Reihenfolge, Parallelität und Fehler-Retry verwaltet
 - **Mobil:** Bottom-Navigation, touch-taugliche Bedienelemente und reduzierte Tabellenbreite für iPhone/Android
 - **Darstellung:** Hell-, Dunkel- oder Systemmodus; Auswahl wird lokal im Browser gespeichert
 
@@ -55,9 +56,9 @@ Tastaturkürzel: `Strg/Cmd + S` speichert offene Konfigurations- bzw. Filteränd
 
 ## Native iPhone-App
 
-Unter [`ios/`](ios/) liegt eine dependency-freie SwiftUI-App ab iOS 17. Sie bietet das verdichtete Lagebild, lokale/cloudseitige Kopien mit Dateizahl und Größe, Jobs, Live-Fortschritt und Abbruch, Laufhistorie mit Logs, getrennte Datenwege, Scheduler-Wartungsfenster, Systemdiagnose und PBS-Starts. Seltene oder riskante Aktionen öffnen in nativen Detailansichten und Bestätigungsdialogen.
+Unter [`ios/`](ios/) liegt eine dependency-freie SwiftUI-App ab iOS 17. Sie bietet das verdichtete Lagebild, lokale/cloudseitige Kopien mit Dateizahl und Größe, Jobs, Live-Fortschritt samt Watchdog-Status und Abbruch, Laufhistorie mit Logs und sicherem Retry, getrennte Datenwege, Push-Diagnose, Scheduler-Wartungsfenster, Systemdiagnose und PBS-Starts. Fehler-Pushs öffnen direkt den betroffenen Lauf. Seltene oder riskante Aktionen öffnen in nativen Detailansichten und Bestätigungsdialogen.
 
-Das Xcode-Projekt wird mit XcodeGen erzeugt. Ohne eigenen Mac übernimmt Codemagic Build, Signierung und TestFlight-Upload; GitHub Actions kompiliert und testet jede iOS-Änderung mit Xcode 26. Einrichtung, Sicherheitsmodell und die noch bestehende Backend-Grenze für die neue Trennung Datenwege → Jobs → Läufe beschreibt [`ios/README.md`](ios/README.md).
+Das Xcode-Projekt wird mit XcodeGen erzeugt. Ohne eigenen Mac übernimmt Codemagic Build, Signierung und TestFlight-Upload; GitHub Actions kompiliert und testet jede iOS-Änderung mit Xcode 26. Einrichtung, Sicherheitsmodell und den nativen Funktionsumfang beschreibt [`ios/README.md`](ios/README.md).
 
 ## Proxmox-Betrieb
 
@@ -115,18 +116,16 @@ Eine Expertenausnahme ist mit `backup.allow_unsafe_rclone_args: true` möglich, 
 - Optimistische Revisionen verhindern stilles Überschreiben paralleler Änderungen
 - `config.yaml.bak` enthält genau eine geschützte Vorversion
 - vollständige GUI-Snapshots verbleiben mit Modus `0600` im lokalen Datenverzeichnis; Wiederherstellungen prüfen Name, Größe, SHA-256, aktuelle Revision und Passwort
-- das herunterladbare Support-Bundle enthält nur eine redigierte Konfiguration, System-/DB-Diagnose und Log-Inventar, niemals Log-Inhalte, Passwörter, Session-Secrets oder Webhook-URLs
-- Webhook-URLs werden im Browser maskiert und beim Speichern anhand stabiler IDs erhalten
-- Webhooks standardmäßig nur über HTTPS; private/lokale Ziele und Redirect-SSRF werden blockiert
-- DNS-Pinning zwischen Prüfung und Verbindung reduziert Rebinding-Risiken
+- das herunterladbare Support-Bundle enthält nur eine redigierte Konfiguration, System-/DB-Diagnose und Log-Inventar, niemals Log-Inhalte, Passwörter, Session-Secrets, APNs-Schlüssel oder Gerätetokens
+- APNs-Schlüsseldateien müssen innerhalb des geschützten Datenverzeichnisses liegen; Gerätetokens laufen per Lease aus und endgültig abgewiesene Tokens werden entfernt
+- Push-Ereignisse werden vor dem Netzversuch persistent gespeichert, dedupliziert und mit begrenztem Backoff erneut zugestellt
 - rclone-Unterprozesse erhalten `RCLONE_ASK_PASSWORD=false` und können keine Dienste blockierend nach einem Passwort fragen
 - systemd-Sandbox mit leerem Capability-Set, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectProc=invisible`, deaktiviertem Uvicorn-Serverheader und restriktiven Schreibpfaden
 
-Webhook-Nutzlasten enthalten Pair-Namen, Pfade und Fehlertexte. Enthalten
-Ordnernamen personenbezogene Daten, ist ein Versand an Discord oder Telegram eine
-Drittlandübermittlung (Art. 44 ff. DSGVO); in diesem Fall den generischen
-JSON-Webhook auf ein selbst gehostetes Ziel richten. Zugangsdaten werden in
-Nutzlasten, Logs und Support-Bundles maskiert.
+Push-Nutzlasten können Job-/Datenwegnamen und gekürzte Fehlertexte enthalten und
+werden über Apples APNs übertragen. Enthalten Namen personenbezogene Daten, sollte
+die Funktion nur nach der eigenen Datenschutzprüfung aktiviert werden.
+Zugangsdaten werden in Nutzlasten, Logs und Support-Bundles maskiert.
 
 Die mitgelieferte Unit startet absichtlich genau **einen Uvicorn-Worker**. Die zentralen Daten, Locks und Login-Sperren sind prozessübergreifend, aber ein einzelner Worker hält Jobsteuerung und Web-Lebenszyklus eindeutig und vereinfacht den Betrieb.
 
@@ -229,7 +228,8 @@ Wichtige globale Werte:
 
 - `backup.timezone`: Zeitzone für Cron-Auswertung, standardmäßig `Europe/Berlin`
 - `backup.max_parallel`: maximale Zahl paralleler, nicht überlappender Pairs
-- `backup.timeout_hours`: Timeout pro rclone-Lauf
+- `backup.timeout_hours`: Stillstands-Timeout; nur echter Transfer-/Check-/Dateifortschritt verlängert die Frist
+- `backup.max_runtime_hours`: optionale absolute Laufzeitgrenze (`0` = deaktiviert); systemd setzt kein zusätzliches Hardlimit
 - `backup.scheduler_retry_minutes`: Backoff nach fehlgeschlagenen geplanten Läufen
 - `backup.scheduler_grace_minutes`: zulässiges Startfenster rund um den Cron-Zeitpunkt
 - `backup.run_on_first_tick`: noch nie gelaufene Pairs nicht sofort beim ersten Timer-Tick starten
@@ -242,7 +242,7 @@ Wichtige globale Werte:
 - `web.secure_cookie`: `false` bei direktem HTTP, `true` hinter festem HTTPS oder `auto` nur bei korrekt vertrautem Proxy
 - `web.hsts_seconds`: erst bei dauerhaftem HTTPS aktivieren
 - `web.local_browse_roots`: erlaubte lokale Browser-/Quick-Sync-Wurzeln
-- `notifications.allow_http` und `allow_private_targets`: nur für bewusst vertrauenswürdige interne Ziele
+- `notifications.apns`: native Fehler-Pushs mit dauerhafter Outbox, Retry und Geräte-Lease
 - `maintenance.job_retention_days`, `keep_latest_jobs` und `log_retention_days`: Aufbewahrung
 
 Wichtige Pair-Werte:
@@ -251,7 +251,6 @@ Wichtige Pair-Werte:
 - `enabled`: Beispiel-Pairs sind absichtlich deaktiviert
 - `direction`: `bisync`, `pull` oder `push`
 - `mode`: bei einseitigen Pairs `copy` oder `sync`
-- `schedule`: Cron-Ausdruck oder `manual`
 - `allow_delete`: produktive Mirror-Löschungen ausdrücklich freigeben
 - `max_delete`: maximal erlaubte Löschungen
 - `require_mountpoint`, `mountpoint`, `sentinel_file`: Mountschutz
@@ -260,7 +259,7 @@ Wichtige Pair-Werte:
 - `rclone_args`: zusätzliche, validierte Argumente
 
 Sicherheitsrelevante Änderungen – etwa Benutzername, PBS-Ziel/Secret,
-Webhook-Ziele, lokale Browser-Wurzeln oder das Abschalten von Schutzschaltern –
+lokale Browser-Wurzeln oder das Abschalten von Schutzschaltern –
 verlangen beim Speichern zusätzlich das aktuelle Webpasswort.
 
 ### Richtungslogik
@@ -291,13 +290,13 @@ Vor jedem produktiven `sync` oder `bisync`: Pfade, Mount/Sentinel, Plan, Dry-Run
 
 ## Scheduler
 
-Der Timer startet jede Minute einen kurzen Scheduler-Tick. Dieser entscheidet pro Pair anhand von Cron-Ausdruck, Zeitzone, Historie und Fehler-Backoff.
+Der Timer startet jede Minute einen kurzen Scheduler-Tick. Dieser entscheidet pro aktiver Jobdefinition anhand von Cron-Ausdruck, Zeitzone, Jobhistorie und Fehler-Backoff.
 
 - Geplante und manuelle Läufe werden getrennt gespeichert.
 - Nur fehlgeschlagene Scheduler-Läufe lösen automatische Backoff-Wiederholungen aus.
 - Ein manueller Fehler startet nicht unbeabsichtigt eine automatische Retry-Schleife.
-- Erfolgreiche Pairs eines teilweise fehlgeschlagenen Sammeljobs werden nicht erneut ausgeführt.
-- Überlappende lokale oder Remote-Pfade werden automatisch seriell verarbeitet.
+- Datenwege laufen in der gespeicherten Reihenfolge oder – nur innerhalb einer Definition – bis zum festgelegten Parallelitätslimit.
+- Mehrere fällige Jobdefinitionen werden unter einem globalen Prozess-Lock nacheinander ausgeführt; gemeinsam verwendete Pfade können dadurch nicht kollidieren.
 - Der alte tägliche Voll-Run-Timer bleibt standardmäßig deaktiviert.
 
 ## systemd
@@ -305,9 +304,9 @@ Der Timer startet jede Minute einen kurzen Scheduler-Tick. Dieser entscheidet pr
 | Unit | Funktion | Standard |
 |---|---|---|
 | `rclone-sync-web.service` | FastAPI-Web-UI auf Port 8001 | aktiv |
-| `sync-scheduler.timer` | prüft jede Minute fällige Pair-Zeitpläne | aktiv |
+| `sync-scheduler.timer` | prüft jede Minute fällige Jobdefinitionen | aktiv |
 | `sync-scheduler.service` | führt einen Scheduler-Tick aus | timer-gesteuert |
-| `rclone-sync.service` | manueller Voll-Run aller aktiven Pairs | inaktiv |
+| `rclone-sync.service` | manueller Voll-Run aller aktiven Jobdefinitionen | inaktiv |
 | `rclone-sync.timer` | alter täglicher Voll-Run | deaktiviert |
 
 Die Units verwenden fest:
@@ -385,6 +384,11 @@ Wichtige Endpunkte:
 - `GET /api/jobs/search?kind=&status=&q=&limit=&offset=`
 - `GET /api/jobs/export.csv?kind=&status=&q=`
 - `GET /api/jobs/{id}/log/download`
+- `POST /api/jobs/{id}/retry?dry_run=false` – nur revisionsgebundene Fehlerläufe
+- `GET /api/jobs/definitions`
+- `GET /api/jobs/definitions/{id}/plan?dry_run=true`
+- `POST /api/jobs/definitions/{id}/run?dry_run=false`
+- `POST /api/jobs/definitions/run-all?dry_run=false`
 - `GET /api/jobs/backup/plan`
 - `POST /api/jobs/backup/run?dry_run=true`
 - `POST /api/jobs/backup/run-pair/{pair}?dry_run=true`
@@ -404,6 +408,8 @@ Wichtige Endpunkte:
 - `GET|POST /api/maintenance/config/snapshots`
 - `POST /api/maintenance/config/snapshots/restore`
 - `GET /api/maintenance/support-bundle`
+- `GET /api/push/status`
+- `POST /api/push/test`
 - `GET /healthz` – Prozess-Liveness
 - `GET /readyz` – DB-/Datenverzeichnis-Readiness für Uptime Kuma/systemd
 - `GET /healthz/deep` – authentifiziert
@@ -418,7 +424,7 @@ Regelmäßig sichern:
 - `/opt/rclone-sync/data/.rclone-cache/`, insbesondere das bisync-Workdir
 - `/home/rclone-sync/.config/rclone/rclone.conf`
 
-Die Anwendung hält mindestens `maintenance.keep_latest_jobs` Jobs, auch wenn diese älter als die Retention sind. SQLite-Integrität, Checkpoint und Log-Retention sind über Weboberfläche und CLI prüfbar.
+Die Anwendung hält mindestens `maintenance.keep_latest_jobs` Jobs, auch wenn diese älter als die Retention sind. SQLite-Integrität, Checkpoint und Log-Retention sind über Weboberfläche und CLI prüfbar. Abgelaufene Push-Geräte und alte abgeschlossene Outbox-Einträge werden bei der automatischen oder manuellen Datenbankwartung ebenfalls entfernt.
 
 Fehlt der bisync-State, nicht blind automatisch resyncen. Zuerst beide Seiten, Filter, Richtung, Konfliktstrategie und Dry-Run prüfen.
 

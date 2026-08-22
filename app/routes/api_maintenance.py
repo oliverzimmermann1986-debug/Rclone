@@ -38,6 +38,11 @@ router = APIRouter(
 )
 logger = logging.getLogger(__name__)
 _SENSITIVE_EXPORT_KEYS = {
+    "access_token",
+    "api_key",
+    "authorization",
+    "client_secret",
+    "cookie",
     "password",
     "password_hash",
     "secret",
@@ -47,6 +52,7 @@ _SENSITIVE_EXPORT_KEYS = {
     "credentials",
     "access_key",
     "private_key",
+    "refresh_token",
 }
 
 
@@ -140,12 +146,16 @@ def prune_database(
     deleted = db.jobs_prune(days, keep_latest)
     auth_deleted = db.auth_prune(7)
     audit_deleted = db.audit_prune(max(days, 365), max(keep_latest, 1000))
+    push_devices_deleted = db.push_device_prune_expired()
+    push_outbox_deleted = db.push_outbox_prune(older_than_days=30)
     db.checkpoint()
     result = {
         "ok": True,
         "deleted_jobs": deleted,
         "deleted_auth_rows": auth_deleted,
         "deleted_audit_events": audit_deleted,
+        "deleted_push_devices": push_devices_deleted,
+        "deleted_push_outbox": push_outbox_deleted,
         "stats": db.stats(),
     }
     _audit_best_effort(
@@ -156,6 +166,8 @@ def prune_database(
             "deleted_jobs": deleted,
             "deleted_auth_rows": auth_deleted,
             "deleted_audit_events": audit_deleted,
+            "deleted_push_devices": push_devices_deleted,
+            "deleted_push_outbox": push_outbox_deleted,
         },
     )
     return result
@@ -171,14 +183,8 @@ def _redacted_export() -> dict[str, Any]:
     pbs = config.get("pbs")
     if isinstance(pbs, dict) and "password" in pbs:
         pbs["password"] = "***REDACTED***"
-    notifications = config.get("notifications")
-    if isinstance(notifications, dict):
-        hooks = notifications.get("webhooks")
-        if isinstance(hooks, list):
-            for hook in hooks:
-                if isinstance(hook, dict) and hook.get("url"):
-                    hook["url"] = "***REDACTED***"
-    return config
+    redacted = _redact_diagnostics(config)
+    return redacted if isinstance(redacted, dict) else {}
 
 
 @router.get("/config/export")
@@ -431,7 +437,7 @@ def support_bundle() -> Response:
     ) as archive:
         archive.writestr(
             "README.txt",
-            "rclone-sync Support-Bundle\n\nEnthält keine Passwörter, Session-Secrets oder Webhook-URLs. "
+            "rclone-sync Support-Bundle\n\nEnthält keine Passwörter, Tokens oder Session-Secrets. "
             "Lokale Pfade, Remote-Namen und Job-Fehler können zur Diagnose enthalten sein.\n",
         )
         archive.writestr(

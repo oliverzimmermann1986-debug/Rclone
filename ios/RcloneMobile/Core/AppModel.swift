@@ -24,6 +24,11 @@ enum ConfigSaveIssue: Equatable {
     case validation([String])
 }
 
+private struct PendingPushRevocation: Codable, Equatable {
+    let server: String
+    let token: String
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     enum Phase: Equatable {
@@ -57,9 +62,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published var errorMessage: String?
     @Published var actionMessage: String?
+    @Published private(set) var requestedRunID: Int?
 
     private(set) var client: (any APIClientProtocol)?
     private var registeredPushToken: String?
+    private let pendingPushRevocationsKey = "pendingPushRevocations"
     private let defaults: UserDefaults
     private let clientFactory: (URL) -> any APIClientProtocol
     private var sessionGeneration = 0
@@ -110,6 +117,7 @@ final class AppModel: ObservableObject {
             try Task.checkCancellation()
             guard isCurrentSession(generation) else { return }
             client = newClient
+            await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
             config = restoredConfig
             jobDefinitions = restoredConfig.backup.jobs
             configState = .loaded
@@ -149,6 +157,7 @@ final class AppModel: ObservableObject {
             defaults.set(url.absoluteString, forKey: "serverAddress")
             defaults.set(username, forKey: "username")
             client = newClient
+            await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
             phase = .signedIn
             await refresh()
         } catch is CancellationError {
@@ -696,6 +705,10 @@ final class AppModel: ObservableObject {
         let session = sessionGeneration
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
         do {
+            await retryPendingPushRevocations(
+                using: currentClient,
+                server: serverAddress
+            )
             _ = try await currentClient.registerPushDevice(
                 token: token,
                 environment: environment,
@@ -714,8 +727,15 @@ final class AppModel: ObservableObject {
 
     func logout() async {
         let exitingClient = client
+        var pushWarning: String?
         if let registeredPushToken {
-            _ = try? await exitingClient?.unregisterPushDevice(token: registeredPushToken)
+            do {
+                _ = try await exitingClient?.unregisterPushDevice(token: registeredPushToken)
+                removePendingPushRevocation(server: serverAddress, token: registeredPushToken)
+            } catch {
+                rememberPendingPushRevocation(server: serverAddress, token: registeredPushToken)
+                pushWarning = "Die Push-Registrierung konnte offline nicht sofort vom Server entfernt werden. Sie wurde lokal beendet, wird beim nächsten Login erneut widerrufen und läuft serverseitig automatisch aus."
+            }
         }
         beginSessionTransition()
         errorMessage = nil
@@ -727,8 +747,82 @@ final class AppModel: ObservableObject {
         } catch {
             errorMessage = "Du wurdest auf diesem Gerät abgemeldet. Ob andere Sitzungen beendet wurden, konnte nicht bestätigt werden: \(userMessage(for: error))"
         }
+        if let pushWarning {
+            errorMessage = [errorMessage, pushWarning]
+                .compactMap { $0 }
+                .joined(separator: "\n\n")
+        }
         exitingClient?.clearLocalSession()
         registeredPushToken = nil
+    }
+
+    func retryJob(id: Int) async -> Bool {
+        await runOperationalAction(success: "Job wurde erneut gestartet.") { client in
+            try await client.retryJob(id: id, dryRun: false)
+        }
+    }
+
+    func requestRunNavigation(id: Int) {
+        guard id > 0 else { return }
+        requestedRunID = id
+    }
+
+    func consumeRequestedRun(id: Int) {
+        guard requestedRunID == id else { return }
+        requestedRunID = nil
+    }
+
+    private func pendingPushRevocations() -> [PendingPushRevocation] {
+        guard let data = defaults.data(forKey: pendingPushRevocationsKey) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([PendingPushRevocation].self, from: data)) ?? []
+    }
+
+    private func savePendingPushRevocations(_ items: [PendingPushRevocation]) {
+        if items.isEmpty {
+            defaults.removeObject(forKey: pendingPushRevocationsKey)
+            return
+        }
+        if let data = try? JSONEncoder().encode(items) {
+            defaults.set(data, forKey: pendingPushRevocationsKey)
+        }
+    }
+
+    private func rememberPendingPushRevocation(server: String, token: String) {
+        let candidate = PendingPushRevocation(server: server, token: token)
+        var items = pendingPushRevocations()
+        if !items.contains(candidate) {
+            items.append(candidate)
+        }
+        savePendingPushRevocations(items)
+    }
+
+    private func removePendingPushRevocation(server: String, token: String) {
+        savePendingPushRevocations(
+            pendingPushRevocations().filter {
+                $0.server != server || $0.token != token
+            }
+        )
+    }
+
+    private func retryPendingPushRevocations(
+        using client: any APIClientProtocol,
+        server: String
+    ) async {
+        let matching = pendingPushRevocations().filter { $0.server == server }
+        guard !matching.isEmpty else { return }
+        var remaining = pendingPushRevocations()
+        for item in matching {
+            do {
+                _ = try await client.unregisterPushDevice(token: item.token)
+                remaining.removeAll { $0 == item }
+            } catch {
+                // Die Server-Lease begrenzt den Restzeitraum. Ein fehlgeschlagener
+                // Nachholversuch darf die eigentliche Anmeldung nicht blockieren.
+            }
+        }
+        savePendingPushRevocations(remaining)
     }
 
     func cancelSessionRestore() {

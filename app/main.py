@@ -177,6 +177,19 @@ def _run_startup_maintenance() -> None:
         logger.exception("Automatische Wartung fehlgeschlagen")
 
 
+def _run_push_dispatcher(stop_event: threading.Event) -> None:
+    from .push_notifications import dispatch_pending_pushes
+
+    while not stop_event.is_set():
+        try:
+            result = dispatch_pending_pushes()
+            if result.get("sent") or result.get("retrying") or result.get("failed"):
+                logger.info("APNs-Outbox verarbeitet: %s", result)
+        except Exception:
+            logger.exception("APNs-Outbox konnte nicht verarbeitet werden")
+        stop_event.wait(30)
+
+
 @asynccontextmanager
 async def _lifespan(_app):
     db = get_db()
@@ -217,9 +230,19 @@ async def _lifespan(_app):
         name="startup-maintenance",
         daemon=True,
     ).start()
+    push_stop = threading.Event()
+    push_thread = threading.Thread(
+        target=_run_push_dispatcher,
+        args=(push_stop,),
+        name="push-outbox",
+        daemon=True,
+    )
+    push_thread.start()
     try:
         yield
     finally:
+        push_stop.set()
+        push_thread.join(timeout=2)
         _sd_notify("STOPPING=1")
 
 
