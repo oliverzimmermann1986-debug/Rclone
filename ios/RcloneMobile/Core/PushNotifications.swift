@@ -3,11 +3,13 @@ import UserNotifications
 
 extension Notification.Name {
     static let pushDeviceTokenReady = Notification.Name("pushDeviceTokenReady")
+    static let pushNavigationRequested = Notification.Name("pushNavigationRequested")
 }
 
 @MainActor
 final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     private(set) var registration: (token: String, environment: String)?
+    private var pendingNavigationJobID: Int?
 
     func application(
         _ application: UIApplication,
@@ -35,6 +37,11 @@ final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUser
         registration = nil
     }
 
+    func consumePendingNavigationJobID() -> Int? {
+        defer { pendingNavigationJobID = nil }
+        return pendingNavigationJobID
+    }
+
     func application(
         _ application: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
@@ -58,5 +65,31 @@ final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUser
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
         [.banner, .list, .sound]
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let userInfo = response.notification.request.content.userInfo
+        guard let jobID = Self.jobID(from: userInfo) else { return }
+        pendingNavigationJobID = jobID
+        NotificationCenter.default.post(
+            name: .pushNavigationRequested,
+            object: nil,
+            userInfo: ["job_id": jobID]
+        )
+    }
+
+    private static func jobID(from userInfo: [AnyHashable: Any]) -> Int? {
+        if let value = userInfo["job_id"] as? Int, value > 0 { return value }
+        if let value = userInfo["job_id"] as? NSNumber, value.intValue > 0 {
+            return value.intValue
+        }
+        if let value = userInfo["job_id"] as? String,
+           let parsed = Int(value), parsed > 0 {
+            return parsed
+        }
+        return nil
     }
 }

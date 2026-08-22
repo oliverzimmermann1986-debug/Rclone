@@ -960,6 +960,9 @@ def backup_progress() -> dict[str, Any]:
             "status": pair_state.get("status", "pending"),
             "log_file": log_file,
             "error": pair_state.get("error"),
+            "last_progress_at": pair_state.get("last_progress_at"),
+            "stall_timeout_sec": pair_state.get("stall_timeout_sec"),
+            "max_runtime_sec": pair_state.get("max_runtime_sec"),
             **_latest_stats(text),
         }
         pairs_status.append(item)
@@ -1361,6 +1364,58 @@ def cleanup_failed_jobs() -> dict[str, Any]:
     deleted = get_db().jobs_delete_failed()
     _audit_best_effort("failed_jobs_cleaned", actor="web", details={"deleted": deleted})
     return {"ok": True, "deleted": deleted}
+
+
+@router.post("/{job_id}/retry")
+def retry_job(job_id: int, dry_run: bool = Query(False)) -> dict[str, Any]:
+    previous = get_db().job_get(job_id)
+    if not previous:
+        raise HTTPException(404, "Job nicht gefunden")
+    if previous.get("status") == "running":
+        raise HTTPException(409, "Ein laufender Job kann nicht erneut gestartet werden")
+    if previous.get("status") not in {"error", "cancelled", "stale"}:
+        raise HTTPException(
+            409,
+            "Nur fehlgeschlagene, abgebrochene oder veraltete Jobs können erneut gestartet werden",
+        )
+    if previous.get("kind") != "backup":
+        raise HTTPException(
+            409,
+            "Nur definitionsbasierte Sicherungsjobs können sicher wiederholt werden",
+        )
+    definition_id = str(previous.get("definition_id") or "").strip()
+    previous_revision = str(previous.get("config_revision") or "").strip()
+    if not definition_id or not previous_revision:
+        raise HTTPException(
+            409,
+            "Der alte Lauf enthält keine revisionsgebundene Jobdefinition",
+        )
+    snapshot, current_revision = get_config().snapshot_with_revision()
+    current_revision = str(current_revision or "")
+    if current_revision != previous_revision:
+        raise HTTPException(
+            409,
+            "Die Konfiguration wurde seit diesem Lauf geändert. Bitte Job neu planen und bewusst starten.",
+        )
+    definition, pair_names = _resolved_definition(snapshot, definition_id)
+    result = _queue_backup(
+        dry_run=dry_run,
+        pairs_filter=pair_names,
+        definition=definition,
+        config_snapshot=snapshot,
+        config_revision=current_revision,
+    )
+    _audit_best_effort(
+        "backup_retried",
+        actor="web",
+        details={
+            "source_job_id": job_id,
+            "new_job_id": result.get("job_id"),
+            "definition_id": definition_id,
+            "dry_run": dry_run,
+        },
+    )
+    return {**result, "retry_of_job_id": job_id}
 
 
 @router.get("/status/current")

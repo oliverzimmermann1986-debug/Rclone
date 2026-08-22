@@ -290,6 +290,31 @@ def test_webhook_management_is_not_exposed_in_the_user_interface():
     assert "result.notifications.webhooks ||= []" not in javascript
 
 
+def test_push_delivery_status_and_test_are_visible_without_webhooks():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "Push-Mitteilungen" in html
+    assert "push.status?.outbox?.pending" in html
+    assert "push.status?.outbox?.failed" in html
+    assert "Testmitteilung" in html
+    assert "loadPushStatus(true)" in javascript
+    assert "'/api/push/status'" in javascript
+    assert "'/api/push/test'" in javascript
+
+
+def test_failed_job_retry_is_revision_bound_and_visible_in_run_detail():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "canRetryJob(jobModal.job)" in html
+    assert "Job erneut starten" in html
+    assert "job?.definition_id" in javascript
+    assert "job?.config_revision" in javascript
+    assert "`/api/jobs/${job.id}/retry?dry_run=false`" in javascript
+    assert "unverändert" in javascript
+
+
 def test_canonical_jobs_ui_separates_data_paths_definitions_and_runs():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     javascript = (STATIC / "app.js").read_text(encoding="utf-8")

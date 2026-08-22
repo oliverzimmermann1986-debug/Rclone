@@ -225,6 +225,24 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.actionMessage, "Alle aktiven Jobs wurden gestartet.")
     }
 
+    func testRetryJobUsesDedicatedClientCallAndKeepsPushNavigationTarget() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.retryResponse = ActionResponse(ok: true, jobID: 43, error: nil)
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        model.requestRunNavigation(id: 42)
+        let started = await model.retryJob(id: 42)
+
+        XCTAssertTrue(started)
+        XCTAssertEqual(client.retriedJobIDs, [42])
+        XCTAssertEqual(model.actionMessage, "Job wurde erneut gestartet.")
+        XCTAssertEqual(model.requestedRunID, 42)
+        model.consumeRequestedRun(id: 42)
+        XCTAssertNil(model.requestedRunID)
+    }
+
     func testJobDefinitionsAreAcceptedOnlyFromRevisionBoundConfigSnapshot() async {
         let defaults = makeDefaults()
         let client = StubAPIClient()
@@ -275,6 +293,7 @@ private final class StubAPIClient: APIClientProtocol {
     var updateConfigError: Error?
     var passwordChangeResponse: PasswordChangeResponse?
     var runAllResponse: ActionResponse?
+    var retryResponse: ActionResponse?
     var pbsError: Error?
     var unregisterPushError: Error?
     var baseConfig: ConfigSnapshot?
@@ -283,6 +302,7 @@ private final class StubAPIClient: APIClientProtocol {
     private(set) var jobsCallCount = 0
     private(set) var doctorCallCount = 0
     private(set) var runAllCallCount = 0
+    private(set) var retriedJobIDs: [Int] = []
     private(set) var definitionsCallCount = 0
     private(set) var unregisterPushCallCount = 0
 
@@ -368,6 +388,11 @@ private final class StubAPIClient: APIClientProtocol {
     func getJob(id: Int) async throws -> JobRecord { throw APIError.invalidResponse }
     func getJobLog(id: Int) async throws -> JobLogResponse { throw APIError.invalidResponse }
     func downloadJobLog(id: Int) async throws -> URL { throw APIError.invalidResponse }
+    func retryJob(id: Int, dryRun: Bool) async throws -> ActionResponse {
+        retriedJobIDs.append(id)
+        guard let retryResponse else { throw APIError.invalidResponse }
+        return retryResponse
+    }
     func getDoctor() async throws -> DoctorResponse {
         doctorCallCount += 1
         return DoctorResponse(ok: true, level: "ok", checks: [], generatedAt: 1_720_000_000)

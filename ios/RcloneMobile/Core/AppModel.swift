@@ -62,6 +62,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published var errorMessage: String?
     @Published var actionMessage: String?
+    @Published private(set) var requestedRunID: Int?
 
     private(set) var client: (any APIClientProtocol)?
     private var registeredPushToken: String?
@@ -753,6 +754,22 @@ final class AppModel: ObservableObject {
         }
         exitingClient?.clearLocalSession()
         registeredPushToken = nil
+    }
+
+    func retryJob(id: Int) async -> Bool {
+        await runOperationalAction(success: "Job wurde erneut gestartet.") { client in
+            try await client.retryJob(id: id, dryRun: false)
+        }
+    }
+
+    func requestRunNavigation(id: Int) {
+        guard id > 0 else { return }
+        requestedRunID = id
+    }
+
+    func consumeRequestedRun(id: Int) {
+        guard requestedRunID == id else { return }
+        requestedRunID = nil
     }
 
     private func pendingPushRevocations() -> [PendingPushRevocation] {

@@ -105,6 +105,8 @@ private struct JobRow: View {
 struct RunsScreen: View {
     @EnvironmentObject private var model: AppModel
     @Binding var showingSettings: Bool
+    @State private var linkedJob: JobRecord?
+    @State private var showingLinkedJob = false
 
     var body: some View {
         RunsListView()
@@ -112,6 +114,23 @@ struct RunsScreen: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
             }
+            .navigationDestination(isPresented: $showingLinkedJob) {
+                if let linkedJob { RunDetailView(job: linkedJob).id(linkedJob.id) }
+            }
+            .task(id: model.requestedRunID) { await openRequestedRun() }
+    }
+
+    private func openRequestedRun() async {
+        guard let jobID = model.requestedRunID else { return }
+        do {
+            linkedJob = try await model.withCurrentClient { try await $0.getJob(id: jobID) }
+            showingLinkedJob = true
+            model.consumeRequestedRun(id: jobID)
+        } catch is CancellationError {
+        } catch {
+            model.errorMessage = "Der Lauf aus der Mitteilung konnte nicht geöffnet werden: \(error.localizedDescription)"
+            model.consumeRequestedRun(id: jobID)
+        }
     }
 }
 
@@ -267,6 +286,9 @@ private struct RunRow: View {
     }
 
     private var label: String {
+        if let definitionName = job.definitionName, !definitionName.isEmpty {
+            return definitionName
+        }
         switch job.kind { case "backup": "Sicherung #\(job.id)"; case "check": "Prüfung #\(job.id)"; case "pbs": "PBS #\(job.id)"; default: "Lauf #\(job.id)" }
     }
     private var symbol: String { job.kind == "check" ? "checkmark.shield" : "arrow.triangle.2.circlepath" }
@@ -282,6 +304,8 @@ struct RunDetailView: View {
     @State private var detailError: String?
     @State private var logError: String?
     @State private var logDownloadURL: URL?
+    @State private var showRetryConfirmation = false
+    @State private var isRetrying = false
 
     var body: some View {
         List {
@@ -290,8 +314,29 @@ struct RunDetailView: View {
                 LabeledContent("Gestartet", value: AppFormat.date(detail?.startedAt ?? job.startedAt))
                 LabeledContent("Dauer", value: AppFormat.duration(start: detail?.startedAt ?? job.startedAt, end: detail?.endedAt ?? job.endedAt))
                 LabeledContent("Typ", value: (detail?.kind ?? job.kind).uppercased())
+                if let definitionName = currentJob.definitionName, !definitionName.isEmpty {
+                    LabeledContent("Job", value: definitionName)
+                }
                 if isDetailLoading { ProgressView("Metadaten werden aktualisiert …") }
                 if let detailError { Text(detailError).font(.caption).foregroundStyle(.orange) }
+            }
+            if isRetryCandidate {
+                Section("Aktionen") {
+                    if canRetry {
+                        Button { showRetryConfirmation = true } label: {
+                            if isRetrying {
+                                ProgressView()
+                            } else {
+                                Label("Job erneut starten", systemImage: "arrow.clockwise")
+                            }
+                        }
+                        .disabled(isRetrying)
+                    } else {
+                        Text("Dieser ältere Lauf enthält keine sichere Bindung an Jobdefinition und Konfigurationsstand. Öffne den Job, prüfe den Plan und starte ihn dort neu.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             Section("Protokoll") {
                 if isLogLoading {
@@ -323,6 +368,34 @@ struct RunDetailView: View {
             async let logTask: Void = loadLog()
             _ = await (detailTask, logTask)
         }
+        .confirmationDialog(
+            "Job erneut starten?",
+            isPresented: $showRetryConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Jetzt erneut starten") { Task { await retryJob() } }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Der Server startet nur dieselbe Jobdefinition, wenn sich die Konfiguration seit diesem Lauf nicht geändert hat. Andernfalls musst du zuerst einen neuen Plan prüfen.")
+        }
+    }
+
+    private var currentJob: JobRecord { detail ?? job }
+
+    private var isRetryCandidate: Bool {
+        currentJob.kind == "backup" && ["error", "cancelled", "stale"].contains(currentJob.status)
+    }
+
+    private var canRetry: Bool {
+        isRetryCandidate
+            && !(currentJob.definitionID ?? "").isEmpty
+            && !(currentJob.configRevision ?? "").isEmpty
+    }
+
+    private func retryJob() async {
+        isRetrying = true
+        defer { isRetrying = false }
+        _ = await model.retryJob(id: currentJob.id)
     }
 
     private func loadDetail() async {

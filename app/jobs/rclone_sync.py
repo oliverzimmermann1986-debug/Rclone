@@ -367,7 +367,7 @@ def cancel_job(scope: str = DEFAULT_CANCEL_SCOPE) -> dict[str, Any]:
         except Exception:
             logger.exception("Cancel-Benachrichtigung fehlgeschlagen")
 
-    # Webhooks (bis zu 60s Timeout) dürfen den Cancel-Request nicht blockieren.
+    # Benachrichtigungen dürfen den Cancel-Request nicht blockieren.
     threading.Thread(
         target=_notify_cancelled, name="notify-cancelled", daemon=True
     ).start()

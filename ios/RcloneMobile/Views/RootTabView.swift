@@ -46,6 +46,13 @@ struct RootTabView: View {
         } message: {
             Text(model.actionMessage ?? "")
         }
+        .onAppear { selectRequestedRunIfNeeded() }
+        .onChange(of: model.requestedRunID) { _, _ in selectRequestedRunIfNeeded() }
+    }
+
+    private func selectRequestedRunIfNeeded() {
+        guard model.requestedRunID != nil else { return }
+        selectedTab = 3
     }
 }
 struct SettingsButton: View {

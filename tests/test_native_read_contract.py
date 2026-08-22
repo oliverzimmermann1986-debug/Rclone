@@ -17,6 +17,7 @@ from app.routes import (
     api_jobs,
     api_maintenance,
     api_pbs,
+    api_push,
     api_storage,
 )
 
@@ -162,6 +163,7 @@ def test_contract_manifest_is_versioned_and_covers_native_reads():
         "maintenance_audit",
         "maintenance_logs",
         "maintenance_database",
+        "push_status",
         "config_snapshots",
         "filter_file",
     }
@@ -195,6 +197,32 @@ def test_new_native_operations_fixtures_match_supported_read_routes(
         _body("maintenance_audit"),
     )
     _assert_shape(api_maintenance.database_status(), _body("maintenance_database"))
+
+    class PushConfig:
+        def get(self, *keys: str, default: Any = None) -> Any:
+            if keys == ("notifications", "apns"):
+                return {
+                    "enabled": True,
+                    "team_id": "ABCDEFGHIJ",
+                    "key_id": "KLMNOPQRST",
+                    "key_file": "/data/AuthKey.p8",
+                    "topic": "de.example.rclone",
+                    "events": ["sync_error"],
+                    "device_lease_days": 7,
+                }
+            return default
+
+    class PushDB:
+        def push_devices(self, *, limit: int) -> list[dict[str, Any]]:
+            assert limit == 128
+            return [{"token": "ab" * 32}]
+
+        def push_outbox_status(self) -> dict[str, Any]:
+            return copy.deepcopy(_body("push_status")["outbox"])
+
+    monkeypatch.setattr(api_push, "get_config", lambda: PushConfig())
+    monkeypatch.setattr(api_push, "get_db", lambda: PushDB())
+    _assert_shape(api_push.push_status(), _body("push_status"))
 
     log_root = tmp_path / "logs"
     log_root.mkdir()
@@ -266,6 +294,9 @@ def test_progress_fixture_matches_running_route_output(monkeypatch: pytest.Monke
                     "status": "running",
                     "log_file": "/logs/42-fotos.log",
                     "error": None,
+                    "last_progress_at": 1_720_000_025,
+                    "stall_timeout_sec": 14_400,
+                    "max_runtime_sec": None,
                 }
             },
         },
