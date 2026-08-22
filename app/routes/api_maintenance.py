@@ -146,12 +146,16 @@ def prune_database(
     deleted = db.jobs_prune(days, keep_latest)
     auth_deleted = db.auth_prune(7)
     audit_deleted = db.audit_prune(max(days, 365), max(keep_latest, 1000))
+    push_devices_deleted = db.push_device_prune_expired()
+    push_outbox_deleted = db.push_outbox_prune(older_than_days=30)
     db.checkpoint()
     result = {
         "ok": True,
         "deleted_jobs": deleted,
         "deleted_auth_rows": auth_deleted,
         "deleted_audit_events": audit_deleted,
+        "deleted_push_devices": push_devices_deleted,
+        "deleted_push_outbox": push_outbox_deleted,
         "stats": db.stats(),
     }
     _audit_best_effort(
@@ -162,6 +166,8 @@ def prune_database(
             "deleted_jobs": deleted,
             "deleted_auth_rows": auth_deleted,
             "deleted_audit_events": audit_deleted,
+            "deleted_push_devices": push_devices_deleted,
+            "deleted_push_outbox": push_outbox_deleted,
         },
     )
     return result

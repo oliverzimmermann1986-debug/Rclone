@@ -226,6 +226,21 @@ struct DashboardView: View {
                         Text([pair.transferred, pair.speed].compactMap { $0 }.joined(separator: " · "))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let lastProgress = pair.lastProgressAt {
+                            Text("Letzter echter Fortschritt: \(AppFormat.relative(lastProgress))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let stallTimeout = pair.stallTimeoutSeconds, stallTimeout > 0 {
+                            Text("Stillstands-Watchdog: \(AppFormat.elapsed(Double(stallTimeout)))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let maxRuntime = pair.maxRuntimeSeconds, maxRuntime > 0 {
+                            Text("Maximale Laufzeit: \(AppFormat.elapsed(Double(maxRuntime)))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Spacer()
                     if let percent = pair.percent {

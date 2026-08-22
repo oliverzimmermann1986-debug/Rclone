@@ -1,4 +1,4 @@
-"""CLI: minütlich aufgerufen, triggert fällige Pairs."""
+"""CLI: minütlich aufgerufen, triggert fällige Jobdefinitionen."""
 
 from __future__ import annotations
 
