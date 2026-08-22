@@ -29,6 +29,7 @@ DEFAULT_ERROR_EVENTS = (
 )
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: tuple[tuple[str, str, str, int], str, float] | None = None
+_BACKGROUND_DISPATCH_LOCK = threading.Lock()
 _INVALID_TOKEN_REASONS = {
     "BadDeviceToken",
     "DeviceTokenNotForTopic",
@@ -395,9 +396,54 @@ def send_push_notifications(
     return result
 
 
+def queue_push_notification(
+    event: str,
+    title: str,
+    message: str,
+    *,
+    extra: Mapping[str, Any] | None = None,
+    dedupe_key: str | None = None,
+    db: Database | None = None,
+) -> dict[str, int]:
+    """Persistiert sofort; ein Daemon-Worker übernimmt den ersten Netzversuch."""
+
+    settings = _settings(event)
+    database = db or get_db()
+    if settings is None:
+        return {"queued": 0}
+    key = dedupe_key or notification_dedupe_key(event, title, message, extra or {})
+    queued = database.push_outbox_enqueue(
+        event=event,
+        title=redact_command_text(str(title)),
+        message=redact_command_text(str(message)),
+        payload=_push_context(extra or {}),
+        dedupe_key=key,
+        retention_seconds=int(settings.get("retention_seconds") or 86400),
+    )
+
+    def dispatch() -> None:
+        if not _BACKGROUND_DISPATCH_LOCK.acquire(blocking=False):
+            return
+        try:
+            dispatch_pending_pushes(db=database)
+        except Exception:
+            logger.exception("APNs-Hintergrundzustellung fehlgeschlagen")
+        finally:
+            _BACKGROUND_DISPATCH_LOCK.release()
+
+    if queued:
+        threading.Thread(
+            target=dispatch,
+            name="push-dispatch",
+            daemon=True,
+        ).start()
+    return {"queued": queued}
+
+
 __all__ = [
     "DEFAULT_ERROR_EVENTS",
     "dispatch_pending_pushes",
     "notification_dedupe_key",
+    "queue_push_notification",
     "send_push_notifications",
 ]

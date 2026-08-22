@@ -243,7 +243,7 @@ Wichtige globale Werte:
 - `web.secure_cookie`: `false` bei direktem HTTP, `true` hinter festem HTTPS oder `auto` nur bei korrekt vertrautem Proxy
 - `web.hsts_seconds`: erst bei dauerhaftem HTTPS aktivieren
 - `web.local_browse_roots`: erlaubte lokale Browser-/Quick-Sync-Wurzeln
-- `notifications.allow_http` und `allow_private_targets`: nur für bewusst vertrauenswürdige interne Ziele
+- `notifications.apns`: native Fehler-Pushs mit dauerhafter Outbox, Retry und Geräte-Lease
 - `maintenance.job_retention_days`, `keep_latest_jobs` und `log_retention_days`: Aufbewahrung
 
 Wichtige Pair-Werte:

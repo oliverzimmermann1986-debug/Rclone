@@ -40,6 +40,23 @@ _SENSITIVE = (
     ("web", "password"),
     ("pbs", "password"),
 )
+_SENSITIVE_KEY_NAMES = {
+    "access_key",
+    "access_token",
+    "api_key",
+    "authorization",
+    "client_secret",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "password_hash",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "secret_key",
+    "token",
+}
 _MAX_FILTER_BYTES = 2 * 1024 * 1024
 _BCRYPT_MAX_PASSWORD_BYTES = 72
 _SERVER_OWNED_WEB_FIELDS = (
@@ -71,20 +88,45 @@ def _redact(data: dict[str, Any], *, revision: str | None = None) -> dict[str, A
         parent = _walk_parent(out, keys)
         if parent is not None and parent.get(keys[-1]):
             parent[keys[-1]] = _PLACEHOLDER
-    notifications = out.get("notifications")
-    if isinstance(notifications, dict):
-        hooks = notifications.get("webhooks")
-        if isinstance(hooks, list):
-            for hook in hooks:
-                if isinstance(hook, dict) and hook.get("url"):
-                    hook["url"] = _PLACEHOLDER
+    _redact_nested(out)
     if revision is not None:
         out["_revision"] = revision
     return out
 
 
+def _redact_nested(value: Any) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _redact_nested(item)
+        return
+    if not isinstance(value, dict):
+        return
+    for raw_key, item in list(value.items()):
+        if str(raw_key).casefold() in _SENSITIVE_KEY_NAMES and item not in (None, ""):
+            value[raw_key] = _PLACEHOLDER
+        else:
+            _redact_nested(item)
+
+
+def _preserve_nested_placeholders(new_value: Any, old_value: Any) -> None:
+    if isinstance(new_value, list) and isinstance(old_value, list):
+        for index, item in enumerate(new_value):
+            if index < len(old_value):
+                _preserve_nested_placeholders(item, old_value[index])
+        return
+    if not isinstance(new_value, dict) or not isinstance(old_value, dict):
+        return
+    for raw_key, item in list(new_value.items()):
+        old_item = old_value.get(raw_key)
+        if str(raw_key).casefold() in _SENSITIVE_KEY_NAMES and item == _PLACEHOLDER:
+            new_value[raw_key] = copy.deepcopy(old_item)
+        else:
+            _preserve_nested_placeholders(item, old_item)
+
+
 def _preserve_sensitive(new_data: dict[str, Any], old_data: dict[str, Any]) -> None:
     """UI-Platzhalter oder ausgelassene Secrets durch den gespeicherten Wert ersetzen."""
+    _preserve_nested_placeholders(new_data, old_data)
     for keys in _SENSITIVE:
         old_parent = _walk_parent(old_data, keys)
         new_parent = _walk_parent(new_data, keys)
@@ -96,32 +138,6 @@ def _preserve_sensitive(new_data: dict[str, Any], old_data: dict[str, Any]) -> N
         value = new_parent.get(keys[-1])
         if value in (None, _PLACEHOLDER):
             new_parent[keys[-1]] = old_value
-
-    old_hooks = (
-        ((old_data.get("notifications") or {}).get("webhooks") or [])
-        if isinstance(old_data.get("notifications"), dict)
-        else []
-    )
-    new_notifications = new_data.get("notifications")
-    if isinstance(new_notifications, dict) and isinstance(
-        new_notifications.get("webhooks"), list
-    ):
-        by_id = {
-            str(hook.get("id")): hook
-            for hook in old_hooks
-            if isinstance(hook, dict) and hook.get("id")
-        }
-        for index, hook in enumerate(new_notifications["webhooks"]):
-            if not isinstance(hook, dict) or hook.get("url") != _PLACEHOLDER:
-                continue
-            old_hook = by_id.get(str(hook.get("id")))
-            if (
-                old_hook is None
-                and index < len(old_hooks)
-                and isinstance(old_hooks[index], dict)
-            ):
-                old_hook = old_hooks[index]
-            hook["url"] = str((old_hook or {}).get("url") or "")
 
     old_web = old_data.get("web") if isinstance(old_data.get("web"), dict) else {}
     new_web = new_data.setdefault("web", {})
@@ -239,30 +255,7 @@ def _sensitive_config_changed(
         ):
             return True
 
-    old_notifications = (
-        old_data.get("notifications")
-        if isinstance(old_data.get("notifications"), dict)
-        else {}
-    )
-    new_notifications = (
-        new_data.get("notifications")
-        if isinstance(new_data.get("notifications"), dict)
-        else {}
-    )
-    for key in ("allow_http", "allow_private_targets"):
-        if not _semantic_bool(
-            old_notifications.get(key), default=False
-        ) and _semantic_bool(new_notifications.get(key), default=False):
-            return True
-
-    def hook_targets(section: dict[str, Any]) -> dict[str, str]:
-        return {
-            str(hook.get("id") or index): str(hook.get("url") or "")
-            for index, hook in enumerate(section.get("webhooks") or [])
-            if isinstance(hook, dict)
-        }
-
-    return hook_targets(old_notifications) != hook_targets(new_notifications)
+    return False
 
 
 def _filter_revision(path: Path, raw: bytes | None = None) -> str:
@@ -709,43 +702,3 @@ def save_filter_file(body: FilterPayload) -> dict[str, Any]:
         raise
     except OSError as exc:
         raise HTTPException(500, f"Schreibfehler: {exc}") from exc
-
-
-class WebhookTest(BaseModel):
-    index: int | None = Field(default=None, ge=0, le=9999)
-    id: str | None = Field(default=None, min_length=8, max_length=64)
-    event: str = Field(default="sync_ok", max_length=64)
-
-
-@router.post("/test-webhook")
-def test_webhook(body: WebhookTest) -> dict[str, Any]:
-    from ..notifications import EVENTS, notify_one
-
-    hooks = get_config().get("notifications", "webhooks", default=[]) or []
-    hook = None
-    if body.id:
-        hook = next(
-            (
-                item
-                for item in hooks
-                if isinstance(item, dict) and str(item.get("id")) == body.id
-            ),
-            None,
-        )
-    elif body.index is not None and body.index < len(hooks):
-        hook = hooks[body.index]
-    if not isinstance(hook, dict):
-        raise HTTPException(404, "Webhook nicht gefunden")
-    if body.event not in EVENTS:
-        raise HTTPException(400, "Unbekanntes Event")
-    try:
-        notify_one(
-            hook,
-            body.event,
-            "rclone-sync Test",
-            "Das ist ein Test aus der rclone-sync Web-UI.",
-            source="ui-test",
-        )
-        return {"ok": True}
-    except Exception as exc:
-        raise HTTPException(502, f"Webhook-Test fehlgeschlagen: {exc}") from exc

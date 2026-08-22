@@ -286,9 +286,8 @@ def test_webhook_management_is_not_exposed_in_the_user_interface():
     assert "Webhook" not in html
     assert "addWebhook()" not in javascript
     assert "testWebhook(" not in javascript
-    # The raw notification section remains normalized so older server fields are
-    # preserved when another setting is saved.
-    assert "result.notifications.webhooks ||= []" in javascript
+    assert "delete result.notifications.webhooks" in javascript
+    assert "result.notifications.webhooks ||= []" not in javascript
 
 
 def test_canonical_jobs_ui_separates_data_paths_definitions_and_runs():

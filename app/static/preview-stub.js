@@ -118,7 +118,7 @@
           enabled: true, targets: [], repository: '', namespace: '', backup_id: '',
           keep: { keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 1 },
         },
-        notifications: { webhooks: [{ id: 'hook1', enabled: true, type: 'discord', url: '', events: ['sync_error'] }] },
+        notifications: {},
         maintenance: { log_retention_days: 90, job_retention_days: 180, enabled: true },
         web: {
           username: 'admin', allowed_hosts: ['*'], local_browse_roots: ['/srv', '/mnt'],

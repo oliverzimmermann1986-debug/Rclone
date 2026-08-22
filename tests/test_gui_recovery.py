@@ -44,15 +44,10 @@ def _recovery_config(tmp_path: Path, password: str = "test-password-long") -> di
             "filter_file": str(tmp_path / "data" / "rclone-filters.txt"),
         },
         "notifications": {
-            "webhooks": [
-                {
-                    "id": "supporthook1",
-                    "enabled": True,
-                    "type": "discord",
-                    "url": "https://example.com/private-webhook-token",
-                    "events": ["sync_error"],
-                }
-            ]
+            "custom_delivery": {
+                "token": "CANARY_TOKEN_MUST_NOT_LEAK",
+                "endpoint": "cloud:https://user:CANARY_PASS@example.test",
+            }
         },
     }
 
@@ -151,7 +146,8 @@ def test_support_bundle_is_redacted_and_contains_diagnostics(tmp_path, monkeypat
         diagnostics = json.loads(archive.read("diagnostics.json"))
 
     assert store.get("web", "secret_key") not in redacted
-    assert "private-webhook-token" not in redacted
+    assert "CANARY_TOKEN_MUST_NOT_LEAK" not in redacted
+    assert "CANARY_PASS" not in redacted
     assert "***REDACTED***" in redacted
     assert diagnostics["app_version"] == app_version
     assert diagnostics["database"]["integrity"]["ok"] is True
