@@ -76,6 +76,17 @@ def test_example_config_is_valid_and_examples_are_disabled():
     assert all(pair["enabled"] is False for pair in normalized["backup"]["pairs"])
 
 
+def test_backup_watchdogs_have_separate_bounded_limits(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["timeout_hours"] = 2.5
+    cfg["backup"]["max_runtime_hours"] = 10_000
+
+    normalized, _ = validate_config(cfg)
+
+    assert normalized["backup"]["timeout_hours"] == 2.5
+    assert normalized["backup"]["max_runtime_hours"] == 720
+
+
 def test_pair_success_age_is_bounded(tmp_path: Path):
     cfg = _base(tmp_path)
     cfg["backup"]["pairs"] = [

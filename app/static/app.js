@@ -47,7 +47,10 @@ function app() {
 
     config: {
       web: {}, paths: {},
-      backup: { pairs: [], jobs: [], rclone_args: [], tuning: {} },
+      backup: {
+        pairs: [], jobs: [], rclone_args: [], tuning: {},
+        timeout_hours: 4, max_runtime_hours: 0,
+      },
       notifications: { webhooks: [] },
       maintenance: {},
       pbs: {
@@ -1034,6 +1037,7 @@ function app() {
       result.backup.timezone ||= 'Europe/Berlin';
       result.backup.max_parallel ??= 2;
       result.backup.timeout_hours ??= 4;
+      result.backup.max_runtime_hours ??= 0;
       result.backup.scheduler_grace_minutes ??= 15;
       result.backup.scheduler_retry_minutes ??= 60;
       result.notifications ||= { webhooks: [] };

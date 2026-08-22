@@ -483,6 +483,7 @@ def run_pair_restore_test(
             copy_cmd,
             log_file,
             timeout_sec=timeout_sec,
+            max_runtime_sec=timeout_sec,
             pair_name=f"restoretest:{name}",
             header=f"# Restore-Drill {name}: {len(paths)} Stichproben\n",
         )
@@ -541,6 +542,7 @@ def run_pair_restore_test(
             check_cmd,
             log_file,
             timeout_sec=timeout_sec,
+            max_runtime_sec=timeout_sec,
             append=True,
             header=f"\n# Prüfsummenvergleich gegen {source}\n",
             pair_name=f"restoretest:{name}",
@@ -565,9 +567,16 @@ def run_pair_restore_test(
                     ),
                 }
             )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         result.update(
-            {"ok": False, "error": f"Timeout nach {round(timeout_sec / 3600, 1)} h"}
+            {
+                "ok": False,
+                "error": (
+                    f"Maximale Laufzeit von {round(timeout_sec / 3600, 1)} h überschritten"
+                    if getattr(exc, "watchdog_reason", "stalled") == "max_runtime"
+                    else f"Kein rclone-Fortschritt seit {round(timeout_sec / 3600, 1)} h"
+                ),
+            }
         )
     except Exception as exc:
         logger.exception("Restore-Drill für %s fehlgeschlagen", name)

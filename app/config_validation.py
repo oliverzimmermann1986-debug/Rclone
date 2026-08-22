@@ -325,6 +325,14 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     backup["timeout_hours"] = float(
         _number(backup.get("timeout_hours", 4), default=4, minimum=0.1, maximum=168)
     )
+    backup["max_runtime_hours"] = float(
+        _number(
+            backup.get("max_runtime_hours", 0),
+            default=0,
+            minimum=0,
+            maximum=720,
+        )
+    )
     backup["collect_pre_post_stats"] = _boolean(
         backup.get("collect_pre_post_stats", False)
     )
