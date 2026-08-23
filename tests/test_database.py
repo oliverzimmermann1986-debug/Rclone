@@ -39,7 +39,7 @@ def test_database_backfills_and_indexes_pair_history(tmp_path: Path):
     assert db.stats()["pair_runs"] == 1
     assert db.integrity_check()["ok"] is True
     with db.conn() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
         indexes = {
             row["name"]
             for row in connection.execute("PRAGMA index_list(jobs)").fetchall()
@@ -176,7 +176,7 @@ def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(pair_runs)").fetchall()
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
     assert {"history_key", "dry_run", "scheduled_slot"} <= columns
 
 
@@ -262,13 +262,14 @@ def test_push_outbox_claim_retry_dedupe_and_device_lease(tmp_path: Path):
         == 0
     )
 
-    claimed = database.push_outbox_claim_due(now=100)
+    claimed = database.push_outbox_claim_due(claim_owner="dispatcher-a", now=100)
     assert len(claimed) == 1
     assert claimed[0]["attempts"] == 1
     assert claimed[0]["payload"] == {"job_id": 7}
     assert (
         database.push_outbox_finish(
             claimed[0]["id"],
+            claim_owner="dispatcher-a",
             sent=False,
             retry=True,
             retry_delay_seconds=60,
@@ -277,12 +278,173 @@ def test_push_outbox_claim_retry_dedupe_and_device_lease(tmp_path: Path):
         )
         == "pending"
     )
-    assert database.push_outbox_claim_due(now=159) == []
-    assert len(database.push_outbox_claim_due(now=160)) == 1
+    assert (
+        database.push_outbox_claim_due(claim_owner="dispatcher-b", now=159) == []
+    )
+    assert (
+        len(database.push_outbox_claim_due(claim_owner="dispatcher-b", now=160))
+        == 1
+    )
 
     assert database.push_devices(now=3_699)
     assert database.push_devices(now=3_700) == []
     assert database.push_device_prune_expired(now=3_700) == 1
+
+
+def test_push_outbox_claims_are_owner_bound_and_renewable(tmp_path: Path):
+    database = Database(tmp_path / "push-owner.db")
+    database.push_device_upsert("ab" * 32, "production", now=100)
+    assert (
+        database.push_outbox_enqueue(
+            event="sync_error",
+            title="Fehler",
+            message="Fotos fehlgeschlagen",
+            payload={},
+            dedupe_key="sync_error:owner",
+            retention_seconds=86400,
+            now=100,
+        )
+        == 1
+    )
+
+    claimed = database.push_outbox_claim_due(
+        claim_owner="dispatcher-a", lease_seconds=20, now=100
+    )
+    assert len(claimed) == 1
+    row_id = int(claimed[0]["id"])
+    assert claimed[0]["claim_owner"] == "dispatcher-a"
+    assert (
+        database.push_outbox_finish(
+            row_id, claim_owner="dispatcher-b", sent=True, now=101
+        )
+        == "not_owned"
+    )
+    assert (
+        database.push_outbox_renew_claims(
+            [row_id], claim_owner="dispatcher-b", lease_seconds=20, now=101
+        )
+        == []
+    )
+    assert database.push_outbox_claim_due(claim_owner="dispatcher-b", now=119) == []
+    assert database.push_outbox_renew_claims(
+        [row_id], claim_owner="dispatcher-a", lease_seconds=20, now=119
+    ) == [row_id]
+    assert database.push_outbox_claim_due(claim_owner="dispatcher-b", now=120) == []
+
+    reclaimed = database.push_outbox_claim_due(
+        claim_owner="dispatcher-b", lease_seconds=20, now=140
+    )
+    assert [int(row["id"]) for row in reclaimed] == [row_id]
+    assert (
+        database.push_outbox_finish(
+            row_id, claim_owner="dispatcher-a", sent=True, now=141
+        )
+        == "not_owned"
+    )
+    assert (
+        database.push_outbox_finish(
+            row_id, claim_owner="dispatcher-b", sent=True, now=141
+        )
+        == "sent"
+    )
+
+
+def test_schema_7_push_claim_is_migrated_without_ambiguous_owner(tmp_path: Path):
+    path = tmp_path / "push-v7.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript("""
+            CREATE TABLE push_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dedupe_key TEXT NOT NULL,
+                token TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                event TEXT NOT NULL,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                lease_until REAL NOT NULL DEFAULT 0,
+                last_error TEXT,
+                apns_id TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                sent_at REAL,
+                UNIQUE(dedupe_key, token)
+            );
+            INSERT INTO push_outbox (
+                dedupe_key, token, environment, event, title, message,
+                status, attempts, next_attempt_at, expires_at, lease_until,
+                apns_id, created_at, updated_at
+            ) VALUES (
+                'legacy', 'abab', 'production', 'sync_error', 'Fehler', 'Alt',
+                'sending', 1, 100, 1000, 900, 'apns-1', 100, 100
+            );
+            PRAGMA user_version=7;
+        """)
+
+    database = Database(path)
+    with database.conn() as connection:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(push_outbox)").fetchall()
+        }
+        row = connection.execute(
+            "SELECT status, lease_until, claim_owner FROM push_outbox"
+        ).fetchone()
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+
+    assert "claim_owner" in columns
+    assert dict(row) == {
+        "status": "pending",
+        "lease_until": 0.0,
+        "claim_owner": "",
+    }
+
+
+def test_device_removal_does_not_release_foreign_active_claim(tmp_path: Path):
+    database = Database(tmp_path / "push-device-race.db")
+    token = "ab" * 32
+    database.push_device_upsert(token, "production", now=100)
+    for sequence in (1, 2):
+        assert database.push_outbox_enqueue(
+            event="sync_error",
+            title="Fehler",
+            message=f"Fehler {sequence}",
+            payload={},
+            dedupe_key=f"device-race:{sequence}",
+            retention_seconds=86400,
+            now=100,
+        ) == 1
+
+    first = database.push_outbox_claim_due(
+        claim_owner="dispatcher-a", limit=1, now=100
+    )[0]
+    second = database.push_outbox_claim_due(
+        claim_owner="dispatcher-b", limit=1, now=100
+    )[0]
+    assert database.push_outbox_finish(
+        int(first["id"]),
+        claim_owner="dispatcher-a",
+        sent=False,
+        error="BadDeviceToken",
+        now=101,
+    ) == "failed"
+
+    assert database.push_device_delete(token, claim_owner="dispatcher-a") is True
+    assert database.push_outbox_finish(
+        int(second["id"]),
+        claim_owner="dispatcher-b",
+        sent=False,
+        retry=True,
+        error="HTTP 503",
+        now=102,
+    ) == "failed"
+    assert database.push_outbox_claim_due(
+        claim_owner="dispatcher-c", now=200
+    ) == []
 
 
 def test_persistent_login_backoff(tmp_path: Path):
