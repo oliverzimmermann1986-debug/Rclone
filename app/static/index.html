@@ -3,19 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#111827">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)">
   <meta name="mobile-web-app-capable" content="yes">
   <title>rclone-sync</title>
   <link rel="manifest" href="/static/manifest.json?v=__APP_VERSION__">
+  <link rel="apple-touch-icon" href="/static/app-icon-1024.png?v=__APP_VERSION__">
   <link rel="stylesheet" href="/static/style.css?v=__APP_VERSION__">
   <script defer src="/static/alpine.min.js?v=__APP_VERSION__"></script>
 </head>
-<body x-data="app()" x-init="init()" @keydown.escape.window="closeOverlays()" @keydown.tab.window="trapDialogFocus($event)">
+<body x-data="app()" x-init="init()" @keydown.escape.window="closeOverlays()" @keydown.tab.window="trapDialogFocus($event)" @focusin.window="enforceActiveDialogFocus($event)">
   <a class="skip-link" href="#main-content">Zum Hauptinhalt</a>
+  <div class="sr-only" role="status" aria-live="polite" aria-atomic="true" x-text="liveMessage"></div>
   <div class="app-shell">
-    <div class="nav-scrim" x-show="navOpen" @click="navOpen=false" x-cloak></div>
+    <button type="button" class="nav-scrim" x-show="navOpen" @click="closeNavigation()" aria-label="Navigation schließen" tabindex="-1" x-cloak></button>
 
-    <aside class="sidebar" id="main-sidebar" :class="navOpen && 'open'">
+    <aside class="sidebar" id="main-sidebar" x-ref="mainSidebar" :class="navOpen && 'open'" tabindex="-1">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">R</div>
         <div>
@@ -58,10 +61,10 @@
       </div>
     </aside>
 
-    <div class="workspace">
+    <div class="workspace" :inert="navigationIsModal()">
       <header class="topbar">
         <div class="topbar-left">
-          <button class="icon-button mobile-menu" @click="navOpen=!navOpen" :aria-expanded="navOpen" aria-controls="main-sidebar" :aria-label="navOpen ? 'Navigation schließen' : 'Navigation öffnen'"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/></svg></span></button>
+          <button class="icon-button mobile-menu" @click="toggleNavigation()" :aria-expanded="navOpen" aria-controls="main-sidebar" :aria-label="navOpen ? 'Navigation schließen' : 'Navigation öffnen'"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/></svg></span></button>
           <div>
             <div class="eyebrow">rclone-sync</div>
             <h1 x-text="pageTitle()"></h1>
@@ -80,7 +83,7 @@
         </div>
       </header>
 
-      <main class="content" id="main-content" tabindex="-1">
+      <main class="content" id="main-content" tabindex="-1" :aria-label="pageTitle()">
         <div class="connection-alert" :class="connectionState" x-show="connectionState !== 'online'" role="status" aria-live="polite" x-cloak>
           <span class="status-dot" :class="connectionState === 'offline' ? 'error' : (connectionState === 'degraded' ? 'warn' : 'pending')" aria-hidden="true"></span>
           <span><strong x-text="connectionLabel()"></strong><small x-text="connectionMessage"></small></span>
@@ -158,30 +161,31 @@
 
           <article class="panel copy-overview" aria-labelledby="copy-overview-heading">
             <div class="panel-head"><div><h3 id="copy-overview-heading">Sicherungskopien</h3><p>Ordner, Umfang und Alter auf einen Blick.</p></div><button class="button secondary" @click="loadPairSizes()" :disabled="storageLoading" x-text="storageLoading ? 'Misst…' : 'Größen aktualisieren'"></button></div>
-            <div class="table-scroll" tabindex="0" aria-label="Übersicht der Sicherungskopien">
-              <table class="table copy-table">
+            <div class="table-scroll responsive-table-wrap" tabindex="0" aria-label="Übersicht der Sicherungskopien">
+              <table class="table copy-table responsive-table">
                 <thead><tr><th>Datenweg</th><th>Lokaler Ordner</th><th>Cloud-Ordner</th><th>Dateien</th><th>Größe</th><th>Messalter</th></tr></thead>
-                <tbody><template x-for="entry in storagePairs()" :key="entry.name"><tr><td><strong x-text="entry.name"></strong></td><td class="mono" x-text="copyFolder(entry, 'local')"></td><td class="mono" x-text="copyFolder(entry, 'cloud')"></td><td x-text="copyMetric(entry, 'count')"></td><td x-text="copyMetric(entry, 'bytes')"></td><td x-text="copyMetric(entry, 'age')"></td></tr></template></tbody>
+                <tbody><template x-for="entry in storagePairs()" :key="entry.name"><tr><td data-label="Datenweg"><strong x-text="entry.name"></strong></td><td data-label="Lokaler Ordner"><span class="mono" x-text="copyFolder(entry, 'local')"></span><small class="error-text" x-show="copySideError(entry, 'local')" x-text="copySideError(entry, 'local')"></small></td><td data-label="Cloud-Ordner"><span class="mono" x-text="copyFolder(entry, 'cloud')"></span><small class="error-text" x-show="copySideError(entry, 'cloud')" x-text="copySideError(entry, 'cloud')"></small></td><td data-label="Dateien" x-text="copyMetric(entry, 'count')"></td><td data-label="Größe" x-text="copyMetric(entry, 'bytes')"></td><td data-label="Messalter" x-text="copyMetric(entry, 'age')"></td></tr></template></tbody>
               </table>
             </div>
-            <div class="loading-state compact-loading" x-show="storageLoading" role="status">Ordnergrößen werden ermittelt…</div>
-            <div class="empty-state compact" x-show="!storageLoading && !storagePairs().length"><strong>Noch keine Kopien</strong><span>Lege zuerst einen Datenweg an.</span><button class="button secondary" @click="navigate('pairs')">Zu Datenwegen</button></div>
+            <div class="loading-state compact-loading" x-show="storageState === 'loading'" role="status" aria-live="polite" x-text="storageStatusText()"></div>
+            <div class="inline-error panel-error" x-show="['partial', 'failed', 'stale'].includes(storageState)" :role="storageState === 'failed' ? 'alert' : 'status'" aria-live="polite"><span x-text="storageStatusText()"></span><button class="button secondary small" @click="loadPairSizes()" :disabled="storageLoading">Erneut messen</button></div>
+            <div class="empty-state compact" x-show="storageState === 'loaded' && !storagePairs().length"><strong>Noch keine Kopien</strong><span>Lege zuerst einen Datenweg an.</span><button class="button secondary" @click="navigate('pairs')">Zu Datenwegen</button></div>
           </article>
 
           <article class="panel" x-show="config.pbs?.enabled" aria-labelledby="pbs-targets-heading">
             <div class="panel-head"><div><span class="section-kicker">Proxmox Backup Server</span><h3 id="pbs-targets-heading">PBS-Targets</h3></div><div class="heading-actions"><button class="button secondary" @click="loadPbsStatus()" :disabled="pbs.loading" x-text="pbs.loading ? 'Lädt…' : 'Aktualisieren'"></button><button class="button danger" x-show="pbs.status?.running" @click="cancelPbs()" :disabled="pending.pbsCancel" x-text="pending.pbsCancel ? 'Bricht ab…' : 'PBS abbrechen'"></button><button class="button primary" @click="runPbs()" :disabled="pbs.status?.running || pending.pbs || configLoading" x-text="pending.pbs ? 'Startet…' : (pbs.status?.running ? 'Sicherung läuft…' : 'Alle sichern')"></button></div></div>
             <div class="loading-state compact-loading" x-show="pbs.loading && !pbs.status" role="status">PBS-Status wird geladen…</div>
             <div class="inline-error" x-show="pbs.status && !pbs.status.client_available" role="alert">proxmox-backup-client ist nicht installiert.</div>
-            <div class="table-scroll" x-show="(pbs.status?.targets || []).length" tabindex="0" aria-label="PBS-Targets, horizontal scrollbar auf kleinen Bildschirmen">
-            <table class="table">
+            <div class="table-scroll responsive-table-wrap" x-show="(pbs.status?.targets || []).length" tabindex="0" aria-label="PBS-Targets">
+            <table class="table responsive-table">
               <thead><tr><th>Target</th><th>Pfade</th><th>Zeitplan</th><th>Letzter Erfolg</th><th></th></tr></thead>
               <tbody><template x-for="target in (pbs.status?.targets || [])" :key="target.name">
                 <tr>
-                  <td x-text="target.name"></td>
-                  <td class="mono" x-text="(target.paths || []).join(', ')"></td>
-                  <td class="mono" x-text="target.schedule"></td>
-                  <td x-text="formatDateTime(target.last_success)"></td>
-                  <td><button class="button secondary" @click="runPbs(target.name)" :disabled="pbs.status?.running || pending.pbs" :aria-label="'PBS-Target ' + target.name + ' sichern'">Sichern</button></td>
+                  <td data-label="Target" x-text="target.name"></td>
+                  <td data-label="Pfade" class="mono" x-text="(target.paths || []).join(', ')"></td>
+                  <td data-label="Zeitplan" class="mono" x-text="target.schedule"></td>
+                  <td data-label="Letzter Erfolg" x-text="formatDateTime(target.last_success)"></td>
+                  <td data-label="Aktion"><button class="button secondary" @click="runPbs(target.name)" :disabled="pbs.status?.running || pending.pbs" :aria-label="'PBS-Target ' + target.name + ' sichern'">Sichern</button></td>
                 </tr>
               </template></tbody>
             </table>
@@ -344,8 +348,8 @@
           <div class="toolbar panel slim" x-show="selectedPairCount() > 0" x-cloak>
             <div class="toolbar-meta"><strong x-text="selectedPairCount()"></strong> ausgewählt</div>
             <div class="toolbar-actions">
-              <button class="button secondary small" @click="bulkPairAction('enable')" :disabled="configDirty">Ausgewählte aktivieren</button>
-              <button class="button secondary small" @click="bulkPairAction('disable')" :disabled="configDirty">Ausgewählte deaktivieren</button>
+              <button class="button secondary small" @click="bulkPairAction('enable')" :disabled="configDirty" :aria-label="'Ausgewählte Datenwege aktivieren: ' + (selectedPairNames().join(', ') || 'keine Auswahl')">Ausgewählte aktivieren</button>
+              <button class="button secondary small" @click="bulkPairAction('disable')" :disabled="configDirty" :aria-label="'Ausgewählte Datenwege deaktivieren: ' + (selectedPairNames().join(', ') || 'keine Auswahl')">Ausgewählte deaktivieren</button>
               <button class="button ghost small" @click="clearPairSelection()">Auswahl aufheben</button>
             </div>
             <small x-show="configDirty">Ungespeicherte Änderungen zuerst speichern.</small>
@@ -369,7 +373,7 @@
             <template x-for="(pair, idx) in config.backup.pairs" :key="idx">
               <article class="pair-card" :id="`pair-${idx}`" x-show="pairVisible(pair)" :class="pairStatus(pair)">
                 <div class="pair-card-top">
-                  <label class="pair-select" title="Für Bulk-Aktion auswählen"><input type="checkbox" :checked="!!pairSelection[pair.name]" @change.stop="togglePairSelection(pair.name)" @input.stop :disabled="!pair.name" aria-label="Pair für Bulk-Aktion auswählen"></label>
+                  <label class="pair-select" title="Für Bulk-Aktion auswählen"><input type="checkbox" :checked="!!pairSelection[pair.name]" @change.stop="togglePairSelection(pair.name)" @input.stop :disabled="!pair.name" :aria-label="'Datenweg ' + (pair.name || 'ohne Namen') + ' für Bulk-Aktion auswählen'"></label>
                   <button class="pair-expand" @click="pairOpen[idx]=!pairOpen[idx]" :aria-label="(pairOpen[idx] ? 'Details schließen: ' : 'Details öffnen: ') + (pair.name || 'Neues Pair')" :aria-expanded="!!pairOpen[idx]" :aria-controls="`pair-details-${idx}`">
                     <span class="status-dot" :class="pairStatus(pair)"></span>
                     <span class="pair-title">
@@ -388,9 +392,9 @@
                 </div>
 
                 <div class="pair-size-row" x-show="pairSize(pair.name)" x-cloak>
-                  <span class="pair-size-cell"><small>Quelle</small><strong x-text="pairSizeText(pair.name, 'source')"></strong><small x-text="pairSizeAge(pair.name, 'source')"></small></span>
+                  <span class="pair-size-cell"><small>Quelle</small><strong x-text="pairSizeText(pair.name, 'source')"></strong><small x-text="pairSizeAge(pair.name, 'source')"></small><small class="error-text" x-show="pairSizeError(pair.name, 'source')" x-text="pairSizeError(pair.name, 'source')"></small></span>
                   <span class="pair-size-arrow" aria-hidden="true">→</span>
-                  <span class="pair-size-cell"><small>Ziel</small><strong x-text="pairSizeText(pair.name, 'target')"></strong><small x-text="pairSizeAge(pair.name, 'target')"></small></span>
+                  <span class="pair-size-cell"><small>Ziel</small><strong x-text="pairSizeText(pair.name, 'target')"></strong><small x-text="pairSizeAge(pair.name, 'target')"></small><small class="error-text" x-show="pairSizeError(pair.name, 'target')" x-text="pairSizeError(pair.name, 'target')"></small></span>
                 </div>
 
                 <div class="pair-quick-actions">
@@ -476,7 +480,7 @@
                   </div>
 
                   <div class="pair-footer-actions">
-                    <div><button class="icon-button" @click="movePair(idx,-1)" :disabled="idx===0" title="Nach oben">↑</button><button class="icon-button" @click="movePair(idx,1)" :disabled="idx===config.backup.pairs.length-1" title="Nach unten">↓</button></div>
+                    <div><button class="icon-button" @click="movePair(idx,-1)" :disabled="idx===0" :aria-label="'Datenweg ' + (pair.name || 'ohne Namen') + ' nach oben verschieben'">↑</button><button class="icon-button" @click="movePair(idx,1)" :disabled="idx===config.backup.pairs.length-1" :aria-label="'Datenweg ' + (pair.name || 'ohne Namen') + ' nach unten verschieben'">↓</button></div>
                     <div><button class="button ghost" @click="clonePair(idx)">Duplizieren</button><button class="button danger ghost" @click="removePair(idx)">Entfernen</button></div>
                   </div>
                 </div>
@@ -525,7 +529,7 @@
                   <div class="definition-label"><strong>Datenwege</strong><small>Die Reihenfolge wird beim Lauf eingehalten.</small></div>
                   <div class="assignment-list">
                     <template x-for="(pathId, pathIdx) in job.data_path_ids" :key="pathId + '-' + pathIdx">
-                      <div class="assignment-row"><span class="assignment-order" x-text="pathIdx + 1"></span><strong x-text="dataPathName(pathId)"></strong><span class="assignment-actions"><button class="icon-button" @click="moveJobPath(job, pathIdx, -1)" :disabled="pathIdx===0" aria-label="Datenweg nach oben">↑</button><button class="icon-button" @click="moveJobPath(job, pathIdx, 1)" :disabled="pathIdx===job.data_path_ids.length-1" aria-label="Datenweg nach unten">↓</button><button class="icon-button" @click="removeJobPath(job, pathIdx)" aria-label="Datenweg aus Job entfernen">×</button></span></div>
+                      <div class="assignment-row"><span class="assignment-order" x-text="pathIdx + 1"></span><strong x-text="dataPathName(pathId)"></strong><span class="assignment-actions"><button class="icon-button" @click="moveJobPath(job, pathIdx, -1)" :disabled="pathIdx===0" :aria-label="'Datenweg ' + dataPathName(pathId) + ' in Job ' + (job.name || 'ohne Namen') + ' nach oben verschieben'">↑</button><button class="icon-button" @click="moveJobPath(job, pathIdx, 1)" :disabled="pathIdx===job.data_path_ids.length-1" :aria-label="'Datenweg ' + dataPathName(pathId) + ' in Job ' + (job.name || 'ohne Namen') + ' nach unten verschieben'">↓</button><button class="icon-button" @click="removeJobPath(job, pathIdx)" :aria-label="'Datenweg ' + dataPathName(pathId) + ' aus Job ' + (job.name || 'ohne Namen') + ' entfernen'">×</button></span></div>
                     </template>
                     <span class="muted" x-show="!job.data_path_ids.length">Noch kein Datenweg zugewiesen.</span>
                   </div>
@@ -641,21 +645,21 @@
               <article class="metric-card"><div class="metric-head"><span>Ohne Versionsablage</span></div><strong class="metric-value" :class="(copies.data?.totals?.without_versioning || 0) > 0 && 'error'" x-text="copies.data?.totals?.without_versioning ?? '—'"></strong></article>
             </div>
 
-            <div class="table-scroll" x-show="(copies.data?.sources || []).length" tabindex="0" aria-label="Kopien je Datenbestand">
-              <table class="table">
+            <div class="table-scroll responsive-table-wrap" x-show="(copies.data?.sources || []).length" tabindex="0" aria-label="Kopien je Datenbestand">
+              <table class="table responsive-table">
                 <thead><tr><th>Quelle</th><th>Kopien</th><th>Speicherorte</th><th>Jüngste Kopie</th><th>Bewertung</th><th>Befunde</th></tr></thead>
                 <tbody>
                   <template x-for="row in (copies.data?.sources || [])" :key="row.id">
                     <tr>
-                      <td class="mono" x-text="row.source"></td>
-                      <td>
+                      <td data-label="Quelle" class="mono" x-text="row.source"></td>
+                      <td data-label="Kopien">
                         <span x-text="row.copy_count"></span>
                         <small class="dim" x-text="' (' + row.offsite_count + ' außer Haus)'"></small>
                       </td>
-                      <td class="mono" x-text="(row.scopes || []).join(', ') || '—'"></td>
-                      <td x-text="row.newest_age_hours === null || row.newest_age_hours === undefined ? 'nie' : ('vor ' + row.newest_age_hours + ' Std.')"></td>
-                      <td><span class="badge compact" :class="row.level === 'ok' ? 'ok' : (row.level === 'error' ? 'error' : 'skipped')" x-text="copyLevelLabel(row.level)"></span></td>
-                      <td x-text="(row.findings || []).join(' · ') || '—'"></td>
+                      <td data-label="Speicherorte" class="mono" x-text="(row.scopes || []).join(', ') || '—'"></td>
+                      <td data-label="Jüngste Kopie" x-text="row.newest_age_hours === null || row.newest_age_hours === undefined ? 'nie' : ('vor ' + row.newest_age_hours + ' Std.')"></td>
+                      <td data-label="Bewertung"><span class="badge compact" :class="row.level === 'ok' ? 'ok' : (row.level === 'error' ? 'error' : 'skipped')" x-text="copyLevelLabel(row.level)"></span></td>
+                      <td data-label="Befunde" x-text="(row.findings || []).join(' · ') || '—'"></td>
                     </tr>
                   </template>
                 </tbody>
@@ -667,8 +671,8 @@
           <article class="panel">
             <div class="panel-head"><div><span class="section-kicker">Wartung</span><h3>Logs und Datenbank</h3></div><button class="button secondary" @click="loadDatabaseStatus(); loadLogs()">Aktualisieren</button></div>
             <div class="maintenance-grid">
-              <div class="maintenance-card"><strong>Datenbank</strong><dl><div><dt>Jobs</dt><dd x-text="maintenance.database?.stats?.jobs || 0"></dd></div><div><dt>Pair-Läufe</dt><dd x-text="maintenance.database?.stats?.pair_runs || 0"></dd></div><div><dt>Größe</dt><dd x-text="formatBytes(maintenance.database?.stats?.bytes)"></dd></div><div><dt>Integrität</dt><dd x-text="maintenance.database?.integrity?.ok ? 'OK' : 'Prüfen'"></dd></div></dl><button class="button danger ghost" @click="if(confirm('Alte Jobhistorie gemäß Aufbewahrung löschen?')) pruneDatabase()">Datenbank aufräumen</button></div>
-              <div class="maintenance-card"><strong>Logdateien</strong><dl><div><dt>Gefunden</dt><dd x-text="maintenance.logs.length"></dd></div><div><dt>Aufbewahrung</dt><dd><span x-text="config.maintenance?.log_retention_days || 90"></span> Tage</dd></div><div><dt>Prune-Test</dt><dd x-text="maintenance.prune ? (maintenance.prune.matched + ' betroffen') : '—'"></dd></div></dl><div class="button-stack"><button class="button secondary" @click="pruneLogs(true)">Prune testen</button><button class="button danger ghost" @click="if(confirm('Alte Logs wirklich löschen?')) pruneLogs(false)">Alte Logs löschen</button></div></div>
+              <div class="maintenance-card"><strong>Datenbank</strong><dl><div><dt>Jobs</dt><dd x-text="maintenance.database?.stats?.jobs || 0"></dd></div><div><dt>Pair-Läufe</dt><dd x-text="maintenance.database?.stats?.pair_runs || 0"></dd></div><div><dt>Größe</dt><dd x-text="formatBytes(maintenance.database?.stats?.bytes)"></dd></div><div><dt>Integrität</dt><dd x-text="maintenance.database?.integrity?.ok ? 'OK' : 'Prüfen'"></dd></div></dl><button class="button danger ghost" @click="pruneDatabase()">Datenbank aufräumen</button></div>
+              <div class="maintenance-card"><strong>Logdateien</strong><dl><div><dt>Gefunden</dt><dd x-text="maintenance.logs.length"></dd></div><div><dt>Aufbewahrung</dt><dd><span x-text="config.maintenance?.log_retention_days || 90"></span> Tage</dd></div><div><dt>Prune-Test</dt><dd x-text="maintenance.prune ? (maintenance.prune.matched + ' betroffen') : '—'"></dd></div></dl><div class="button-stack"><button class="button secondary" @click="pruneLogs(true)">Prune testen</button><button class="button danger ghost" @click="pruneLogs(false)">Alte Logs löschen</button></div></div>
               <div class="maintenance-card"><strong>Push-Mitteilungen</strong><dl><div><dt>APNs</dt><dd x-text="push.status ? (push.status.configured ? 'Bereit' : 'Nicht eingerichtet') : '—'"></dd></div><div><dt>Geräte</dt><dd x-text="push.status?.registered_devices ?? '—'"></dd></div><div><dt>Ausstehend</dt><dd x-text="push.status?.outbox?.pending ?? '—'"></dd></div><div><dt>Fehlgeschlagen</dt><dd x-text="push.status?.outbox?.failed ?? '—'"></dd></div></dl><p class="error-text" x-show="push.status?.outbox?.last_error" x-text="push.status?.outbox?.last_error"></p><p class="error-text" x-show="push.error" x-text="push.error"></p><div class="button-stack"><button class="button secondary" @click="loadPushStatus()" :disabled="push.loading" x-text="push.loading ? 'Prüft…' : 'Status prüfen'"></button><button class="button primary" @click="testPushNotification()" :disabled="push.testing || !push.status?.configured || !(push.status?.registered_devices)" x-text="push.testing ? 'Sendet…' : 'Testmitteilung'"></button></div></div>
             </div>
             <details class="disclosure" x-show="maintenance.logs.length"><summary>Gefundene Logdateien anzeigen</summary><div class="disclosure-body"><label class="search-field"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg></span><input x-model="maintenance.logQuery" @keyup.enter="loadLogs()" placeholder="Logdateien filtern" aria-label="Logdateien filtern"></label><div class="log-file-list"><template x-for="log in maintenance.logs" :key="log.path"><div><span class="mono" x-text="log.path"></span><span x-text="formatBytes(log.size)"></span><span x-text="formatTs(log.mtime)"></span></div></template></div></div></details>
@@ -908,6 +912,15 @@
         <button :class="page==='runs' && 'active'" :aria-current="page==='runs' ? 'page' : null" @click="navigate('runs')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8"/></svg></span><small>Läufe</small></button>
         <button :class="page==='doctor' && 'active'" :aria-current="page==='doctor' ? 'page' : null" @click="navigate('doctor')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span><small>System</small></button>
       </nav>
+    </div>
+  </div>
+
+  <!-- Einheitliche, tastaturbedienbare Bestätigung -->
+  <div class="modal" x-show="confirmationDialog.show" @click.self="respondConfirmation(false)" x-cloak>
+    <div class="modal-dialog confirmation-dialog" x-ref="confirmationDialog" role="dialog" aria-modal="true" aria-labelledby="confirmation-dialog-title" aria-describedby="confirmation-dialog-message" tabindex="-1">
+      <div class="modal-head"><div><span class="section-kicker">Sicherheitsbestätigung</span><h3 id="confirmation-dialog-title" x-text="confirmationDialog.title"></h3></div></div>
+      <div class="modal-content"><p id="confirmation-dialog-message" class="confirmation-message" x-text="confirmationDialog.message"></p></div>
+      <div class="modal-footer"><button class="button secondary" @click="respondConfirmation(false)" data-dialog-initial-focus>Abbrechen</button><button class="button" :class="confirmationDialog.tone" @click="respondConfirmation(true)" x-text="confirmationDialog.confirmLabel"></button></div>
     </div>
   </div>
 

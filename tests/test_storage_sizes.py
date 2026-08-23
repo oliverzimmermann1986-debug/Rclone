@@ -105,7 +105,7 @@ def test_size_results_are_reused_within_ttl_and_can_be_refreshed(monkeypatch):
     monkeypatch.setattr(api_storage.time, "time", lambda: clock[0])
     calls: list[str] = []
 
-    def measure(path):
+    def measure(path, **_kwargs):
         calls.append(path)
         return {"path": path, "count": len(calls), "bytes": 100 + len(calls)}
 
@@ -185,9 +185,11 @@ def test_failed_measurement_is_not_cached_as_fresh_zero(monkeypatch):
 
     assert fresh["measurement_status"] == "fresh"
     assert stale["measurement_status"] == "stale"
+    assert stale["measurement_state"] == "stale"
     assert stale["count"] == 4 and stale["bytes"] == 512
     assert stale["measurement_error"] == "Timeout"
     assert failed["measurement_status"] == "failed"
+    assert failed["measurement_state"] == "failed"
     assert failed["measured_at"] is None
     assert failed["error"] == "Timeout"
     assert "count" not in failed and "bytes" not in failed
@@ -303,3 +305,147 @@ def test_overview_does_not_reuse_history_for_new_identity_or_restore_drill(
 
     assert "last_sync" not in item
     assert "last_transferred" not in item
+
+
+def _storage_pairs(count: int) -> list[dict]:
+    return [
+        {
+            "id": f"pair-{index}",
+            "name": f"Pair {index}",
+            "local": f"/mnt/{index}",
+            "remote": f"cloud:{index}",
+            "direction": "push",
+        }
+        for index in range(count)
+    ]
+
+
+def test_four_pairs_measure_all_eight_sides_in_one_parallel_wave(monkeypatch):
+    """Vier Pairs dürfen nicht mehr in zwei seriellen 45-s-Wellen laufen."""
+    import threading
+
+    pairs = _storage_pairs(4)
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig(pairs))
+    monkeypatch.setattr(api_storage, "get_db", lambda: _FakeDB())
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+    monkeypatch.setattr(api_storage, "_SIZE_MEASUREMENT_WORKERS", 8)
+    barrier = threading.Barrier(8)
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def measure(path, *, timeout):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            barrier.wait(timeout=1)
+            return {"path": path, "count": 1, "bytes": 2}
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(api_storage, "_rclone_size", measure)
+
+    result = api_storage.overview(include_remote=True, refresh_sizes=True)
+
+    assert peak == 8
+    assert active == 0
+    assert result["measurement"] == {
+        "state": "loaded",
+        "total": 8,
+        "loaded": 8,
+        "failed": 0,
+        "stale": 0,
+        "measurement_error": None,
+        "measured_at": result["measurement"]["measured_at"],
+    }
+
+
+def test_global_deadline_finishes_all_workers_and_marks_total_failure(monkeypatch):
+    """Auch viele langsame Pfade verlassen keine Threads nach der API-Antwort."""
+    import threading
+    import time
+
+    pairs = _storage_pairs(5)
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig(pairs))
+    monkeypatch.setattr(api_storage, "get_db", lambda: _FakeDB())
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+    monkeypatch.setattr(api_storage, "_SIZE_MEASUREMENT_WORKERS", 2)
+    monkeypatch.setattr(api_storage, "_SIZE_MEASUREMENT_DEADLINE_SECONDS", 0.08)
+    active = 0
+    lock = threading.Lock()
+
+    def measure(path, *, timeout):
+        nonlocal active
+        with lock:
+            active += 1
+        try:
+            time.sleep(min(timeout, 0.1))
+            return {"path": path, "error": "Timeout"}
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(api_storage, "_rclone_size", measure)
+    started = time.monotonic()
+
+    result = api_storage.overview(include_remote=True, refresh_sizes=True)
+
+    assert time.monotonic() - started < 0.3
+    assert active == 0
+    assert result["measurement"]["state"] == "failed"
+    assert result["measurement"]["failed"] == 10
+    assert all(
+        item[f"{side}_measurement"]["state"] == "failed"
+        for item in result["pairs"]
+        for side in ("source", "target")
+    )
+
+
+def test_partial_measurement_is_machine_readable_per_side(monkeypatch):
+    pairs = _storage_pairs(2)
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig(pairs))
+    monkeypatch.setattr(api_storage, "get_db", lambda: _FakeDB())
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+
+    def measure(path, **_kwargs):
+        if path == "cloud:1":
+            return {"path": path, "error": "Remote nicht erreichbar"}
+        return {"path": path, "count": 3, "bytes": 4}
+
+    monkeypatch.setattr(api_storage, "_rclone_size", measure)
+
+    result = api_storage.overview(include_remote=True, refresh_sizes=True)
+
+    assert result["measurement"]["state"] == "partial"
+    assert result["measurement"]["loaded"] == 3
+    assert result["measurement"]["failed"] == 1
+    failed = result["pairs"][1]
+    assert failed["source_measurement"]["state"] == "loaded"
+    assert failed["target_measurement"] == {
+        "path": "cloud:1",
+        "state": "failed",
+        "measurement_error": "Remote nicht erreichbar",
+        "measured_at": None,
+    }
+    assert failed["target_size"]["measurement_status"] == "failed"
+    assert failed["target_size"]["measurement_error"] == "Remote nicht erreichbar"
+
+
+def test_base_overview_exposes_loading_metadata_without_overwriting_size_fields(
+    monkeypatch,
+):
+    pairs = _storage_pairs(1)
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig(pairs))
+    monkeypatch.setattr(api_storage, "get_db", lambda: _FakeDB())
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+
+    result = api_storage.overview(include_remote=False)
+    pair = result["pairs"][0]
+
+    assert "source_size" not in pair and "target_size" not in pair
+    assert pair["source_measurement"]["state"] == "loading"
+    assert pair["target_measurement"]["state"] == "loading"
+    assert result["measurement"]["state"] == "loading"

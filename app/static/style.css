@@ -547,6 +547,9 @@ code { font-family: var(--mono); }
 .inline-error .button { margin-left: auto; }
 
 .error-text { overflow: hidden; color: var(--danger); font-size: 12px; }
+.copy-table .error-text, .pair-size-cell .error-text {
+  display: block; margin-top: 4px; white-space: normal;
+}
 
 .loading-state { padding: 18px; color: var(--text-soft); font-size: 12.5px; }
 .loading-state.compact-loading { padding: 10px 0; }
@@ -1794,6 +1797,7 @@ input[type="checkbox"], input[type="radio"] {
 .modal-dialog.wide { width: min(920px, 100%); }
 .modal-dialog.extra-wide { width: min(1280px, 100%); }
 .modal-dialog.reauth-dialog { width: min(520px, 100%); }
+.modal-dialog.confirmation-dialog { width: min(520px, 100%); }
 .picker-dialog { width: min(820px, 100%); }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between; gap: 14px;
@@ -1802,6 +1806,7 @@ input[type="checkbox"], input[type="radio"] {
 }
 .modal-head-actions { display: flex; align-items: center; gap: 8px; }
 .modal-content { flex: 1; overflow: auto; padding: 18px; }
+.confirmation-message { white-space: pre-line; color: var(--text-soft); line-height: 1.55; }
 .modal-loading { padding: 30px 18px; color: var(--text-soft); }
 .modal-footer {
   display: flex; align-items: center; justify-content: flex-end; gap: 8px;
@@ -1962,11 +1967,16 @@ html[data-density="compact"] .job-row { min-height: 54px; }
     transform: translateX(-100%);
     transition: transform 240ms var(--ease-out);
     box-shadow: var(--shadow-lg);
+    height: 100dvh;
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-bottom: max(14px, env(safe-area-inset-bottom));
   }
   .sidebar.open { transform: translateX(0); }
   .nav-scrim {
     position: fixed; inset: 0; z-index: 39; display: block;
+    width: 100%; height: 100%; padding: 0; border: 0;
     background: color-mix(in srgb, var(--text) 38%, transparent);
+    cursor: default;
   }
   .workspace { margin-left: 0; }
   .mobile-menu { display: inline-flex !important; }
@@ -2013,11 +2023,17 @@ html[data-density="compact"] .job-row { min-height: 54px; }
   }
   .toast { bottom: calc(80px + env(safe-area-inset-bottom)); }
   .toast.above-unsaved { bottom: calc(148px + env(safe-area-inset-bottom)); }
-  .modal { align-items: end; padding: 0; }
+  .modal {
+    align-items: end;
+    min-height: 100dvh;
+    padding: max(8px, env(safe-area-inset-top)) 0 0;
+  }
   .modal-dialog, .modal-dialog.wide, .modal-dialog.extra-wide, .picker-dialog {
-    width: 100%; max-height: 94vh;
+    width: 100%; max-height: calc(100dvh - max(8px, env(safe-area-inset-top)));
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   }
+  .modal-content { overscroll-behavior: contain; }
+  .modal-footer { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
   .picker-toolbar { grid-template-columns: 36px 1fr; }
   .picker-toolbar .compact-search { grid-column: 1 / -1; }
   .log-toolbar { align-items: stretch; flex-wrap: wrap; }
@@ -2094,7 +2110,48 @@ html[data-density="compact"] .job-row { min-height: 54px; }
   .definition-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .definition-actions .button { width: 100%; }
   .definition-actions small { grid-column: 1 / -1; margin-left: 0; }
-  .table-scroll.mobile-cards { overflow: visible; }
+  .table-scroll.mobile-cards,
+  .table-scroll.responsive-table-wrap { overflow: visible; }
+  .responsive-table {
+    display: block;
+    min-width: 0;
+  }
+  .responsive-table thead {
+    position: absolute;
+    width: 1px; height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .responsive-table tbody { display: grid; gap: 10px; }
+  .responsive-table tbody tr {
+    display: grid;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .responsive-table td {
+    display: grid;
+    grid-template-columns: minmax(104px, .42fr) minmax(0, 1fr);
+    gap: 12px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border-soft);
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+  .responsive-table td:first-child { border-top: 0; }
+  .responsive-table td::before {
+    content: attr(data-label);
+    color: var(--text-faint);
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .responsive-table td .mono,
+  .responsive-table td.mono { max-width: none; white-space: normal; overflow-wrap: anywhere; }
   .toast { right: 12px; left: 12px; max-width: none; min-width: 0; transform: none; }
 }
 
@@ -2122,6 +2179,26 @@ html[data-density="compact"] .job-row { min-height: 54px; }
     transition-duration: .001ms !important;
   }
   .status-dot.running, .job-status-icon.running span { opacity: 1; }
+}
+
+@media (pointer: coarse) {
+  .button,
+  .button.small,
+  .icon-button,
+  .theme-button,
+  .main-nav button,
+  .mobile-nav button,
+  .assignment-actions .icon-button,
+  .picker-select,
+  .input-action button,
+  .settings-nav button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .icon-button,
+  .assignment-actions .icon-button { width: 44px; height: 44px; }
+  input:not([type="checkbox"]):not([type="radio"]),
+  select { min-height: 44px; }
 }
 
 /* Bedien- und Statusbeschriftungen bleiben auch in der kompakten Ansicht

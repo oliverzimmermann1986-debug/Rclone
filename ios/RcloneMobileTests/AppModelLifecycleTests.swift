@@ -192,6 +192,31 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.config?.revision, "revision-1")
     }
 
+    func testDirtyRevisionOneDraftCannotSaveAfterBackgroundRefreshPublishesRevisionTwo() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+        let draftBaseRevision = try? XCTUnwrap(model.config?.revision)
+        client.baseConfig = ConfigSnapshot(
+            revision: "revision-2",
+            backup: BackupConfig(enabled: true, timezone: "Europe/Berlin", defaultSchedule: nil, pairs: [])
+        )
+
+        await model.reloadConfiguration()
+        let saved = await model.saveConfiguration(
+            pairs: [], definitions: [], baseRevision: draftBaseRevision
+        )
+
+        XCTAssertFalse(saved)
+        XCTAssertNil(client.updatedConfig)
+        XCTAssertEqual(model.config?.revision, "revision-2")
+        XCTAssertEqual(
+            model.configSaveIssue,
+            .conflict("Die Serverkonfiguration wurde geändert, während dieser Entwurf offen war. Lade den Serverstand neu und übernimm deine Änderungen erneut.")
+        )
+    }
+
     func testPasswordChangeImmediatelyClearsSessionAndRequestsFreshLogin() async {
         let defaults = makeDefaults()
         let client = StubAPIClient()
@@ -223,6 +248,121 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertTrue(started)
         XCTAssertEqual(client.runAllCallCount, 1)
         XCTAssertEqual(model.actionMessage, "Alle aktiven Jobs wurden gestartet.")
+        await model.logout()
+    }
+
+    func testBatchResponseIsPublishedAndVisibleSourcesRefreshImmediately() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        let started = BatchDefinitionState(
+            definitionID: "daily", definitionName: "Täglich", state: "started", jobID: 91
+        )
+        let queued = BatchDefinitionState(
+            definitionID: "weekly", definitionName: "Wöchentlich", state: "queued", jobID: nil
+        )
+        client.runAllResponse = ActionResponse(
+            ok: true, jobID: 91, error: nil,
+            startedDefinitions: [started], queuedDefinitions: [queued],
+            definitions: [started, queued]
+        )
+        let model = AppModel(defaults: defaults, runPollInterval: .milliseconds(10)) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+        let callsBeforeRun = client.jobsCallCount
+        client.progressResults = [.success(.fixture(running: true)), .success(.fixture(running: false))]
+        client.jobResults = [
+            JobSearchResponse(
+                items: [.fixture(id: 91, status: "running", definitionID: "daily")],
+                total: 1, limit: 100, offset: 0
+            ),
+            JobSearchResponse(
+                items: [
+                    .fixture(id: 91, status: "ok", definitionID: "daily"),
+                    .fixture(id: 92, status: "ok", definitionID: "weekly")
+                ],
+                total: 2, limit: 100, offset: 0
+            )
+        ]
+
+        let startedBatch = await model.runAllJobDefinitions()
+
+        XCTAssertTrue(startedBatch)
+        XCTAssertEqual(model.batchDefinitions.map(\.definitionID), ["daily", "weekly"])
+        XCTAssertGreaterThan(client.jobsCallCount, callsBeforeRun)
+        XCTAssertNotNil(model.storage)
+        var attempts = 0
+        while model.batchIsRunning && attempts < 50 {
+            try? await Task.sleep(for: .milliseconds(10))
+            attempts += 1
+        }
+        XCTAssertFalse(model.batchIsRunning)
+        XCTAssertEqual(model.batchDefinitions.map(\.state), ["ok", "ok"])
+        await model.logout()
+    }
+
+    func testAuthenticatedAction401EndsSessionCentrally() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.runAllError = APIError.unauthenticated
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        let startedBatch = await model.runAllJobDefinitions()
+
+        XCTAssertFalse(startedBatch)
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertTrue(client.clearedLocalSession)
+    }
+
+    func testStoragePartialAndTimeoutStatesKeepLastUsefulTimestamp() async {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.detailedStorage = StorageOverview(
+            pairs: [],
+            measurement: StorageMeasurementSummary(
+                state: "partial", total: 4, loaded: 2, failed: 2, stale: 0,
+                measurementError: "2 von 4 Messungen nutzbar", measuredAt: 1_720_000_000
+            )
+        )
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        XCTAssertEqual(model.storageSizeState.status, .partial)
+        XCTAssertEqual(model.storageSizeState.message, "2 von 4 Messungen nutzbar")
+        let lastUpdated = model.storageSizeState.lastUpdated
+
+        client.detailedStorage = nil
+        client.detailedStorageError = URLError(.timedOut)
+        await model.refreshStorageSizes()
+
+        XCTAssertEqual(model.storageSizeState.status, .stale)
+        XCTAssertEqual(model.storageSizeState.lastUpdated, lastUpdated)
+        XCTAssertTrue(model.storageSizeState.message?.contains("Zeitlimits") == true)
+    }
+
+    func testPushRotationAndLogoutRevokeEveryKnownTokenAfterInflightRegistration() async throws {
+        let defaults = makeDefaults()
+        let client = StubAPIClient()
+        client.pushDelay = .milliseconds(40)
+        let model = AppModel(defaults: defaults) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+        let first = String(repeating: "a", count: 64)
+        let second = String(repeating: "b", count: 64)
+
+        let firstRegistration = Task { await model.registerPushDevice(token: first, environment: "production") }
+        try await Task.sleep(for: .milliseconds(5))
+        let secondRegistration = Task { await model.registerPushDevice(token: second, environment: "production") }
+        try await Task.sleep(for: .milliseconds(5))
+        let logout = Task { await model.logout() }
+        await Task.yield()
+        XCTAssertEqual(model.phase, .signedOut, "Die lokale Ansicht muss nicht auf Netzwerk-Widerrufe warten")
+        await firstRegistration.value
+        await secondRegistration.value
+        await logout.value
+
+        XCTAssertFalse(client.registeredPushTokens.isEmpty)
+        XCTAssertTrue(Set(client.registeredPushTokens).isSubset(of: Set([first, second])))
+        XCTAssertTrue(Set(client.registeredPushTokens).isSubset(of: Set(client.unregisteredPushTokens)))
+        XCTAssertNil(defaults.data(forKey: "pendingPushRevocations"))
     }
 
     func testRetryJobUsesDedicatedClientCallAndKeepsPushNavigationTarget() async {
@@ -290,12 +430,17 @@ private final class StubAPIClient: APIClientProtocol {
         detail: nil
     )
     var progressResults: [Result<BackupProgress, Error>] = []
+    var jobResults: [JobSearchResponse] = []
     var updateConfigError: Error?
     var passwordChangeResponse: PasswordChangeResponse?
     var runAllResponse: ActionResponse?
+    var runAllError: Error?
     var retryResponse: ActionResponse?
     var pbsError: Error?
     var unregisterPushError: Error?
+    var detailedStorage: StorageOverview?
+    var detailedStorageError: Error?
+    var pushDelay: Duration?
     var baseConfig: ConfigSnapshot?
     private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
@@ -305,6 +450,8 @@ private final class StubAPIClient: APIClientProtocol {
     private(set) var retriedJobIDs: [Int] = []
     private(set) var definitionsCallCount = 0
     private(set) var unregisterPushCallCount = 0
+    private(set) var registeredPushTokens: [String] = []
+    private(set) var unregisteredPushTokens: [String] = []
 
     func login(username: String, password: String) async throws {}
 
@@ -314,6 +461,8 @@ private final class StubAPIClient: APIClientProtocol {
 
     func getStorage(includeSizes: Bool, forceRefresh: Bool) async throws -> StorageOverview {
         if includeSizes {
+            if let detailedStorageError { throw detailedStorageError }
+            if let detailedStorage { return detailedStorage }
             throw URLError(.timedOut)
         }
         return StorageOverview(pairs: [])
@@ -352,6 +501,7 @@ private final class StubAPIClient: APIClientProtocol {
     }
     func runAllJobDefinitions(dryRun: Bool) async throws -> ActionResponse {
         runAllCallCount += 1
+        if let runAllError { throw runAllError }
         guard let runAllResponse else { throw APIError.invalidResponse }
         return runAllResponse
     }
@@ -378,6 +528,7 @@ private final class StubAPIClient: APIClientProtocol {
 
     func getJobs(limit: Int) async throws -> JobSearchResponse {
         jobsCallCount += 1
+        if !jobResults.isEmpty { return jobResults.removeFirst() }
         return JobSearchResponse(items: [], total: 0, limit: limit, offset: 0)
     }
     func searchJobs(kind: String?, status: String?, query: String, limit: Int, offset: Int) async throws -> JobSearchResponse {
@@ -425,11 +576,14 @@ private final class StubAPIClient: APIClientProtocol {
     func pauseScheduler(minutes: Int) async throws -> SchedulerControl { throw APIError.invalidResponse }
     func resumeScheduler() async throws -> SchedulerControl { throw APIError.invalidResponse }
     func registerPushDevice(token: String, environment: String, appVersion: String) async throws -> PushRegistrationResponse {
-        PushRegistrationResponse(ok: true)
+        if let pushDelay { try await Task.sleep(for: pushDelay) }
+        registeredPushTokens.append(token)
+        return PushRegistrationResponse(ok: true)
     }
     func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
         unregisterPushCallCount += 1
         if let unregisterPushError { throw unregisterPushError }
+        unregisteredPushTokens.append(token)
         return PushRegistrationResponse(ok: true)
     }
     func logout() async throws -> LogoutResult { logoutResult }
@@ -450,6 +604,22 @@ private extension BackupProgress {
             totalPairs: running ? 1 : nil,
             donePairs: running ? 0 : nil,
             last: nil
+        )
+    }
+}
+
+private extension JobRecord {
+    static func fixture(id: Int, status: String, definitionID: String) -> JobRecord {
+        JobRecord(
+            id: id,
+            kind: "backup",
+            status: status,
+            startedAt: Date().timeIntervalSince1970,
+            endedAt: status == "running" ? nil : Date().timeIntervalSince1970,
+            logFile: nil,
+            definitionID: definitionID,
+            definitionName: definitionID,
+            configRevision: "revision-1"
         )
     }
 }

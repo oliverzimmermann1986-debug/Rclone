@@ -45,6 +45,72 @@ def test_pbs_process_lock_contention_returns_409_without_leaking_web_lock(
     assert api_pbs._lock.locked() is False
 
 
+def test_pbs_web_worker_persists_prune_failure_as_successful_backup(monkeypatch):
+    from app.routes import api_pbs
+
+    summary = {
+        "ok": True,
+        "backup_ok": True,
+        "prune_ok": False,
+        "prune_error": "Prune Exit-Code 2",
+        "maintenance_failed": True,
+        "degraded": True,
+        "outcome": "maintenance_failed",
+        "trigger": "web",
+        "pairs": [
+            {
+                "name": "pbs:docs",
+                "ok": True,
+                "backup_ok": True,
+                "prune_ok": False,
+                "prune_error": "Prune Exit-Code 2",
+                "maintenance_failed": True,
+            }
+        ],
+    }
+
+    class Db:
+        def __init__(self):
+            self.finished = []
+            self.audits = []
+
+        def job_get(self, job_id):
+            assert job_id == 42
+            return {"id": job_id, "status": "running"}
+
+        def job_finish(self, job_id, status, result):
+            self.finished.append((job_id, status, result))
+            return True
+
+        def audit_add(self, event, *, actor, details):
+            self.audits.append((event, actor, details))
+
+    class ScopeLock:
+        released = False
+
+        def release(self):
+            self.released = True
+
+    database = Db()
+    scope_lock = ScopeLock()
+    monkeypatch.setattr(api_pbs, "get_db", lambda: database)
+    monkeypatch.setattr(
+        api_pbs.pbs_backup,
+        "run_pbs_backup",
+        lambda *_args, **_kwargs: summary,
+    )
+
+    assert api_pbs._lock.acquire(blocking=False)
+    api_pbs._run_thread(42, ["docs"], {"pbs:docs": "pbs:id:docs"}, scope_lock, {})
+
+    assert database.finished[0][1] == "ok"
+    assert database.finished[0][2]["maintenance_failed"] is True
+    assert database.audits[0][0:2] == ("pbs_prune_failed", "web")
+    assert database.audits[0][2]["backup_ok"] is True
+    assert scope_lock.released is True
+    assert api_pbs._lock.locked() is False
+
+
 def test_unsaved_pair_connection_test_uses_inline_draft(tmp_path, monkeypatch):
     import json
     import subprocess

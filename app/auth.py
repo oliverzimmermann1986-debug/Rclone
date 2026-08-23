@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import secrets
 import threading
@@ -166,6 +168,115 @@ def clear_login_failures(key: str) -> None:
     with _login_lock:
         _login_failures.pop(key, None)
         _login_blocked_until.pop(key, None)
+
+
+def reauth_keys(request: Request) -> tuple[str, str]:
+    """Anonyme, getrennte Sperrschlüssel für Sitzung und Client-IP.
+
+    Weder die signierte Sitzung noch die IP-Adresse landen im Klartext in der
+    Datenbank. Das serverseitige Session-Geheimnis verhindert zudem, dass der
+    IP-Schlüssel durch simples Durchprobieren zurückgerechnet werden kann.
+    """
+    session_token = str(request.cookies.get(SESSION_COOKIE, "") or "")
+    client_host = request.client.host if request.client else "unknown"
+    secret = str(get_config().get("web", "secret_key", default="") or "")
+    secret_bytes = secret.encode("utf-8") or b"rclone-sync-reauth-v1"
+
+    def digest(scope: str, value: str) -> str:
+        payload = f"{scope}\0{value}".encode("utf-8", errors="surrogatepass")
+        return hmac.new(secret_bytes, payload, hashlib.sha256).hexdigest()
+
+    return (
+        f"reauth:session:{digest('session', session_token)}",
+        f"reauth:ip:{digest('ip', client_host)}",
+    )
+
+
+def _fallback_reauth_retry_after(keys: tuple[str, ...], window_sec: int) -> int:
+    return max((_fallback_retry_after(key, window_sec) for key in keys), default=0)
+
+
+def reauth_retry_after(request: Request) -> int:
+    keys = reauth_keys(request)
+    window_sec, _max_failures, _lock_sec = _login_policy()
+    try:
+        return get_db().auth_retry_after_many(keys)
+    except Exception:
+        logger.exception("Persistente Reauth-Sperre nicht verfügbar; nutze Fallback")
+        return _fallback_reauth_retry_after(keys, window_sec)
+
+
+def record_reauth_failure(request: Request) -> int:
+    keys = reauth_keys(request)
+    window_sec, max_failures, lock_sec = _login_policy()
+    try:
+        return get_db().auth_record_failure_many(
+            keys,
+            window_sec=window_sec,
+            max_failures=max_failures,
+            lock_sec=lock_sec,
+        )
+    except Exception:
+        logger.exception(
+            "Reauth-Fehler konnte nicht persistent gespeichert werden; nutze Fallback"
+        )
+        now = time.monotonic()
+        longest = 0
+        with _login_lock:
+            for key in keys:
+                failures = _login_failures[key]
+                while failures and now - failures[0] > window_sec:
+                    failures.popleft()
+                failures.append(now)
+                if len(failures) >= max_failures:
+                    _login_blocked_until[key] = now + lock_sec
+                    failures.clear()
+                    longest = max(longest, lock_sec)
+        return longest
+
+
+def clear_reauth_failures(request: Request) -> None:
+    keys = reauth_keys(request)
+    try:
+        get_db().auth_clear_many(keys)
+    except Exception:
+        logger.exception("Persistente Reauth-Sperre konnte nicht gelöscht werden")
+    with _login_lock:
+        for key in keys:
+            _login_failures.pop(key, None)
+            _login_blocked_until.pop(key, None)
+
+
+def require_reauthentication(request: Request, username: str, password: str) -> None:
+    """Prüft ein aktuelles Passwort mit persistenter Sitzung/IP-Sperre."""
+
+    def rate_limited(retry_after: int) -> HTTPException:
+        retry = max(1, int(retry_after))
+        return HTTPException(
+            429,
+            {
+                "message": "Zu viele falsche Passwortbestätigungen",
+                "reauth_required": True,
+                "retry_after_seconds": retry,
+            },
+            headers={"Retry-After": str(retry)},
+        )
+
+    retry_after = reauth_retry_after(request)
+    if retry_after:
+        raise rate_limited(retry_after)
+    if not verify_password(username, password):
+        retry_after = record_reauth_failure(request)
+        if retry_after:
+            raise rate_limited(retry_after)
+        raise HTTPException(
+            403,
+            {
+                "message": "Aktuelles Passwort falsch",
+                "reauth_required": True,
+            },
+        )
+    clear_reauth_failures(request)
 
 
 def _constant_time_text_equal(first: str, second: str) -> bool:

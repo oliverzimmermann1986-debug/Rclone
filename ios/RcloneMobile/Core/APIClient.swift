@@ -24,9 +24,9 @@ enum APIError: LocalizedError, Equatable {
         case .unauthenticated:
             "Die Sitzung ist abgelaufen. Bitte erneut anmelden."
         case .invalidResponse:
-            "Der Server hat eine unerwartete Antwort gesendet."
+            "Die Serverantwort konnte nicht geprüft werden. Prüfe, ob die Adresse zu Rclone Sync gehört, und versuche es erneut."
         case let .incompatibleResponse(resource):
-            "\(resource): Die Antwort konnte nicht gelesen werden. Server und App verwenden unterschiedliche Datenstände."
+            "\(resource) konnte nicht gelesen werden. Aktualisiere Server oder App und versuche es erneut."
         case let .server(_, message):
             message
         case .loginFailed:
@@ -155,6 +155,7 @@ final class APIClient: APIClientProtocol {
     let baseURL: URL
     private let session: URLSession
     private let loginSession: URLSession
+    private let lifecycleSession: URLSession
     private let cookieStorage: HTTPCookieStorage
     private let decoder: JSONDecoder
 
@@ -198,6 +199,18 @@ final class APIClient: APIClientProtocol {
             loginConfiguration.timeoutIntervalForResource = 12
             self.loginSession = URLSession(configuration: loginConfiguration)
         }
+        if let session {
+            self.lifecycleSession = session
+        } else {
+            let lifecycleConfiguration = URLSessionConfiguration.ephemeral
+            lifecycleConfiguration.httpCookieStorage = cookieStorage
+            lifecycleConfiguration.httpShouldSetCookies = true
+            lifecycleConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            lifecycleConfiguration.waitsForConnectivity = false
+            lifecycleConfiguration.timeoutIntervalForRequest = 4
+            lifecycleConfiguration.timeoutIntervalForResource = 6
+            self.lifecycleSession = URLSession(configuration: lifecycleConfiguration)
+        }
         self.decoder = JSONDecoder()
     }
 
@@ -218,7 +231,10 @@ final class APIClient: APIClientProtocol {
               components.password == nil else {
             throw APIError.invalidServer
         }
-        components.path = ""
+        let normalizedPath = components.percentEncodedPath
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .joined(separator: "/")
+        components.percentEncodedPath = normalizedPath.isEmpty ? "" : "/" + normalizedPath
         components.query = nil
         components.fragment = nil
         guard let url = components.url else { throw APIError.invalidServer }
@@ -275,9 +291,9 @@ final class APIClient: APIClientProtocol {
         )
 
         let (data, response) = try await loginSession.data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              let result = try? decoder.decode(NativeLoginResponse.self, from: data) else {
-            throw APIError.invalidResponse
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        guard let result = try? decoder.decode(NativeLoginResponse.self, from: data) else {
+            throw APIError.incompatibleResponse(resource: "Anmeldung")
         }
         switch result.status {
         case "success" where (200..<300).contains(http.statusCode):
@@ -340,10 +356,9 @@ final class APIClient: APIClientProtocol {
     func getStorage(includeSizes: Bool = true, forceRefresh: Bool = false) async throws -> StorageOverview {
         try await get(
             "/api/storage/overview?include_remote=\(includeSizes ? "true" : "false")&refresh_sizes=\(forceRefresh ? "true" : "false")",
-            // A cold rclone size traversal may legitimately take up to 45 seconds
-            // per endpoint. Keep every size request alive long enough, not only a
-            // manually forced refresh.
-            timeout: includeSizes ? 75 : nil
+            // The backend owns a bounded 70-second aggregate measurement deadline.
+            // Keep 15 seconds for HTTP serialization and a busy local network.
+            timeout: includeSizes ? 85 : nil
         )
     }
 
@@ -354,12 +369,19 @@ final class APIClient: APIClientProtocol {
     func registerPushDevice(token: String, environment: String, appVersion: String) async throws -> PushRegistrationResponse {
         try await post(
             "/api/push/devices",
-            body: PushDeviceRegistration(token: token, environment: environment, appVersion: appVersion)
+            body: PushDeviceRegistration(token: token, environment: environment, appVersion: appVersion),
+            using: lifecycleSession,
+            timeout: 4
         )
     }
 
     func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
-        try await delete("/api/push/devices", body: PushDeviceRemoval(token: token))
+        try await delete(
+            "/api/push/devices",
+            body: PushDeviceRemoval(token: token),
+            using: lifecycleSession,
+            timeout: 4
+        )
     }
 
     func getPushStatus() async throws -> PushStatus {
@@ -560,8 +582,9 @@ final class APIClient: APIClientProtocol {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(origin, forHTTPHeaderField: "Origin")
+        request.timeoutInterval = 4
         try addCSRF(to: &request)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await lifecycleSession.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         if (200..<400).contains(http.statusCode) {
             return LogoutResult(
@@ -597,14 +620,20 @@ final class APIClient: APIClientProtocol {
         return try await send(request)
     }
 
-    private func post<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
+    private func post<Body: Encodable, T: Decodable>(
+        _ path: String,
+        body: Body,
+        using requestSession: URLSession? = nil,
+        timeout: TimeInterval? = nil
+    ) async throws -> T {
         var request = URLRequest(url: url(for: path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(origin, forHTTPHeaderField: "Origin")
         try addCSRF(to: &request)
         request.httpBody = try JSONEncoder().encode(body)
-        return try await send(request)
+        if let timeout { request.timeoutInterval = timeout }
+        return try await send(request, using: requestSession ?? session)
     }
 
     private func download(_ path: String, filename: String) async throws -> URL {
@@ -632,18 +661,27 @@ final class APIClient: APIClientProtocol {
         return try await send(request)
     }
 
-    private func delete<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
+    private func delete<Body: Encodable, T: Decodable>(
+        _ path: String,
+        body: Body,
+        using requestSession: URLSession? = nil,
+        timeout: TimeInterval? = nil
+    ) async throws -> T {
         var request = URLRequest(url: url(for: path))
         request.httpMethod = "DELETE"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(origin, forHTTPHeaderField: "Origin")
         try addCSRF(to: &request)
         request.httpBody = try JSONEncoder().encode(body)
-        return try await send(request)
+        if let timeout { request.timeoutInterval = timeout }
+        return try await send(request, using: requestSession ?? session)
     }
 
-    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
-        let (data, response) = try await session.data(for: request)
+    private func send<T: Decodable>(
+        _ request: URLRequest,
+        using requestSession: URLSession? = nil
+    ) async throws -> T {
+        let (data, response) = try await (requestSession ?? session).data(for: request)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         if http.statusCode == 401 { throw APIError.unauthenticated }
         if !(200..<300).contains(http.statusCode) {
@@ -680,13 +718,24 @@ final class APIClient: APIClientProtocol {
         guard (200..<300).contains(http.statusCode) else {
             throw APIError.server(
                 status: http.statusCode,
-                message: Self.errorMessage(data) ?? "Anmeldedienst nicht erreichbar (HTTP \(http.statusCode))"
+                message: Self.loginServerMessage(status: http.statusCode)
             )
         }
         do {
             return try decoder.decode(T.self, from: data)
         } catch {
-            throw APIError.invalidResponse
+            throw APIError.incompatibleResponse(resource: "Anmeldung")
+        }
+    }
+
+    private static func loginServerMessage(status: Int) -> String {
+        switch status {
+        case 404, 405:
+            "Diese Serverversion unterstützt die native Anmeldung nicht. Die App versucht den kompatiblen Anmeldeweg."
+        case 500..<600:
+            "Der Server konnte die Anmeldung gerade nicht verarbeiten. Versuche es später erneut oder prüfe den Serverstatus."
+        default:
+            "Die Anmeldung wurde vom Server abgelehnt. Prüfe Adresse und Zugangsdaten und versuche es erneut."
         }
     }
 
@@ -730,18 +779,18 @@ final class APIClient: APIClientProtocol {
     }
 
     private static func responseResource(for path: String) -> String {
-        switch path {
-        case "/api/storage/overview":
+        switch true {
+        case path.hasSuffix("/api/storage/overview"):
             "Dateizahlen und Größen"
-        case "/api/diagnostics/overview":
+        case path.hasSuffix("/api/diagnostics/overview"):
             "Lagebild"
-        case "/api/config":
+        case path.hasSuffix("/api/config"):
             "Konfiguration"
-        case "/api/jobs/search", "/api/jobs/list":
+        case path.hasSuffix("/api/jobs/search") || path.hasSuffix("/api/jobs/list"):
             "Laufhistorie"
-        case "/api/jobs/backup/progress":
+        case path.hasSuffix("/api/jobs/backup/progress"):
             "Laufstatus"
-        case "/api/pbs/status":
+        case path.hasSuffix("/api/pbs/status"):
             "PBS-Status"
         default:
             "Serverdaten"

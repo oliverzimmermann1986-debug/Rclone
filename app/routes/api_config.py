@@ -15,10 +15,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import bcrypt
 from croniter import croniter
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..auth import require_auth, verify_password
+from ..auth import require_auth, require_reauthentication
 from ..config_store import ConfigConflictError, get_config
 from ..file_lock import acquire as acquire_file_lock
 from ..file_lock import release as release_file_lock
@@ -147,13 +147,15 @@ def _preserve_sensitive(new_data: dict[str, Any], old_data: dict[str, Any]) -> N
         new_web[key] = copy.deepcopy(old_web.get(key, ""))
 
 
-def _audit_best_effort(event: str, *, actor: str, details: dict[str, Any]) -> None:
+def _audit_best_effort(event: str, *, actor: str, details: dict[str, Any]) -> bool:
     try:
         get_db().audit_add(event, actor=actor, details=details)
+        return True
     except Exception:
         # Die Aktion ist zu diesem Zeitpunkt bereits atomar persistiert. Ein
         # Audit-Ausfall darf daher keinen irreführenden HTTP-500 erzeugen.
         logger.exception("Audit-Ereignis %s konnte nicht gespeichert werden", event)
+        return False
 
 
 def _semantic_bool(value: Any, *, default: bool = False) -> bool:
@@ -299,7 +301,9 @@ class PairBulkAction(BaseModel):
 
 @router.put("")
 def update_config(
-    body: ConfigUpdate, user: str = Depends(require_auth)
+    request: Request,
+    body: ConfigUpdate,
+    user: str = Depends(require_auth),
 ) -> dict[str, Any]:
     store = get_config()
     old_data, current_revision = store.snapshot_with_revision()
@@ -322,9 +326,7 @@ def update_config(
         != str(new_web.get("username") or "").casefold()
     )
     if _sensitive_config_changed(old_data, new_data):
-        if not body.current_password or not verify_password(
-            user, body.current_password
-        ):
+        if not body.current_password:
             raise HTTPException(
                 403,
                 {
@@ -333,6 +335,7 @@ def update_config(
                     "reauth_required": True,
                 },
             )
+        require_reauthentication(request, user, body.current_password)
     if username_changed:
         try:
             version = int(old_web.get("session_version", 1) or 1)
@@ -362,7 +365,8 @@ def update_config(
         raise HTTPException(
             500, f"Konfiguration konnte nicht gespeichert werden: {exc}"
         ) from exc
-    _audit_best_effort(
+    response_warnings = list(warnings)
+    audit_ok = _audit_best_effort(
         "config_saved",
         actor=user,
         details={
@@ -371,9 +375,16 @@ def update_config(
             "warning_count": len(warnings),
         },
     )
+    if not audit_ok:
+        response_warnings.append(
+            "Konfiguration wurde gespeichert, das Audit-Protokoll war jedoch "
+            "nicht verfügbar"
+        )
     return {
         "ok": True,
-        "warnings": warnings,
+        "status": "success_with_warning" if response_warnings else "success",
+        "warnings": response_warnings,
+        "reauthenticate": username_changed,
         "config": _redact(normalized, revision=revision),
     }
 
@@ -537,11 +548,12 @@ class PasswordChange(BaseModel):
 
 @router.post("/change-password")
 def change_password(
-    body: PasswordChange, user: str = Depends(require_auth)
+    request: Request,
+    body: PasswordChange,
+    user: str = Depends(require_auth),
 ) -> dict[str, Any]:
     """Ändert das Passwort und invalidiert alle bestehenden Sessions."""
-    if not verify_password(user, body.current_password):
-        raise HTTPException(403, "Aktuelles Passwort falsch")
+    require_reauthentication(request, user, body.current_password)
 
     new = body.new_password
     if new != new.strip():
@@ -574,17 +586,47 @@ def change_password(
             current_version = 1
         web["session_version"] = max(1, current_version) + 1
 
+    store = get_config()
     try:
-        store = get_config()
         store.update(updater)
-        data_dir = Path(store.get("paths", "data_dir", default="/opt/rclone-sync/data"))
-        (data_dir / ".initial-password").unlink(missing_ok=True)
     except (OSError, ValueError) as exc:
         raise HTTPException(
             500, f"Passwort konnte nicht gespeichert werden: {exc}"
         ) from exc
-    _audit_best_effort("password_changed", actor=user, details={})
-    return {"ok": True, "message": "Passwort geändert", "reauthenticate": True}
+
+    # Ab hier ist das Passwort bereits atomar geändert. Nacharbeiten dürfen
+    # daher niemals einen HTTP-500 vortäuschen und einen gefährlichen Retry
+    # derselben Mutation provozieren.
+    warnings: list[str] = []
+    try:
+        data_dir = Path(store.get("paths", "data_dir", default="/opt/rclone-sync/data"))
+        (data_dir / ".initial-password").unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError):
+        logger.exception(
+            "Initialpasswort-Datei konnte nach Passwortwechsel nicht entfernt werden"
+        )
+        warnings.append(
+            "Passwort wurde geändert, die Initialpasswort-Datei konnte jedoch "
+            "nicht bereinigt werden"
+        )
+        _audit_best_effort(
+            "password_post_cleanup_warning",
+            actor=user,
+            details={"stage": "initial_password_marker"},
+        )
+    if not _audit_best_effort(
+        "password_changed", actor=user, details={"warning_count": len(warnings)}
+    ):
+        warnings.append(
+            "Passwort wurde geändert, das Audit-Protokoll war jedoch nicht verfügbar"
+        )
+    return {
+        "ok": True,
+        "status": "success_with_warning" if warnings else "success",
+        "message": "Passwort geändert",
+        "warnings": warnings,
+        "reauthenticate": True,
+    }
 
 
 class FilterPayload(BaseModel):

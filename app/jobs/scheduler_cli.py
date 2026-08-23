@@ -23,7 +23,7 @@ from .job_lifecycle import (
     reconcile_locked_scope,
 )
 from .locks import file_lock_or_none
-from .pbs_backup import PBS_CANCEL_SCOPE, run_pbs_backup
+from .pbs_backup import PBS_CANCEL_SCOPE, prune_failures, run_pbs_backup
 from .rclone_sync import reset_cancel, run_job
 from .restore_test import AGGREGATE_RUN_NAME as RESTORE_AGGREGATE_NAME
 from .restore_test import JOB_KIND as RESTORE_JOB_KIND
@@ -89,6 +89,31 @@ def _with_metadata(
     enriched["history_keys"] = history_keys
     enriched["scheduler_slots"] = scheduler_slots
     return enriched
+
+
+def _audit_pbs_prune_failures(db, summary: dict, *, job_id: int) -> None:
+    """Audit-Warnung getrennt vom erfolgreichen Snapshot persistieren."""
+
+    failures = prune_failures(summary)
+    audit_add = getattr(db, "audit_add", None)
+    if not failures or not callable(audit_add):
+        return
+    try:
+        audit_add(
+            "pbs_prune_failed",
+            actor="scheduler",
+            details={
+                "job_id": job_id,
+                "trigger": "scheduler",
+                "backup_ok": summary.get("backup_ok") is True,
+                "maintenance_failed": True,
+                "targets": failures,
+            },
+        )
+    except Exception:
+        logging.getLogger("scheduler_cli").exception(
+            "PBS-Prune-Fehler konnte nicht auditiert werden"
+        )
 
 
 def _definition_attempt_metadata(
@@ -525,6 +550,7 @@ def main() -> int:
                     )
                     status_name = _job_status(summary)
                     db.job_finish(job_id, status_name, summary)
+                    _audit_pbs_prune_failures(db, summary, job_id=job_id)
                     if status_name != "ok":
                         rc = 1
                 except Exception as e:

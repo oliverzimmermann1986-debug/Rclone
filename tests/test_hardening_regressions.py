@@ -6,7 +6,7 @@ from pathlib import Path
 import bcrypt
 import pytest
 import yaml
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from app.config_store import Config
 from app.config_validation import ConfigValidationError, validate_config
@@ -44,6 +44,18 @@ def _config(tmp_path: Path) -> dict:
 class _AuditDB:
     def audit_add(self, *_args, **_kwargs) -> None:
         return None
+
+
+def _request(token: str = "direct-test-session") -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/config",
+            "headers": [(b"cookie", f"rclone_sync_session={token}".encode("ascii"))],
+            "client": ("127.0.0.1", 12345),
+        }
+    )
 
 
 def test_config_write_failure_restores_memory_from_disk(
@@ -89,7 +101,9 @@ def test_generic_config_save_cannot_replace_server_owned_credentials(
     monkeypatch.setattr(api_config, "get_config", lambda: store)
     monkeypatch.setattr(api_config, "get_db", lambda: _AuditDB())
 
-    api_config.update_config(api_config.ConfigUpdate(config=candidate), user="admin")
+    api_config.update_config(
+        _request(), api_config.ConfigUpdate(config=candidate), user="admin"
+    )
 
     assert store.get("web", "password") == ""
     assert store.get("web", "password_hash") == original["web"]["password_hash"]
@@ -111,12 +125,13 @@ def test_username_change_requires_reauthentication(
 
     with pytest.raises(HTTPException) as raised:
         api_config.update_config(
-            api_config.ConfigUpdate(config=candidate), user="admin"
+            _request(), api_config.ConfigUpdate(config=candidate), user="admin"
         )
     assert raised.value.status_code == 403
 
-    monkeypatch.setattr(api_config, "verify_password", lambda *_args: True)
+    monkeypatch.setattr(api_config, "require_reauthentication", lambda *_args: None)
     api_config.update_config(
+        _request(),
         api_config.ConfigUpdate(config=candidate, current_password="correct-password"),
         user="admin",
     )
@@ -139,7 +154,7 @@ def test_string_false_cannot_bypass_sensitive_config_reauthentication(
 
     with pytest.raises(HTTPException) as raised:
         api_config.update_config(
-            api_config.ConfigUpdate(config=candidate), user="admin"
+            _request(), api_config.ConfigUpdate(config=candidate), user="admin"
         )
 
     assert raised.value.status_code == 403
@@ -177,7 +192,7 @@ def test_pbs_target_route_change_requires_reauthentication(
 
     with pytest.raises(HTTPException) as raised:
         api_config.update_config(
-            api_config.ConfigUpdate(config=candidate), user="admin"
+            _request(), api_config.ConfigUpdate(config=candidate), user="admin"
         )
 
     assert raised.value.status_code == 403
@@ -219,7 +234,7 @@ def test_transport_and_lockout_changes_require_reauthentication(
 
     with pytest.raises(HTTPException) as raised:
         api_config.update_config(
-            api_config.ConfigUpdate(config=candidate), user="admin"
+            _request(), api_config.ConfigUpdate(config=candidate), user="admin"
         )
 
     assert raised.value.status_code == 403
@@ -244,9 +259,10 @@ def test_absent_security_fields_are_not_treated_as_change() -> None:
 def test_bcrypt_byte_limit_is_reported_as_client_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(api_config, "verify_password", lambda *_args: True)
+    monkeypatch.setattr(api_config, "require_reauthentication", lambda *_args: None)
     with pytest.raises(HTTPException) as raised:
         api_config.change_password(
+            _request(),
             api_config.PasswordChange(
                 current_password="old-password", new_password="ä" * 37
             ),

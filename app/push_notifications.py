@@ -9,6 +9,7 @@ import os
 import stat
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -249,12 +250,14 @@ def dispatch_pending_pushes(
     db: Database | None = None,
     client_factory: Callable[..., httpx.Client] = httpx.Client,
     limit: int = 32,
+    claim_owner: str | None = None,
 ) -> dict[str, int]:
     """Claimt fällige Outbox-Zeilen atomar und stellt sie best-effort zu."""
 
     database = db or get_db()
+    owner = str(claim_owner or uuid.uuid4().hex)
     database.push_device_prune_expired()
-    rows = database.push_outbox_claim_due(limit=limit)
+    rows = database.push_outbox_claim_due(claim_owner=owner, limit=limit)
     result = {"sent": 0, "failed": 0, "removed": 0, "retrying": 0}
     if not rows:
         return result
@@ -262,16 +265,34 @@ def dispatch_pending_pushes(
     row_settings = [_settings(str(row.get("event") or "")) for row in rows]
     timeouts = [float(item["timeout"]) for item in row_settings if item]
     client_timeout = max(timeouts, default=10.0)
+    lease_seconds = max(60, min(300, int(client_timeout * 2) + 10))
     with client_factory(http2=True, timeout=client_timeout) as client:
-        for row, settings in zip(rows, row_settings):
+        for index, (row, settings) in enumerate(zip(rows, row_settings)):
             row_id = int(row["id"])
-            if settings is None:
-                database.push_outbox_finish(
+            remaining_ids = [int(item["id"]) for item in rows[index:]]
+            renewed_ids = set(
+                database.push_outbox_renew_claims(
+                    remaining_ids,
+                    claim_owner=owner,
+                    lease_seconds=lease_seconds,
+                )
+            )
+            if row_id not in renewed_ids:
+                logger.info(
+                    "APNs-Outbox-Zeile %s gehört nicht mehr Dispatcher %s",
                     row_id,
+                    owner,
+                )
+                continue
+            if settings is None:
+                status = database.push_outbox_finish(
+                    row_id,
+                    claim_owner=owner,
                     sent=False,
                     error="APNs ist für dieses Event nicht mehr konfiguriert",
                 )
-                result["failed"] += 1
+                if status == "failed":
+                    result["failed"] += 1
                 continue
             token = str(row["token"])
             host = (
@@ -296,13 +317,17 @@ def dispatch_pending_pushes(
             except (OSError, ValueError, PermissionError, jwt.PyJWTError) as exc:
                 status = database.push_outbox_finish(
                     row_id,
+                    claim_owner=owner,
                     sent=False,
                     retry=True,
                     retry_delay_seconds=_retry_delay(row),
                     error=str(exc),
                     max_attempts=int(settings.get("max_attempts") or 8),
                 )
-                result["retrying" if status == "pending" else "failed"] += 1
+                if status == "pending":
+                    result["retrying"] += 1
+                elif status == "failed":
+                    result["failed"] += 1
                 logger.warning("APNs Provider-Token fehlgeschlagen: %s", exc)
                 continue
             try:
@@ -313,16 +338,26 @@ def dispatch_pending_pushes(
                 )
                 reason = _response_reason(response)
                 if response.status_code == 200:
-                    database.push_outbox_finish(row_id, sent=True)
-                    result["sent"] += 1
+                    status = database.push_outbox_finish(
+                        row_id, claim_owner=owner, sent=True
+                    )
+                    if status == "sent":
+                        result["sent"] += 1
                     continue
                 if (
                     response.status_code in {400, 410}
                     and reason in _INVALID_TOKEN_REASONS
                 ):
-                    if database.push_device_delete(token):
-                        result["removed"] += 1
-                    result["failed"] += 1
+                    status = database.push_outbox_finish(
+                        row_id,
+                        claim_owner=owner,
+                        sent=False,
+                        error=f"HTTP {response.status_code} {reason}".strip(),
+                    )
+                    if status == "failed":
+                        if database.push_device_delete(token, claim_owner=owner):
+                            result["removed"] += 1
+                        result["failed"] += 1
                     continue
                 retryable = (
                     response.status_code in _RETRYABLE_STATUS_CODES
@@ -332,13 +367,17 @@ def dispatch_pending_pushes(
                     _reset_provider_token()
                 status = database.push_outbox_finish(
                     row_id,
+                    claim_owner=owner,
                     sent=False,
                     retry=retryable,
                     retry_delay_seconds=_retry_delay(row, response),
                     error=f"HTTP {response.status_code} {reason}".strip(),
                     max_attempts=int(settings.get("max_attempts") or 8),
                 )
-                result["retrying" if status == "pending" else "failed"] += 1
+                if status == "pending":
+                    result["retrying"] += 1
+                elif status == "failed":
+                    result["failed"] += 1
                 logger.warning(
                     "APNs %s für Gerät abgelehnt: HTTP %s %s",
                     row["event"],
@@ -348,13 +387,17 @@ def dispatch_pending_pushes(
             except (httpx.HTTPError, OSError) as exc:
                 status = database.push_outbox_finish(
                     row_id,
+                    claim_owner=owner,
                     sent=False,
                     retry=True,
                     retry_delay_seconds=_retry_delay(row),
                     error=str(exc),
                     max_attempts=int(settings.get("max_attempts") or 8),
                 )
-                result["retrying" if status == "pending" else "failed"] += 1
+                if status == "pending":
+                    result["retrying"] += 1
+                elif status == "failed":
+                    result["failed"] += 1
                 logger.warning("APNs %s fehlgeschlagen: %s", row["event"], exc)
     return result
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import bcrypt
 import pytest
 import yaml
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from app import __version__ as app_version, config_store, db
 from app.config_store import Config
@@ -67,6 +67,18 @@ def _setup(tmp_path: Path, monkeypatch) -> tuple[Config, Database]:
     return store, database
 
 
+def _request(token: str = "recovery-test-session") -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/maintenance/config/snapshots/restore",
+            "headers": [(b"cookie", f"rclone_sync_session={token}".encode("ascii"))],
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+
 def test_snapshot_restore_keeps_identity_and_invalidates_sessions(
     tmp_path, monkeypatch
 ):
@@ -94,6 +106,7 @@ def test_snapshot_restore_keeps_identity_and_invalidates_sessions(
 
     with pytest.raises(HTTPException) as mismatch:
         api_maintenance.restore_config_snapshot(
+            _request(),
             api_maintenance.SnapshotRestore(
                 name=snapshot["name"],
                 current_password="test-password-long",
@@ -105,6 +118,7 @@ def test_snapshot_restore_keeps_identity_and_invalidates_sessions(
     assert mismatch.value.status_code == 409
 
     restored = api_maintenance.restore_config_snapshot(
+        _request(),
         api_maintenance.SnapshotRestore(
             name=snapshot["name"],
             current_password="test-password-long",

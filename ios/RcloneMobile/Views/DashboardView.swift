@@ -20,6 +20,26 @@ struct DashboardView: View {
                     }
                 }
 
+                if model.batchIsRunning || !model.batchDefinitions.isEmpty {
+                    Section(model.batchIsRunning ? "Job-Batch läuft" : "Letzter Job-Batch") {
+                        ForEach(model.batchDefinitions) { definition in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(definition.definitionName)
+                                    if let jobID = definition.jobID {
+                                        Text("Lauf #\(jobID)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                StatusBadge(status: definition.state)
+                            }
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                }
+
                 if !overview.alerts.isEmpty {
                     Section("Hinweise") {
                         ForEach(overview.alerts) { alert in
@@ -64,6 +84,7 @@ struct DashboardView: View {
                             LoadingSection(label: "Kopien werden geladen …")
                         }
                     }
+                    StorageMeasurementStateView(state: model.storageSizeState)
                 } header: {
                     HStack {
                         Text("Kopien")
@@ -374,9 +395,12 @@ private struct CopyListRow: View {
         case "cached":
             return "Gemessen \(AppFormat.relative(size.measuredAt))"
         case "stale":
+            if let issue = size.measurementError ?? size.error, !issue.isEmpty {
+                return "Veraltet · \(issue)"
+            }
             return "Veraltet · \(AppFormat.relative(size.measuredAt))"
         case "failed":
-            return "Messung fehlgeschlagen"
+            return size.measurementError ?? size.error ?? "Messung fehlgeschlagen"
         default:
             return size.measuredAt.map { "Gemessen \(AppFormat.relative($0))" } ?? "Noch nicht gemessen"
         }
@@ -385,5 +409,46 @@ private struct CopyListRow: View {
     private func measurementColor(_ size: PathSize?) -> Color {
         guard let status = size?.measurementStatus else { return .secondary }
         return ["stale", "failed"].contains(status) ? .orange : .secondary
+    }
+}
+
+private struct StorageMeasurementStateView: View {
+    let state: StorageSizeState
+
+    var body: some View {
+        switch state.status {
+        case .idle, .loaded:
+            EmptyView()
+        case .loading:
+            Label("Dateizahlen und Größen werden im Hintergrund ermittelt.", systemImage: "hourglass")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .partial, .failed, .stale:
+            VStack(alignment: .leading, spacing: 3) {
+                Label(title, systemImage: state.status == .failed ? "exclamationmark.triangle" : "clock.badge.exclamationmark")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+                if let message = state.message, !message.isEmpty {
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                if let lastUpdated = state.lastUpdated {
+                    Text("Letzter nutzbarer Stand: \(AppFormat.relative(lastUpdated.timeIntervalSince1970))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var title: String {
+        switch state.status {
+        case .partial: "Nur ein Teil der Größen konnte gemessen werden."
+        case .failed: "Dateizahlen und Größen konnten nicht gemessen werden."
+        case .stale: "Die angezeigten Größen sind veraltet."
+        default: ""
+        }
     }
 }

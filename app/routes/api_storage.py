@@ -44,6 +44,15 @@ _SIZE_CACHE_TTL_SECONDS = _bounded_env_int(
 _SIZE_CACHE_MAX_ENTRIES = _bounded_env_int(
     "RCLONE_SIZE_CACHE_MAX_ENTRIES", 256, 16, 2048
 )
+_SIZE_MEASUREMENT_DEADLINE_SECONDS = _bounded_env_int(
+    "RCLONE_SIZE_MEASUREMENT_DEADLINE_SECONDS", 60, 5, 70
+)
+_SIZE_MEASUREMENT_TIMEOUT_SECONDS = _bounded_env_int(
+    "RCLONE_SIZE_MEASUREMENT_TIMEOUT_SECONDS", 45, 5, 60
+)
+_SIZE_MEASUREMENT_WORKERS = _bounded_env_int(
+    "RCLONE_SIZE_MEASUREMENT_WORKERS", 8, 2, 16
+)
 _size_cache_lock = threading.Lock()
 _size_cache: OrderedDict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = (
     OrderedDict()
@@ -70,7 +79,7 @@ def _disk_usage(path: str) -> dict[str, Any]:
         return {"path": path, "exists": True, "error": str(exc)}
 
 
-def _rclone_size(remote: str, timeout: int = 45) -> dict[str, Any]:
+def _rclone_size(remote: str, timeout: float = 45) -> dict[str, Any]:
     if not remote:
         return {"path": remote, "error": "Pfad fehlt"}
     cache_dir = os.getenv("RCLONE_CACHE_DIR", "/opt/rclone-sync/data/.rclone-cache")
@@ -123,15 +132,46 @@ def _is_successful_size(result: dict[str, Any]) -> bool:
 def _decorate_measurement(
     result: dict[str, Any], *, measured_at: float | None, status: str
 ) -> dict[str, Any]:
+    error = result.get("measurement_error") or result.get("error")
+    state = {
+        "fresh": "loaded",
+        "cached": "loaded",
+        "stale": "stale",
+        "failed": "failed",
+    }.get(status, "failed")
     return {
         **result,
         "measured_at": measured_at,
         "measurement_status": status,
+        "measurement_state": state,
+        "measurement_error": str(error) if error else None,
+    }
+
+
+def _measurement_metadata(result: dict[str, Any] | None, path: str) -> dict[str, Any]:
+    """Kleine, stabile Zustandsprojektion für Clients ohne Größenmodell."""
+    if not result:
+        return {
+            "path": path,
+            "state": "loading",
+            "measurement_error": None,
+            "measured_at": None,
+        }
+    return {
+        "path": result.get("path", path),
+        "state": result.get("measurement_state", "failed"),
+        "measurement_error": result.get("measurement_error"),
+        "measured_at": result.get("measured_at"),
     }
 
 
 def _cached_rclone_size(
-    pair: dict[str, Any], side: str, path: str, *, force_refresh: bool = False
+    pair: dict[str, Any],
+    side: str,
+    path: str,
+    *,
+    force_refresh: bool = False,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Liefert erfolgreiche Größenmessungen aus einem begrenzten TTL-Cache.
 
@@ -149,7 +189,17 @@ def _cached_rclone_size(
                 dict(cached[1]), measured_at=cached[0], status="cached"
             )
 
-    result = _rclone_size(path)
+    if deadline is None:
+        result = _rclone_size(path)
+    else:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            result = {"path": path, "error": "Globale Messzeit überschritten"}
+        else:
+            result = _rclone_size(
+                path,
+                timeout=min(_SIZE_MEASUREMENT_TIMEOUT_SECONDS, max(0.1, remaining)),
+            )
     measured_at = time.time()
     if _is_successful_size(result):
         clean = {
@@ -177,6 +227,61 @@ def _cached_rclone_size(
         measured_at=None,
         status="failed",
     )
+
+
+def _measurement_summary(
+    output: list[dict[str, Any]], *, requested: bool
+) -> dict[str, Any]:
+    if not requested:
+        return {
+            "state": "loading",
+            "total": len(output) * 2,
+            "loaded": 0,
+            "failed": 0,
+            "stale": 0,
+            "measurement_error": None,
+            "measured_at": None,
+        }
+
+    results = [
+        item.get(f"{side}_size") for item in output for side in ("source", "target")
+    ]
+    states = [
+        str(result.get("measurement_state") or "failed")
+        for result in results
+        if isinstance(result, dict)
+    ]
+    loaded = states.count("loaded")
+    failed = states.count("failed")
+    stale = states.count("stale")
+    total = len(results)
+    if total == 0 or loaded == total:
+        state = "loaded"
+    elif failed == total:
+        state = "failed"
+    elif stale == total:
+        state = "stale"
+    else:
+        state = "partial"
+    measured_values = [
+        float(result["measured_at"])
+        for result in results
+        if isinstance(result, dict)
+        and isinstance(result.get("measured_at"), (int, float))
+    ]
+    return {
+        "state": state,
+        "total": total,
+        "loaded": loaded,
+        "failed": failed,
+        "stale": stale,
+        "measurement_error": (
+            f"{loaded + stale} von {total} Messungen nutzbar"
+            if failed or stale
+            else None
+        ),
+        "measured_at": max(measured_values, default=None),
+    }
 
 
 def _resolve_endpoints(pair: dict[str, Any]) -> tuple[str, str]:
@@ -251,16 +356,19 @@ def overview(
             else None,
             **last_success.get(rclone_history_key(pair), {}),
         }
+        info["source_measurement"] = _measurement_metadata(None, source)
+        info["target_measurement"] = _measurement_metadata(None, target)
         output.append(info)
 
     # Größen für Quelle UND Ziel jedes Pairs sind teuer (rclone size traversiert
     # beide Endpunkte). Daher nur auf ausdrückliche Anforderung und parallelisiert.
     if include_remote and output:
+        deadline = time.monotonic() + _SIZE_MEASUREMENT_DEADLINE_SECONDS
         tasks: list[tuple[int, str, dict[str, Any]]] = []
         for index, (item, pair) in enumerate(zip(output, pairs, strict=True)):
             tasks.append((index, "source", pair))
             tasks.append((index, "target", pair))
-        workers = min(6, max(1, len(tasks)))
+        workers = min(_SIZE_MEASUREMENT_WORKERS, max(1, len(tasks)))
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="pair-size"
         ) as pool:
@@ -271,6 +379,7 @@ def overview(
                     side,
                     str(output[index].get(side) or ""),
                     force_refresh=refresh_sizes,
+                    deadline=deadline,
                 ): (
                     index,
                     side,
@@ -283,8 +392,18 @@ def overview(
                 try:
                     output[index][key] = future.result()
                 except Exception as exc:
-                    output[index][key] = {
-                        "path": output[index].get(side),
-                        "error": str(exc),
-                    }
-    return {"pairs": output}
+                    output[index][key] = _decorate_measurement(
+                        {
+                            "path": output[index].get(side),
+                            "error": str(exc),
+                        },
+                        measured_at=None,
+                        status="failed",
+                    )
+                output[index][f"{side}_measurement"] = _measurement_metadata(
+                    output[index][key], str(output[index].get(side) or "")
+                )
+    return {
+        "pairs": output,
+        "measurement": _measurement_summary(output, requested=include_remote),
+    }

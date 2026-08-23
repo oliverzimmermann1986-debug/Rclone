@@ -272,13 +272,26 @@ def _register_proc(
     )
 
 
-def _unregister_proc(proc: subprocess.Popen) -> None:
+def _unregister_proc(proc: subprocess.Popen) -> bool:
+    """Entfernt Marker nur für einen sicher beendeten und gereapten Prozess."""
+    try:
+        if proc.poll() is None:
+            return False
+    except OSError:
+        return False
     with _ACTIVE_PROCS_LOCK:
+        before = len(_ACTIVE_PROCS)
         _ACTIVE_PROCS[:] = [item for item in _ACTIVE_PROCS if item[0] is not proc]
-    runtime_state.unregister_process(proc.pid)
+        removed = len(_ACTIVE_PROCS) != before
+    if removed:
+        runtime_state.unregister_process(proc.pid)
+    return removed
 
 
-def _terminate_proc(proc: subprocess.Popen, *, graceful_sec: int = 10) -> None:
+def _terminate_proc(
+    proc: subprocess.Popen, *, graceful_sec: float = 10, forceful_sec: float = 5
+) -> None:
+    """Beendet und reapt einen Prozess; unbestätigte Exits schlagen geschlossen fehl."""
     if proc.poll() is not None:
         return
     try:
@@ -287,12 +300,15 @@ def _terminate_proc(proc: subprocess.Popen, *, graceful_sec: int = 10) -> None:
         try:
             proc.terminate()
         except OSError:
-            return
+            pass
     try:
-        proc.wait(timeout=graceful_sec)
+        proc.wait(timeout=max(0.0, float(graceful_sec)))
         return
     except subprocess.TimeoutExpired:
         pass
+    except OSError:
+        if proc.poll() is not None:
+            return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (AttributeError, ProcessLookupError, PermissionError, OSError):
@@ -300,6 +316,18 @@ def _terminate_proc(proc: subprocess.Popen, *, graceful_sec: int = 10) -> None:
             proc.kill()
         except OSError:
             pass
+    try:
+        proc.wait(timeout=max(0.0, float(forceful_sec)))
+    except subprocess.TimeoutExpired as exc:
+        if proc.poll() is None:
+            raise runtime_state.ProcessTerminationError(
+                f"Prozess {proc.pid} ist auch nach SIGKILL nicht sicher beendet"
+            ) from exc
+    except OSError as exc:
+        if proc.poll() is None:
+            raise runtime_state.ProcessTerminationError(
+                f"Exit von Prozess {proc.pid} konnte nach SIGKILL nicht bestätigt werden"
+            ) from exc
 
 
 def _cancel_event(scope: str = DEFAULT_CANCEL_SCOPE) -> threading.Event:
@@ -341,8 +369,17 @@ def cancel_job(scope: str = DEFAULT_CANCEL_SCOPE) -> dict[str, Any]:
             proc for proc, proc_scope in _ACTIVE_PROCS if proc_scope == normalized_scope
         ]
     for proc in local_procs:
-        if proc.poll() is None:
-            _terminate_proc(proc, graceful_sec=2)
+        try:
+            if proc.poll() is None:
+                _terminate_proc(proc, graceful_sec=2)
+            _unregister_proc(proc)
+        except runtime_state.ProcessTerminationError as exc:
+            if termination_error is None:
+                termination_error = exc
+            logger.error(
+                "Lokaler Prozess %s blieb nach Cancel unbestätigt aktiv",
+                getattr(proc, "pid", "?"),
+            )
 
     signal_persisted = marker_error is None
     process_scan_ok = termination_error is None
@@ -353,12 +390,17 @@ def cancel_job(scope: str = DEFAULT_CANCEL_SCOPE) -> dict[str, Any]:
             from ..notifications import notify
 
             title = "Sync abgebrochen" if ok else "Sync-Abbruch unvollständig"
-            message = (
-                f"{killed} rclone-Prozess(e) beendet"
-                if ok
-                else "Lokale Prozesse wurden beendet, aber das dauerhafte "
-                "Cancel-Signal konnte nicht zuverlässig gesetzt werden"
-            )
+            if ok:
+                message = f"{killed} rclone-Prozess(e) beendet"
+            elif not process_scan_ok:
+                message = (
+                    "Mindestens ein Prozess-Exit konnte nicht sicher bestätigt werden"
+                )
+            else:
+                message = (
+                    "Lokale Prozesse wurden beendet, aber das dauerhafte "
+                    "Cancel-Signal konnte nicht zuverlässig gesetzt werden"
+                )
             notify(
                 "cancelled",
                 title,

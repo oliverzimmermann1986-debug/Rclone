@@ -1,4 +1,5 @@
 function app() {
+  const DIALOG_FOCUS_RETRY_MS = 50;
   const emptyQuick = () => ({
     remote: '', local: '', direction: 'bisync', mode: 'bisync', dry_run: true,
     allow_delete: false, max_delete: 100, new_target: false,
@@ -8,6 +9,9 @@ function app() {
   const dialogFocusStack = [];
   const staleResponse = Object.freeze({ __stale: true });
   let currentPasswordResolver = null;
+  let confirmationResolver = null;
+  let navigationFocusReturn = null;
+  let dialogFocusGeneration = 0;
   const ui = window.RcloneUI;
   const safeStoredValue = ui.storedChoice;
 
@@ -16,6 +20,7 @@ function app() {
     pages: ['dashboard', 'pairs', 'definitions', 'runs', 'doctor', 'settings'],
     settingsTabs: ['general', 'scheduler', 'security', 'filters', 'account', 'pbs'],
     navOpen: false,
+    liveMessage: '',
     online: navigator.onLine,
     connectionState: navigator.onLine ? 'checking' : 'offline',
     connectionMessage: navigator.onLine ? 'Verbindung wird geprüft' : 'Netzwerkverbindung ist offline',
@@ -33,12 +38,22 @@ function app() {
       save: false, validate: false, filter: false, password: false, definition: false, retry: false,
     },
     currentPasswordDialog: { show: false, password: '', error: '' },
+    confirmationDialog: {
+      show: false,
+      title: 'Aktion bestätigen',
+      message: '',
+      confirmLabel: 'Bestätigen',
+      tone: 'danger',
+    },
 
     overview: { loading: false, data: null },
     status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null },
     progress: null,
     sse: null,
     storageLoading: false,
+    storageState: 'loading',
+    storageError: '',
+    storageMeasurement: { state: 'loading', total: 0, loaded: 0, failed: 0, stale: 0 },
     recentJobs: [],
     jobs: {
       loading: false, items: [], total: 0, offset: 0, limit: 25,
@@ -283,16 +298,23 @@ function app() {
       scheduleActivity();
     },
 
-    navigate(next, updateHash = true) {
+    async navigate(next, updateHash = true) {
       if (!this.pages.includes(next)) return;
       if ((this.configDirty || this.filterFile.dirty) && ['pairs', 'definitions', 'settings'].includes(this.page) && next !== this.page) {
-        if (!confirm('Es gibt ungespeicherte Änderungen. Seite trotzdem wechseln?')) return;
+        const confirmed = await this.requestConfirmation(
+          'Es gibt ungespeicherte Änderungen. Seite trotzdem wechseln?',
+          { title: 'Ungespeicherte Änderungen', confirmLabel: 'Seite wechseln' },
+        );
+        if (!confirmed) return;
       }
       this.page = next;
-      this.navOpen = false;
+      this.closeNavigation(false);
       if (updateHash && window.location.hash !== `#${next}`) history.pushState(null, '', `#${next}`);
       this.loadPage(next);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
+      this.announce(`${this.pageTitle()} geöffnet`);
+      this.$nextTick(() => document.getElementById('main-content')?.focus({ preventScroll: true }));
     },
 
     loadPage(page, configAlreadyLoaded = false) {
@@ -643,9 +665,13 @@ function app() {
       this.markConfigDirty();
     },
 
-    removeJobDefinition(idx) {
+    async removeJobDefinition(idx) {
       const job = this.config.backup.jobs[idx];
-      if (!confirm(`Job „${job?.name || 'ohne Namen'}“ entfernen? Die bisherigen Läufe bleiben erhalten.`)) return;
+      const confirmed = await this.requestConfirmation(
+        `Job „${job?.name || 'ohne Namen'}“ entfernen? Die bisherigen Läufe bleiben erhalten.`,
+        { title: 'Job entfernen', confirmLabel: 'Job entfernen' },
+      );
+      if (!confirmed) return;
       this.config.backup.jobs.splice(idx, 1);
       delete this.jobPathChoice[idx];
       this.markConfigDirty();
@@ -711,7 +737,10 @@ function app() {
         this.showToast('Job zuerst speichern, dann starten.', 'warn');
         return;
       }
-      if (!dryRun && !confirm(`Job „${job.name}“ jetzt produktiv starten?`)) return;
+      if (!dryRun && !(await this.requestConfirmation(
+        `Job „${job.name}“ jetzt produktiv starten?`,
+        { title: 'Produktiven Job starten', confirmLabel: 'Produktiv starten' },
+      ))) return;
       this.pending.definition = true;
       try {
         const result = await this.api(
@@ -765,14 +794,20 @@ function app() {
 
     async ensureConfigSavedForRun() {
       if (!this.configDirty) return true;
-      if (!confirm('Die Konfiguration enthält ungespeicherte Änderungen. Vor dem Start speichern?')) return false;
+      if (!(await this.requestConfirmation(
+        'Die Konfiguration enthält ungespeicherte Änderungen. Vor dem Start speichern?',
+        { title: 'Vor dem Start speichern', confirmLabel: 'Speichern und fortfahren', tone: 'primary' },
+      ))) return false;
       return await this.saveConfig();
     },
 
     async runBackup(dryRun) {
       if (this.pending.backup) return;
       if (!(await this.ensureConfigSavedForRun())) return;
-      if (!dryRun && !confirm('Produktiven Lauf für alle aktiven Pairs starten? Prüfe vorher möglichst den Plan oder einen Dry-Run.')) return;
+      if (!dryRun && !(await this.requestConfirmation(
+        'Produktiven Lauf für alle aktiven Pairs starten? Prüfe vorher möglichst den Plan oder einen Dry-Run.',
+        { title: 'Produktiven Lauf starten', confirmLabel: 'Produktiv starten' },
+      ))) return;
       this.pending.backup = true;
       try {
         const result = await this.api('POST', `/api/jobs/backup/run?dry_run=${dryRun}`);
@@ -786,7 +821,10 @@ function app() {
     },
 
     async cancelBackup() {
-      if (!confirm('Laufenden Job wirklich abbrechen? Bereits übertragene Änderungen bleiben bestehen.')) return;
+      if (!(await this.requestConfirmation(
+        'Laufenden Job wirklich abbrechen? Bereits übertragene Änderungen bleiben bestehen.',
+        { title: 'Lauf abbrechen', confirmLabel: 'Job abbrechen' },
+      ))) return;
       const result = await this.api('POST', '/api/jobs/backup/cancel');
       if (result?.ok) this.showToast('Abbruchsignal gesendet');
       else if (result) this.showToast(result.error || 'Kein laufender Job', 'err');
@@ -795,7 +833,10 @@ function app() {
     async runSinglePair(name, dryRun = true) {
       if (!name || this.pending.backup) return;
       if (!(await this.ensureConfigSavedForRun())) return;
-      if (!dryRun && !confirm(`Pair „${name}“ produktiv starten?`)) return;
+      if (!dryRun && !(await this.requestConfirmation(
+        `Pair „${name}“ produktiv starten?`,
+        { title: 'Datenweg produktiv starten', confirmLabel: 'Produktiv starten' },
+      ))) return;
       this.pending.backup = true;
       try {
         const result = await this.api('POST', `/api/jobs/backup/run-pair/${encodeURIComponent(name)}?dry_run=${dryRun}`);
@@ -854,7 +895,10 @@ function app() {
         if (!this.quick.allow_delete || this.quick.max_delete === null || this.quick.max_delete === '') {
           this.showToast('Produktiver Sync benötigt Löschfreigabe und Löschlimit', 'err'); return;
         }
-        if (!confirm(`${this.quick.mode.toUpperCase()} kann bis zu ${this.quick.max_delete} Einträge löschen. Wirklich starten?`)) return;
+        if (!(await this.requestConfirmation(
+          `${this.quick.mode.toUpperCase()} kann bis zu ${this.quick.max_delete} Einträge löschen. Wirklich starten?`,
+          { title: 'Löschenden Lauf starten', confirmLabel: 'Trotzdem starten' },
+        ))) return;
       }
       const payload = { ...this.quick, min_local_files: this.quick.new_target ? 0 : 1 };
       delete payload.new_target;
@@ -934,7 +978,10 @@ function app() {
 
     async retryJob(job = this.jobModal.job) {
       if (!this.canRetryJob(job) || this.pending.retry) return;
-      if (!confirm('Job erneut starten?\n\nDer Server startet nur dieselbe Jobdefinition, wenn sich die Konfiguration seit diesem Lauf nicht geändert hat. Andernfalls wird der Start sicher abgelehnt.')) return;
+      if (!(await this.requestConfirmation(
+        'Job erneut starten?\n\nDer Server startet nur dieselbe Jobdefinition, wenn sich die Konfiguration seit diesem Lauf nicht geändert hat. Andernfalls wird der Start sicher abgelehnt.',
+        { title: 'Job erneut starten', confirmLabel: 'Job starten', tone: 'primary' },
+      ))) return;
       this.pending.retry = true;
       try {
         const result = await this.api('POST', `/api/jobs/${job.id}/retry?dry_run=false`);
@@ -949,7 +996,10 @@ function app() {
     },
 
     async cleanupFailed() {
-      if (!confirm('Fehlgeschlagene, abgebrochene und verwaiste Jobs aus der Datenbank löschen? Die Logdateien bleiben bestehen.')) return;
+      if (!(await this.requestConfirmation(
+        'Fehlgeschlagene, abgebrochene und verwaiste Jobs aus der Datenbank löschen? Die Logdateien bleiben bestehen.',
+        { title: 'Fehlgeschlagene Jobs bereinigen', confirmLabel: 'Jobs löschen' },
+      ))) return;
       const result = await this.api('POST', '/api/jobs/cleanup-failed');
       if (result?.ok) {
         this.showToast(`${result.deleted} Jobs gelöscht`);
@@ -993,7 +1043,10 @@ function app() {
     },
     async cancelPbs() {
       if (this.pending.pbsCancel || !this.pbs.status?.running) return;
-      if (!confirm('Laufendes PBS-Backup kontrolliert abbrechen?')) return;
+      if (!(await this.requestConfirmation(
+        'Laufendes PBS-Backup kontrolliert abbrechen?',
+        { title: 'PBS-Backup abbrechen', confirmLabel: 'Backup abbrechen' },
+      ))) return;
       this.pending.pbsCancel = true;
       try {
         const result = await this.api('POST', '/api/pbs/cancel');
@@ -1545,9 +1598,12 @@ function app() {
       this.showToast('Pair als deaktivierte Kopie angelegt');
     },
 
-    removePair(idx) {
+    async removePair(idx) {
       const pair = this.config.backup.pairs[idx];
-      if (!confirm(`Pair „${pair?.name || 'ohne Namen'}“ aus der Konfiguration entfernen?`)) return;
+      if (!(await this.requestConfirmation(
+        `Pair „${pair?.name || 'ohne Namen'}“ aus der Konfiguration entfernen?`,
+        { title: 'Datenweg entfernen', confirmLabel: 'Datenweg entfernen' },
+      ))) return;
       this.config.backup.pairs.splice(idx, 1);
       this.markConfigDirty();
     },
@@ -1649,16 +1705,64 @@ function app() {
     },
 
     async loadStorage(includeRemote = false, refreshSizes = false) {
+      const hadPairs = this.storagePairs().length > 0;
+      this.storageState = 'loading';
+      this.storageError = '';
       const query = includeRemote
         ? `?include_remote=true&refresh_sizes=${refreshSizes ? 'true' : 'false'}`
         : '';
-      const result = await this.api('GET', `/api/storage/overview${query}`, undefined, { silent: !includeRemote, timeoutMs: includeRemote ? 120000 : 30000 });
+      const result = await this.api('GET', `/api/storage/overview${query}`, undefined, {
+        silent: true,
+        captureError: true,
+        requestKey: 'storage-overview',
+        timeoutMs: includeRemote ? 70000 : 30000,
+      });
+      if (this.isStale(result)) return undefined;
+      if (result?.__error) {
+        const detail = typeof result.detail === 'string'
+          ? result.detail
+          : (result.detail?.message || 'Storage-Übersicht konnte nicht geladen werden');
+        this.storageError = detail;
+        this.storageState = hadPairs ? 'stale' : 'failed';
+        return null;
+      }
       // storage_pairs auch außerhalb des Dashboards ablegen: overview.data ist auf
       // der Pairs-Seite noch null (loadOverview läuft nur dort). Alle Leser nutzen
       // optionales Chaining, ein leeres Objekt ist daher unkritisch.
       if (result?.pairs) {
         if (!this.overview.data) this.overview.data = {};
-        this.overview.data.storage_pairs = result.pairs;
+        const previous = new Map(this.storagePairs().map((pair) => [pair.name, pair]));
+        this.overview.data.storage_pairs = includeRemote
+          ? result.pairs
+          : result.pairs.map((pair) => {
+            const old = previous.get(pair.name) || {};
+            return {
+              ...pair,
+              source_size: pair.source_size || old.source_size,
+              target_size: pair.target_size || old.target_size,
+              source_measurement: old.source_size ? old.source_measurement : pair.source_measurement,
+              target_measurement: old.target_size ? old.target_measurement : pair.target_measurement,
+            };
+          });
+        if (includeRemote || previous.size === 0) {
+          this.storageMeasurement = result.measurement || {
+            state: includeRemote ? 'loaded' : 'loading',
+            total: result.pairs.length * 2,
+            loaded: 0,
+            failed: 0,
+            stale: 0,
+          };
+        }
+        const measuredState = ['loaded', 'partial', 'failed', 'stale'].includes(this.storageMeasurement.state)
+          ? this.storageMeasurement.state
+          : 'partial';
+        this.storageState = includeRemote
+          ? measuredState
+          : (previous.size > 0 && measuredState !== 'loaded' ? measuredState : 'loaded');
+        this.storageError = this.storageMeasurement.measurement_error || '';
+      } else {
+        this.storageError = 'Der Server hat keine Storage-Daten geliefert.';
+        this.storageState = hadPairs ? 'stale' : 'failed';
       }
       return result;
     },
@@ -1680,6 +1784,20 @@ function app() {
       return entry.target_size || entry.source_size || null;
     },
 
+    copySide(entry, kind) {
+      const wantLocal = kind === 'local';
+      const sourceIsLocal = entry?.source && String(entry.source).startsWith('/');
+      const targetIsLocal = entry?.target && String(entry.target).startsWith('/');
+      if (sourceIsLocal === wantLocal) return entry?.source_size || null;
+      if (targetIsLocal === wantLocal) return entry?.target_size || null;
+      return null;
+    },
+
+    copySideError(entry, kind) {
+      const size = this.copySide(entry, kind);
+      return size?.measurement_error || size?.error || '';
+    },
+
     copyMetric(entry, kind) {
       const size = this.copySize(entry);
       if (!size || size.error || size.measurement_status === 'failed') return '—';
@@ -1694,11 +1812,27 @@ function app() {
       this.storageLoading = true;
       try {
         const result = await this.loadStorage(true, true);
-        if (result?.pairs) this.showToast('Dateizahl und Größe berechnet');
-        else this.showToast('Größen konnten nicht berechnet werden', 'warn');
+        if (result?.pairs) {
+          const summary = result.measurement || this.storageMeasurement;
+          const message = `${summary.loaded || 0}/${summary.total || 0} Messungen erfolgreich`;
+          this.showToast(message, summary.state === 'loaded' ? 'ok' : (summary.state === 'failed' ? 'err' : 'warn'));
+        } else {
+          this.showToast(this.storageError || 'Größen konnten nicht berechnet werden', 'err');
+        }
       } finally {
         this.storageLoading = false;
       }
+    },
+
+    storageStatusText() {
+      const summary = this.storageMeasurement || {};
+      if (this.storageState === 'loading') return 'Ordnergrößen werden ermittelt…';
+      if (this.storageState === 'failed') return this.storageError || 'Keine Größenmessung war erfolgreich.';
+      if (this.storageState === 'stale') return this.storageError || 'Es werden veraltete Messwerte angezeigt.';
+      if (this.storageState === 'partial') {
+        return `${summary.loaded || 0}/${summary.total || 0} Messungen erfolgreich; ${summary.failed || 0} fehlgeschlagen, ${summary.stale || 0} veraltet.`;
+      }
+      return '';
     },
 
     pairSize(name) {
@@ -1723,6 +1857,11 @@ function app() {
       if (!size.measured_at) return '';
       const prefix = size.measurement_status === 'stale' ? 'Veraltet' : 'Gemessen';
       return `${prefix} ${this.formatTs(size.measured_at)}`;
+    },
+
+    pairSizeError(name, side) {
+      const size = this.pairSize(name)?.[`${side}_size`];
+      return size?.measurement_error || size?.error || '';
     },
 
     openPicker(mode, idx) {
@@ -1849,8 +1988,11 @@ function app() {
     },
 
     async runRestoreTest(pairName = '') {
-      const scope = pairName ? `Pair „${pairName}"` : 'alle aktiven Pairs';
-      if (!confirm(`Restore-Drill für ${scope} starten?\n\nEine Stichprobe wird vom Ziel zurückgeholt und per Prüfsumme mit der Quelle verglichen. Das erzeugt Egress-Kosten beim Anbieter. Die zurückgeholten Dateien werden nach dem Vergleich gelöscht.`)) return;
+      const scope = pairName ? `Pair „${pairName}“` : 'alle aktiven Pairs';
+      if (!(await this.requestConfirmation(
+        `Restore-Drill für ${scope} starten?\n\nEine Stichprobe wird vom Ziel zurückgeholt und per Prüfsumme mit der Quelle verglichen. Das erzeugt Egress-Kosten beim Anbieter. Die zurückgeholten Dateien werden nach dem Vergleich gelöscht.`,
+        { title: 'Restore-Drill starten', confirmLabel: 'Restore-Drill starten' },
+      ))) return;
       const query = pairName ? `?pairs=${encodeURIComponent(pairName)}` : '';
       const result = await this.api('POST', `/api/jobs/backup/restore-test${query}`);
       if (result?.ok) {
@@ -1884,6 +2026,10 @@ function app() {
     },
 
     async pruneLogs(dryRun = true) {
+      if (!dryRun && !(await this.requestConfirmation(
+        'Alte Logs wirklich löschen?',
+        { title: 'Alte Logs löschen', confirmLabel: 'Logs löschen' },
+      ))) return;
       const days = Number(this.config.maintenance?.log_retention_days || 90);
       const result = await this.api('POST', `/api/maintenance/logs/prune?days=${days}&dry_run=${dryRun}`);
       if (result) {
@@ -1900,6 +2046,10 @@ function app() {
     },
 
     async pruneDatabase() {
+      if (!(await this.requestConfirmation(
+        'Alte Jobhistorie gemäß Aufbewahrung löschen?',
+        { title: 'Datenbank aufräumen', confirmLabel: 'Jobhistorie löschen' },
+      ))) return;
       const cfg = this.config.maintenance || {};
       const days = cfg.job_retention_days || 180;
       const keep = cfg.keep_latest_jobs || 500;
@@ -1934,7 +2084,10 @@ function app() {
       if (!this.snapshots.restoreName || !this.snapshots.password) {
         this.showToast('Snapshot und aktuelles Passwort erforderlich', 'err'); return;
       }
-      if (!confirm('Diesen Snapshot wiederherstellen? Aktuelle Zugangsdaten bleiben erhalten; alle Sitzungen werden beendet.')) return;
+      if (!(await this.requestConfirmation(
+        'Diesen Snapshot wiederherstellen? Aktuelle Zugangsdaten bleiben erhalten; alle Sitzungen werden beendet.',
+        { title: 'Snapshot wiederherstellen', confirmLabel: 'Wiederherstellen' },
+      ))) return;
       const selected = this.snapshots.items.find((item) => item.name === this.snapshots.restoreName);
       const result = await this.api('POST', '/api/maintenance/config/snapshots/restore', {
         name: this.snapshots.restoreName,
@@ -2017,7 +2170,10 @@ function app() {
     },
 
     async logout() {
-      if ((this.configDirty || this.filterFile.dirty) && !confirm('Ungespeicherte Änderungen verwerfen und abmelden?')) return;
+      if ((this.configDirty || this.filterFile.dirty) && !(await this.requestConfirmation(
+        'Ungespeicherte Änderungen verwerfen und abmelden?',
+        { title: 'Abmelden', confirmLabel: 'Verwerfen und abmelden' },
+      ))) return;
       const result = await this.api('POST', '/logout');
       if (result !== null) window.location = '/login';
     },
@@ -2031,28 +2187,134 @@ function app() {
     },
 
     openDialog(refName) {
+      const generation = ++dialogFocusGeneration;
       dialogFocusStack.push(document.activeElement);
       this.$nextTick(() => {
-        const dialog = this.$refs[refName];
-        const target = dialog?.querySelector('[data-dialog-initial-focus]') || this.focusableElements(dialog)[0] || dialog;
-        target?.focus();
+        this.focusOpenedDialog(refName);
+        window.setTimeout(() => {
+          if (generation !== dialogFocusGeneration) return;
+          this.focusOpenedDialog(refName);
+        }, DIALOG_FOCUS_RETRY_MS);
       });
     },
 
+    focusOpenedDialog(refName) {
+      const dialog = this.$refs[refName];
+      if (!this.visibleElement(dialog)) return false;
+      const initialTarget = dialog.querySelector('[data-dialog-initial-focus]');
+      if (initialTarget && !this.visibleElement(initialTarget)) return false;
+      const target = initialTarget || this.focusableElements(dialog)[0] || dialog;
+      target.focus({ preventScroll: true });
+      return dialog.contains(document.activeElement);
+    },
+
+    enforceInitialDialogFocus(refName) {
+      const dialog = this.$refs[refName];
+      if (!this.visibleElement(dialog)) return false;
+      const initialTarget = dialog.querySelector('[data-dialog-initial-focus]');
+      if (!this.visibleElement(initialTarget)) return false;
+      const focusIsOutside = !dialog.contains(document.activeElement);
+      const focusIsNotInitial = document.activeElement !== initialTarget;
+      if (focusIsOutside || focusIsNotInitial) initialTarget.focus({ preventScroll: true });
+      return document.activeElement === initialTarget;
+    },
+
+    enforceActiveDialogFocus(event) {
+      const dialog = this.activeDialog();
+      if (!this.visibleElement(dialog)) return false;
+      const eventTarget = event?.target;
+      if (eventTarget?.nodeType && dialog.contains(eventTarget)) return true;
+      const initialTarget = dialog.querySelector('[data-dialog-initial-focus]');
+      const target = this.visibleElement(initialTarget)
+        ? initialTarget
+        : (this.focusableElements(dialog)[0] || dialog);
+      if (!this.visibleElement(target)) return false;
+      target.focus({ preventScroll: true });
+      return dialog.contains(document.activeElement);
+    },
+
+    visibleElement(element) {
+      if (!element?.isConnected || element.getClientRects().length === 0) return false;
+      const style = window.getComputedStyle(element);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    },
+
     restoreDialogFocus() {
+      dialogFocusGeneration += 1;
       const target = dialogFocusStack.pop();
       this.$nextTick(() => {
-        if (target?.isConnected) target.focus();
+        const focusTarget = target?.isConnected ? target : document.getElementById('main-content');
+        focusTarget?.focus();
       });
     },
 
     activeDialog() {
+      if (this.confirmationDialog.show) return this.$refs.confirmationDialog;
       if (this.currentPasswordDialog.show) return this.$refs.currentPasswordDialog;
       if (this.jobModal.show) return this.$refs.jobDialog;
       if (this.picker.show) return this.$refs.pickerDialog;
       if (this.quickModal.show) return this.$refs.quickDialog;
       if (this.plan.data) return this.$refs.planDialog;
       return null;
+    },
+
+    requestConfirmation(message, options = {}) {
+      if (confirmationResolver) confirmationResolver(false);
+      this.confirmationDialog = {
+        show: true,
+        title: options.title || 'Aktion bestätigen',
+        message: String(message || ''),
+        confirmLabel: options.confirmLabel || 'Bestätigen',
+        tone: options.tone === 'primary' ? 'primary' : 'danger',
+      };
+      this.openDialog('confirmationDialog');
+      return new Promise((resolve) => {
+        confirmationResolver = resolve;
+      });
+    },
+
+    respondConfirmation(confirmed) {
+      if (!this.confirmationDialog.show) return;
+      const resolve = confirmationResolver;
+      confirmationResolver = null;
+      this.confirmationDialog = {
+        show: false,
+        title: 'Aktion bestätigen',
+        message: '',
+        confirmLabel: 'Bestätigen',
+        tone: 'danger',
+      };
+      this.restoreDialogFocus();
+      resolve?.(Boolean(confirmed));
+    },
+
+    announce(message) {
+      this.liveMessage = '';
+      this.$nextTick(() => { this.liveMessage = String(message || ''); });
+    },
+
+    navigationIsModal() {
+      return this.navOpen && Boolean(window.matchMedia?.('(max-width: 900px)').matches);
+    },
+
+    openNavigation() {
+      if (this.navOpen) return;
+      navigationFocusReturn = document.activeElement;
+      this.navOpen = true;
+      this.$nextTick(() => this.focusableElements(this.$refs.mainSidebar)[0]?.focus());
+    },
+
+    closeNavigation(restoreFocus = true) {
+      if (!this.navOpen) return;
+      this.navOpen = false;
+      const target = navigationFocusReturn;
+      navigationFocusReturn = null;
+      if (restoreFocus) this.$nextTick(() => target?.isConnected && target.focus());
+    },
+
+    toggleNavigation() {
+      if (this.navOpen) this.closeNavigation();
+      else this.openNavigation();
     },
 
     requestCurrentPassword(message = '') {
@@ -2087,17 +2349,17 @@ function app() {
     },
 
     trapDialogFocus(event) {
-      const dialog = this.activeDialog();
-      if (!dialog) return;
-      const focusable = this.focusableElements(dialog);
+      const container = this.activeDialog() || (this.navigationIsModal() ? this.$refs.mainSidebar : null);
+      if (!container) return;
+      const focusable = this.focusableElements(container);
       if (!focusable.length) {
         event.preventDefault();
-        dialog.focus();
+        container.focus();
         return;
       }
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (!dialog.contains(document.activeElement)) {
+      if (!container.contains(document.activeElement)) {
         event.preventDefault();
         first.focus();
       } else if (event.shiftKey && document.activeElement === first) {
@@ -2137,12 +2399,13 @@ function app() {
     },
 
     closeOverlays() {
-      if (this.currentPasswordDialog.show) this.cancelCurrentPassword();
+      if (this.confirmationDialog.show) this.respondConfirmation(false);
+      else if (this.currentPasswordDialog.show) this.cancelCurrentPassword();
       else if (this.jobModal.show) this.closeJob();
       else if (this.picker.show) this.closePicker();
       else if (this.quickModal.show) this.closeQuick();
       else if (this.plan.data) this.closePlan();
-      else this.navOpen = false;
+      else this.closeNavigation();
     },
 
     selectSettingsTab(tab, focus = false) {

@@ -18,6 +18,23 @@ enum ContentLoadState: Equatable {
     case failed(String)
 }
 
+enum StorageSizeStatus: Equatable {
+    case idle
+    case loading
+    case loaded
+    case partial
+    case failed
+    case stale
+}
+
+struct StorageSizeState: Equatable {
+    let status: StorageSizeStatus
+    let message: String?
+    let lastUpdated: Date?
+
+    static let idle = StorageSizeState(status: .idle, message: nil, lastUpdated: nil)
+}
+
 enum ConfigSaveIssue: Equatable {
     case conflict(String)
     case passwordRequired(String)
@@ -56,6 +73,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var doctorLastCheckedAt: Date?
     @Published private(set) var doctorIsRefreshing = false
     @Published private(set) var storageSizesAreLoading = false
+    @Published private(set) var storageSizeState: StorageSizeState = .idle
     @Published private(set) var isSavingConfig = false
     @Published private(set) var configSaveIssue: ConfigSaveIssue?
     @Published private(set) var configWarnings: [String] = []
@@ -63,17 +81,26 @@ final class AppModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var actionMessage: String?
     @Published private(set) var requestedRunID: Int?
+    @Published private(set) var batchDefinitions: [BatchDefinitionState] = []
+    @Published private(set) var batchIsRunning = false
 
     private(set) var client: (any APIClientProtocol)?
     private var registeredPushToken: String?
     private let pendingPushRevocationsKey = "pendingPushRevocations"
     private let defaults: UserDefaults
     private let clientFactory: (URL) -> any APIClientProtocol
+    private let runPollInterval: Duration
     private var sessionGeneration = 0
     private var refreshGeneration = 0
     private var activities: Set<UUID> = []
     private var refreshTask: Task<Void, Never>?
     private var refreshOwner: UUID?
+    private var runTrackingTask: Task<Void, Never>?
+    private var pushSyncTask: Task<Void, Never>?
+    private var pushSyncOwner: UUID?
+    private var desiredPushToken: String?
+    private var desiredPushEnvironment: String?
+    private var knownPushTokens: Set<String> = []
 
     var serverAddress: String {
         defaults.string(forKey: "serverAddress") ?? ""
@@ -92,9 +119,11 @@ final class AppModel: ObservableObject {
 
     init(
         defaults: UserDefaults = .standard,
+        runPollInterval: Duration = .seconds(2),
         clientFactory: @escaping (URL) -> any APIClientProtocol = { APIClient(baseURL: $0) }
     ) {
         self.defaults = defaults
+        self.runPollInterval = runPollInterval
         self.clientFactory = clientFactory
     }
 
@@ -200,6 +229,11 @@ final class AppModel: ObservableObject {
         let activity = beginActivity()
         errorMessage = nil
         storageSizesAreLoading = true
+        storageSizeState = StorageSizeState(
+            status: .loading,
+            message: storageSizeState.message,
+            lastUpdated: storageSizeState.lastUpdated
+        )
         defer {
             endActivity(activity)
             if isCurrent(session: session, refresh: refresh) {
@@ -244,9 +278,12 @@ final class AppModel: ObservableObject {
                     // failure must never discard usable base storage or old sizes.
                     if case let .success(detailed) = result {
                         storage = detailed.preservingSizes(from: storage)
+                        acceptStorageMeasurement(detailed)
                     } else if case let .failure(error) = result,
                               error as? APIError == .unauthenticated {
                         handle(error, firstError: &firstError)
+                    } else if case let .failure(error) = result {
+                        markStorageMeasurementFailure(error)
                     }
                 case let .config(result):
                     switch result {
@@ -327,6 +364,11 @@ final class AppModel: ObservableObject {
         let session = sessionGeneration
         let activity = beginActivity()
         storageSizesAreLoading = true
+        storageSizeState = StorageSizeState(
+            status: .loading,
+            message: storageSizeState.message,
+            lastUpdated: storageSizeState.lastUpdated
+        )
         defer {
             endActivity(activity)
             if isCurrentSession(session) { storageSizesAreLoading = false }
@@ -339,51 +381,44 @@ final class AppModel: ObservableObject {
             guard isCurrentSession(session) else { return }
             storage = detailed.preservingSizes(from: storage)
             storageState = .loaded
+            acceptStorageMeasurement(detailed)
         } catch APIError.unauthenticated {
             guard isCurrentSession(session) else { return }
             signOutLocally()
         } catch {
             guard isCurrentSession(session) else { return }
+            markStorageMeasurementFailure(error)
             errorMessage = userMessage(for: error)
         }
     }
 
     func refreshDoctor() async {
-        guard let currentClient = client else { return }
-        let session = sessionGeneration
         doctorIsRefreshing = true
         defer {
-            if isCurrentSession(session) { doctorIsRefreshing = false }
+            doctorIsRefreshing = false
         }
         do {
-            let newDoctor = try await currentClient.getDoctor()
-            guard isCurrentSession(session) else { return }
+            let newDoctor = try await withCurrentClient { try await $0.getDoctor() }
             doctor = newDoctor
             doctorLastCheckedAt = Date()
+        } catch is CancellationError {
         } catch {
-            guard isCurrentSession(session) else { return }
             errorMessage = userMessage(for: error)
         }
     }
 
     func reloadConfiguration() async {
-        guard let currentClient = client else { return }
-        let session = sessionGeneration
         let activity = beginActivity()
         defer { endActivity(activity) }
         do {
-            let newConfig = try await currentClient.getConfig()
-            guard isCurrentSession(session) else { return }
+            let newConfig = try await withCurrentClient { try await $0.getConfig() }
             config = newConfig
             jobDefinitions = newConfig.backup.jobs
             configState = .loaded
             configSaveIssue = nil
             configWarnings = []
-        } catch APIError.unauthenticated {
-            guard isCurrentSession(session) else { return }
-            signOutLocally()
+        } catch is CancellationError {
         } catch {
-            guard isCurrentSession(session) else { return }
             errorMessage = userMessage(for: error)
         }
     }
@@ -392,9 +427,17 @@ final class AppModel: ObservableObject {
     func saveConfiguration(
         pairs: [PairConfig],
         definitions: [JobDefinition],
+        baseRevision: String? = nil,
         currentPassword: String? = nil
     ) async -> Bool {
         guard let currentClient = client, let currentConfig = config else { return false }
+        let draftRevision = baseRevision ?? currentConfig.revision
+        guard draftRevision == currentConfig.revision else {
+            configSaveIssue = .conflict(
+                "Die Serverkonfiguration wurde geändert, während dieser Entwurf offen war. Lade den Serverstand neu und übernimm deine Änderungen erneut."
+            )
+            return false
+        }
         let session = sessionGeneration
         isSavingConfig = true
         configSaveIssue = nil
@@ -404,7 +447,7 @@ final class AppModel: ObservableObject {
         }
         do {
             let response = try await currentClient.updateConfig(
-                currentConfig.replacing(pairs: pairs, jobs: definitions),
+                currentConfig.replacing(pairs: pairs, jobs: definitions, revision: draftRevision),
                 currentPassword: currentPassword
             )
             guard isCurrentSession(session) else { return false }
@@ -462,8 +505,13 @@ final class AppModel: ObservableObject {
         do {
             let response = try await currentClient.runJobDefinition(id: id, dryRun: dryRun)
             guard isCurrentSession(session) else { return false }
-            actionMessage = dryRun ? "Probelauf wurde gestartet." : "Job wurde gestartet."
-            await refresh()
+            actionMessage = response.ok
+                ? (dryRun ? "Probelauf wurde gestartet." : "Job wurde gestartet.")
+                : (response.error ?? "Job konnte nicht gestartet werden.")
+            if response.ok {
+                beginRunTracking(response)
+                await refreshVisibleRunData()
+            }
             return response.ok
         } catch APIError.unauthenticated {
             guard isCurrentSession(session) else { return false }
@@ -476,10 +524,24 @@ final class AppModel: ObservableObject {
     }
 
     func runAllJobDefinitions(dryRun: Bool = false) async -> Bool {
-        await runOperationalAction(
-            success: dryRun ? "Probeläufe für alle Jobs wurden gestartet." : "Alle aktiven Jobs wurden gestartet."
-        ) { client in
-            try await client.runAllJobDefinitions(dryRun: dryRun)
+        do {
+            let response = try await withCurrentClient {
+                try await $0.runAllJobDefinitions(dryRun: dryRun)
+            }
+            actionMessage = response.ok
+                ? (dryRun ? "Probeläufe für alle Jobs wurden gestartet." : "Alle aktiven Jobs wurden gestartet.")
+                : (response.error ?? "Jobs konnten nicht gestartet werden.")
+            if response.ok {
+                batchDefinitions = response.definitions
+                beginRunTracking(response)
+                await refreshVisibleRunData()
+            }
+            return response.ok
+        } catch is CancellationError {
+            return false
+        } catch {
+            errorMessage = userMessage(for: error)
+            return false
         }
     }
 
@@ -561,7 +623,10 @@ final class AppModel: ObservableObject {
         do {
             let response = try await withCurrentClient(operation)
             actionMessage = response.ok ? success : (response.error ?? "Aktion konnte nicht gestartet werden.")
-            if response.ok { await refresh() }
+            if response.ok {
+                beginRunTracking(response)
+                await refreshVisibleRunData()
+            }
             return response.ok
         } catch is CancellationError {
             return false
@@ -601,6 +666,9 @@ final class AppModel: ObservableObject {
         } catch APIError.configValidation(let errors) {
             guard isCurrentSession(session) else { return false }
             configSaveIssue = .validation(errors)
+        } catch APIError.unauthenticated {
+            guard isCurrentSession(session) else { return false }
+            signOutLocally()
         } catch {
             guard isCurrentSession(session) else { return false }
             errorMessage = userMessage(for: error)
@@ -609,151 +677,174 @@ final class AppModel: ObservableObject {
     }
 
     func runBackup(pair: String? = nil, dryRun: Bool = false) async -> Bool {
-        guard let currentClient = client else { return false }
-        let session = sessionGeneration
         do {
-            let response = try await currentClient.runBackup(pair: pair, dryRun: dryRun)
-            guard isCurrentSession(session) else { return false }
-            actionMessage = dryRun ? "Probelauf wurde gestartet." : "Sicherung wurde gestartet."
-            await refresh()
+            let response = try await withCurrentClient {
+                try await $0.runBackup(pair: pair, dryRun: dryRun)
+            }
+            actionMessage = response.ok
+                ? (dryRun ? "Probelauf wurde gestartet." : "Sicherung wurde gestartet.")
+                : (response.error ?? "Sicherung konnte nicht gestartet werden.")
+            if response.ok {
+                beginRunTracking(response)
+                await refreshVisibleRunData()
+            }
             return response.ok
+        } catch is CancellationError {
+            return false
         } catch {
-            guard isCurrentSession(session) else { return false }
             errorMessage = userMessage(for: error)
             return false
         }
     }
 
     func pauseScheduler(minutes: Int) async {
-        guard let currentClient = client else { return }
-        let session = sessionGeneration
         do {
-            _ = try await currentClient.pauseScheduler(minutes: minutes)
-            guard isCurrentSession(session) else { return }
+            _ = try await withCurrentClient { try await $0.pauseScheduler(minutes: minutes) }
             actionMessage = "Zeitpläne wurden für \(minutes) Minuten pausiert."
             await refresh()
+        } catch is CancellationError {
         } catch {
-            guard isCurrentSession(session) else { return }
             errorMessage = userMessage(for: error)
         }
     }
 
     func cancelBackup() async -> Bool {
-        guard let currentClient = client else { return false }
-        let session = sessionGeneration
         do {
-            let response = try await currentClient.cancelBackup()
-            guard isCurrentSession(session) else { return false }
+            let response = try await withCurrentClient { try await $0.cancelBackup() }
             actionMessage = response.ok ? "Abbruch wurde angefordert." : (response.error ?? "Kein laufender Job.")
             await refreshProgress()
             return response.ok
+        } catch is CancellationError {
+            return false
         } catch {
-            guard isCurrentSession(session) else { return false }
             errorMessage = userMessage(for: error)
             return false
         }
     }
 
     func resumeScheduler() async {
-        guard let currentClient = client else { return }
-        let session = sessionGeneration
         do {
-            _ = try await currentClient.resumeScheduler()
-            guard isCurrentSession(session) else { return }
+            _ = try await withCurrentClient { try await $0.resumeScheduler() }
             actionMessage = "Zeitpläne laufen wieder."
             await refresh()
+        } catch is CancellationError {
         } catch {
-            guard isCurrentSession(session) else { return }
             errorMessage = userMessage(for: error)
         }
     }
 
     func runPBS(target: String?) async {
-        guard let currentClient = client else { return }
-        let session = sessionGeneration
         do {
-            let response = try await currentClient.runPBS(target: target)
-            guard isCurrentSession(session) else { return }
+            let response = try await withCurrentClient { try await $0.runPBS(target: target) }
             actionMessage = response.ok ? "PBS-Sicherung wurde gestartet." : (response.error ?? "PBS-Sicherung konnte nicht starten.")
-            let newPBS = try await currentClient.getPBSStatus()
-            guard isCurrentSession(session) else { return }
+            let newPBS = try await withCurrentClient { try await $0.getPBSStatus() }
             pbs = newPBS
+        } catch is CancellationError {
         } catch {
-            guard isCurrentSession(session) else { return }
             errorMessage = userMessage(for: error)
         }
     }
 
     func cancelPBS() async {
-        guard let currentClient = client else { return }
-        let session = sessionGeneration
         do {
-            let response = try await currentClient.cancelPBS()
-            guard isCurrentSession(session) else { return }
+            let response = try await withCurrentClient { try await $0.cancelPBS() }
             actionMessage = response.ok ? "PBS-Abbruch wurde angefordert." : (response.error ?? "Kein laufender PBS-Job.")
-            let newPBS = try await currentClient.getPBSStatus()
-            guard isCurrentSession(session) else { return }
+            let newPBS = try await withCurrentClient { try await $0.getPBSStatus() }
             pbs = newPBS
+        } catch is CancellationError {
         } catch {
-            guard isCurrentSession(session) else { return }
             errorMessage = userMessage(for: error)
         }
     }
 
     func registerPushDevice(token: String, environment: String) async {
         guard phase == .signedIn, let currentClient = client else { return }
+        if desiredPushToken == token, desiredPushEnvironment == environment {
+            if registeredPushToken == token { return }
+            if let pushSyncTask {
+                await pushSyncTask.value
+                return
+            }
+        }
         let session = sessionGeneration
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        do {
-            await retryPendingPushRevocations(
-                using: currentClient,
-                server: serverAddress
-            )
-            _ = try await currentClient.registerPushDevice(
+        let server = serverAddress
+        if let previous = desiredPushToken ?? registeredPushToken, previous != token {
+            rememberPendingPushRevocation(server: server, token: previous)
+            knownPushTokens.insert(previous)
+        }
+        desiredPushToken = token
+        desiredPushEnvironment = environment
+        knownPushTokens.insert(token)
+
+        let preceding = pushSyncTask
+        let owner = UUID()
+        pushSyncOwner = owner
+        let task = Task { [weak self] in
+            await preceding?.value
+            guard let self else { return }
+            await self.reconcilePushRegistration(
                 token: token,
                 environment: environment,
-                appVersion: version
+                client: currentClient,
+                server: server,
+                session: session
             )
-            guard isCurrentSession(session) else { return }
-            registeredPushToken = token
-        } catch let APIError.server(status, _) where status == 404 || status == 405 {
-            // Older servers do not expose device registration yet. The rest of
-            // the authenticated app remains usable until the server is updated.
-        } catch {
-            guard isCurrentSession(session) else { return }
-            errorMessage = "Push-Benachrichtigungen konnten nicht eingerichtet werden: \(userMessage(for: error))"
+        }
+        pushSyncTask = task
+        await task.value
+        if pushSyncOwner == owner {
+            pushSyncTask = nil
+            pushSyncOwner = nil
         }
     }
 
     func logout() async {
         let exitingClient = client
-        var pushWarning: String?
-        if let registeredPushToken {
-            do {
-                _ = try await exitingClient?.unregisterPushDevice(token: registeredPushToken)
-                removePendingPushRevocation(server: serverAddress, token: registeredPushToken)
-            } catch {
-                rememberPendingPushRevocation(server: serverAddress, token: registeredPushToken)
-                pushWarning = "Die Push-Registrierung konnte offline nicht sofort vom Server entfernt werden. Sie wurde lokal beendet, wird beim nächsten Login erneut widerrufen und läuft serverseitig automatisch aus."
-            }
+        let exitingServer = serverAddress
+        let pendingRegistration = pushSyncTask
+        var tokens = knownPushTokens
+        if let desiredPushToken { tokens.insert(desiredPushToken) }
+        if let registeredPushToken { tokens.insert(registeredPushToken) }
+        for token in tokens {
+            rememberPendingPushRevocation(server: exitingServer, token: token)
         }
+        desiredPushToken = nil
+        desiredPushEnvironment = nil
+
+        // Wechsel die sichtbare Sitzung sofort. Der kurze Lifecycle-Transport
+        // widerruft Push und Server-Session anschließend ohne Connectivity-Wait.
         beginSessionTransition()
         errorMessage = nil
         clearSessionState()
-        do {
-            if let result = try await exitingClient?.logout(), !result.globalRevocation {
-                errorMessage = result.detail ?? "Du wurdest auf diesem Gerät abgemeldet, aber andere Sitzungen konnten nicht sicher beendet werden. Bitte später erneut anmelden und noch einmal abmelden."
+        var warnings: [String] = []
+        await pendingRegistration?.value
+        if let exitingClient {
+            for token in tokens {
+                do {
+                    _ = try await exitingClient.unregisterPushDevice(token: token)
+                    removePendingPushRevocation(server: exitingServer, token: token)
+                } catch {
+                    rememberPendingPushRevocation(server: exitingServer, token: token)
+                }
             }
-        } catch {
-            errorMessage = "Du wurdest auf diesem Gerät abgemeldet. Ob andere Sitzungen beendet wurden, konnte nicht bestätigt werden: \(userMessage(for: error))"
+            if pendingPushRevocations().contains(where: { $0.server == exitingServer && tokens.contains($0.token) }) {
+                warnings.append("Die Push-Registrierung konnte offline nicht sofort vom Server entfernt werden. Sie wird beim nächsten Login erneut widerrufen und läuft serverseitig automatisch aus.")
+            }
+            do {
+                let result = try await exitingClient.logout()
+                if !result.globalRevocation {
+                    warnings.append(result.detail ?? "Andere Sitzungen konnten nicht sicher beendet werden. Bitte später erneut anmelden und noch einmal abmelden.")
+                }
+            } catch {
+                warnings.append("Ob andere Sitzungen beendet wurden, konnte nicht bestätigt werden: \(userMessage(for: error))")
+            }
+            exitingClient.clearLocalSession()
         }
-        if let pushWarning {
-            errorMessage = [errorMessage, pushWarning]
-                .compactMap { $0 }
-                .joined(separator: "\n\n")
-        }
-        exitingClient?.clearLocalSession()
+        errorMessage = warnings.isEmpty ? nil : warnings.joined(separator: "\n\n")
         registeredPushToken = nil
+        knownPushTokens.removeAll()
+        pushSyncTask = nil
+        pushSyncOwner = nil
     }
 
     func retryJob(id: Int) async -> Bool {
@@ -770,6 +861,172 @@ final class AppModel: ObservableObject {
     func consumeRequestedRun(id: Int) {
         guard requestedRunID == id else { return }
         requestedRunID = nil
+    }
+
+    private func reconcilePushRegistration(
+        token: String,
+        environment: String,
+        client currentClient: any APIClientProtocol,
+        server: String,
+        session: Int
+    ) async {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        await retryPendingPushRevocations(using: currentClient, server: server)
+        guard isCurrentSession(session), desiredPushToken == token else {
+            rememberPendingPushRevocation(server: server, token: token)
+            return
+        }
+        do {
+            _ = try await currentClient.registerPushDevice(
+                token: token,
+                environment: environment,
+                appVersion: version
+            )
+            if isCurrentSession(session), desiredPushToken == token,
+               desiredPushEnvironment == environment, phase == .signedIn {
+                registeredPushToken = token
+                removePendingPushRevocation(server: server, token: token)
+            } else {
+                do {
+                    _ = try await currentClient.unregisterPushDevice(token: token)
+                    removePendingPushRevocation(server: server, token: token)
+                } catch {
+                    rememberPendingPushRevocation(server: server, token: token)
+                }
+            }
+        } catch let APIError.server(status, _) where status == 404 || status == 405 {
+            // Ältere Server bleiben ohne Push weiterhin vollständig nutzbar.
+        } catch APIError.unauthenticated {
+            if isCurrentSession(session) { signOutLocally() }
+            rememberPendingPushRevocation(server: server, token: token)
+        } catch {
+            rememberPendingPushRevocation(server: server, token: token)
+            if isCurrentSession(session), desiredPushToken == token {
+                errorMessage = "Push-Benachrichtigungen konnten nicht eingerichtet werden: \(userMessage(for: error))"
+            }
+        }
+    }
+
+    private func beginRunTracking(_ response: ActionResponse) {
+        let expectedDefinitionIDs = Set(response.definitions.map(\.definitionID).filter { !$0.isEmpty })
+        let expectedJobIDs = Set([response.jobID].compactMap { $0 })
+        guard !expectedDefinitionIDs.isEmpty || !expectedJobIDs.isEmpty else { return }
+        runTrackingTask?.cancel()
+        batchDefinitions = response.definitions
+        batchIsRunning = true
+        let session = sessionGeneration
+        let startedAt = Date().timeIntervalSince1970
+        runTrackingTask = Task { [weak self] in
+            guard let self else { return }
+            await self.trackRun(
+                expectedDefinitionIDs: expectedDefinitionIDs,
+                expectedJobIDs: expectedJobIDs,
+                startedAt: startedAt,
+                session: session
+            )
+        }
+    }
+
+    private func trackRun(
+        expectedDefinitionIDs: Set<String>,
+        expectedJobIDs: Set<Int>,
+        startedAt: Double,
+        session: Int
+    ) async {
+        var quietPolls = 0
+        var observedDefinitions: Set<String> = []
+        while !Task.isCancelled, isCurrentSession(session), let currentClient = client {
+            do {
+                try await Task.sleep(for: runPollInterval)
+                async let progressRequest = currentClient.getProgress()
+                async let jobsRequest = currentClient.getJobs(limit: 100)
+                let (newProgress, response) = try await (progressRequest, jobsRequest)
+                guard isCurrentSession(session) else { return }
+                acceptProgress(newProgress)
+                jobs = response.items
+                jobsState = .loaded
+
+                let relevant = response.items.filter {
+                    $0.startedAt >= startedAt - 5 && (
+                        expectedJobIDs.contains($0.id)
+                        || $0.definitionID.map(expectedDefinitionIDs.contains) == true
+                    )
+                }
+                observedDefinitions.formUnion(relevant.compactMap(\.definitionID))
+                if !batchDefinitions.isEmpty {
+                    batchDefinitions = batchDefinitions.map { definition in
+                        guard let run = relevant.first(where: { $0.definitionID == definition.definitionID }) else {
+                            return definition
+                        }
+                        return BatchDefinitionState(
+                            definitionID: definition.definitionID,
+                            definitionName: definition.definitionName,
+                            state: run.status,
+                            jobID: run.id
+                        )
+                    }
+                }
+
+                let observedJobs = Set(relevant.map(\.id))
+                let hasRelevantRunning = relevant.contains { $0.status == "running" }
+                let allDefinitionsObserved = expectedDefinitionIDs.isSubset(of: observedDefinitions)
+                let allJobsObserved = expectedJobIDs.isSubset(of: observedJobs)
+                if !newProgress.running && !hasRelevantRunning {
+                    quietPolls += 1
+                } else {
+                    quietPolls = 0
+                }
+                if (allDefinitionsObserved && allJobsObserved && quietPolls >= 1) || quietPolls >= 3 {
+                    if !allDefinitionsObserved {
+                        batchDefinitions = batchDefinitions.map { definition in
+                            guard !observedDefinitions.contains(definition.definitionID) else { return definition }
+                            return BatchDefinitionState(
+                                definitionID: definition.definitionID,
+                                definitionName: definition.definitionName,
+                                state: "nicht gestartet",
+                                jobID: nil
+                            )
+                        }
+                    }
+                    batchIsRunning = false
+                    await refreshVisibleRunData()
+                    return
+                }
+            } catch APIError.unauthenticated {
+                guard isCurrentSession(session) else { return }
+                signOutLocally()
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                guard isCurrentSession(session) else { return }
+                recordProgressFailure()
+            }
+        }
+    }
+
+    private func refreshVisibleRunData() async {
+        do {
+            async let overviewRequest = withCurrentClient { try await $0.getOverview() }
+            async let jobsRequest = withCurrentClient { try await $0.getJobs(limit: 100) }
+            async let progressRequest = withCurrentClient { try await $0.getProgress() }
+            async let storageRequest = withCurrentClient {
+                try await $0.getStorage(includeSizes: false, forceRefresh: false)
+            }
+            let (newOverview, jobResponse, newProgress, baseStorage) = try await (
+                overviewRequest, jobsRequest, progressRequest, storageRequest
+            )
+            overview = newOverview
+            overviewState = .loaded
+            jobs = jobResponse.items
+            jobsState = .loaded
+            acceptProgress(newProgress)
+            storage = baseStorage.preservingSizes(from: storage)
+            storageState = .loaded
+        } catch is CancellationError {
+        } catch {
+            if phase == .signedIn { errorMessage = userMessage(for: error) }
+        }
     }
 
     private func pendingPushRevocations() -> [PendingPushRevocation] {
@@ -896,11 +1153,57 @@ final class AppModel: ObservableObject {
         progressConsecutiveFailures = 0
     }
 
+    private func acceptStorageMeasurement(_ value: StorageOverview) {
+        guard let summary = value.measurement else {
+            let measuredAt = value.pairs
+                .flatMap { [$0.sourceSize?.measuredAt, $0.targetSize?.measuredAt] }
+                .compactMap { $0 }
+                .max()
+            storageSizeState = StorageSizeState(
+                status: measuredAt == nil ? .failed : .loaded,
+                message: measuredAt == nil ? "Der Server hat keine Größenmessung geliefert." : nil,
+                lastUpdated: measuredAt.map { Date(timeIntervalSince1970: $0) }
+            )
+            return
+        }
+        let status: StorageSizeStatus
+        switch summary.state {
+        case "loaded": status = .loaded
+        case "partial": status = .partial
+        case "stale": status = .stale
+        case "failed": status = storageSizeState.lastUpdated == nil ? .failed : .stale
+        case "loading": status = .loading
+        default: status = .failed
+        }
+        storageSizeState = StorageSizeState(
+            status: status,
+            message: summary.measurementError,
+            lastUpdated: summary.measuredAt.map { Date(timeIntervalSince1970: $0) }
+                ?? storageSizeState.lastUpdated
+        )
+    }
+
+    private func markStorageMeasurementFailure(_ error: Error) {
+        let previousDate = storageSizeState.lastUpdated
+        storageSizeState = StorageSizeState(
+            status: previousDate == nil ? .failed : .stale,
+            message: userMessage(for: error),
+            lastUpdated: previousDate
+        )
+    }
+
     private func recordProgressFailure() {
         progressConsecutiveFailures = min(progressConsecutiveFailures + 1, 999)
     }
 
     private func signOutLocally() {
+        for token in knownPushTokens {
+            rememberPendingPushRevocation(server: serverAddress, token: token)
+        }
+        desiredPushToken = nil
+        desiredPushEnvironment = nil
+        registeredPushToken = nil
+        knownPushTokens.removeAll()
         client?.clearLocalSession()
         beginSessionTransition()
         clearSessionState()
@@ -920,6 +1223,7 @@ final class AppModel: ObservableObject {
         doctorLastCheckedAt = nil
         doctorIsRefreshing = false
         storageSizesAreLoading = false
+        storageSizeState = .idle
         isSavingConfig = false
         configSaveIssue = nil
         configWarnings = []
@@ -929,6 +1233,10 @@ final class AppModel: ObservableObject {
         configState = .idle
         jobsState = .idle
         pbsState = .idle
+        runTrackingTask?.cancel()
+        runTrackingTask = nil
+        batchDefinitions = []
+        batchIsRunning = false
         phase = .signedOut
     }
 
@@ -960,6 +1268,7 @@ private extension StorageOverview {
     func preservingSizes(from previous: StorageOverview?) -> StorageOverview {
         guard let previous else { return self }
         let oldPairs = Dictionary(uniqueKeysWithValues: previous.pairs.map { ($0.name, $0) })
+        let incomingMeasurement = measurement?.state == "loading" ? nil : measurement
         return StorageOverview(pairs: pairs.map { pair in
             guard let old = oldPairs[pair.name] else { return pair }
             return StoragePair(
@@ -972,9 +1281,23 @@ private extension StorageOverview {
                 localDisk: pair.localDisk,
                 lastSync: pair.lastSync,
                 lastTransferred: pair.lastTransferred,
-                sourceSize: pair.sourceSize ?? old.sourceSize,
-                targetSize: pair.targetSize ?? old.targetSize
+                sourceSize: preservingMeasurement(pair.sourceSize, previous: old.sourceSize),
+                targetSize: preservingMeasurement(pair.targetSize, previous: old.targetSize)
             )
-        })
+        }, measurement: incomingMeasurement ?? previous.measurement)
+    }
+
+    private func preservingMeasurement(_ incoming: PathSize?, previous: PathSize?) -> PathSize? {
+        guard let incoming else { return previous }
+        guard incoming.count == nil, incoming.bytes == nil, let previous else { return incoming }
+        return PathSize(
+            path: incoming.path ?? previous.path,
+            count: previous.count,
+            bytes: previous.bytes,
+            error: incoming.error,
+            measuredAt: previous.measuredAt,
+            measurementStatus: "stale",
+            measurementError: incoming.measurementError ?? incoming.error
+        )
     }
 }
