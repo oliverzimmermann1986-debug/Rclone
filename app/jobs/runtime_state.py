@@ -24,6 +24,10 @@ DEFAULT_CANCEL_SCOPE = "backup"
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
+class ProcessTerminationError(OSError):
+    """Ein Prozessabbruch konnte nicht sicher bis zum Exit bestätigt werden."""
+
+
 def _scope_name(scope: str | None) -> str:
     value = str(scope or DEFAULT_CANCEL_SCOPE).strip().lower()
     if not _SCOPE_RE.fullmatch(value):
@@ -363,6 +367,7 @@ def terminate_active_processes(
     *,
     scope: str = DEFAULT_CANCEL_SCOPE,
     request_cancel: bool = True,
+    forceful_sec: float = 5.0,
 ) -> int:
     """Beendet nur Prozessgruppen des angeforderten Job-Scopes."""
     normalized_scope = _scope_name(scope)
@@ -386,13 +391,31 @@ def terminate_active_processes(
         except (ProcessLookupError, PermissionError, OSError):
             continue
 
-    deadline = time.monotonic() + max(0, graceful_sec)
-    while time.monotonic() < deadline:
-        if not active_processes(normalized_scope):
-            break
-        time.sleep(0.2)
+    def _remaining(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        remaining: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if _is_same_registered_process(candidate):
+                remaining.append(candidate)
+                continue
+            unregister_process(
+                int(candidate["pid"]),
+                marker_id=str(candidate.get("marker_id") or ""),
+            )
+        return remaining
 
-    for marker in active_processes(normalized_scope):
+    def _wait_for_exit(
+        candidates: list[dict[str, Any]], timeout_sec: float
+    ) -> list[dict[str, Any]]:
+        remaining = _remaining(candidates)
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        while remaining and time.monotonic() < deadline:
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+            remaining = _remaining(remaining)
+        # Auch bei Timeout 0 mindestens einmal nach dem Signal prüfen.
+        return _remaining(remaining)
+
+    remaining = _wait_for_exit(markers, graceful_sec)
+    for marker in remaining:
         if not _is_same_registered_process(marker):
             continue
         pid = int(marker["pid"])
@@ -400,7 +423,17 @@ def terminate_active_processes(
             os.killpg(os.getpgid(pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             pass
-        unregister_process(pid, marker_id=str(marker.get("marker_id") or ""))
+
+    remaining = _wait_for_exit(remaining, forceful_sec)
+    if remaining:
+        pids = ", ".join(str(marker.get("pid")) for marker in remaining)
+        message = (
+            "Prozess-Exit nach SIGKILL nicht bestätigt; "
+            f"Marker bleiben erhalten (PID(s): {pids})"
+        )
+        if marker_error is not None:
+            message = f"{marker_error}; {message}"
+        raise ProcessTerminationError(message) from marker_error
     if marker_error is not None:
         raise marker_error
     return killed
