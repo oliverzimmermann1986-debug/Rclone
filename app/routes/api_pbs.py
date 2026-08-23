@@ -35,6 +35,22 @@ def _audit_best_effort(event: str, details: dict[str, Any]) -> None:
         logger.exception("Audit-Ereignis %s konnte nicht gespeichert werden", event)
 
 
+def _audit_prune_failures(summary: dict[str, Any], *, job_id: int) -> None:
+    failures = pbs_backup.prune_failures(summary)
+    if not failures:
+        return
+    _audit_best_effort(
+        "pbs_prune_failed",
+        {
+            "job_id": job_id,
+            "trigger": str(summary.get("trigger") or "web"),
+            "backup_ok": summary.get("backup_ok") is True,
+            "maintenance_failed": True,
+            "targets": failures,
+        },
+    )
+
+
 class PbsRunPayload(BaseModel):
     target: Optional[str] = Field(default=None, max_length=120)
 
@@ -55,6 +71,9 @@ def pbs_status() -> dict[str, Any]:
             f"{pbs_backup.PAIR_PREFIX}{name}",
             history_key=pbs_history_key(settings, target),
         )
+        last_pair = (last or {}).get("pair") or {}
+        if not isinstance(last_pair, dict):
+            last_pair = {}
         schedule = str(target.get("schedule") or "manual")
         targets.append(
             {
@@ -63,6 +82,12 @@ def pbs_status() -> dict[str, Any]:
                 "schedule": schedule,
                 "namespace": target.get("namespace") or settings.get("namespace") or "",
                 "last_success": (last or {}).get("ended_at"),
+                "last_backup_ok": (
+                    last_pair.get("backup_ok", True) is True if last else None
+                ),
+                "last_prune_ok": last_pair.get("prune_ok"),
+                "last_prune_error": last_pair.get("prune_error"),
+                "maintenance_failed": last_pair.get("maintenance_failed") is True,
                 "next_run": next_run_after(
                     schedule,
                     timezone_name=timezone_name,
@@ -108,6 +133,7 @@ def _run_thread(
             else ("ok" if summary.get("ok") else "error")
         )
         db.job_finish(job_id, status, summary)
+        _audit_prune_failures(summary, job_id=job_id)
     except Exception as exc:
         worker_error = str(exc)
         logger.exception("PBS-Job %s gescheitert", job_id)
