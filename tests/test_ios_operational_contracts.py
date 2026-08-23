@@ -155,7 +155,10 @@ def test_native_lifecycle_contracts_keep_drafts_sessions_and_proxy_paths_safe():
     assert "reconcilePushRegistration" in model
     assert "lifecycleConfiguration.waitsForConnectivity = false" in api
     assert "lifecycleConfiguration.timeoutIntervalForResource = 6" in api
-    assert 'components.percentEncodedPath = normalizedPath.isEmpty ? "" : "/" + normalizedPath' in api
+    assert (
+        'components.percentEncodedPath = normalizedPath.isEmpty ? "" : "/" + normalizedPath'
+        in api
+    )
 
 
 def test_native_batch_storage_and_central_401_contracts_are_explicit():
@@ -175,4 +178,64 @@ def test_native_batch_storage_and_central_401_contracts_are_explicit():
     assert "acceptStorageMeasurement" in model
     assert "markStorageMeasurementFailure" in model
     assert "StorageMeasurementStateView" in dashboard
-    assert 'timeout: includeSizes ? 85 : nil' in api
+    assert "timeout: includeSizes ? 85 : nil" in api
+
+
+def test_native_accessibility_motion_and_recovery_messages_are_explicit():
+    components = _swift("Views/Components.swift")
+    login = _swift("Views/LoginView.swift")
+    app = _swift("RcloneMobileApp.swift")
+    api = _swift("Core/APIClient.swift")
+
+    assert "@AccessibilityFocusState" in components
+    assert "UIAccessibility.post(notification: .announcement" in components
+    assert 'accessibilityLabel("Fehler.' in components
+    assert (
+        'accessibilityHint("Prüfe die Angaben oder versuche die Aktion erneut.'
+        in components
+    )
+    assert "let accessibilityHint: String" in login
+    assert ".accessibilityLabel(title)" in login
+    assert ".accessibilityHint(accessibilityHint)" in login
+    assert ".textContentType(contentType)" in login
+    assert ".submitLabel(.go)" in login
+    assert "@Environment(\\.accessibilityReduceMotion)" in app
+    assert "reduceMotion ? nil : .smooth" in app
+    assert "if reduceMotion" in app
+    assert "Die Serverantwort konnte nicht geprüft werden" in api
+    assert 'APIError.incompatibleResponse(resource: "Anmeldung")' in api
+
+
+def test_native_push_permission_is_contextual_deferred_and_retriggerable():
+    app = _swift("RcloneMobileApp.swift")
+    push = _swift("Core/PushNotifications.swift")
+    system = _swift("Views/SystemView.swift")
+
+    assert '@AppStorage("pushPrimerDecision")' in app
+    assert '.alert("Bei Sicherungsfehlern informieren?"' in app
+    assert 'Button("Später", role: .cancel)' in app
+    assert 'Button("Mitteilungen erlauben")' in app
+    assert "requestAuthorizationAndRegister()" in app
+    assert app.index('Button("Mitteilungen erlauben")') < app.index(
+        "requestAuthorizationAndRegister()"
+    )
+    assert "registerIfAlreadyAuthorized" in push
+    assert "notificationSettings()" in push
+    assert "pushAuthorizationRequested" in push
+    assert "pushAuthorizationRequested" in system
+    assert "Mitteilungen aktivieren oder prüfen" in system
+
+
+def test_native_tappable_rows_use_semantic_controls_with_specific_labels():
+    backups = _swift("Views/BackupsView.swift")
+    config = _swift("Views/ConfigurationViews.swift")
+
+    assert ".onTapGesture" not in backups
+    assert ".onTapGesture" not in config
+    assert "Button { selectedPair = pair }" in backups
+    assert "NavigationLink { RunDetailView(job: job) }" in backups
+    assert "NavigationLink { DataPathDetailView" in backups
+    assert 'accessibilityLabel("Job \\(pair.name), Status' in backups
+    assert 'accessibilityLabel("Datenweg \\(pair.name)' in backups
+    assert 'accessibilityLabel("Datenweg \\(pair.name) bearbeiten")' in config
+    assert 'accessibilityLabel("Job \\(definition.name) bearbeiten")' in config

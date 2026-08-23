@@ -61,6 +61,8 @@ private struct JobsListView: View {
                                 JobRow(pair: pair)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Job \(pair.name), Status \(StatusStyle.label(for: pair.lastStatus))")
+                            .accessibilityHint("Öffnet die Startoptionen für diesen Job.")
                         }
                     }
                 }
@@ -98,7 +100,7 @@ private struct JobRow: View {
             StatusBadge(status: pair.lastStatus)
         }
         .contentShape(Rectangle())
-        .accessibilityHint("Öffnet die Startoptionen")
+        .accessibilityHidden(true)
     }
 }
 
@@ -283,6 +285,9 @@ private struct RunRow: View {
             Spacer()
             StatusBadge(status: job.status)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label), Status \(StatusStyle.label(for: job.status)), gestartet \(AppFormat.date(job.startedAt))")
+        .accessibilityHint("Öffnet die Details dieses Laufs.")
     }
 
     private var label: String {
@@ -478,6 +483,8 @@ private struct DataPathsListView: View {
                         }
                         .padding(.vertical, 3)
                     }
+                    .accessibilityLabel("Datenweg \(pair.name), \(pair.enabled == false ? "deaktiviert" : "aktiv")")
+                    .accessibilityHint("Öffnet Ordner, Ziel und Messwerte dieses Datenwegs.")
                 }
             } else if model.configState == .loaded {
                 ContentUnavailableView("Keine Datenwege", systemImage: "arrow.left.arrow.right", description: Text("Eingerichtete Verbindungen zwischen lokalen und entfernten Ordnern erscheinen hier."))

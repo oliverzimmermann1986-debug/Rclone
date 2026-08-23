@@ -24,9 +24,9 @@ enum APIError: LocalizedError, Equatable {
         case .unauthenticated:
             "Die Sitzung ist abgelaufen. Bitte erneut anmelden."
         case .invalidResponse:
-            "Der Server hat eine unerwartete Antwort gesendet."
+            "Die Serverantwort konnte nicht geprüft werden. Prüfe, ob die Adresse zu Rclone Sync gehört, und versuche es erneut."
         case let .incompatibleResponse(resource):
-            "\(resource): Die Antwort konnte nicht gelesen werden. Server und App verwenden unterschiedliche Datenstände."
+            "\(resource) konnte nicht gelesen werden. Aktualisiere Server oder App und versuche es erneut."
         case let .server(_, message):
             message
         case .loginFailed:
@@ -291,9 +291,9 @@ final class APIClient: APIClientProtocol {
         )
 
         let (data, response) = try await loginSession.data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              let result = try? decoder.decode(NativeLoginResponse.self, from: data) else {
-            throw APIError.invalidResponse
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        guard let result = try? decoder.decode(NativeLoginResponse.self, from: data) else {
+            throw APIError.incompatibleResponse(resource: "Anmeldung")
         }
         switch result.status {
         case "success" where (200..<300).contains(http.statusCode):
@@ -718,13 +718,24 @@ final class APIClient: APIClientProtocol {
         guard (200..<300).contains(http.statusCode) else {
             throw APIError.server(
                 status: http.statusCode,
-                message: Self.errorMessage(data) ?? "Anmeldedienst nicht erreichbar (HTTP \(http.statusCode))"
+                message: Self.loginServerMessage(status: http.statusCode)
             )
         }
         do {
             return try decoder.decode(T.self, from: data)
         } catch {
-            throw APIError.invalidResponse
+            throw APIError.incompatibleResponse(resource: "Anmeldung")
+        }
+    }
+
+    private static func loginServerMessage(status: Int) -> String {
+        switch status {
+        case 404, 405:
+            "Diese Serverversion unterstützt die native Anmeldung nicht. Die App versucht den kompatiblen Anmeldeweg."
+        case 500..<600:
+            "Der Server konnte die Anmeldung gerade nicht verarbeiten. Versuche es später erneut oder prüfe den Serverstatus."
+        default:
+            "Die Anmeldung wurde vom Server abgelehnt. Prüfe Adresse und Zugangsdaten und versuche es erneut."
         }
     }
 

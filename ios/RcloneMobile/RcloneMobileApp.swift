@@ -16,6 +16,9 @@ struct RcloneMobileApp: App {
 }
 private struct AppRootView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("pushPrimerDecision") private var pushPrimerDecision = "notAsked"
+    @State private var showPushPrimer = false
     let pushCoordinator: PushNotificationCoordinator
 
     var body: some View {
@@ -29,7 +32,7 @@ private struct AppRootView: View {
                 RootTabView()
             }
         }
-        .animation(.smooth(duration: 0.32), value: model.phase)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: model.phase)
         .task(id: model.phase) {
             if let jobID = pushCoordinator.consumePendingNavigationJobID() {
                 model.requestRunNavigation(id: jobID)
@@ -40,12 +43,10 @@ private struct AppRootView: View {
                 }
                 return
             }
-            await pushCoordinator.requestAuthorizationAndRegister()
-            if let registration = pushCoordinator.registration {
-                await model.registerPushDevice(
-                    token: registration.token,
-                    environment: registration.environment
-                )
+            if await pushCoordinator.registerIfAlreadyAuthorized() {
+                await registerCurrentPushToken()
+            } else if pushPrimerDecision == "notAsked" {
+                showPushPrimer = true
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pushDeviceTokenReady)) { notification in
@@ -58,11 +59,42 @@ private struct AppRootView: View {
             model.requestRunNavigation(id: jobID)
             _ = pushCoordinator.consumePendingNavigationJobID()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .pushAuthorizationRequested)) { _ in
+            guard model.phase == .signedIn else { return }
+            showPushPrimer = true
+        }
+        .alert("Bei Sicherungsfehlern informieren?", isPresented: $showPushPrimer) {
+            Button("Später", role: .cancel) {
+                pushPrimerDecision = "later"
+            }
+            Button("Mitteilungen erlauben") {
+                pushPrimerDecision = "accepted"
+                Task {
+                    let granted = await pushCoordinator.requestAuthorizationAndRegister()
+                    if granted {
+                        await registerCurrentPushToken()
+                    } else {
+                        model.actionMessage = "Mitteilungen sind nicht erlaubt. Du kannst sie später in iOS unter Einstellungen → Rclone Sync → Mitteilungen aktivieren."
+                    }
+                }
+            }
+        } message: {
+            Text("Rclone Sync meldet nur Sicherungs- und Prüfprobleme. Erfolgreiche Läufe erzeugen keine Mitteilung. Die App funktioniert auch ohne Push vollständig.")
+        }
+    }
+
+    private func registerCurrentPushToken() async {
+        guard let registration = pushCoordinator.registration else { return }
+        await model.registerPushDevice(
+            token: registration.token,
+            environment: registration.environment
+        )
     }
 }
 
 private struct LaunchStatusView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showRecoveryActions = false
 
     var body: some View {
@@ -107,6 +139,10 @@ private struct LaunchStatusView: View {
             .padding(24)
         }
         .task {
+            if reduceMotion {
+                showRecoveryActions = true
+                return
+            }
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
             withAnimation { showRecoveryActions = true }

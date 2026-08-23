@@ -139,6 +139,16 @@ private struct PushStatusView: View {
 
     var body: some View {
         List {
+            Section("Dieses iPhone") {
+                Button {
+                    NotificationCenter.default.post(name: .pushAuthorizationRequested, object: nil)
+                } label: {
+                    Label("Mitteilungen aktivieren oder prüfen", systemImage: "bell.badge")
+                }
+                .accessibilityHint("Zeigt zuerst, welche Fehler gemeldet werden, und fragt danach nach der iOS-Berechtigung.")
+            } footer: {
+                Text("Rclone Sync informiert nur über Sicherungs- und Prüfprobleme, nicht über erfolgreiche Läufe.")
+            }
             if let status {
                 Section("Bereitschaft") {
                     LabeledContent("APNs-Konfiguration") {
