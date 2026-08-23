@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS push_outbox (
     next_attempt_at REAL NOT NULL,
     expires_at REAL NOT NULL,
     lease_until REAL NOT NULL DEFAULT 0,
+    claim_owner TEXT NOT NULL DEFAULT '',
     last_error TEXT,
     apns_id TEXT NOT NULL,
     created_at REAL NOT NULL,
@@ -439,6 +440,28 @@ class Database:
                     (1 if inferred_dry_run else 0, inferred_trigger, int(row["id"])),
                 )
             connection.execute("PRAGMA user_version=7")
+            version = 7
+        if version < 8:
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(push_outbox)"
+                ).fetchall()
+            }
+            if "claim_owner" not in columns:
+                connection.execute(
+                    "ALTER TABLE push_outbox ADD COLUMN claim_owner "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+            # Schema 7 hatte keine Claim-Identität. Solche übernommenen Leases
+            # können keinem Dispatcher sicher zugeordnet werden und werden daher
+            # sofort wieder fällig statt von einem beliebigen Prozess bestätigt.
+            connection.execute(
+                "UPDATE push_outbox SET status='pending', lease_until=0, "
+                "claim_owner='', updated_at=? WHERE status='sending'",
+                (time.time(),),
+            )
+            connection.execute("PRAGMA user_version=8")
 
     @staticmethod
     def _record_job_definition_schedule_state(
@@ -2011,9 +2034,18 @@ class Database:
                 ),
             )
 
-    def push_device_delete(self, token: str) -> bool:
+    def push_device_delete(
+        self, token: str, *, claim_owner: Optional[str] = None
+    ) -> bool:
         with self.conn() as connection:
-            connection.execute("DELETE FROM push_outbox WHERE token=?", (token,))
+            if claim_owner is None:
+                connection.execute("DELETE FROM push_outbox WHERE token=?", (token,))
+            else:
+                connection.execute(
+                    "DELETE FROM push_outbox WHERE token=? "
+                    "AND (status<>'sending' OR claim_owner=?)",
+                    (token, str(claim_owner)),
+                )
             cursor = connection.execute(
                 "DELETE FROM push_devices WHERE token=?", (token,)
             )
@@ -2045,8 +2077,9 @@ class Database:
             if expired_tokens:
                 placeholders = ",".join("?" for _ in expired_tokens)
                 connection.execute(
-                    f"DELETE FROM push_outbox WHERE token IN ({placeholders})",
-                    expired_tokens,
+                    f"DELETE FROM push_outbox WHERE token IN ({placeholders}) "
+                    "AND (status<>'sending' OR lease_until<=?)",
+                    (*expired_tokens, now_value),
                 )
             cursor = connection.execute(
                 "DELETE FROM push_devices WHERE expires_at<=?", (now_value,)
@@ -2104,24 +2137,39 @@ class Database:
     def push_outbox_claim_due(
         self,
         *,
+        claim_owner: str,
         limit: int = 32,
         lease_seconds: int = 60,
         now: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         now_value = float(time.time() if now is None else now)
+        owner = str(claim_owner or "").strip()
+        if not owner:
+            raise ValueError("claim_owner darf nicht leer sein")
         with self.conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "UPDATE push_outbox SET status='pending', lease_until=0, "
+                "claim_owner='', "
                 "updated_at=? WHERE status='sending' AND lease_until<=? "
                 "AND expires_at>?",
                 (now_value, now_value, now_value),
             )
             connection.execute(
                 "UPDATE push_outbox SET status='failed', lease_until=0, "
+                "claim_owner='', "
                 "last_error=COALESCE(last_error, 'Benachrichtigung abgelaufen'), "
                 "updated_at=? WHERE status IN ('pending', 'sending') AND expires_at<=?",
                 (now_value, now_value),
+            )
+            connection.execute(
+                "UPDATE push_outbox SET status='failed', lease_until=0, "
+                "claim_owner='', "
+                "last_error=COALESCE(last_error, 'Push-Gerät nicht mehr registriert'), "
+                "updated_at=? WHERE status='pending' AND NOT EXISTS ("
+                "SELECT 1 FROM push_devices WHERE push_devices.token=push_outbox.token"
+                ")",
+                (now_value,),
             )
             rows = connection.execute(
                 "SELECT id FROM push_outbox WHERE status='pending' "
@@ -2136,13 +2184,15 @@ class Database:
             lease_until = now_value + max(10, min(int(lease_seconds), 300))
             connection.execute(
                 f"UPDATE push_outbox SET status='sending', attempts=attempts+1, "
-                f"lease_until=?, updated_at=? WHERE id IN ({placeholders})",
-                (lease_until, now_value, *ids),
+                f"lease_until=?, claim_owner=?, updated_at=? "
+                f"WHERE status='pending' AND id IN ({placeholders})",
+                (lease_until, owner, now_value, *ids),
             )
             claimed = connection.execute(
                 f"SELECT * FROM push_outbox WHERE id IN ({placeholders}) "
+                "AND status='sending' AND claim_owner=? "
                 "ORDER BY next_attempt_at, id",
-                ids,
+                (*ids, owner),
             ).fetchall()
         result: List[Dict[str, Any]] = []
         for row in claimed:
@@ -2154,10 +2204,45 @@ class Database:
             result.append(item)
         return result
 
+    def push_outbox_renew_claims(
+        self,
+        outbox_ids: Iterable[int],
+        *,
+        claim_owner: str,
+        lease_seconds: int = 60,
+        now: Optional[float] = None,
+    ) -> List[int]:
+        """Verlängert ausschließlich noch aktive Claims des aufrufenden Dispatchers."""
+
+        ids = list(dict.fromkeys(int(value) for value in outbox_ids))
+        if not ids:
+            return []
+        owner = str(claim_owner or "").strip()
+        if not owner:
+            raise ValueError("claim_owner darf nicht leer sein")
+        now_value = float(time.time() if now is None else now)
+        lease_until = now_value + max(10, min(int(lease_seconds), 300))
+        placeholders = ",".join("?" for _ in ids)
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                f"UPDATE push_outbox SET lease_until=?, updated_at=? "
+                f"WHERE status='sending' AND claim_owner=? "
+                f"AND id IN ({placeholders})",
+                (lease_until, now_value, owner, *ids),
+            )
+            rows = connection.execute(
+                f"SELECT id FROM push_outbox WHERE status='sending' "
+                f"AND claim_owner=? AND id IN ({placeholders}) ORDER BY id",
+                (owner, *ids),
+            ).fetchall()
+        return [int(row["id"]) for row in rows]
+
     def push_outbox_finish(
         self,
         outbox_id: int,
         *,
+        claim_owner: str,
         sent: bool,
         retry: bool = False,
         retry_delay_seconds: int = 60,
@@ -2166,23 +2251,35 @@ class Database:
         now: Optional[float] = None,
     ) -> str:
         now_value = float(time.time() if now is None else now)
+        owner = str(claim_owner or "").strip()
+        if not owner:
+            raise ValueError("claim_owner darf nicht leer sein")
         with self.conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT attempts, expires_at FROM push_outbox WHERE id=?",
-                (int(outbox_id),),
+                "SELECT attempts, expires_at, token FROM push_outbox "
+                "WHERE id=? AND status='sending' AND claim_owner=?",
+                (int(outbox_id), owner),
             ).fetchone()
             if not row:
-                return "missing"
+                exists = connection.execute(
+                    "SELECT 1 FROM push_outbox WHERE id=?", (int(outbox_id),)
+                ).fetchone()
+                return "not_owned" if exists else "missing"
+            device_exists = connection.execute(
+                "SELECT 1 FROM push_devices WHERE token=?", (str(row["token"]),)
+            ).fetchone()
+            elif_retry = (
+                retry
+                and device_exists is not None
+                and int(row["attempts"] or 0) < max(1, int(max_attempts))
+                and float(row["expires_at"] or 0) > now_value
+            )
             if sent:
                 status = "sent"
                 next_attempt_at = now_value
                 sent_at: float | None = now_value
-            elif (
-                retry
-                and int(row["attempts"] or 0) < max(1, int(max_attempts))
-                and float(row["expires_at"] or 0) > now_value
-            ):
+            elif elif_retry:
                 status = "pending"
                 next_attempt_at = now_value + max(
                     1, min(int(retry_delay_seconds), 86400)
@@ -2194,7 +2291,8 @@ class Database:
                 sent_at = None
             connection.execute(
                 "UPDATE push_outbox SET status=?, next_attempt_at=?, lease_until=0, "
-                "last_error=?, updated_at=?, sent_at=? WHERE id=?",
+                "claim_owner='', last_error=?, updated_at=?, sent_at=? "
+                "WHERE id=? AND status='sending' AND claim_owner=?",
                 (
                     status,
                     next_attempt_at,
@@ -2202,6 +2300,7 @@ class Database:
                     now_value,
                     sent_at,
                     int(outbox_id),
+                    owner,
                 ),
             )
             return status
