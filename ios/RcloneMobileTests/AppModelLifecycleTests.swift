@@ -578,7 +578,7 @@ private final class StubAPIClient: APIClientProtocol {
     func registerPushDevice(token: String, environment: String, appVersion: String) async throws -> PushRegistrationResponse {
         if let pushDelay { try await Task.sleep(for: pushDelay) }
         registeredPushTokens.append(token)
-        PushRegistrationResponse(ok: true)
+        return PushRegistrationResponse(ok: true)
     }
     func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
         unregisterPushCallCount += 1
