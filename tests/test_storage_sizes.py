@@ -224,6 +224,61 @@ def test_overview_keeps_last_sync_across_pair_rename(monkeypatch):
     assert item["last_transferred"] == "2 GiB"
 
 
+def test_overview_normalizes_numeric_transfer_from_historic_run(monkeypatch):
+    pair = {
+        "id": "photos",
+        "name": "Fotos",
+        "local": "/mnt/photos",
+        "remote": "gd:photos",
+        "direction": "push",
+    }
+    key = "rclone:id:photos"
+    database = _FakeDB(
+        {
+            key: {
+                "last_result": None,
+                "last_success": {
+                    "ended_at": 1234,
+                    "pair": {"transferred": 2048},
+                },
+            }
+        }
+    )
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
+    monkeypatch.setattr(api_storage, "get_db", lambda: database)
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+
+    item = api_storage.overview()["pairs"][0]
+
+    assert item["last_transferred"] == "2048"
+
+
+def test_overview_omits_missing_transfer_instead_of_sending_numeric_zero(monkeypatch):
+    pair = {
+        "id": "photos",
+        "name": "Fotos",
+        "local": "/mnt/photos",
+        "remote": "gd:photos",
+        "direction": "push",
+    }
+    key = "rclone:id:photos"
+    database = _FakeDB(
+        {
+            key: {
+                "last_result": None,
+                "last_success": {"ended_at": 1234, "pair": {}},
+            }
+        }
+    )
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
+    monkeypatch.setattr(api_storage, "get_db", lambda: database)
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+
+    item = api_storage.overview()["pairs"][0]
+
+    assert "last_transferred" not in item
+
+
 def test_overview_does_not_reuse_history_for_new_identity_or_restore_drill(
     monkeypatch,
 ):

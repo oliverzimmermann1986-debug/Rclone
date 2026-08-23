@@ -212,10 +212,14 @@ def _last_success_by_identity(
         if not result:
             continue
         pair = result.get("pair") or {}
-        found[history_key] = {
-            "last_sync": result.get("ended_at"),
-            "last_transferred": pair.get("transferred", 0),
-        }
+        entry: dict[str, Any] = {"last_sync": result.get("ended_at")}
+        transferred = pair.get("transferred")
+        if transferred not in (None, ""):
+            # Historische Datensätze enthielten teils Byte-Zahlen, neuere
+            # rclone-Auswertungen bereits formatierte Texte. Der API-Vertrag
+            # bleibt für beide Fälle stabil und liefert hier immer Text.
+            entry["last_transferred"] = str(transferred)
+        found[history_key] = entry
     return found
 
 
