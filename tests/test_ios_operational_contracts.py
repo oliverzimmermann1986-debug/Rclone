@@ -19,7 +19,7 @@ def test_logout_warning_survives_local_session_clear():
     assert "partial.localSessionCleared" in api
     assert "defer { clearCookies() }" in api
     assert "!result.globalRevocation" in model
-    assert "errorMessage = result.detail" in model
+    assert "warnings.append(result.detail" in model
     assert "if let error = model.errorMessage" in login
 
 
@@ -139,3 +139,40 @@ def test_push_delivery_status_and_real_test_are_visible_in_system():
     assert "PushStatusView()" in system
     assert "Endgültig fehlgeschlagen" in system
     assert "Testmitteilung senden" in system
+
+
+def test_native_lifecycle_contracts_keep_drafts_sessions_and_proxy_paths_safe():
+    api = _swift("Core/APIClient.swift")
+    model = _swift("Core/AppModel.swift")
+    config = _swift("Views/ConfigurationViews.swift")
+
+    assert "draftBaseRevision" in config
+    assert "baseRevision: draftBaseRevision" in config
+    assert "draftRevision == currentConfig.revision" in model
+    assert "revision: draftRevision" in model
+    assert "pushSyncTask" in model
+    assert "knownPushTokens" in model
+    assert "reconcilePushRegistration" in model
+    assert "lifecycleConfiguration.waitsForConnectivity = false" in api
+    assert "lifecycleConfiguration.timeoutIntervalForResource = 6" in api
+    assert 'components.percentEncodedPath = normalizedPath.isEmpty ? "" : "/" + normalizedPath' in api
+
+
+def test_native_batch_storage_and_central_401_contracts_are_explicit():
+    models = _swift("Core/Models.swift")
+    model = _swift("Core/AppModel.swift")
+    dashboard = _swift("Views/DashboardView.swift")
+    api = _swift("Core/APIClient.swift")
+
+    assert "startedDefinitions" in models
+    assert "queuedDefinitions" in models
+    assert "BatchDefinitionState" in models
+    assert "beginRunTracking(response)" in model
+    assert "refreshVisibleRunData" in model
+    assert "catch APIError.unauthenticated" in model
+    assert "signOutLocally()" in model
+    assert "StorageSizeState" in model
+    assert "acceptStorageMeasurement" in model
+    assert "markStorageMeasurementFailure" in model
+    assert "StorageMeasurementStateView" in dashboard
+    assert 'timeout: includeSizes ? 85 : nil' in api

@@ -268,6 +268,9 @@ final class APIClientSessionTests: XCTestCase {
 
         XCTAssertTrue(result.ok)
         XCTAssertEqual(result.jobID, 91)
+        XCTAssertEqual(result.startedDefinitions.map(\.definitionID), ["daily"])
+        XCTAssertEqual(result.queuedDefinitions.map(\.definitionID), ["weekly"])
+        XCTAssertEqual(result.definitions.map(\.state), ["started", "queued"])
     }
 
     func testRetryJobUsesCanonicalRevisionSafeRoute() async throws {
@@ -306,7 +309,7 @@ final class APIClientSessionTests: XCTestCase {
         let result = try await client.getStorage(includeSizes: true, forceRefresh: false)
 
         XCTAssertEqual(result.pairs.count, 0)
-        XCTAssertGreaterThanOrEqual(try XCTUnwrap(StorageTimeoutURLProtocol.timeout), 60)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(StorageTimeoutURLProtocol.timeout), 85)
     }
 
     func testMalformedStorageResponseNamesTheAffectedArea() async throws {
@@ -347,6 +350,26 @@ final class APIClientSessionTests: XCTestCase {
         )
         XCTAssertEqual(components.path, "/api/browse/rclone")
         XCTAssertEqual(components.queryItems?.first(where: { $0.name == "path" })?.value, "pcloud:/Fotos & Familie")
+    }
+
+    func testReverseProxyBasePathIsNormalizedAndKeptForEveryEndpoint() async throws {
+        BasePathURLProtocol.requestURL = nil
+        let normalized = try APIClient.normalizedServerURL(
+            "https://backup.example.de/rclone/app///?discarded=true#fragment"
+        )
+        XCTAssertEqual(normalized.absoluteString, "https://backup.example.de/rclone/app")
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [BasePathURLProtocol.self]
+        let client = APIClient(baseURL: normalized, session: URLSession(configuration: configuration))
+
+        _ = try await client.getStorage(includeSizes: false, forceRefresh: false)
+
+        XCTAssertEqual(BasePathURLProtocol.requestURL?.path, "/rclone/app/api/storage/overview")
+        XCTAssertEqual(
+            URLComponents(url: try XCTUnwrap(BasePathURLProtocol.requestURL), resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "include_remote" })?.value,
+            "false"
+        )
     }
 }
 
@@ -496,6 +519,26 @@ private final class StorageTimeoutURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+private final class BasePathURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var requestURL: URL?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.requestURL = request.url
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"pairs":[],"measurement":{"state":"loading","total":0,"loaded":0,"failed":0,"stale":0,"measurement_error":null,"measured_at":null}}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 private final class MalformedStorageURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -635,7 +678,7 @@ private final class RunAllURLProtocol: URLProtocol {
             && request.url?.path == "/api/jobs/definitions/run-all"
             && components?.queryItems?.first(where: { $0.name == "dry_run" })?.value == "false"
         let status = valid ? 200 : 404
-        let body = Data((valid ? #"{"ok":true,"job_id":91}"# : #"{"detail":"wrong route"}"#).utf8)
+        let body = Data((valid ? #"{"ok":true,"job_id":91,"started_definitions":[{"definition_id":"daily","definition_name":"Täglich","state":"started","job_id":91}],"queued_definitions":[{"definition_id":"weekly","definition_name":"Wöchentlich","state":"queued","job_id":null}],"failed_definitions":[],"definitions":[{"definition_id":"daily","definition_name":"Täglich","state":"started","job_id":91},{"definition_id":"weekly","definition_name":"Wöchentlich","state":"queued","job_id":null}]}"# : #"{"detail":"wrong route"}"#).utf8)
         let response = HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]
