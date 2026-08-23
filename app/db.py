@@ -2255,6 +2255,35 @@ class Database:
                 return max(1, int(blocked_until - now_value))
             return 0
 
+    def auth_retry_after_many(
+        self, client_keys: Iterable[str], *, now: Optional[float] = None
+    ) -> int:
+        """Liefert die längste aktive Sperre mehrerer anonymer Auth-Sichten.
+
+        Reauthentifizierungen werden sowohl pro Sitzung als auch pro Client-IP
+        begrenzt. Beide Schlüssel werden absichtlich einzeln gespeichert, damit
+        weder ein Sitzungs- noch ein IP-Wechsel den jeweils anderen Schutz
+        aufhebt.
+        """
+        keys = tuple(dict.fromkeys(str(key) for key in client_keys if str(key)))
+        if not keys:
+            return 0
+        now_value = float(time.time() if now is None else now)
+        blocked_until = 0.0
+        with self.conn() as connection:
+            for key in keys:
+                row = connection.execute(
+                    "SELECT blocked_until FROM auth_failures WHERE client_key=?",
+                    (key,),
+                ).fetchone()
+                if row:
+                    blocked_until = max(
+                        blocked_until, float(row["blocked_until"] or 0)
+                    )
+        if blocked_until > now_value:
+            return max(1, int(blocked_until - now_value))
+        return 0
+
     def auth_record_failure(
         self,
         client_key: str,
@@ -2291,10 +2320,72 @@ class Database:
             )
             return max(0, int(blocked_until - now_value))
 
+    def auth_record_failure_many(
+        self,
+        client_keys: Iterable[str],
+        *,
+        window_sec: int,
+        max_failures: int,
+        lock_sec: int,
+        now: Optional[float] = None,
+    ) -> int:
+        """Erfasst einen Fehlversuch atomar für mehrere anonyme Auth-Sichten."""
+        keys = tuple(dict.fromkeys(str(key) for key in client_keys if str(key)))
+        if not keys:
+            return 0
+        now_value = float(time.time() if now is None else now)
+        longest_block = 0.0
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for key in keys:
+                row = connection.execute(
+                    "SELECT * FROM auth_failures WHERE client_key=?", (key,)
+                ).fetchone()
+                if (
+                    not row
+                    or now_value - float(row["window_started_at"]) > window_sec
+                ):
+                    window_started = now_value
+                    count = 1
+                    blocked_until = 0.0
+                else:
+                    window_started = float(row["window_started_at"])
+                    count = int(row["failure_count"] or 0) + 1
+                    blocked_until = float(row["blocked_until"] or 0)
+                if count >= max_failures:
+                    blocked_until = max(blocked_until, now_value + lock_sec)
+                    count = 0
+                    window_started = now_value
+                connection.execute(
+                    "INSERT INTO auth_failures(client_key, window_started_at, "
+                    "failure_count, blocked_until, updated_at) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(client_key) DO UPDATE SET "
+                    "window_started_at=excluded.window_started_at, "
+                    "failure_count=excluded.failure_count, "
+                    "blocked_until=excluded.blocked_until, "
+                    "updated_at=excluded.updated_at",
+                    (key, window_started, count, blocked_until, now_value),
+                )
+                longest_block = max(longest_block, blocked_until)
+        if longest_block > now_value:
+            return max(1, int(longest_block - now_value))
+        return 0
+
     def auth_clear(self, client_key: str) -> None:
         with self.conn() as connection:
             connection.execute(
                 "DELETE FROM auth_failures WHERE client_key=?", (client_key,)
+            )
+
+    def auth_clear_many(self, client_keys: Iterable[str]) -> None:
+        """Löscht ausschließlich die angegebenen Auth-Zähler atomar."""
+        keys = tuple(dict.fromkeys(str(key) for key in client_keys if str(key)))
+        if not keys:
+            return
+        with self.conn() as connection:
+            connection.executemany(
+                "DELETE FROM auth_failures WHERE client_key=?",
+                ((key,) for key in keys),
             )
 
     def auth_prune(self, older_than_days: int = 7) -> int:
