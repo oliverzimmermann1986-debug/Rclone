@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     definition_id TEXT,
     definition_name TEXT,
     config_revision TEXT,
-    scheduled_slot TEXT
+    scheduled_slot TEXT,
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    trigger TEXT NOT NULL DEFAULT 'manual'
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_kind_started ON jobs(kind, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_status_started ON jobs(status, started_at DESC);
@@ -79,6 +81,23 @@ CREATE TABLE IF NOT EXISTS pair_history_state (
     last_success_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_pair_history_state_name ON pair_history_state(pair_name);
+
+CREATE TABLE IF NOT EXISTS job_definition_schedule_state (
+    definition_id TEXT PRIMARY KEY,
+    definition_name TEXT NOT NULL DEFAULT '',
+    last_attempt_job_id INTEGER,
+    last_attempt_started_at REAL,
+    last_attempt_at REAL,
+    last_attempt_status TEXT,
+    last_attempt_trigger TEXT,
+    last_attempt_scheduled_slot TEXT,
+    last_success_job_id INTEGER,
+    last_success_started_at REAL,
+    last_success_at REAL,
+    last_success_trigger TEXT,
+    last_success_scheduled_slot TEXT,
+    updated_at REAL NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS auth_failures (
     client_key TEXT PRIMARY KEY,
@@ -239,6 +258,7 @@ class Database:
             self._migrate_schema(connection)
             self._backfill_pair_runs(connection)
             self._backfill_pair_history_state(connection)
+            self._backfill_job_definition_schedule_state(connection)
         try:
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
@@ -363,6 +383,199 @@ class Database:
                 "ON push_outbox(created_at DESC)"
             )
             connection.execute("PRAGMA user_version=6")
+            version = 6
+        if version < 7:
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "dry_run" not in columns:
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0"
+                )
+            if "trigger" not in columns:
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'manual'"
+                )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS job_definition_schedule_state ("
+                "definition_id TEXT PRIMARY KEY, "
+                "definition_name TEXT NOT NULL DEFAULT '', "
+                "last_attempt_job_id INTEGER, last_attempt_started_at REAL, "
+                "last_attempt_at REAL, last_attempt_status TEXT, "
+                "last_attempt_trigger TEXT, last_attempt_scheduled_slot TEXT, "
+                "last_success_job_id INTEGER, last_success_started_at REAL, "
+                "last_success_at REAL, last_success_trigger TEXT, "
+                "last_success_scheduled_slot TEXT, updated_at REAL NOT NULL)"
+            )
+            rows = connection.execute(
+                "SELECT id, summary_json, scheduled_slot FROM jobs ORDER BY id"
+            ).fetchall()
+            for row in rows:
+                try:
+                    summary = json.loads(row["summary_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    summary = {}
+                if not isinstance(summary, dict):
+                    summary = {}
+                pairs = summary.get("pairs") or []
+                inferred_dry_run = (
+                    summary.get("dry_run") is True
+                    or bool(pairs)
+                    and all(
+                        isinstance(pair, dict) and pair.get("dry_run") is True
+                        for pair in pairs
+                    )
+                )
+                inferred_trigger = str(summary.get("trigger") or "").strip()
+                if not inferred_trigger:
+                    inferred_trigger = (
+                        "scheduler"
+                        if str(row["scheduled_slot"] or "").strip()
+                        else "manual"
+                    )
+                connection.execute(
+                    "UPDATE jobs SET dry_run=?, trigger=? WHERE id=?",
+                    (1 if inferred_dry_run else 0, inferred_trigger, int(row["id"])),
+                )
+            connection.execute("PRAGMA user_version=7")
+
+    @staticmethod
+    def _record_job_definition_schedule_state(
+        connection: sqlite3.Connection,
+        *,
+        definition_id: str,
+        definition_name: str,
+        job_id: int,
+        started_at: float,
+        ended_at: Optional[float],
+        status: str,
+        trigger: str,
+        scheduled_slot: Optional[str],
+        dry_run: bool,
+    ) -> None:
+        """Persistiert Scheduler-Fakten unabhängig von löschbarer Anzeigehistorie."""
+
+        stable_id = str(definition_id or "").strip()
+        if not stable_id or dry_run:
+            return
+        name = str(definition_name or "").strip()
+        started = float(started_at)
+        effective_at = float(ended_at if ended_at is not None else started_at)
+        normalized_trigger = str(trigger or "manual").strip() or "manual"
+        slot = str(scheduled_slot or "").strip() or None
+        scheduler_attempt = normalized_trigger == "scheduler"
+        succeeded = status == "ok"
+        if not scheduler_attempt and not succeeded:
+            return
+        existing = connection.execute(
+            "SELECT * FROM job_definition_schedule_state WHERE definition_id=?",
+            (stable_id,),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                "INSERT INTO job_definition_schedule_state ("
+                "definition_id, definition_name, last_attempt_job_id, "
+                "last_attempt_started_at, last_attempt_at, last_attempt_status, "
+                "last_attempt_trigger, last_attempt_scheduled_slot, "
+                "last_success_job_id, last_success_started_at, last_success_at, "
+                "last_success_trigger, last_success_scheduled_slot, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    stable_id,
+                    name,
+                    int(job_id) if scheduler_attempt else None,
+                    started if scheduler_attempt else None,
+                    effective_at if scheduler_attempt else None,
+                    status if scheduler_attempt else None,
+                    normalized_trigger if scheduler_attempt else None,
+                    slot if scheduler_attempt else None,
+                    int(job_id) if succeeded else None,
+                    started if succeeded else None,
+                    effective_at if succeeded else None,
+                    normalized_trigger if succeeded else None,
+                    slot if succeeded else None,
+                    effective_at,
+                ),
+            )
+            return
+
+        current_attempt = (
+            float(existing["last_attempt_started_at"] or 0),
+            int(existing["last_attempt_job_id"] or 0),
+        )
+        candidate = (started, int(job_id))
+        assignments = ["definition_name=?", "updated_at=MAX(updated_at, ?)"]
+        values: list[Any] = [
+            name or str(existing["definition_name"] or ""),
+            effective_at,
+        ]
+        if scheduler_attempt and candidate >= current_attempt:
+            assignments.extend(
+                [
+                    "last_attempt_job_id=?",
+                    "last_attempt_started_at=?",
+                    "last_attempt_at=?",
+                    "last_attempt_status=?",
+                    "last_attempt_trigger=?",
+                    "last_attempt_scheduled_slot=?",
+                ]
+            )
+            values.extend(
+                [int(job_id), started, effective_at, status, normalized_trigger, slot]
+            )
+        if status == "ok":
+            current_success = (
+                float(existing["last_success_started_at"] or 0),
+                int(existing["last_success_job_id"] or 0),
+            )
+            if candidate >= current_success:
+                assignments.extend(
+                    [
+                        "last_success_job_id=?",
+                        "last_success_started_at=?",
+                        "last_success_at=?",
+                        "last_success_trigger=?",
+                        "last_success_scheduled_slot=?",
+                    ]
+                )
+                values.extend(
+                    [int(job_id), started, effective_at, normalized_trigger, slot]
+                )
+        values.append(stable_id)
+        connection.execute(
+            f"UPDATE job_definition_schedule_state SET {', '.join(assignments)} "
+            "WHERE definition_id=?",
+            tuple(values),
+        )
+
+    @classmethod
+    def _backfill_job_definition_schedule_state(
+        cls, connection: sqlite3.Connection
+    ) -> None:
+        """Backfill ist idempotent und überschreibt nie neueren, erhaltenen Zustand."""
+
+        rows = connection.execute(
+            "SELECT id, definition_id, definition_name, started_at, ended_at, status, "
+            "trigger, scheduled_slot, dry_run FROM jobs "
+            "WHERE definition_id IS NOT NULL AND definition_id<>'' "
+            "ORDER BY started_at, id"
+        ).fetchall()
+        for row in rows:
+            cls._record_job_definition_schedule_state(
+                connection,
+                definition_id=str(row["definition_id"] or ""),
+                definition_name=str(row["definition_name"] or ""),
+                job_id=int(row["id"]),
+                started_at=float(row["started_at"]),
+                ended_at=(
+                    float(row["ended_at"]) if row["ended_at"] is not None else None
+                ),
+                status=str(row["status"]),
+                trigger=str(row["trigger"] or "manual"),
+                scheduled_slot=str(row["scheduled_slot"] or "") or None,
+                dry_run=bool(row["dry_run"]),
+            )
 
     @classmethod
     def _migrate_pair_history_columns(cls, connection: sqlite3.Connection) -> None:
@@ -591,10 +804,32 @@ class Database:
         definition_name: Optional[str] = None,
         config_revision: Optional[str] = None,
         scheduled_slot: Optional[str] = None,
+        dry_run: Optional[bool] = None,
+        trigger: Optional[str] = None,
     ) -> int:
         if not kind or len(kind) > 64:
             raise ValueError("Ungültiger Job-Typ")
         started_at = time.time()
+        prepared_attempts = [
+            attempt for attempt in (attempts or ()) if isinstance(attempt, Mapping)
+        ]
+        inferred_dry_run = (
+            bool(dry_run)
+            if dry_run is not None
+            else bool(prepared_attempts)
+            and all(attempt.get("dry_run") is True for attempt in prepared_attempts)
+        )
+        attempt_triggers = {
+            str(attempt.get("trigger") or "").strip()
+            for attempt in prepared_attempts
+            if str(attempt.get("trigger") or "").strip()
+        }
+        inferred_trigger = str(trigger or "").strip()
+        if not inferred_trigger and len(attempt_triggers) == 1:
+            inferred_trigger = next(iter(attempt_triggers))
+        if not inferred_trigger:
+            inferred_trigger = "scheduler" if scheduled_slot else "manual"
+        definition_slot = str(scheduled_slot or "").strip() or None
         with self.conn() as connection:
             if exclusive_scope:
                 connection.execute("BEGIN IMMEDIATE")
@@ -612,8 +847,8 @@ class Database:
                     )
             cursor = connection.execute(
                 "INSERT INTO jobs (kind, status, started_at, log_file, "
-                "definition_id, definition_name, config_revision, scheduled_slot) "
-                "VALUES (?, 'running', ?, ?, ?, ?, ?, ?)",
+                "definition_id, definition_name, config_revision, scheduled_slot, "
+                "dry_run, trigger) VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     kind,
                     started_at,
@@ -621,13 +856,13 @@ class Database:
                     str(definition_id or "").strip() or None,
                     str(definition_name or "").strip() or None,
                     str(config_revision or "").strip() or None,
-                    str(scheduled_slot or "").strip() or None,
+                    definition_slot,
+                    1 if inferred_dry_run else 0,
+                    inferred_trigger,
                 ),
             )
             job_id = int(cursor.lastrowid)
-            for attempt in attempts or ():
-                if not isinstance(attempt, Mapping):
-                    continue
+            for attempt in prepared_attempts:
                 pair_name = str(attempt.get("name") or "").strip()
                 if not pair_name:
                     continue
@@ -670,6 +905,19 @@ class Database:
                     pair_name=pair_name,
                     seen_at=started_at,
                 )
+            if inferred_trigger == "scheduler":
+                self._record_job_definition_schedule_state(
+                    connection,
+                    definition_id=str(definition_id or ""),
+                    definition_name=str(definition_name or ""),
+                    job_id=job_id,
+                    started_at=started_at,
+                    ended_at=None,
+                    status="running",
+                    trigger=inferred_trigger,
+                    scheduled_slot=definition_slot,
+                    dry_run=inferred_dry_run,
+                )
             return job_id
 
     def job_finish(
@@ -685,17 +933,42 @@ class Database:
         )
         with self.conn() as connection:
             row = connection.execute(
-                "SELECT kind, status, started_at FROM jobs WHERE id=?", (job_id,)
+                "SELECT kind, status, started_at, definition_id, definition_name, "
+                "scheduled_slot, dry_run, trigger FROM jobs WHERE id=?",
+                (job_id,),
             ).fetchone()
             if not row:
                 raise ValueError(f"Job nicht gefunden: {job_id}")
             if str(row["status"]) != "running":
                 return False
             started_at = float(row["started_at"])
+            summary_data = summary if isinstance(summary, dict) else {}
+            effective_dry_run = (
+                bool(row["dry_run"]) or summary_data.get("dry_run") is True
+            )
+            effective_trigger = (
+                str(summary_data.get("trigger") or row["trigger"] or "manual").strip()
+                or "manual"
+            )
+            effective_slot = (
+                str(
+                    summary_data.get("scheduled_slot") or row["scheduled_slot"] or ""
+                ).strip()
+                or None
+            )
             cursor = connection.execute(
-                "UPDATE jobs SET status=?, ended_at=?, summary_json=? "
+                "UPDATE jobs SET status=?, ended_at=?, summary_json=?, dry_run=?, "
+                "trigger=?, scheduled_slot=COALESCE(scheduled_slot, ?) "
                 "WHERE id=? AND status='running'",
-                (status, ended_at, payload, job_id),
+                (
+                    status,
+                    ended_at,
+                    payload,
+                    1 if effective_dry_run else 0,
+                    effective_trigger,
+                    effective_slot,
+                    job_id,
+                ),
             )
             if int(cursor.rowcount or 0) != 1:
                 return False
@@ -707,6 +980,18 @@ class Database:
                 ended_at,
                 summary or {},
                 job_kind=str(row["kind"]),
+            )
+            self._record_job_definition_schedule_state(
+                connection,
+                definition_id=str(row["definition_id"] or ""),
+                definition_name=str(row["definition_name"] or ""),
+                job_id=job_id,
+                started_at=started_at,
+                ended_at=ended_at,
+                status=status,
+                trigger=effective_trigger,
+                scheduled_slot=effective_slot,
+                dry_run=effective_dry_run,
             )
             return True
 
@@ -923,6 +1208,8 @@ class Database:
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         data = dict(row)
+        if "dry_run" in data:
+            data["dry_run"] = bool(data["dry_run"])
         if data.get("summary_json"):
             try:
                 data["summary"] = json.loads(data["summary_json"])
@@ -1073,7 +1360,7 @@ class Database:
     def job_definition_history(
         self, definitions: Mapping[str, str]
     ) -> Dict[str, Dict[str, Optional[Dict[str, Any]]]]:
-        """Lädt letzten Versuch und Erfolg pro stabiler Jobdefinitions-ID."""
+        """Lädt die löschbare Anzeigehistorie pro stabiler Jobdefinitions-ID."""
 
         ids = [str(value).strip() for value in definitions if str(value).strip()]
         result: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = {
@@ -1101,8 +1388,66 @@ class Database:
                 item = {**item, **summary, "summary": summary}
             if bucket["last_result"] is None:
                 bucket["last_result"] = item
-            if item.get("status") == "ok" and bucket["last_success"] is None:
+            if (
+                item.get("status") == "ok"
+                and not bool(item.get("dry_run"))
+                and bucket["last_success"] is None
+            ):
                 bucket["last_success"] = item
+        return result
+
+    def job_definition_schedule_state(
+        self, definitions: Mapping[str, str]
+    ) -> Dict[str, Dict[str, Optional[Dict[str, Any]]]]:
+        """Lädt den dauerhaften Schedulerzustand, unabhängig von ``jobs``-Retention."""
+
+        ids = [str(value).strip() for value in definitions if str(value).strip()]
+        result: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = {
+            definition_id: {"last_success": None, "last_result": None}
+            for definition_id in ids
+        }
+        if not ids:
+            return result
+        marks = ",".join("?" for _ in ids)
+        with self.conn() as connection:
+            rows = connection.execute(
+                "SELECT * FROM job_definition_schedule_state WHERE definition_id IN ("
+                + marks
+                + ")",
+                tuple(ids),
+            ).fetchall()
+        for row in rows:
+            definition_id = str(row["definition_id"] or "")
+            bucket = result.get(definition_id)
+            if bucket is None:
+                continue
+            if row["last_attempt_job_id"] is not None:
+                status = str(row["last_attempt_status"] or "error")
+                bucket["last_result"] = {
+                    "id": int(row["last_attempt_job_id"]),
+                    "job_id": int(row["last_attempt_job_id"]),
+                    "definition_id": definition_id,
+                    "definition_name": str(row["definition_name"] or ""),
+                    "ok": status == "ok",
+                    "status": status,
+                    "started_at": row["last_attempt_started_at"],
+                    "ended_at": row["last_attempt_at"],
+                    "trigger": str(row["last_attempt_trigger"] or "manual"),
+                    "scheduled_slot": row["last_attempt_scheduled_slot"],
+                }
+            if row["last_success_job_id"] is not None:
+                bucket["last_success"] = {
+                    "id": int(row["last_success_job_id"]),
+                    "job_id": int(row["last_success_job_id"]),
+                    "definition_id": definition_id,
+                    "definition_name": str(row["definition_name"] or ""),
+                    "ok": True,
+                    "status": "ok",
+                    "started_at": row["last_success_started_at"],
+                    "ended_at": row["last_success_at"],
+                    "trigger": str(row["last_success_trigger"] or "manual"),
+                    "scheduled_slot": row["last_success_scheduled_slot"],
+                }
         return result
 
     def job_running(self, kind: str) -> Optional[Dict[str, Any]]:
@@ -1123,6 +1468,12 @@ class Database:
         )
         with self.conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT id, definition_id, definition_name, started_at, "
+                "scheduled_slot, dry_run, trigger FROM jobs "
+                "WHERE id=? AND status='running'",
+                (int(job_id),),
+            ).fetchone()
             cursor = connection.execute(
                 "UPDATE jobs SET status='stale', ended_at=?, summary_json=? "
                 "WHERE id=? AND status='running'",
@@ -1137,6 +1488,19 @@ class Database:
                     ended_at=now,
                     error=reason,
                 )
+                if row is not None:
+                    self._record_job_definition_schedule_state(
+                        connection,
+                        definition_id=str(row["definition_id"] or ""),
+                        definition_name=str(row["definition_name"] or ""),
+                        job_id=int(row["id"]),
+                        started_at=float(row["started_at"]),
+                        ended_at=now,
+                        status="stale",
+                        trigger=str(row["trigger"] or "manual"),
+                        scheduled_slot=str(row["scheduled_slot"] or "") or None,
+                        dry_run=bool(row["dry_run"]),
+                    )
             return transitioned
 
     def jobs_mark_all_running_stale(
@@ -1163,7 +1527,9 @@ class Database:
         with self.conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                f"SELECT id FROM jobs WHERE status='running'{kind_clause}",
+                "SELECT id, definition_id, definition_name, started_at, "
+                "scheduled_slot, dry_run, trigger FROM jobs "
+                f"WHERE status='running'{kind_clause}",
                 kind_params,
             ).fetchall()
             cursor = connection.execute(
@@ -1178,6 +1544,19 @@ class Database:
                 ended_at=now,
                 error=reason,
             )
+            for row in rows:
+                self._record_job_definition_schedule_state(
+                    connection,
+                    definition_id=str(row["definition_id"] or ""),
+                    definition_name=str(row["definition_name"] or ""),
+                    job_id=int(row["id"]),
+                    started_at=float(row["started_at"]),
+                    ended_at=now,
+                    status="stale",
+                    trigger=str(row["trigger"] or "manual"),
+                    scheduled_slot=str(row["scheduled_slot"] or "") or None,
+                    dry_run=bool(row["dry_run"]),
+                )
             return int(cursor.rowcount or 0)
 
     def jobs_mark_stale(
@@ -1195,7 +1574,8 @@ class Database:
             kind_clause = " AND kind=?" if kind else ""
             params: tuple[Any, ...] = (cutoff, str(kind)) if kind else (cutoff,)
             stale_rows = connection.execute(
-                "SELECT id, started_at FROM jobs "
+                "SELECT id, definition_id, definition_name, started_at, "
+                "scheduled_slot, dry_run, trigger FROM jobs "
                 f"WHERE status='running' AND started_at < ?{kind_clause}",
                 params,
             ).fetchall()
@@ -1214,6 +1594,19 @@ class Database:
                 ended_at=now,
                 error=reason,
             )
+            for row in stale_rows:
+                self._record_job_definition_schedule_state(
+                    connection,
+                    definition_id=str(row["definition_id"] or ""),
+                    definition_name=str(row["definition_name"] or ""),
+                    job_id=int(row["id"]),
+                    started_at=float(row["started_at"]),
+                    ended_at=now,
+                    status="stale",
+                    trigger=str(row["trigger"] or "manual"),
+                    scheduled_slot=str(row["scheduled_slot"] or "") or None,
+                    dry_run=bool(row["dry_run"]),
+                )
             return int(cursor.rowcount or 0)
 
     def pair_last_result(

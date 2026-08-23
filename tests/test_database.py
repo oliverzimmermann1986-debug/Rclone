@@ -39,7 +39,7 @@ def test_database_backfills_and_indexes_pair_history(tmp_path: Path):
     assert db.stats()["pair_runs"] == 1
     assert db.integrity_check()["ok"] is True
     with db.conn() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
         indexes = {
             row["name"]
             for row in connection.execute("PRAGMA index_list(jobs)").fetchall()
@@ -176,8 +176,54 @@ def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(pair_runs)").fetchall()
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
     assert {"history_key", "dry_run", "scheduled_slot"} <= columns
+
+
+def test_v7_backfills_definition_schedule_state_without_dry_runs(tmp_path: Path):
+    path = tmp_path / "schedule-state-migration.db"
+    database = Database(path)
+    definition_id = "a" * 32
+    with database.conn() as connection:
+        connection.execute("DROP TABLE job_definition_schedule_state")
+        rows = [
+            (10, 20, "ok", False, "scheduler", "slot-1"),
+            (30, 40, "ok", True, "web", None),
+            (50, 60, "error", False, "scheduler", "slot-2"),
+        ]
+        for started_at, ended_at, status, dry_run, trigger, slot in rows:
+            connection.execute(
+                "INSERT INTO jobs(kind, status, started_at, ended_at, summary_json, "
+                "definition_id, definition_name, scheduled_slot) "
+                "VALUES('backup', ?, ?, ?, ?, ?, 'Fotos täglich', ?)",
+                (
+                    status,
+                    started_at,
+                    ended_at,
+                    json.dumps(
+                        {
+                            "ok": status == "ok",
+                            "dry_run": dry_run,
+                            "trigger": trigger,
+                            "scheduled_slot": slot,
+                        }
+                    ),
+                    definition_id,
+                    slot,
+                ),
+            )
+        connection.execute("PRAGMA user_version=6")
+
+    migrated = Database(path)
+    state = migrated.job_definition_schedule_state({definition_id: "Fotos täglich"})[
+        definition_id
+    ]
+
+    assert state["last_success"]["started_at"] == 10
+    assert state["last_success"]["scheduled_slot"] == "slot-1"
+    assert state["last_result"]["started_at"] == 50
+    assert state["last_result"]["status"] == "error"
+    assert state["last_result"]["scheduled_slot"] == "slot-2"
 
 
 def test_push_outbox_claim_retry_dedupe_and_device_lease(tmp_path: Path):

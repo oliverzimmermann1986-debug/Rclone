@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi import HTTPException
 
+from app import db as db_module
 from app.config_validation import ConfigValidationError, validate_config
 from app.db import Database
 from app.job_definitions import effective_job_definitions, legacy_job_definitions
@@ -161,6 +162,161 @@ def test_run_metadata_and_history_survive_definition_rename(tmp_path: Path):
     history = database.job_definition_history({"a" * 32: "Neu"})["a" * 32]
     assert history["last_result"]["id"] == second
     assert history["last_success"]["id"] == first
+
+
+def test_dry_run_never_advances_definition_schedule_state(tmp_path: Path, monkeypatch):
+    config, _ = validate_config(_config(tmp_path))
+    definition = config["backup"]["jobs"][0]
+    scheduled_now = datetime(
+        2026, 8, 23, 2, 5, tzinfo=ZoneInfo("Europe/Berlin")
+    ).timestamp()
+    monkeypatch.setattr(db_module.time, "time", lambda: scheduled_now)
+    database = Database(tmp_path / "dry-definition.db")
+
+    dry_job = database.job_start(
+        "backup",
+        definition_id=definition["id"],
+        definition_name=definition["name"],
+        attempts=[
+            {
+                "name": "Fotos",
+                "history_key": "rclone:id:photos",
+                "trigger": "web",
+                "dry_run": True,
+            }
+        ],
+    )
+    database.job_finish(
+        dry_job,
+        "ok",
+        {"ok": True, "dry_run": True, "trigger": "web", "pairs": []},
+    )
+
+    display = database.job_definition_history({definition["id"]: definition["name"]})[
+        definition["id"]
+    ]
+    state = database.job_definition_schedule_state(
+        {definition["id"]: definition["name"]}
+    )[definition["id"]]
+    due, status = find_due_jobs(config, database, now=scheduled_now)
+
+    assert display["last_result"]["id"] == dry_job
+    assert display["last_success"] is None
+    assert state == {"last_result": None, "last_success": None}
+    assert definition["name"] in due
+    assert (
+        next(item for item in status if item["definition_id"] == definition["id"])[
+            "due"
+        ]
+        is True
+    )
+
+
+def test_failed_history_cleanup_preserves_scheduler_retry(tmp_path: Path, monkeypatch):
+    config, _ = validate_config(_config(tmp_path))
+    definition = config["backup"]["jobs"][0]
+    definition["retry_minutes"] = 5
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")).timestamp()
+    clock = [now - 6 * 60]
+    monkeypatch.setattr(db_module.time, "time", lambda: clock[0])
+    database = Database(tmp_path / "failed-cleanup.db")
+    failed = database.job_start(
+        "backup",
+        definition_id=definition["id"],
+        definition_name=definition["name"],
+        scheduled_slot="failed-slot",
+        attempts=[
+            {
+                "name": "Fotos",
+                "history_key": "rclone:id:photos",
+                "trigger": "scheduler",
+                "scheduled_slot": "failed-slot",
+            }
+        ],
+    )
+    database.job_finish(
+        failed,
+        "error",
+        {
+            "ok": False,
+            "trigger": "scheduler",
+            "scheduled_slot": "failed-slot",
+            "pairs": [],
+        },
+    )
+    clock[0] = now
+
+    before_due, before_status = find_due_jobs(config, database, now=now)
+    assert database.jobs_delete_failed() == 1
+    after_due, after_status = find_due_jobs(config, database, now=now)
+
+    assert database.job_definition_history({definition["id"]: definition["name"]})[
+        definition["id"]
+    ] == {"last_result": None, "last_success": None}
+    assert before_due == after_due
+    before = next(
+        item for item in before_status if item["definition_id"] == definition["id"]
+    )
+    after = next(
+        item for item in after_status if item["definition_id"] == definition["id"]
+    )
+    assert before["reason"] == after["reason"] == "retry_after_failure"
+    assert before["scheduled_slot"] == after["scheduled_slot"]
+
+
+def test_history_retention_preserves_definition_catch_up_state(
+    tmp_path: Path, monkeypatch
+):
+    config, _ = validate_config(_config(tmp_path))
+    definition = config["backup"]["jobs"][0]
+    clock = [datetime(2026, 8, 20, 2, 5, tzinfo=ZoneInfo("Europe/Berlin")).timestamp()]
+    monkeypatch.setattr(db_module.time, "time", lambda: clock[0])
+    database = Database(tmp_path / "retention-state.db")
+    successful = database.job_start(
+        "backup",
+        definition_id=definition["id"],
+        definition_name=definition["name"],
+        scheduled_slot="success-slot",
+        attempts=[
+            {
+                "name": "Fotos",
+                "history_key": "rclone:id:photos",
+                "trigger": "scheduler",
+                "scheduled_slot": "success-slot",
+            }
+        ],
+    )
+    clock[0] += 60
+    database.job_finish(
+        successful,
+        "ok",
+        {
+            "ok": True,
+            "trigger": "scheduler",
+            "scheduled_slot": "success-slot",
+            "pairs": [],
+        },
+    )
+    clock[0] = datetime(
+        2026, 8, 23, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")
+    ).timestamp()
+
+    before_due, before_status = find_due_jobs(config, database, now=clock[0])
+    assert database.jobs_prune(older_than_days=1, keep_latest=0) == 1
+    after_due, after_status = find_due_jobs(config, database, now=clock[0])
+
+    assert database.job_definition_history({definition["id"]: definition["name"]})[
+        definition["id"]
+    ] == {"last_result": None, "last_success": None}
+    assert before_due == after_due
+    before = next(
+        item for item in before_status if item["definition_id"] == definition["id"]
+    )
+    after = next(
+        item for item in after_status if item["definition_id"] == definition["id"]
+    )
+    assert before["last_run"] == after["last_run"]
+    assert before["scheduled_slot"] == after["scheduled_slot"]
 
 
 def test_scheduler_uses_definition_history_and_job_retry(tmp_path: Path):
