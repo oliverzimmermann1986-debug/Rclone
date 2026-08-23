@@ -31,6 +31,34 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertNil(detailed.pairs[3].sourceSize?.bytes)
     }
 
+    func testStorageAcceptsHistoricNumericTransferAndRemoteSizeContract() throws {
+        let data = Data(#"""
+        {
+          "pairs": [{
+            "name": "Fotos",
+            "local": "/mnt/fotos",
+            "remote": "cloud:Fotos",
+            "last_transferred": 2048,
+            "remote_size": {
+              "remote": "cloud:Fotos",
+              "count": 12,
+              "bytes": 4096
+            }
+          }]
+        }
+        """#.utf8)
+
+        let overview = try JSONDecoder().decode(StorageOverview.self, from: data)
+        let pair = try XCTUnwrap(overview.pairs.first)
+        XCTAssertEqual(pair.direction, "push")
+        XCTAssertEqual(pair.source, "/mnt/fotos")
+        XCTAssertEqual(pair.target, "cloud:Fotos")
+        XCTAssertEqual(pair.lastTransferred, "2048 B")
+        XCTAssertEqual(pair.targetSize?.path, "cloud:Fotos")
+        XCTAssertEqual(pair.targetSize?.count, 12)
+        XCTAssertEqual(pair.targetSize?.bytes, 4096)
+    }
+
     func testConfigAndJobReadModelsDecodeSharedContract() throws {
         let config: ConfigSnapshot = try decode("config")
         XCTAssertEqual(config.revision.count, 64)

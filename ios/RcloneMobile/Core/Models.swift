@@ -238,6 +238,61 @@ struct StoragePair: Decodable, Identifiable {
         case lastTransferred = "last_transferred"
         case sourceSize = "source_size"
         case targetSize = "target_size"
+        case remoteSize = "remote_size"
+    }
+}
+
+extension StoragePair {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        name = try values.decode(String.self, forKey: .name)
+        local = try values.decode(String.self, forKey: .local)
+        remote = try values.decodeIfPresent(String.self, forKey: .remote)
+
+        let decodedDirection = try values.decodeIfPresent(String.self, forKey: .direction)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        direction = decodedDirection.flatMap { $0.isEmpty ? nil : $0 } ?? "push"
+
+        let fallbackSource = direction == "pull" ? (remote ?? "") : local
+        let fallbackTarget = direction == "pull" ? local : (remote ?? "")
+        source = try values.decodeIfPresent(String.self, forKey: .source) ?? fallbackSource
+        target = try values.decodeIfPresent(String.self, forKey: .target) ?? fallbackTarget
+        localDisk = try values.decodeIfPresent(LocalDisk.self, forKey: .localDisk)
+        lastSync = try values.decodeIfPresent(Double.self, forKey: .lastSync)
+
+        let transferIsMissing = !values.contains(.lastTransferred)
+        let transferIsNull: Bool
+        if transferIsMissing {
+            transferIsNull = false
+        } else {
+            transferIsNull = try values.decodeNil(forKey: .lastTransferred)
+        }
+        if transferIsMissing || transferIsNull {
+            lastTransferred = nil
+        } else if let text = try? values.decode(String.self, forKey: .lastTransferred) {
+            lastTransferred = text
+        } else if let bytes = try? values.decode(Int64.self, forKey: .lastTransferred) {
+            // Alte Laufhistorien speicherten diesen Wert teilweise numerisch.
+            // Der Wert wird nur als Hinweis angezeigt; wichtig ist, dass deshalb
+            // nicht die komplette Storage-Antwort verworfen wird.
+            lastTransferred = "\(bytes) B"
+        } else if let bytes = try? values.decode(Double.self, forKey: .lastTransferred) {
+            lastTransferred = "\(bytes) B"
+        } else {
+            lastTransferred = nil
+        }
+
+        let decodedSourceSize = try values.decodeIfPresent(PathSize.self, forKey: .sourceSize)
+        let decodedTargetSize = try values.decodeIfPresent(PathSize.self, forKey: .targetSize)
+        let legacyRemoteSize = try values.decodeIfPresent(PathSize.self, forKey: .remoteSize)
+        if direction == "pull" {
+            sourceSize = decodedSourceSize ?? legacyRemoteSize
+            targetSize = decodedTargetSize
+        } else {
+            sourceSize = decodedSourceSize
+            targetSize = decodedTargetSize ?? legacyRemoteSize
+        }
     }
 }
 
@@ -267,9 +322,24 @@ struct PathSize: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case path, count, bytes, error
+        case legacyRemote = "remote"
         case measuredAt = "measured_at"
         case measurementStatus = "measurement_status"
         case measurementError = "measurement_error"
+    }
+}
+
+extension PathSize {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        path = try values.decodeIfPresent(String.self, forKey: .path)
+            ?? values.decodeIfPresent(String.self, forKey: .legacyRemote)
+        count = try values.decodeIfPresent(Int.self, forKey: .count)
+        bytes = try values.decodeIfPresent(Int64.self, forKey: .bytes)
+        error = try values.decodeIfPresent(String.self, forKey: .error)
+        measuredAt = try values.decodeIfPresent(Double.self, forKey: .measuredAt)
+        measurementStatus = try values.decodeIfPresent(String.self, forKey: .measurementStatus)
+        measurementError = try values.decodeIfPresent(String.self, forKey: .measurementError)
     }
 }
 

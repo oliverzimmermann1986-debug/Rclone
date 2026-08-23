@@ -4,6 +4,7 @@ enum APIError: LocalizedError, Equatable {
     case invalidServer
     case unauthenticated
     case invalidResponse
+    case incompatibleResponse(resource: String)
     case server(status: Int, message: String)
     case loginFailed
     case loginRateLimited(retryAfterSeconds: Int)
@@ -24,6 +25,8 @@ enum APIError: LocalizedError, Equatable {
             "Die Sitzung ist abgelaufen. Bitte erneut anmelden."
         case .invalidResponse:
             "Der Server hat eine unerwartete Antwort gesendet."
+        case let .incompatibleResponse(resource):
+            "\(resource): Die Antwort konnte nicht gelesen werden. Server und App verwenden unterschiedliche Datenstände."
         case let .server(_, message):
             message
         case .loginFailed:
@@ -656,7 +659,9 @@ final class APIClient: APIClientProtocol {
         do {
             return try decoder.decode(T.self, from: data)
         } catch {
-            throw APIError.invalidResponse
+            throw APIError.incompatibleResponse(
+                resource: Self.responseResource(for: request.url?.path ?? "")
+            )
         }
     }
 
@@ -722,6 +727,25 @@ final class APIClient: APIClientProtocol {
         if let text = detail as? String { return text }
         if let dictionary = detail as? [String: Any], let message = dictionary["message"] as? String { return message }
         return nil
+    }
+
+    private static func responseResource(for path: String) -> String {
+        switch path {
+        case "/api/storage/overview":
+            "Dateizahlen und Größen"
+        case "/api/diagnostics/overview":
+            "Lagebild"
+        case "/api/config":
+            "Konfiguration"
+        case "/api/jobs/search", "/api/jobs/list":
+            "Laufhistorie"
+        case "/api/jobs/backup/progress":
+            "Laufstatus"
+        case "/api/pbs/status":
+            "PBS-Status"
+        default:
+            "Serverdaten"
+        }
     }
 
     private static func queryEncode(_ value: String) -> String {
