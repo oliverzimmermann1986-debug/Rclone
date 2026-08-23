@@ -278,13 +278,8 @@ def test_push_outbox_claim_retry_dedupe_and_device_lease(tmp_path: Path):
         )
         == "pending"
     )
-    assert (
-        database.push_outbox_claim_due(claim_owner="dispatcher-b", now=159) == []
-    )
-    assert (
-        len(database.push_outbox_claim_due(claim_owner="dispatcher-b", now=160))
-        == 1
-    )
+    assert database.push_outbox_claim_due(claim_owner="dispatcher-b", now=159) == []
+    assert len(database.push_outbox_claim_due(claim_owner="dispatcher-b", now=160)) == 1
 
     assert database.push_devices(now=3_699)
     assert database.push_devices(now=3_700) == []
@@ -409,15 +404,18 @@ def test_device_removal_does_not_release_foreign_active_claim(tmp_path: Path):
     token = "ab" * 32
     database.push_device_upsert(token, "production", now=100)
     for sequence in (1, 2):
-        assert database.push_outbox_enqueue(
-            event="sync_error",
-            title="Fehler",
-            message=f"Fehler {sequence}",
-            payload={},
-            dedupe_key=f"device-race:{sequence}",
-            retention_seconds=86400,
-            now=100,
-        ) == 1
+        assert (
+            database.push_outbox_enqueue(
+                event="sync_error",
+                title="Fehler",
+                message=f"Fehler {sequence}",
+                payload={},
+                dedupe_key=f"device-race:{sequence}",
+                retention_seconds=86400,
+                now=100,
+            )
+            == 1
+        )
 
     first = database.push_outbox_claim_due(
         claim_owner="dispatcher-a", limit=1, now=100
@@ -425,26 +423,30 @@ def test_device_removal_does_not_release_foreign_active_claim(tmp_path: Path):
     second = database.push_outbox_claim_due(
         claim_owner="dispatcher-b", limit=1, now=100
     )[0]
-    assert database.push_outbox_finish(
-        int(first["id"]),
-        claim_owner="dispatcher-a",
-        sent=False,
-        error="BadDeviceToken",
-        now=101,
-    ) == "failed"
+    assert (
+        database.push_outbox_finish(
+            int(first["id"]),
+            claim_owner="dispatcher-a",
+            sent=False,
+            error="BadDeviceToken",
+            now=101,
+        )
+        == "failed"
+    )
 
     assert database.push_device_delete(token, claim_owner="dispatcher-a") is True
-    assert database.push_outbox_finish(
-        int(second["id"]),
-        claim_owner="dispatcher-b",
-        sent=False,
-        retry=True,
-        error="HTTP 503",
-        now=102,
-    ) == "failed"
-    assert database.push_outbox_claim_due(
-        claim_owner="dispatcher-c", now=200
-    ) == []
+    assert (
+        database.push_outbox_finish(
+            int(second["id"]),
+            claim_owner="dispatcher-b",
+            sent=False,
+            retry=True,
+            error="HTTP 503",
+            now=102,
+        )
+        == "failed"
+    )
+    assert database.push_outbox_claim_due(claim_owner="dispatcher-c", now=200) == []
 
 
 def test_persistent_login_backoff(tmp_path: Path):

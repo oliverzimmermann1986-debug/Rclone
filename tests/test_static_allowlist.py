@@ -77,9 +77,7 @@ def test_allowed_asset_preserves_query_head_range_and_conditional_requests(
     partial = client.get("/static/app.js", headers={"Range": "bytes=0-6"})
     assert partial.status_code == 206
     assert partial.content == b"console"
-    assert partial.headers["content-range"] == (
-        f"bytes 0-6/{len(response.content)}"
-    )
+    assert partial.headers["content-range"] == (f"bytes 0-6/{len(response.content)}")
 
     not_modified = client.get(
         "/static/app.js",

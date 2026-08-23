@@ -2376,9 +2376,7 @@ class Database:
                     (key,),
                 ).fetchone()
                 if row:
-                    blocked_until = max(
-                        blocked_until, float(row["blocked_until"] or 0)
-                    )
+                    blocked_until = max(blocked_until, float(row["blocked_until"] or 0))
         if blocked_until > now_value:
             return max(1, int(blocked_until - now_value))
         return 0
@@ -2440,10 +2438,7 @@ class Database:
                 row = connection.execute(
                     "SELECT * FROM auth_failures WHERE client_key=?", (key,)
                 ).fetchone()
-                if (
-                    not row
-                    or now_value - float(row["window_started_at"]) > window_sec
-                ):
+                if not row or now_value - float(row["window_started_at"]) > window_sec:
                     window_started = now_value
                     count = 1
                     blocked_until = 0.0

@@ -156,9 +156,7 @@ def _force_popen_signal_fallback(monkeypatch) -> None:
     def unavailable_killpg(_pgid, _signal):
         raise OSError("process groups unavailable")
 
-    monkeypatch.setattr(
-        rclone_sync.os, "killpg", unavailable_killpg, raising=False
-    )
+    monkeypatch.setattr(rclone_sync.os, "killpg", unavailable_killpg, raising=False)
 
 
 def test_local_termination_waits_for_sigkill_exit_and_unregisters_once(monkeypatch):
@@ -193,7 +191,9 @@ def test_unconfirmed_exit_after_sigkill_keeps_process_evidence(monkeypatch):
         lambda pid, **_kwargs: unregistered.append(pid),
     )
 
-    with pytest.raises(runtime_state.ProcessTerminationError, match="nicht sicher beendet"):
+    with pytest.raises(
+        runtime_state.ProcessTerminationError, match="nicht sicher beendet"
+    ):
         rclone_sync._terminate_proc(process, graceful_sec=0, forceful_sec=0)
 
     assert process.terminate_called is True

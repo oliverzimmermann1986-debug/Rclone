@@ -45,9 +45,7 @@ def _config(tmp_path: Path) -> dict:
     }
 
 
-def _setup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[Config, Database]:
+def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Database]:
     for name in ("data", "logs", "tmp"):
         (tmp_path / name).mkdir(exist_ok=True)
     path = tmp_path / "config.yaml"
@@ -65,9 +63,7 @@ def _request(token: str, host: str = "192.0.2.10") -> Request:
             "type": "http",
             "method": "POST",
             "path": "/api/config/change-password",
-            "headers": [
-                (b"cookie", f"rclone_sync_session={token}".encode("ascii"))
-            ],
+            "headers": [(b"cookie", f"rclone_sync_session={token}".encode("ascii"))],
             "client": (host, 12345),
         }
     )

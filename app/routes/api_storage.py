@@ -148,9 +148,7 @@ def _decorate_measurement(
     }
 
 
-def _measurement_metadata(
-    result: dict[str, Any] | None, path: str
-) -> dict[str, Any]:
+def _measurement_metadata(result: dict[str, Any] | None, path: str) -> dict[str, Any]:
     """Kleine, stabile Zustandsprojektion für Clients ohne Größenmodell."""
     if not result:
         return {
@@ -246,9 +244,7 @@ def _measurement_summary(
         }
 
     results = [
-        item.get(f"{side}_size")
-        for item in output
-        for side in ("source", "target")
+        item.get(f"{side}_size") for item in output for side in ("source", "target")
     ]
     states = [
         str(result.get("measurement_state") or "failed")
