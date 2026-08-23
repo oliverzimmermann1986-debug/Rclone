@@ -70,7 +70,8 @@ struct QuickSyncView: View {
         .sheet(item: $browseTarget) { target in
             PathBrowserSheet(
                 kind: target == .local || remote.hasPrefix("/") ? .local : .remote,
-                initialPath: target == .local ? local : remote
+                initialPath: target == .local ? local : remote,
+                allowsKindSwitch: target == .remote
             ) {
                 if target == .local { local = $0 } else { remote = $0 }
             }
@@ -115,23 +116,53 @@ private enum QuickBrowseTarget: String, Identifiable {
     var id: String { rawValue }
 }
 
-enum PathBrowserKind: Equatable {
-    case local, remote
+enum PathBrowserKind: String, CaseIterable, Identifiable {
+    case remote, local
+    var id: Self { self }
 }
 
 struct PathBrowserSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    let kind: PathBrowserKind
-    let initialPath: String
+    let allowsKindSwitch: Bool
     let select: (String) -> Void
+    @State private var selectedKind: PathBrowserKind
+    @State private var localPath: String
+    @State private var remotePath: String
     @State private var result: BrowseResponse?
     @State private var isLoading = false
+    @State private var isCreating = false
     @State private var errorMessage: String?
+    @State private var showingCreateFolder = false
+    @State private var folderName = ""
+
+    init(
+        kind: PathBrowserKind,
+        initialPath: String,
+        allowsKindSwitch: Bool = false,
+        select: @escaping (String) -> Void
+    ) {
+        self.allowsKindSwitch = allowsKindSwitch
+        self.select = select
+        _selectedKind = State(initialValue: kind)
+        _localPath = State(initialValue: kind == .local && initialPath.hasPrefix("/") ? initialPath : "")
+        _remotePath = State(initialValue: kind == .remote && initialPath.contains(":") ? initialPath : "")
+    }
 
     var body: some View {
         NavigationStack {
             List {
+                if allowsKindSwitch {
+                    Section {
+                        Picker("Zieltyp", selection: $selectedKind) {
+                            Label("Cloud", systemImage: "icloud").tag(PathBrowserKind.remote)
+                            Label("Lokal", systemImage: "externaldrive").tag(PathBrowserKind.local)
+                        }
+                        .pickerStyle(.segmented)
+                    } footer: {
+                        Text("Wechsle hier zwischen einem rclone-Cloudziel und einem lokalen Ordner.")
+                    }
+                }
                 if let errorMessage {
                     Label(errorMessage, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
                 }
@@ -144,6 +175,17 @@ struct PathBrowserSheet: View {
                         if let parent = result.parent {
                             Button { Task { await load(parent) } } label: { Label("Übergeordnet", systemImage: "arrow.up") }
                         }
+                        Button {
+                            folderName = ""
+                            showingCreateFolder = true
+                        } label: {
+                            if isCreating {
+                                HStack { ProgressView(); Text("Ordner wird angelegt …") }
+                            } else {
+                                Label("Neuen Ordner anlegen", systemImage: "folder.badge.plus")
+                            }
+                        }
+                        .disabled(!canCreateFolder || isCreating)
                     }
                     Section("Ordner") {
                         ForEach(result.entries) { entry in
@@ -159,30 +201,86 @@ struct PathBrowserSheet: View {
                     ProgressView("Ordner werden geladen …")
                 }
             }
-            .navigationTitle(kind == .local ? "Lokalen Ordner wählen" : "Remote-Ordner wählen")
+            .navigationTitle(selectedKind == .local ? "Lokalen Ordner wählen" : "Cloud-Ordner wählen")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Abbrechen") { dismiss() } } }
             .task {
-                let path = kind == .local
-                    ? (initialPath.hasPrefix("/") ? initialPath : "")
-                    : (initialPath.contains(":") ? initialPath : "")
-                await load(path)
+                await load(savedPath(for: selectedKind), kind: selectedKind)
             }
+            .onChange(of: selectedKind) { _, kind in
+                result = nil
+                errorMessage = nil
+                Task { await load(savedPath(for: kind), kind: kind) }
+            }
+        }
+        .alert("Neuen Ordner anlegen", isPresented: $showingCreateFolder) {
+            TextField("Ordnername", text: $folderName)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+            Button("Anlegen") { Task { await createFolder() } }
+                .disabled(cleanFolderName.isEmpty)
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Der neue Ordner wird im aktuell geöffneten \(selectedKind == .local ? "lokalen" : "Cloud-")Ordner angelegt.")
         }
     }
 
-    private func load(_ path: String) async {
+    private var cleanFolderName: String {
+        let value = folderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value != ".", value != "..", !value.hasPrefix("."),
+              !value.contains("/"), !value.contains("\\") else { return "" }
+        return value
+    }
+
+    private var canCreateFolder: Bool {
+        guard let result else { return false }
+        return !isLoading && errorMessage == nil
+            && result.path != "/" && !result.path.isEmpty && result.isRoot != true
+    }
+
+    private func savedPath(for kind: PathBrowserKind) -> String {
+        kind == .local ? localPath : remotePath
+    }
+
+    private func load(_ path: String, kind requestedKind: PathBrowserKind? = nil) async {
+        let requestKind = requestedKind ?? selectedKind
         isLoading = true
         errorMessage = nil
         do {
-            result = try await model.withCurrentClient {
-                if kind == .local { return try await $0.browseLocal(path: path) }
+            let response = try await model.withCurrentClient {
+                if requestKind == .local { return try await $0.browseLocal(path: path) }
                 return try await $0.browseRemote(path: path)
             }
+            guard requestKind == selectedKind else { return }
+            result = response
+            if requestKind == .local { localPath = response.path } else { remotePath = response.path }
         }
         catch is CancellationError {}
-        catch { errorMessage = error.localizedDescription }
-        isLoading = false
+        catch {
+            if requestKind == selectedKind { errorMessage = error.localizedDescription }
+        }
+        if requestKind == selectedKind { isLoading = false }
+    }
+
+    private func createFolder() async {
+        guard canCreateFolder, let parent = result?.path, !cleanFolderName.isEmpty else { return }
+        isCreating = true
+        errorMessage = nil
+        do {
+            let created = try await model.withCurrentClient {
+                try await $0.createDirectory(
+                    kind: selectedKind.rawValue,
+                    parent: parent,
+                    name: cleanFolderName
+                )
+            }
+            folderName = ""
+            await load(created.path, kind: selectedKind)
+        } catch is CancellationError {
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isCreating = false
     }
 
     private func choose(_ path: String) {

@@ -615,7 +615,8 @@ private struct DataPathEditor: View {
         .sheet(item: $browseTarget) { target in
             PathBrowserSheet(
                 kind: target == .local || remote.hasPrefix("/") ? .local : .remote,
-                initialPath: target == .local ? local : remote
+                initialPath: target == .local ? local : remote,
+                allowsKindSwitch: target == .remote
             ) {
                 if target == .local { local = $0 } else { remote = $0 }
             }
