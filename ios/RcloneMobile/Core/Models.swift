@@ -261,7 +261,14 @@ extension StoragePair {
         localDisk = try values.decodeIfPresent(LocalDisk.self, forKey: .localDisk)
         lastSync = try values.decodeIfPresent(Double.self, forKey: .lastSync)
 
-        if !values.contains(.lastTransferred) || (try values.decodeNil(forKey: .lastTransferred)) {
+        let transferIsMissing = !values.contains(.lastTransferred)
+        let transferIsNull: Bool
+        if transferIsMissing {
+            transferIsNull = false
+        } else {
+            transferIsNull = try values.decodeNil(forKey: .lastTransferred)
+        }
+        if transferIsMissing || transferIsNull {
             lastTransferred = nil
         } else if let text = try? values.decode(String.self, forKey: .lastTransferred) {
             lastTransferred = text
