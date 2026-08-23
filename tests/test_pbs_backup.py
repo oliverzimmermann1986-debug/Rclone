@@ -319,9 +319,86 @@ def test_prune_failure_marks_pbs_run_degraded(tmp_path, monkeypatch):
 
     summary = pbs_backup.run_pbs_backup(trigger="scheduler")
 
-    assert summary["ok"] is False
-    assert summary["pairs"][0]["degraded"] is True
-    assert summary["pairs"][0]["prune_ok"] is False
+    pair = summary["pairs"][0]
+    assert summary["ok"] is True
+    assert summary["backup_ok"] is True
+    assert summary["prune_ok"] is False
+    assert summary["maintenance_failed"] is True
+    assert summary["outcome"] == "maintenance_failed"
+    assert pair["ok"] is True
+    assert pair["backup_ok"] is True
+    assert pair["degraded"] is True
+    assert pair["prune_ok"] is False
+    assert pair["prune_error"] == "Prune Exit-Code 2"
+
+    # Der erfolgreiche Snapshot ist die Scheduler-Baseline. Ein reiner
+    # Retention-Fehler darf nicht als fehlgeschlagener Backup-Versuch gelten.
+    database = Database(tmp_path / "history.db")
+    history_key = pair["history_key"]
+    job_id = database.job_start(
+        "pbs",
+        attempts=[
+            {
+                "name": "pbs:docs",
+                "history_key": history_key,
+                "trigger": "scheduler",
+            }
+        ],
+    )
+    summary["history_keys"] = {"pbs:docs": history_key}
+    database.job_finish(job_id, "ok", summary)
+
+    persisted = database.pair_last_result("pbs:docs", history_key=history_key)
+    assert persisted is not None
+    assert persisted["ok"] is True
+    assert persisted["pair"]["prune_ok"] is False
+    assert database.pair_last_success("pbs:docs", history_key=history_key) is not None
+    history = database.pair_last_history({history_key: "pbs:docs"})[history_key]
+    evaluation = scheduler._evaluate_due(
+        "0 3 * * *",
+        history,
+        history_key=history_key,
+        now=time.time() + 10,
+        timezone_name="Europe/Berlin",
+        retry_sec=1,
+        grace_minutes=15,
+        run_on_first_tick=False,
+    )
+    assert evaluation.get("reason") != "retry_after_failure"
+    assert not str(evaluation.get("scheduled_slot") or "").startswith("retry|")
+
+
+def test_prune_failure_emits_maintenance_alarm_without_backup_failure(monkeypatch):
+    notifications = []
+    monkeypatch.setattr(
+        "app.notifications.notify",
+        lambda event, title, message, **extra: notifications.append(
+            (event, title, message, extra)
+        ),
+    )
+    summary = {
+        "ok": True,
+        "backup_ok": True,
+        "maintenance_failed": True,
+        "pairs": [
+            {
+                "name": "pbs:docs",
+                "ok": True,
+                "backup_ok": True,
+                "prune_ok": False,
+                "prune_error": "Prune Exit-Code 2",
+            }
+        ],
+    }
+
+    pbs_backup._notify_result_sync(summary)
+
+    assert len(notifications) == 1
+    event, title, message, extra = notifications[0]
+    assert event == "sync_error"
+    assert title == "PBS-Aufräumen fehlgeschlagen"
+    assert "Backup erfolgreich" in message
+    assert extra["maintenance_failed"] is True
 
 
 def test_find_due_pbs_targets_uses_pair_runs(tmp_path, monkeypatch):

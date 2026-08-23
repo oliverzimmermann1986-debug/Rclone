@@ -147,6 +147,49 @@ def _target_result(name: str, **extra: Any) -> dict[str, Any]:
     return {"name": f"{PAIR_PREFIX}{name}", "kind": JOB_KIND, **extra}
 
 
+def prune_failures(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Liefert die Retention-Fehler eines Laufs ohne Backup-Fehler umzudeuten."""
+
+    failures: list[dict[str, Any]] = []
+    pairs = summary.get("pairs") or []
+    if not isinstance(pairs, list):
+        return failures
+    for raw_pair in pairs:
+        if not isinstance(raw_pair, Mapping) or raw_pair.get("prune_ok") is not False:
+            continue
+        failures.append(
+            {
+                "name": str(raw_pair.get("name") or ""),
+                "error": str(
+                    raw_pair.get("prune_error") or "PBS-Retention fehlgeschlagen"
+                ),
+                "history_key": str(raw_pair.get("history_key") or ""),
+                "log_file": str(raw_pair.get("log_file") or ""),
+            }
+        )
+    return failures
+
+
+def _mark_prune_failure(
+    entry: dict[str, Any], error: str, *, cancelled: bool = False
+) -> None:
+    """Markiert ausschließlich die Wartungsphase; das Backup bleibt erfolgreich."""
+
+    entry.update(
+        prune_ok=False,
+        prune_error=str(error),
+        maintenance_failed=True,
+        degraded=True,
+        warning=str(error),
+        # Legacy-Clients kennen nur ``error``. Das Feld bleibt deshalb als
+        # Anzeigehinweis erhalten; ``ok``/``backup_ok`` verhindern die
+        # Verwechslung mit einem fehlgeschlagenen Snapshot.
+        error=str(error),
+    )
+    if cancelled:
+        entry["cancelled"] = True
+
+
 def _count_files_up_to(path: Path, limit: int) -> int:
     if limit <= 0:
         return 0
@@ -279,6 +322,11 @@ def run_pbs_backup(
     settings = pbs_settings(cfg)
     summary: dict[str, Any] = {
         "ok": True,
+        "backup_ok": False,
+        "prune_ok": None,
+        "prune_error": None,
+        "maintenance_failed": False,
+        "degraded": False,
         "kind": JOB_KIND,
         "trigger": trigger,
         "pairs": [],
@@ -316,7 +364,15 @@ def run_pbs_backup(
         name = str(target.get("name"))
         if is_cancelled(PBS_CANCEL_SCOPE):
             summary["pairs"].append(
-                _target_result(name, ok=False, cancelled=True, skipped=True)
+                _target_result(
+                    name,
+                    ok=False,
+                    backup_ok=False,
+                    prune_ok=None,
+                    prune_error=None,
+                    cancelled=True,
+                    skipped=True,
+                )
             )
             summary["ok"] = False
             continue
@@ -327,6 +383,10 @@ def run_pbs_backup(
         )
         entry = _target_result(
             name,
+            ok=False,
+            backup_ok=False,
+            prune_ok=None,
+            prune_error=None,
             history_key=pbs_history_key(settings, target),
             log_file=str(log_file),
             started_at=datetime.fromtimestamp(started).isoformat(timespec="seconds"),
@@ -360,41 +420,50 @@ def run_pbs_backup(
             )
             entry["returncode"] = rc
             if rc == 130:
-                entry.update(ok=False, cancelled=True)
+                entry.update(ok=False, backup_ok=False, cancelled=True)
             elif rc != 0:
-                entry.update(ok=False, error=f"proxmox-backup-client Exit-Code {rc}")
+                entry.update(
+                    ok=False,
+                    backup_ok=False,
+                    error=f"proxmox-backup-client Exit-Code {rc}",
+                )
             else:
-                entry["ok"] = True
-                prune_cmd = build_prune_command(settings, target)
-                if is_cancelled(PBS_CANCEL_SCOPE):
-                    entry.update(ok=False, cancelled=True, error="Abgebrochen")
-                elif prune_cmd:
-                    prune_rc = _run_rclone_command(
-                        prune_cmd,
-                        log_file,
-                        timeout_sec=min(timeout_sec, 1800),
-                        max_runtime_sec=min(timeout_sec, 1800),
-                        append=True,
-                        header=f"\n# Prune: {command_to_string(prune_cmd)}\n\n",
-                        pair_name=f"{PAIR_PREFIX}{name}",
-                        extra_env=extra_env,
-                        cancel_scope=PBS_CANCEL_SCOPE,
-                        run_id=target_run_id,
-                    )
-                    entry["prune_ok"] = prune_rc == 0
-                    if prune_rc == 130 and is_cancelled(PBS_CANCEL_SCOPE):
-                        entry.update(ok=False, cancelled=True, error="Abgebrochen")
-                    elif prune_rc != 0:
-                        prune_error = f"Prune Exit-Code {prune_rc}"
-                        entry.update(
-                            ok=False,
-                            degraded=True,
-                            prune_error=prune_error,
-                            error=prune_error,
+                # Ab hier ist der Snapshot erfolgreich. Retention/Prune ist eine
+                # getrennte Wartungsphase und darf diesen Erfolg nicht mehr
+                # zurücknehmen oder einen vollständigen Backup-Retry auslösen.
+                entry.update(ok=True, backup_ok=True)
+                try:
+                    prune_cmd = build_prune_command(settings, target)
+                    if is_cancelled(PBS_CANCEL_SCOPE):
+                        entry.update(cancelled=True, warning="Aufräumen abgebrochen")
+                    elif prune_cmd:
+                        prune_rc = _run_rclone_command(
+                            prune_cmd,
+                            log_file,
+                            timeout_sec=min(timeout_sec, 1800),
+                            max_runtime_sec=min(timeout_sec, 1800),
+                            append=True,
+                            header=f"\n# Prune: {command_to_string(prune_cmd)}\n\n",
+                            pair_name=f"{PAIR_PREFIX}{name}",
+                            extra_env=extra_env,
+                            cancel_scope=PBS_CANCEL_SCOPE,
+                            run_id=target_run_id,
                         )
+                        entry["prune_returncode"] = prune_rc
+                        if prune_rc == 0:
+                            entry["prune_ok"] = True
+                        elif prune_rc == 130 and is_cancelled(PBS_CANCEL_SCOPE):
+                            _mark_prune_failure(
+                                entry, "PBS-Aufräumen wurde abgebrochen", cancelled=True
+                            )
+                        else:
+                            _mark_prune_failure(entry, f"Prune Exit-Code {prune_rc}")
+                except Exception as exc:
+                    logger.exception("[%s] PBS-Retention fehlgeschlagen", name)
+                    _mark_prune_failure(entry, str(exc))
         except Exception as exc:
             logger.exception("[%s] PBS-Backup fehlgeschlagen", name)
-            entry.update(ok=False, error=str(exc))
+            entry.update(ok=False, backup_ok=False, error=str(exc))
             if is_cancelled(PBS_CANCEL_SCOPE):
                 entry.update(cancelled=True, error="Abgebrochen")
         entry["duration_sec"] = round(time.time() - started, 1)
@@ -402,6 +471,37 @@ def run_pbs_backup(
             summary["ok"] = False
         summary["pairs"].append(entry)
 
+    backup_results = [entry.get("backup_ok") is True for entry in summary["pairs"]]
+    summary["backup_ok"] = bool(backup_results) and all(backup_results)
+    # ``ok`` bleibt aus Kompatibilitätsgründen das primäre Erfolgsfeld, steht
+    # bei PBS aber bewusst für den erzeugten Snapshot, nicht für Retention.
+    summary["ok"] = summary["backup_ok"]
+    failures = prune_failures(summary)
+    evaluated_prunes = [
+        entry.get("prune_ok")
+        for entry in summary["pairs"]
+        if entry.get("prune_ok") is not None
+    ]
+    summary["prune_ok"] = (
+        all(value is True for value in evaluated_prunes) if evaluated_prunes else None
+    )
+    summary["prune_error"] = (
+        "; ".join(item["error"] for item in failures) if failures else None
+    )
+    summary["maintenance_failed"] = bool(failures)
+    summary["degraded"] = bool(failures)
+    summary["partial"] = bool(failures) or (
+        any(backup_results) and not summary["backup_ok"]
+    )
+    summary["outcome"] = (
+        "maintenance_failed"
+        if failures and summary["backup_ok"]
+        else (
+            "ok"
+            if summary["backup_ok"]
+            else ("partial" if any(backup_results) else "backup_failed")
+        )
+    )
     summary["cancelled"] = any(
         bool(entry.get("cancelled")) for entry in summary["pairs"]
     )
@@ -414,8 +514,18 @@ def _notify_result_sync(summary: dict[str, Any]) -> None:
     try:
         from ..notifications import notify
 
-        failed = [p["name"] for p in summary["pairs"] if not p.get("ok")]
-        if summary.get("ok"):
+        failed = [p["name"] for p in summary["pairs"] if p.get("backup_ok") is not True]
+        prune_failed = prune_failures(summary)
+        if prune_failed:
+            notify(
+                "sync_error",
+                "PBS-Aufräumen fehlgeschlagen",
+                "Backup erfolgreich, Retention fehlgeschlagen bei: "
+                + ", ".join(item["name"] for item in prune_failed),
+                maintenance_failed=True,
+                targets=[item["name"] for item in prune_failed],
+            )
+        if summary.get("ok") and not prune_failed and not summary.get("cancelled"):
             notify(
                 "sync_ok",
                 "PBS-Backup erfolgreich",

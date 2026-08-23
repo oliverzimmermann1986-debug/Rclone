@@ -336,6 +336,104 @@ def test_disabled_rclone_backup_does_not_disable_pbs_scheduler(tmp_path, monkeyp
     assert database.finished[0][1] == "ok"
 
 
+def test_scheduler_does_not_retry_backup_when_only_pbs_prune_failed(
+    tmp_path, monkeypatch
+):
+    class Config:
+        data = {
+            "backup": {"enabled": False, "pairs": []},
+            "paths": {"logs_dir": str(tmp_path)},
+        }
+
+        def get(self, *keys, default=None):
+            value = self.data
+            for key in keys:
+                if not isinstance(value, dict) or key not in value:
+                    return default
+                value = value[key]
+            return value
+
+    class Db:
+        def __init__(self):
+            self.finished = []
+            self.audits = []
+
+        def job_start(self, _kind, **_kwargs):
+            return 42
+
+        def job_finish(self, job_id, status, summary):
+            self.finished.append((job_id, status, summary))
+            return True
+
+        def jobs_mark_all_running_stale(self, **_kwargs):
+            return 0
+
+        def audit_add(self, event, *, actor, details):
+            self.audits.append((event, actor, details))
+
+    @contextmanager
+    def lock(_name):
+        yield object()
+
+    database = Db()
+    due_status = [
+        {
+            "name": "docs",
+            "run_name": "pbs:docs",
+            "history_key": "pbs:id:docs",
+            "scheduled_slot": "slot",
+            "due": True,
+        }
+    ]
+    degraded_summary = {
+        "ok": True,
+        "backup_ok": True,
+        "prune_ok": False,
+        "prune_error": "Prune Exit-Code 2",
+        "maintenance_failed": True,
+        "degraded": True,
+        "outcome": "maintenance_failed",
+        "pairs": [
+            {
+                "name": "pbs:docs",
+                "ok": True,
+                "backup_ok": True,
+                "prune_ok": False,
+                "prune_error": "Prune Exit-Code 2",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(scheduler_cli, "get_config", Config)
+    monkeypatch.setattr(scheduler_cli, "get_db", lambda: database)
+    monkeypatch.setattr(scheduler_cli, "_configure_logging", lambda _path=None: None)
+    monkeypatch.setattr(scheduler_cli, "scheduler_state", lambda _db: {"paused": False})
+    monkeypatch.setattr(
+        scheduler_cli,
+        "find_due_pairs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("rclone scheduler must stay disabled")
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler_cli,
+        "find_due_pbs_targets",
+        lambda *_args, **_kwargs: (["docs"], due_status),
+    )
+    monkeypatch.setattr(scheduler_cli, "file_lock_or_none", lock)
+    monkeypatch.setattr(
+        scheduler_cli,
+        "run_pbs_backup",
+        lambda *_args, **_kwargs: degraded_summary,
+    )
+
+    assert scheduler_cli.main() == 0
+    assert database.finished[0][1] == "ok"
+    assert database.finished[0][2]["maintenance_failed"] is True
+    assert database.audits[0][0:2] == ("pbs_prune_failed", "scheduler")
+    assert database.audits[0][2]["backup_ok"] is True
+
+
 def test_unsafe_backup_scope_does_not_block_independent_pbs_scope(
     tmp_path, monkeypatch
 ):
