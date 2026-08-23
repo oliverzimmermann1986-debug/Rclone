@@ -19,7 +19,7 @@ def test_logout_warning_survives_local_session_clear():
     assert "partial.localSessionCleared" in api
     assert "defer { clearCookies() }" in api
     assert "!result.globalRevocation" in model
-    assert "errorMessage = result.detail" in model
+    assert "warnings.append(result.detail" in model
     assert "if let error = model.errorMessage" in login
 
 
@@ -139,3 +139,103 @@ def test_push_delivery_status_and_real_test_are_visible_in_system():
     assert "PushStatusView()" in system
     assert "Endgültig fehlgeschlagen" in system
     assert "Testmitteilung senden" in system
+
+
+def test_native_lifecycle_contracts_keep_drafts_sessions_and_proxy_paths_safe():
+    api = _swift("Core/APIClient.swift")
+    model = _swift("Core/AppModel.swift")
+    config = _swift("Views/ConfigurationViews.swift")
+
+    assert "draftBaseRevision" in config
+    assert "baseRevision: draftBaseRevision" in config
+    assert "draftRevision == currentConfig.revision" in model
+    assert "revision: draftRevision" in model
+    assert "pushSyncTask" in model
+    assert "knownPushTokens" in model
+    assert "reconcilePushRegistration" in model
+    assert "lifecycleConfiguration.waitsForConnectivity = false" in api
+    assert "lifecycleConfiguration.timeoutIntervalForResource = 6" in api
+    assert (
+        'components.percentEncodedPath = normalizedPath.isEmpty ? "" : "/" + normalizedPath'
+        in api
+    )
+
+
+def test_native_batch_storage_and_central_401_contracts_are_explicit():
+    models = _swift("Core/Models.swift")
+    model = _swift("Core/AppModel.swift")
+    dashboard = _swift("Views/DashboardView.swift")
+    api = _swift("Core/APIClient.swift")
+
+    assert "startedDefinitions" in models
+    assert "queuedDefinitions" in models
+    assert "BatchDefinitionState" in models
+    assert "beginRunTracking(response)" in model
+    assert "refreshVisibleRunData" in model
+    assert "catch APIError.unauthenticated" in model
+    assert "signOutLocally()" in model
+    assert "StorageSizeState" in model
+    assert "acceptStorageMeasurement" in model
+    assert "markStorageMeasurementFailure" in model
+    assert "StorageMeasurementStateView" in dashboard
+    assert "timeout: includeSizes ? 85 : nil" in api
+
+
+def test_native_accessibility_motion_and_recovery_messages_are_explicit():
+    components = _swift("Views/Components.swift")
+    login = _swift("Views/LoginView.swift")
+    app = _swift("RcloneMobileApp.swift")
+    api = _swift("Core/APIClient.swift")
+
+    assert "@AccessibilityFocusState" in components
+    assert "UIAccessibility.post(notification: .announcement" in components
+    assert 'accessibilityLabel("Fehler.' in components
+    assert (
+        'accessibilityHint("Prüfe die Angaben oder versuche die Aktion erneut.'
+        in components
+    )
+    assert "let accessibilityHint: String" in login
+    assert ".accessibilityLabel(title)" in login
+    assert ".accessibilityHint(accessibilityHint)" in login
+    assert ".textContentType(contentType)" in login
+    assert ".submitLabel(.go)" in login
+    assert "@Environment(\\.accessibilityReduceMotion)" in app
+    assert "reduceMotion ? nil : .smooth" in app
+    assert "if reduceMotion" in app
+    assert "Die Serverantwort konnte nicht geprüft werden" in api
+    assert 'APIError.incompatibleResponse(resource: "Anmeldung")' in api
+
+
+def test_native_push_permission_is_contextual_deferred_and_retriggerable():
+    app = _swift("RcloneMobileApp.swift")
+    push = _swift("Core/PushNotifications.swift")
+    system = _swift("Views/SystemView.swift")
+
+    assert '@AppStorage("pushPrimerDecision")' in app
+    assert '.alert("Bei Sicherungsfehlern informieren?"' in app
+    assert 'Button("Später", role: .cancel)' in app
+    assert 'Button("Mitteilungen erlauben")' in app
+    assert "requestAuthorizationAndRegister()" in app
+    assert app.index('Button("Mitteilungen erlauben")') < app.index(
+        "requestAuthorizationAndRegister()"
+    )
+    assert "registerIfAlreadyAuthorized" in push
+    assert "notificationSettings()" in push
+    assert "pushAuthorizationRequested" in push
+    assert "pushAuthorizationRequested" in system
+    assert "Mitteilungen aktivieren oder prüfen" in system
+
+
+def test_native_tappable_rows_use_semantic_controls_with_specific_labels():
+    backups = _swift("Views/BackupsView.swift")
+    config = _swift("Views/ConfigurationViews.swift")
+
+    assert ".onTapGesture" not in backups
+    assert ".onTapGesture" not in config
+    assert "Button { selectedPair = pair }" in backups
+    assert "NavigationLink { RunDetailView(job: job) }" in backups
+    assert "NavigationLink { DataPathDetailView" in backups
+    assert 'accessibilityLabel("Job \\(pair.name), Status' in backups
+    assert 'accessibilityLabel("Datenweg \\(pair.name)' in backups
+    assert 'accessibilityLabel("Datenweg \\(pair.name) bearbeiten")' in config
+    assert 'accessibilityLabel("Job \\(definition.name) bearbeiten")' in config

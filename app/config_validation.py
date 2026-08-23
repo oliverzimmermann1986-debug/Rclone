@@ -604,6 +604,35 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         pair["direction"] = direction
         pair["mode"] = mode
 
+        # Optionaler physischer/logischer Ausfallbereich für Remote-Ziele.
+        # ``location_id`` bleibt als kompatibler Alias erhalten; die
+        # Kopien-Matrix akzeptiert beide Namen. Ohne explizite Angabe kann sie
+        # bei Remotes nur den rclone-Remote-Namen als Näherung verwenden.
+        explicit_domains: dict[str, str] = {}
+        for domain_key in ("failure_domain", "location_id"):
+            if domain_key not in pair:
+                continue
+            domain_value = str(pair.get(domain_key) or "").strip()
+            if len(domain_value) > 128 or any(
+                ord(character) < 32 for character in domain_value
+            ):
+                errors.append(
+                    f"{label}.{domain_key} muss eine druckbare Kennung mit "
+                    "höchstens 128 Zeichen sein"
+                )
+                domain_value = ""
+            pair[domain_key] = domain_value
+            if domain_value:
+                explicit_domains[domain_key] = domain_value
+        if (
+            len(explicit_domains) == 2
+            and explicit_domains["failure_domain"].casefold()
+            != explicit_domains["location_id"].casefold()
+        ):
+            errors.append(
+                f"{label}.failure_domain und {label}.location_id widersprechen sich"
+            )
+
         # Versionsablage: --backup-dir bewahrt überschriebene und gelöschte
         # Dateien auf. Ohne sie repliziert ein sync/bisync eine Verschlüsselung
         # oder Massenlöschung an der Quelle binnen eines Laufs zum Ziel — der

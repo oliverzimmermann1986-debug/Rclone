@@ -1,11 +1,33 @@
 {
-  "name": "rclone-sync-container",
+  "id": "/",
+  "name": "rclone-sync Backup-Konsole",
   "short_name": "rclone-sync",
-  "description": "Sichere rclone Sync- und Scheduler-Konsole für Proxmox",
-  "start_url": "/",
+  "description": "Backup-, Sync- und Scheduler-Konsole für rclone auf Proxmox",
+  "lang": "de-DE",
+  "start_url": "/#dashboard",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#0f172a",
-  "theme_color": "#111827",
+  "background_color": "#f6f7f9",
+  "theme_color": "#f6f7f9",
   "orientation": "any",
-  "icons": []
+  "icons": [
+    {
+      "src": "/static/app-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/app-icon-1024.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
 }

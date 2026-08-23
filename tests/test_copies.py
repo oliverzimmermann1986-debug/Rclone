@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from app.copies import build_matrix, target_scope
 from app.db import Database
 
@@ -34,11 +36,129 @@ def _pair(name, local, remote, **overrides):
     return pair
 
 
-def test_target_scope_groups_by_storage_unit():
-    assert target_scope("wasabi:media-bk/2026") == "wasabi:"
-    assert target_scope("wasabi:andere") == "wasabi:"
-    assert target_scope("/mnt/nas1/backup/x") == "/mnt/nas1"
+def test_target_scope_groups_by_storage_unit(tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    assert target_scope("wasabi:media-bk/2026") == "remote-name:wasabi:"
+    assert target_scope("wasabi:andere") == "remote-name:wasabi:"
+    assert target_scope(str(first)) == target_scope(str(second))
+    assert target_scope(str(first)).startswith("local-device:")
     assert target_scope("") == ""
+
+
+def test_local_targets_on_same_device_count_as_one_scope(tmp_path):
+    first = tmp_path / "disk-a"
+    second = tmp_path / "disk-b"
+    first.mkdir()
+    second.mkdir()
+    db = Database(tmp_path / "same-device.db")
+
+    row = build_matrix(
+        _cfg(
+            [
+                _pair("a", "/srv/fibu", str(first)),
+                _pair("b", "/srv/fibu", str(second)),
+            ]
+        ),
+        db,
+        now=1000.0,
+    )["sources"][0]
+
+    assert row["scope_count"] == 1
+    assert len(row["domains"]) == 1
+    assert row["domains"][0]["source"] == "st_dev"
+    assert row["domains"][0]["confidence"] == "high"
+    assert set(row["domains"][0]["targets"]) == {str(first), str(second)}
+    assert "alle Kopien im selben Speicherort" in row["findings"]
+
+
+def test_local_targets_on_different_devices_count_as_two_scopes(tmp_path, monkeypatch):
+    targets = {"/mnt/disk-a/backup": 101, "/mnt/disk-b/backup": 202}
+
+    def fake_stat(path):
+        value = str(path).replace("\\", "/")
+        if value in targets:
+            return SimpleNamespace(st_dev=targets[value])
+        raise FileNotFoundError(value)
+
+    monkeypatch.setattr("app.copies._path_stat", fake_stat)
+    db = Database(tmp_path / "different-devices.db")
+    row = build_matrix(
+        _cfg(
+            [
+                _pair("a", "/srv/fibu", "/mnt/disk-a/backup"),
+                _pair("b", "/srv/fibu", "/mnt/disk-b/backup"),
+            ]
+        ),
+        db,
+        now=1000.0,
+    )["sources"][0]
+
+    assert row["scope_count"] == 2
+    assert {domain["id"] for domain in row["domains"]} == {
+        "local-device:101",
+        "local-device:202",
+    }
+    assert not row["domain_warnings"]
+    assert "alle Kopien im selben Speicherort" not in row["findings"]
+
+
+def test_missing_local_mounts_are_grouped_conservatively(tmp_path):
+    first = tmp_path / "missing-mount-a" / "backup"
+    second = tmp_path / "missing-mount-b" / "backup"
+    db = Database(tmp_path / "missing-mounts.db")
+
+    row = build_matrix(
+        _cfg(
+            [
+                _pair("a", "/srv/fibu", str(first)),
+                _pair("b", "/srv/fibu", str(second)),
+            ]
+        ),
+        db,
+        now=1000.0,
+    )["sources"][0]
+
+    assert row["scope_count"] == 1
+    assert row["domains"][0]["source"] == "nearest_existing_parent"
+    assert row["domains"][0]["confidence"] == "low"
+    assert len(row["domain_warnings"]) == 2
+    assert "alle Kopien im selben Speicherort" in row["findings"]
+    assert any("nur abgeleitet oder unsicher" in item for item in row["findings"])
+
+
+def test_explicit_remote_domain_groups_different_remotes(tmp_path):
+    db = Database(tmp_path / "explicit-remote-domain.db")
+    row = build_matrix(
+        _cfg(
+            [
+                _pair(
+                    "a",
+                    "/srv/fibu",
+                    "wasabi:fibu",
+                    failure_domain="Rechenzentrum EU-1",
+                ),
+                _pair(
+                    "b",
+                    "/srv/fibu",
+                    "hetzner:fibu",
+                    location_id="rechenzentrum eu-1",
+                ),
+            ]
+        ),
+        db,
+        now=1000.0,
+    )["sources"][0]
+
+    assert row["scope_count"] == 1
+    assert row["domains"][0]["id"] == "explicit:rechenzentrum eu-1"
+    assert row["domains"][0]["source"] == "explicit"
+    assert row["domains"][0]["confidence"] == "high"
+    assert not row["domain_warnings"]
+    assert "alle Kopien im selben Speicherort" in row["findings"]
 
 
 def test_scheduled_flag_comes_from_job_definitions(tmp_path):
@@ -130,11 +250,17 @@ def test_two_scopes_without_versioning_only_warns(tmp_path):
 def test_versioned_offsite_pair_is_clean(tmp_path):
     db = Database(tmp_path / "app.db")
     now = 1_000_000.0
+    local_target = tmp_path / "nas1" / "fibu"
+    local_target.mkdir(parents=True)
     pairs = [
         _pair(
-            "a", "/srv/fibu", "wasabi:fibu", backup_dir="wasabi:fibu-versions/{date}"
+            "a",
+            "/srv/fibu",
+            "wasabi:fibu",
+            backup_dir="wasabi:fibu-versions/{date}",
+            failure_domain="Wasabi EU",
         ),
-        _pair("b", "/srv/fibu", "/mnt/nas1/fibu"),
+        _pair("b", "/srv/fibu", str(local_target)),
     ]
     job_id = db.job_start("backup")
     db.job_finish(

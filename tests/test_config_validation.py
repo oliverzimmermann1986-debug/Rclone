@@ -104,6 +104,61 @@ def test_pair_success_age_is_bounded(tmp_path: Path):
     assert normalized["backup"]["pairs"][0]["max_success_age_hours"] == 8760
 
 
+def test_pair_failure_domain_and_location_alias_are_preserved(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [
+        {
+            "name": "Domain",
+            "remote": "cloud:/data",
+            "local": str(tmp_path / "data"),
+            "direction": "push",
+            "mode": "copy",
+            "failure_domain": "  Anbieter EU-1  ",
+            "location_id": "anbieter eu-1",
+        }
+    ]
+
+    normalized, _ = validate_config(cfg)
+    pair = normalized["backup"]["pairs"][0]
+    assert pair["failure_domain"] == "Anbieter EU-1"
+    assert pair["location_id"] == "anbieter eu-1"
+
+
+def test_conflicting_pair_failure_domain_aliases_are_rejected(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [
+        {
+            "name": "Domain",
+            "remote": "cloud:/data",
+            "local": str(tmp_path / "data"),
+            "direction": "push",
+            "mode": "copy",
+            "failure_domain": "Anbieter A",
+            "location_id": "Anbieter B",
+        }
+    ]
+
+    with pytest.raises(ConfigValidationError, match="widersprechen"):
+        validate_config(cfg)
+
+
+def test_pair_failure_domain_rejects_control_characters(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [
+        {
+            "name": "Domain",
+            "remote": "cloud:/data",
+            "local": str(tmp_path / "data"),
+            "direction": "push",
+            "mode": "copy",
+            "failure_domain": "Anbieter\ngefälscht",
+        }
+    ]
+
+    with pytest.raises(ConfigValidationError, match="failure_domain"):
+        validate_config(cfg)
+
+
 def test_local_target_gets_mount_guard_by_default(tmp_path: Path):
     cfg = _base(tmp_path)
     source = tmp_path / "src"

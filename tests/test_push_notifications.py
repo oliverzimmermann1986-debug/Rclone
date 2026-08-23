@@ -222,3 +222,68 @@ def test_apns_retry_is_persisted_and_duplicate_event_is_not_requeued(
     payload = json.loads(calls[1][1])
     assert payload["job_id"] == 42
     assert payload["run_id"] == "run-42"
+
+
+def test_slow_apns_batch_renews_remaining_owner_claims(monkeypatch, tmp_path: Path):
+    database = Database(tmp_path / "slow-batch.db")
+    database.push_device_upsert(TOKEN, "production", now=100)
+    database.push_device_upsert("cd" * 32, "production", now=99)
+    for sequence in (1, 2):
+        assert (
+            database.push_outbox_enqueue(
+                event="sync_error",
+                title="Fehler",
+                message=f"Fehler {sequence}",
+                payload={"sequence": sequence},
+                dedupe_key=f"slow:{sequence}",
+                retention_seconds=86400,
+                device_limit=1,
+                now=100,
+            )
+            == 1
+        )
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr("app.db.time.time", lambda: clock["now"])
+    monkeypatch.setattr(
+        push_notifications,
+        "_settings",
+        lambda _event: {
+            "team_id": "ABCDEFGHIJ",
+            "key_id": "KLMNOPQRST",
+            "key_file": str(tmp_path / "AuthKey.p8"),
+            "topic": "de.oliverzimmermann.rclonesync",
+            "timeout": 30,
+            "max_attempts": 8,
+        },
+    )
+    monkeypatch.setattr(push_notifications, "_provider_token", lambda _settings: "jwt")
+    competing_results = []
+
+    class SlowClient(_Client):
+        def post(self, url, *, content, headers):
+            self.calls.append((url, content, headers))
+            if len(self.calls) == 2:
+                clock["now"] = 165.0
+            else:
+                clock["now"] = 175.0
+                competing_results.append(
+                    push_notifications.dispatch_pending_pushes(
+                        db=database,
+                        client_factory=lambda **_kwargs: pytest.fail(
+                            "Dispatcher B darf keine fremde APNs-Zeile senden"
+                        ),
+                        claim_owner="dispatcher-b",
+                    )
+                )
+            return _Response(200)
+
+    result = push_notifications.dispatch_pending_pushes(
+        db=database,
+        client_factory=lambda **kwargs: SlowClient([], [], **kwargs),
+        claim_owner="dispatcher-a",
+    )
+
+    assert result["sent"] == 2
+    assert competing_results == [{"sent": 0, "failed": 0, "removed": 0, "retrying": 0}]
+    assert database.push_outbox_status()["sent"] == 2

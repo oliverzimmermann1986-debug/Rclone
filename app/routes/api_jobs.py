@@ -294,6 +294,39 @@ def _audit_best_effort(event: str, *, actor: str, details: dict) -> None:
         logger.exception("Audit-Event %s konnte nicht gespeichert werden", event)
 
 
+def _abort_reserved_backup_job(
+    job_id: int,
+    scope_lock: HeldFileLock,
+    *,
+    error: str,
+    error_code: str,
+) -> None:
+    """Roll back a DB reservation and both locks after setup failed.
+
+    A reservation is visible as ``running`` immediately.  Therefore every
+    failure before the worker owns the lease must make the row terminal before
+    releasing the process- and web-locks.  Cleanup itself stays best-effort so
+    the original setup error is not hidden by a secondary database problem.
+    """
+
+    try:
+        get_db().job_finish(
+            job_id,
+            "error",
+            {
+                "ok": False,
+                "error": error,
+                "error_code": error_code,
+                "stage": "setup",
+            },
+        )
+    except Exception:
+        logger.exception("Fehlgeschlagene Jobreservation #%s blieb unbereinigt", job_id)
+    finally:
+        scope_lock.release()
+        _locks["backup"].release()
+
+
 def _start_thread(
     target,
     *,
@@ -306,16 +339,12 @@ def _start_thread(
         thread = threading.Thread(target=target, args=args, name=name, daemon=True)
         thread.start()
     except Exception as exc:
-        scope_lock.release()
-        _locks["backup"].release()
-        try:
-            get_db().job_finish(
-                job_id,
-                "error",
-                {"error": f"Thread konnte nicht gestartet werden: {exc}"},
-            )
-        except Exception:
-            logger.exception("Thread-Startfehler konnte nicht gespeichert werden")
+        _abort_reserved_backup_job(
+            job_id,
+            scope_lock,
+            error=f"Thread konnte nicht gestartet werden: {exc}",
+            error_code="thread_start_failed",
+        )
         raise HTTPException(500, "Job konnte nicht gestartet werden") from exc
 
 
@@ -403,21 +432,35 @@ def _queue_backup(
         definition_name=definition_name,
         config_revision=config_revision,
     )
-    run_metadata = {
-        "execution_mode": str((definition or {}).get("execution_mode") or "parallel"),
-        "max_parallel_override": (
-            int((definition or {}).get("max_parallel") or 1) if definition else None
-        ),
-        "definition_id": definition_id,
-        "definition_name": definition_name,
-        "config_revision": config_revision,
-        "config_snapshot": config_snapshot,
-    }
-    _audit_best_effort(
-        "backup_requested",
-        actor="web",
-        details={"dry_run": dry_run, "pairs": pairs_filter or []},
-    )
+    try:
+        run_metadata = {
+            "execution_mode": str(
+                (definition or {}).get("execution_mode") or "parallel"
+            ),
+            "max_parallel_override": (
+                int((definition or {}).get("max_parallel") or 1) if definition else None
+            ),
+            "definition_id": definition_id,
+            "definition_name": definition_name,
+            "config_revision": config_revision,
+            "config_snapshot": config_snapshot,
+        }
+        _audit_best_effort(
+            "backup_requested",
+            actor="web",
+            details={"dry_run": dry_run, "pairs": pairs_filter or []},
+        )
+    except Exception as exc:
+        logger.exception(
+            "Backup #%s konnte nach der Reservation nicht vorbereitet werden", job_id
+        )
+        _abort_reserved_backup_job(
+            job_id,
+            scope_lock,
+            error=f"Jobvorbereitung fehlgeschlagen: {exc}",
+            error_code="setup_failed",
+        )
+        raise HTTPException(500, "Job konnte nicht vorbereitet werden") from exc
     _start_thread(
         _run_backup_thread,
         job_id=job_id,
@@ -540,11 +583,23 @@ def _run_definition_batch_thread(
 
     try:
         for index, spec in enumerate(specs):
-            if index > 0 and rclone_job.is_cancelled():
-                break
             definition = spec["definition"]
             definition_id = str(definition.get("id") or "") or None
             definition_name = str(definition.get("name") or "") or None
+            if index > 0 and rclone_job.is_cancelled():
+                _audit_best_effort(
+                    "job_definition_batch_item_failed",
+                    actor="web",
+                    details={
+                        "batch_job_id": first_job_id,
+                        "definition_id": definition_id,
+                        "definition_name": definition_name,
+                        "state": "failed",
+                        "error_code": "batch_cancelled",
+                        "error": "Batch wurde vor dem Start dieser Definition abgebrochen",
+                    },
+                )
+                continue
             if index == 0:
                 job_id = first_job_id
             else:
@@ -557,12 +612,24 @@ def _run_definition_batch_thread(
                         definition_name=definition_name,
                         config_revision=config_revision,
                     )
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         "Jobdefinition %s konnte nicht reserviert werden",
                         definition_name,
                     )
-                    break
+                    _audit_best_effort(
+                        "job_definition_batch_item_failed",
+                        actor="web",
+                        details={
+                            "batch_job_id": first_job_id,
+                            "definition_id": definition_id,
+                            "definition_name": definition_name,
+                            "state": "failed",
+                            "error_code": "reservation_failed",
+                            "error": str(exc),
+                        },
+                    )
+                    continue
             _run_backup_thread(
                 job_id,
                 dry_run,
@@ -630,23 +697,41 @@ def _queue_enabled_job_definitions(*, dry_run: bool) -> dict[str, Any]:
         )
         thread.start()
     except Exception as exc:
-        scope_lock.release()
-        _locks["backup"].release()
-        try:
-            get_db().job_finish(
-                first_job_id,
-                "error",
-                {"error": f"Batch-Thread konnte nicht gestartet werden: {exc}"},
-            )
-        except Exception:
-            logger.exception("Thread-Startfehler konnte nicht gespeichert werden")
+        _abort_reserved_backup_job(
+            first_job_id,
+            scope_lock,
+            error=f"Batch-Thread konnte nicht gestartet werden: {exc}",
+            error_code="thread_start_failed",
+        )
         logger.exception("Jobdefinitions-Batch konnte nicht gestartet werden")
         raise HTTPException(500, "Jobs konnten nicht gestartet werden") from exc
+    started_definition = {
+        "definition_id": str(first_definition.get("id") or ""),
+        "definition_name": str(first_definition.get("name") or ""),
+        "state": "started",
+        "job_id": first_job_id,
+    }
+    queued_definitions = [
+        {
+            "definition_id": str(spec["definition"].get("id") or ""),
+            "definition_name": str(spec["definition"].get("name") or ""),
+            "state": "queued",
+            "job_id": None,
+        }
+        for spec in specs[1:]
+    ]
     return {
         "ok": True,
         "job_id": first_job_id,
-        "definition_ids": [str(item.get("id") or "") for item in definitions],
-        "definition_names": [str(item.get("name") or "") for item in definitions],
+        # Backwards-compatible fields now describe only definitions that really
+        # own a DB run at response time.  Accepted serial successors are exposed
+        # separately as queued instead of being falsely reported as started.
+        "definition_ids": [started_definition["definition_id"]],
+        "definition_names": [started_definition["definition_name"]],
+        "started_definitions": [started_definition],
+        "queued_definitions": queued_definitions,
+        "failed_definitions": [],
+        "definitions": [started_definition, *queued_definitions],
         "config_revision": revision,
         "dry_run": dry_run,
     }
@@ -785,9 +870,11 @@ def check_pair(
 ) -> dict[str, Any]:
     if pair_name not in _known_pair_names():
         raise HTTPException(404, "Pair nicht gefunden")
+    # Snapshot before taking either lock.  A config read failure must never
+    # leave the process looking busy although no DB reservation exists.
+    config_snapshot, config_revision = get_config().snapshot_with_revision()
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup/Check läuft bereits")
-    config_snapshot, config_revision = get_config().snapshot_with_revision()
     job_id, scope_lock = _reserve_backup_job("check", config_revision=config_revision)
     _audit_best_effort(
         "check_requested",
@@ -862,9 +949,10 @@ def start_restore_test(pairs: Optional[str] = Query(None)) -> dict[str, Any]:
     unknown = [name for name in (pairs_filter or []) if name not in known]
     if unknown:
         raise HTTPException(404, f"Pair nicht gefunden: {', '.join(unknown)}")
+    # See ``check_pair``: snapshot failures happen outside the lock lifecycle.
+    config_snapshot, config_revision = get_config().snapshot_with_revision()
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup, Check oder Drill läuft bereits")
-    config_snapshot, config_revision = get_config().snapshot_with_revision()
     job_id, scope_lock = _reserve_backup_job(
         restore_test.JOB_KIND, config_revision=config_revision
     )

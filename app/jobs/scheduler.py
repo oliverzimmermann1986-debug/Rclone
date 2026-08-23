@@ -315,11 +315,14 @@ def _is_due(
 def _load_job_history(
     db, definitions: Mapping[str, str]
 ) -> Dict[str, Dict[str, Optional[Dict[str, Any]]]]:
-    bulk = getattr(db, "job_definition_history", None)
+    bulk = getattr(db, "job_definition_schedule_state", None)
     if callable(bulk):
         return bulk(definitions)
-    # Adapter für ältere DB-Testdoubles und externe Integrationen. Der
-    # produktive Database-Pfad verwendet ausschließlich Job-Run-Historie.
+    # Adapter für ältere DB-Testdoubles und externe Integrationen. Die
+    # produktive Database verwendet den von Anzeige-Retention getrennten State.
+    legacy_bulk = getattr(db, "job_definition_history", None)
+    if callable(legacy_bulk):
+        return legacy_bulk(definitions)
     return _load_history(
         db,
         {

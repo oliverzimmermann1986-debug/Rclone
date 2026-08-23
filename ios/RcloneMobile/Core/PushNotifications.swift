@@ -4,6 +4,7 @@ import UserNotifications
 extension Notification.Name {
     static let pushDeviceTokenReady = Notification.Name("pushDeviceTokenReady")
     static let pushNavigationRequested = Notification.Name("pushNavigationRequested")
+    static let pushAuthorizationRequested = Notification.Name("pushAuthorizationRequested")
 }
 
 @MainActor
@@ -19,16 +20,31 @@ final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUser
         return true
     }
 
-    func requestAuthorizationAndRegister() async {
+    func requestAuthorizationAndRegister() async -> Bool {
         do {
             let granted = try await UNUserNotificationCenter.current().requestAuthorization(
                 options: [.alert, .badge, .sound]
             )
-            guard granted else { return }
+            guard granted else { return false }
             UIApplication.shared.registerForRemoteNotifications()
+            return true
         } catch {
             // The app remains fully usable when the user denies notifications
             // or iOS cannot contact APNs yet.
+            return false
+        }
+    }
+
+    func registerIfAlreadyAuthorized() async -> Bool {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            UIApplication.shared.registerForRemoteNotifications()
+            return true
+        case .notDetermined, .denied:
+            return false
+        @unknown default:
+            return false
         }
     }
 

@@ -95,6 +95,20 @@ def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeyp
         )
         assert logged_in.status_code == 303
 
+        index_page = client.get("/")
+        assert index_page.status_code == 200
+        assert app_version == "2.2.1"
+        for asset in (
+            "manifest.json",
+            "style.css",
+            "alpine.min.js",
+            "ui-helpers.js",
+            "app.js",
+            "app-icon-1024.png",
+        ):
+            assert f"/static/{asset}?v={app_version}" in index_page.text
+        assert "__APP_VERSION__" not in index_page.text
+
         filter_response = client.get("/api/config/filter-file")
         assert filter_response.status_code == 200
         filter_data = filter_response.json()

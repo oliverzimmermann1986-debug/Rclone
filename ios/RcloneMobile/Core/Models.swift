@@ -215,6 +215,28 @@ struct DiskMetrics: Decodable {
 
 struct StorageOverview: Decodable {
     let pairs: [StoragePair]
+    let measurement: StorageMeasurementSummary?
+
+    init(pairs: [StoragePair], measurement: StorageMeasurementSummary? = nil) {
+        self.pairs = pairs
+        self.measurement = measurement
+    }
+}
+
+struct StorageMeasurementSummary: Decodable, Equatable {
+    let state: String
+    let total: Int
+    let loaded: Int
+    let failed: Int
+    let stale: Int
+    let measurementError: String?
+    let measuredAt: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case state, total, loaded, failed, stale
+        case measurementError = "measurement_error"
+        case measuredAt = "measured_at"
+    }
 }
 
 struct StoragePair: Decodable, Identifiable {
@@ -444,9 +466,13 @@ struct ConfigSnapshot: Codable {
         try values.encode(backup, forKey: DynamicCodingKey(stringValue: "backup")!)
     }
 
-    func replacing(pairs: [PairConfig], jobs: [JobDefinition]) -> ConfigSnapshot {
+    func replacing(
+        pairs: [PairConfig],
+        jobs: [JobDefinition],
+        revision replacementRevision: String? = nil
+    ) -> ConfigSnapshot {
         ConfigSnapshot(
-            revision: revision,
+            revision: replacementRevision ?? revision,
             backup: backup.replacing(pairs: pairs, jobs: jobs),
             extraSections: extraSections
         )
@@ -1027,9 +1053,82 @@ struct ActionResponse: Decodable {
     let ok: Bool
     let jobID: Int?
     let error: String?
+    let definitionIDs: [String]
+    let definitionNames: [String]
+    let startedDefinitions: [BatchDefinitionState]
+    let queuedDefinitions: [BatchDefinitionState]
+    let failedDefinitions: [BatchDefinitionState]
+    let definitions: [BatchDefinitionState]
+    let configRevision: String?
+    let dryRun: Bool?
 
     enum CodingKeys: String, CodingKey {
         case ok, error
+        case jobID = "job_id"
+        case definitionIDs = "definition_ids"
+        case definitionNames = "definition_names"
+        case startedDefinitions = "started_definitions"
+        case queuedDefinitions = "queued_definitions"
+        case failedDefinitions = "failed_definitions"
+        case definitions
+        case configRevision = "config_revision"
+        case dryRun = "dry_run"
+    }
+
+    init(
+        ok: Bool,
+        jobID: Int?,
+        error: String?,
+        definitionIDs: [String] = [],
+        definitionNames: [String] = [],
+        startedDefinitions: [BatchDefinitionState] = [],
+        queuedDefinitions: [BatchDefinitionState] = [],
+        failedDefinitions: [BatchDefinitionState] = [],
+        definitions: [BatchDefinitionState] = [],
+        configRevision: String? = nil,
+        dryRun: Bool? = nil
+    ) {
+        self.ok = ok
+        self.jobID = jobID
+        self.error = error
+        self.definitionIDs = definitionIDs
+        self.definitionNames = definitionNames
+        self.startedDefinitions = startedDefinitions
+        self.queuedDefinitions = queuedDefinitions
+        self.failedDefinitions = failedDefinitions
+        self.definitions = definitions
+        self.configRevision = configRevision
+        self.dryRun = dryRun
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try values.decode(Bool.self, forKey: .ok)
+        jobID = try values.decodeIfPresent(Int.self, forKey: .jobID)
+        error = try values.decodeIfPresent(String.self, forKey: .error)
+        definitionIDs = try values.decodeIfPresent([String].self, forKey: .definitionIDs) ?? []
+        definitionNames = try values.decodeIfPresent([String].self, forKey: .definitionNames) ?? []
+        startedDefinitions = try values.decodeIfPresent([BatchDefinitionState].self, forKey: .startedDefinitions) ?? []
+        queuedDefinitions = try values.decodeIfPresent([BatchDefinitionState].self, forKey: .queuedDefinitions) ?? []
+        failedDefinitions = try values.decodeIfPresent([BatchDefinitionState].self, forKey: .failedDefinitions) ?? []
+        definitions = try values.decodeIfPresent([BatchDefinitionState].self, forKey: .definitions)
+            ?? (startedDefinitions + queuedDefinitions + failedDefinitions)
+        configRevision = try values.decodeIfPresent(String.self, forKey: .configRevision)
+        dryRun = try values.decodeIfPresent(Bool.self, forKey: .dryRun)
+    }
+}
+
+struct BatchDefinitionState: Decodable, Identifiable, Equatable {
+    var id: String { definitionID }
+    let definitionID: String
+    let definitionName: String
+    let state: String
+    let jobID: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case definitionID = "definition_id"
+        case definitionName = "definition_name"
         case jobID = "job_id"
     }
 }

@@ -98,6 +98,7 @@ struct LoginView: View {
             LoginField(
                 title: "Server",
                 placeholder: "192.168.1.67 oder backup.example.de",
+                accessibilityHint: "Gib die vollständige Adresse deiner Rclone-Sync-Installation ein. Einen abweichenden Port direkt anhängen.",
                 symbol: "server.rack",
                 text: $server,
                 contentType: .URL,
@@ -121,6 +122,7 @@ struct LoginView: View {
             LoginField(
                 title: "Benutzer",
                 placeholder: "admin",
+                accessibilityHint: "Gib den Benutzernamen für die Serveranmeldung ein.",
                 symbol: "person",
                 text: $username,
                 contentType: .username,
@@ -138,6 +140,7 @@ struct LoginView: View {
             LoginField(
                 title: "Passwort",
                 placeholder: "Passwort",
+                accessibilityHint: "Gib das Passwort für die Serveranmeldung ein.",
                 symbol: "key",
                 text: $password,
                 contentType: .password,
@@ -172,6 +175,10 @@ struct LoginView: View {
         .controlSize(.large)
         .tint(.green)
         .disabled(!model.isRefreshing && (server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || username.isEmpty || password.isEmpty))
+        .accessibilityLabel(model.isRefreshing ? "Anmeldung abbrechen" : "Mit Server verbinden")
+        .accessibilityHint(model.isRefreshing
+            ? "Bricht den laufenden Verbindungsversuch ab."
+            : "Meldet dich mit der eingegebenen Serveradresse und den Zugangsdaten an.")
     }
 
     private func login() {
@@ -204,6 +211,7 @@ struct LoginView: View {
 private struct LoginField: View {
     let title: String
     let placeholder: String
+    let accessibilityHint: String
     let symbol: String
     @Binding var text: String
     let contentType: UITextContentType?
@@ -237,6 +245,9 @@ private struct LoginField: View {
                 .textInputAutocapitalization(capitalization)
                 .autocorrectionDisabled()
                 .keyboardType(keyboardType)
+                .accessibilityLabel(title)
+                .accessibilityHint(accessibilityHint)
+                .accessibilityIdentifier("login\(title)Field")
             }
         }
         .padding(.horizontal, 16)

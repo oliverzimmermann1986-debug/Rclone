@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi import HTTPException
 
+from app import db as db_module
 from app.config_validation import ConfigValidationError, validate_config
 from app.db import Database
 from app.job_definitions import effective_job_definitions, legacy_job_definitions
@@ -161,6 +162,161 @@ def test_run_metadata_and_history_survive_definition_rename(tmp_path: Path):
     history = database.job_definition_history({"a" * 32: "Neu"})["a" * 32]
     assert history["last_result"]["id"] == second
     assert history["last_success"]["id"] == first
+
+
+def test_dry_run_never_advances_definition_schedule_state(tmp_path: Path, monkeypatch):
+    config, _ = validate_config(_config(tmp_path))
+    definition = config["backup"]["jobs"][0]
+    scheduled_now = datetime(
+        2026, 8, 23, 2, 5, tzinfo=ZoneInfo("Europe/Berlin")
+    ).timestamp()
+    monkeypatch.setattr(db_module.time, "time", lambda: scheduled_now)
+    database = Database(tmp_path / "dry-definition.db")
+
+    dry_job = database.job_start(
+        "backup",
+        definition_id=definition["id"],
+        definition_name=definition["name"],
+        attempts=[
+            {
+                "name": "Fotos",
+                "history_key": "rclone:id:photos",
+                "trigger": "web",
+                "dry_run": True,
+            }
+        ],
+    )
+    database.job_finish(
+        dry_job,
+        "ok",
+        {"ok": True, "dry_run": True, "trigger": "web", "pairs": []},
+    )
+
+    display = database.job_definition_history({definition["id"]: definition["name"]})[
+        definition["id"]
+    ]
+    state = database.job_definition_schedule_state(
+        {definition["id"]: definition["name"]}
+    )[definition["id"]]
+    due, status = find_due_jobs(config, database, now=scheduled_now)
+
+    assert display["last_result"]["id"] == dry_job
+    assert display["last_success"] is None
+    assert state == {"last_result": None, "last_success": None}
+    assert definition["name"] in due
+    assert (
+        next(item for item in status if item["definition_id"] == definition["id"])[
+            "due"
+        ]
+        is True
+    )
+
+
+def test_failed_history_cleanup_preserves_scheduler_retry(tmp_path: Path, monkeypatch):
+    config, _ = validate_config(_config(tmp_path))
+    definition = config["backup"]["jobs"][0]
+    definition["retry_minutes"] = 5
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")).timestamp()
+    clock = [now - 6 * 60]
+    monkeypatch.setattr(db_module.time, "time", lambda: clock[0])
+    database = Database(tmp_path / "failed-cleanup.db")
+    failed = database.job_start(
+        "backup",
+        definition_id=definition["id"],
+        definition_name=definition["name"],
+        scheduled_slot="failed-slot",
+        attempts=[
+            {
+                "name": "Fotos",
+                "history_key": "rclone:id:photos",
+                "trigger": "scheduler",
+                "scheduled_slot": "failed-slot",
+            }
+        ],
+    )
+    database.job_finish(
+        failed,
+        "error",
+        {
+            "ok": False,
+            "trigger": "scheduler",
+            "scheduled_slot": "failed-slot",
+            "pairs": [],
+        },
+    )
+    clock[0] = now
+
+    before_due, before_status = find_due_jobs(config, database, now=now)
+    assert database.jobs_delete_failed() == 1
+    after_due, after_status = find_due_jobs(config, database, now=now)
+
+    assert database.job_definition_history({definition["id"]: definition["name"]})[
+        definition["id"]
+    ] == {"last_result": None, "last_success": None}
+    assert before_due == after_due
+    before = next(
+        item for item in before_status if item["definition_id"] == definition["id"]
+    )
+    after = next(
+        item for item in after_status if item["definition_id"] == definition["id"]
+    )
+    assert before["reason"] == after["reason"] == "retry_after_failure"
+    assert before["scheduled_slot"] == after["scheduled_slot"]
+
+
+def test_history_retention_preserves_definition_catch_up_state(
+    tmp_path: Path, monkeypatch
+):
+    config, _ = validate_config(_config(tmp_path))
+    definition = config["backup"]["jobs"][0]
+    clock = [datetime(2026, 8, 20, 2, 5, tzinfo=ZoneInfo("Europe/Berlin")).timestamp()]
+    monkeypatch.setattr(db_module.time, "time", lambda: clock[0])
+    database = Database(tmp_path / "retention-state.db")
+    successful = database.job_start(
+        "backup",
+        definition_id=definition["id"],
+        definition_name=definition["name"],
+        scheduled_slot="success-slot",
+        attempts=[
+            {
+                "name": "Fotos",
+                "history_key": "rclone:id:photos",
+                "trigger": "scheduler",
+                "scheduled_slot": "success-slot",
+            }
+        ],
+    )
+    clock[0] += 60
+    database.job_finish(
+        successful,
+        "ok",
+        {
+            "ok": True,
+            "trigger": "scheduler",
+            "scheduled_slot": "success-slot",
+            "pairs": [],
+        },
+    )
+    clock[0] = datetime(
+        2026, 8, 23, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")
+    ).timestamp()
+
+    before_due, before_status = find_due_jobs(config, database, now=clock[0])
+    assert database.jobs_prune(older_than_days=1, keep_latest=0) == 1
+    after_due, after_status = find_due_jobs(config, database, now=clock[0])
+
+    assert database.job_definition_history({definition["id"]: definition["name"]})[
+        definition["id"]
+    ] == {"last_result": None, "last_success": None}
+    assert before_due == after_due
+    before = next(
+        item for item in before_status if item["definition_id"] == definition["id"]
+    )
+    after = next(
+        item for item in after_status if item["definition_id"] == definition["id"]
+    )
+    assert before["last_run"] == after["last_run"]
+    assert before["scheduled_slot"] == after["scheduled_slot"]
 
 
 def test_scheduler_uses_definition_history_and_job_retry(tmp_path: Path):
@@ -444,7 +600,25 @@ def test_definition_batch_creates_separate_ordered_runs_under_one_global_lock(
 
     result = api_jobs._queue_enabled_job_definitions(dry_run=True)
 
-    assert result["definition_ids"] == ["1" * 32, "2" * 32]
+    assert result["definition_ids"] == ["1" * 32]
+    assert result["definition_names"] == ["Seriell"]
+    assert result["started_definitions"] == [
+        {
+            "definition_id": "1" * 32,
+            "definition_name": "Seriell",
+            "state": "started",
+            "job_id": 1,
+        }
+    ]
+    assert result["queued_definitions"] == [
+        {
+            "definition_id": "2" * 32,
+            "definition_name": "Parallel",
+            "state": "queued",
+            "job_id": None,
+        }
+    ]
+    assert result["failed_definitions"] == []
     assert result["config_revision"] == "rev-batch"
     assert [item["definition_id"] for item in database.starts] == [
         "1" * 32,
@@ -463,6 +637,159 @@ def test_definition_batch_creates_separate_ordered_runs_under_one_global_lock(
     assert [status for _job_id, status, _summary in database.finishes] == ["ok", "ok"]
     assert scope_lock.releases == 1
     assert api_jobs._locks["backup"].locked() is False
+
+
+def test_definition_batch_continues_after_reservation_failure_and_audits_item(
+    monkeypatch,
+):
+    definitions = [
+        {"id": char * 32, "name": name, "execution_mode": "sequential"}
+        for char, name in (("1", "Erster"), ("2", "Defekt"), ("3", "Dritter"))
+    ]
+    specs = [
+        {
+            "definition": definition,
+            "pair_names": [definition["name"]],
+            "history_keys": {definition["name"]: f"key-{index}"},
+            "attempts": [],
+        }
+        for index, definition in enumerate(definitions, start=1)
+    ]
+
+    class FakeDb:
+        def __init__(self):
+            self.starts = []
+            self.audits = []
+
+        def job_start(self, _kind, **kwargs):
+            self.starts.append(kwargs["definition_id"])
+            if kwargs["definition_id"] == "2" * 32:
+                raise RuntimeError("temporary reservation failure")
+            return 303
+
+        def audit_add(self, event, **kwargs):
+            self.audits.append((event, kwargs))
+
+    class FakeScopeLock:
+        def __init__(self):
+            self.releases = 0
+
+        def release(self):
+            self.releases += 1
+
+    database = FakeDb()
+    scope_lock = FakeScopeLock()
+    executed = []
+    monkeypatch.setattr(api_jobs, "get_db", lambda: database)
+    monkeypatch.setattr(api_jobs.rclone_job, "is_cancelled", lambda: False)
+    monkeypatch.setattr(
+        api_jobs,
+        "_run_backup_thread",
+        lambda job_id, *_args, **_kwargs: executed.append(job_id),
+    )
+    assert api_jobs._locks["backup"].acquire(blocking=False)
+
+    api_jobs._run_definition_batch_thread(
+        specs,
+        False,
+        {"backup": {}},
+        "batch-revision",
+        scope_lock,
+        101,
+    )
+
+    assert database.starts == ["2" * 32, "3" * 32]
+    assert executed == [101, 303]
+    assert len(database.audits) == 1
+    event, audit = database.audits[0]
+    assert event == "job_definition_batch_item_failed"
+    assert audit["details"] == {
+        "batch_job_id": 101,
+        "definition_id": "2" * 32,
+        "definition_name": "Defekt",
+        "state": "failed",
+        "error_code": "reservation_failed",
+        "error": "temporary reservation failure",
+    }
+    assert scope_lock.releases == 1
+    assert api_jobs._locks["backup"].locked() is False
+
+
+def test_definition_batch_thread_start_failure_marks_first_job_error(
+    tmp_path: Path, monkeypatch
+):
+    config, _ = validate_config(_config(tmp_path))
+    first = copy.deepcopy(config["backup"]["jobs"][0])
+    second = copy.deepcopy(first)
+    second["id"] = "b" * 32
+    second["name"] = "Zweiter"
+    config["backup"]["jobs"] = [first, second]
+
+    class Store:
+        def snapshot_with_revision(self):
+            return copy.deepcopy(config), "thread-failure-revision"
+
+    class FakeDb:
+        def __init__(self):
+            self.finished = []
+
+        def job_start(self, _kind, **_kwargs):
+            return 88
+
+        def job_finish(self, job_id, status, summary):
+            self.finished.append((job_id, status, summary))
+            return True
+
+        def audit_add(self, *_args, **_kwargs):
+            return None
+
+    class FakeScopeLock:
+        def __init__(self):
+            self.releases = 0
+
+        def release(self):
+            self.releases += 1
+
+    class BrokenThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread capacity exhausted")
+
+    database = FakeDb()
+    scope_lock = FakeScopeLock()
+    monkeypatch.setattr(api_jobs, "get_config", lambda: Store())
+    monkeypatch.setattr(api_jobs, "get_db", lambda: database)
+    monkeypatch.setattr(api_jobs, "try_file_lock", lambda _scope: scope_lock)
+    monkeypatch.setattr(
+        api_jobs, "reconcile_locked_scope", lambda *_args, **_kwargs: {"safe": True}
+    )
+    monkeypatch.setattr(api_jobs.rclone_job, "reset_cancel", lambda: None)
+    monkeypatch.setattr(api_jobs.threading, "Thread", BrokenThread)
+
+    with pytest.raises(HTTPException) as caught:
+        api_jobs._queue_enabled_job_definitions(dry_run=False)
+
+    assert caught.value.status_code == 500
+    assert database.finished == [
+        (
+            88,
+            "error",
+            {
+                "ok": False,
+                "error": (
+                    "Batch-Thread konnte nicht gestartet werden: "
+                    "thread capacity exhausted"
+                ),
+                "error_code": "thread_start_failed",
+                "stage": "setup",
+            },
+        )
+    ]
+    assert scope_lock.releases == 1
+    assert api_jobs._locks["backup"].acquire(blocking=False)
+    api_jobs._locks["backup"].release()
 
 
 def test_definition_batch_rejects_enabled_job_without_active_data_path(

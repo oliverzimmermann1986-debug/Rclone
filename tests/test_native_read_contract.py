@@ -524,7 +524,7 @@ def test_native_management_uses_canonical_routes_and_models_without_webview():
     assert "WebhookManagementView" not in operations
     assert "browseTarget = .remote" in views
     assert "PathBrowserSheet" in views
-    assert "timeout: includeSizes ? 75 : nil" in api
+    assert "timeout: includeSizes ? 85 : nil" in api
     assert "WKWebView" not in production
     assert "UIWebView" not in production
 
