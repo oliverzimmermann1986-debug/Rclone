@@ -366,6 +366,7 @@ final class APIClientSessionTests: XCTestCase {
 
     func testCreateDirectoryUsesProtectedJSONEndpoint() async throws {
         CreateDirectoryURLProtocol.request = nil
+        CreateDirectoryURLProtocol.requestBody = nil
         let baseURL = try XCTUnwrap(URL(string: "https://browse.example"))
         let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
             forGroupContainerIdentifier: "APIClientCreateDirectoryTests-\(UUID().uuidString)"
@@ -395,7 +396,7 @@ final class APIClientSessionTests: XCTestCase {
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.url?.path, "/api/browse/directory")
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-CSRF-Token"), "csrf-create-folder")
-        let body = try XCTUnwrap(request.httpBody)
+        let body = try XCTUnwrap(CreateDirectoryURLProtocol.requestBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
         XCTAssertEqual(json, [
             "kind": "remote",
@@ -639,12 +640,25 @@ private final class BrowseURLProtocol: URLProtocol {
 
 private final class CreateDirectoryURLProtocol: URLProtocol {
     nonisolated(unsafe) static var request: URLRequest?
+    nonisolated(unsafe) static var requestBody: Data?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
         Self.request = request
+        Self.requestBody = request.httpBody ?? request.httpBodyStream.flatMap { stream in
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }
+                data.append(contentsOf: buffer.prefix(count))
+            }
+            return data
+        }
         let body = Data(#"{"ok":true,"kind":"remote","path":"pcloud:/Fotos/2026 Urlaub"}"#.utf8)
         let response = HTTPURLResponse(
             url: request.url!, statusCode: 200, httpVersion: nil,
