@@ -116,6 +116,20 @@ def test_login_uses_system_theme_and_mobile_full_frame():
     assert "font:inherit;font-size:16px" in login
 
 
+def test_target_picker_can_switch_storage_and_create_folders():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert 'aria-label="Zieltyp auswählen"' in html
+    assert "switchPickerKind('remote')" in html
+    assert "switchPickerKind('local')" in html
+    assert 'aria-label="Name des neuen Ordners"' in html
+    assert "createPickerFolder()" in html
+    assert "pickerCanSwitchKind()" in javascript
+    assert "'/api/browse/directory'" in javascript
+    assert "kind: this.picker.kind" in javascript
+
+
 def test_missing_resource_metrics_never_render_as_zero_percent():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     javascript = (STATIC / "app.js").read_text(encoding="utf-8")
