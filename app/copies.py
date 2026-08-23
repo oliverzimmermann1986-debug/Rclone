@@ -218,9 +218,9 @@ def build_matrix(cfg, db, *, now: Optional[float] = None) -> dict[str, Any]:
             # Eine schwächere Zuordnung innerhalb derselben Domain darf nicht
             # durch eine andere, exakte Zuordnung verdeckt werden.
             confidence_rank = {"low": 0, "medium": 1, "high": 2}
-            if confidence_rank.get(str(domain.get("confidence")), 0) < confidence_rank.get(
-                str(aggregate.get("confidence")), 0
-            ):
+            if confidence_rank.get(
+                str(domain.get("confidence")), 0
+            ) < confidence_rank.get(str(aggregate.get("confidence")), 0):
                 aggregate["confidence"] = domain.get("confidence")
         entry["copies"].append(
             {

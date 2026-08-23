@@ -73,9 +73,7 @@ def _request(token: str = "recovery-test-session") -> Request:
             "type": "http",
             "method": "POST",
             "path": "/api/maintenance/config/snapshots/restore",
-            "headers": [
-                (b"cookie", f"rclone_sync_session={token}".encode("ascii"))
-            ],
+            "headers": [(b"cookie", f"rclone_sync_session={token}".encode("ascii"))],
             "client": ("127.0.0.1", 12345),
         }
     )

@@ -97,8 +97,7 @@ def test_gui_assets_reference_current_cache_version():
     assert "/static/app.js?v=__APP_VERSION__" in html
     assert html.index("/static/ui-helpers.js") < html.index("/static/app.js")
     assert (
-        'html = html.replace("?v=__APP_VERSION__", f"?v={__version__}")'
-        in main_source
+        'html = html.replace("?v=__APP_VERSION__", f"?v={__version__}")' in main_source
     )
     assert "Proxmox Backup Console" in login
     assert 'class="shell"' in login
@@ -259,13 +258,27 @@ def test_dialog_focus_accessibility_and_loading_contracts():
     assert "}, DIALOG_FOCUS_RETRY_MS)" in javascript
     assert "dialogFocusGeneration += 1" in javascript
     assert "window.requestAnimationFrame" not in javascript
-    assert "const initialTarget = dialog.querySelector('[data-dialog-initial-focus]')" in javascript
-    assert "if (initialTarget && !this.visibleElement(initialTarget)) return false" in javascript
-    assert "const focusIsOutside = !dialog.contains(document.activeElement)" in javascript
-    assert "const focusIsNotInitial = document.activeElement !== initialTarget" in javascript
+    assert (
+        "const initialTarget = dialog.querySelector('[data-dialog-initial-focus]')"
+        in javascript
+    )
+    assert (
+        "if (initialTarget && !this.visibleElement(initialTarget)) return false"
+        in javascript
+    )
+    assert (
+        "const focusIsOutside = !dialog.contains(document.activeElement)" in javascript
+    )
+    assert (
+        "const focusIsNotInitial = document.activeElement !== initialTarget"
+        in javascript
+    )
     assert "if (focusIsOutside || focusIsNotInitial) initialTarget.focus" in javascript
     assert "enforceActiveDialogFocus(event)" in javascript
-    assert "if (eventTarget?.nodeType && dialog.contains(eventTarget)) return true" in javascript
+    assert (
+        "if (eventTarget?.nodeType && dialog.contains(eventTarget)) return true"
+        in javascript
+    )
     assert "this.visibleElement(initialTarget)" in javascript
     assert "this.focusableElements(dialog)[0] || dialog" in javascript
     assert "element.getClientRects().length === 0" in javascript
@@ -299,7 +312,10 @@ def test_confirmation_navigation_and_pair_actions_are_accessible():
     assert 'x-ref="mainSidebar"' in html
     assert ':inert="navigationIsModal()"' in html
     assert "document.getElementById('main-content')?.focus" in javascript
-    assert "target?.isConnected ? target : document.getElementById('main-content')" in javascript
+    assert (
+        "target?.isConnected ? target : document.getElementById('main-content')"
+        in javascript
+    )
     assert 'role="status" aria-live="polite" aria-atomic="true"' in html
     assert "selectedPairNames().join(', ')" in html
     assert "dataPathName(pathId) + ' in Job '" in html
@@ -346,7 +362,10 @@ def test_pwa_caches_only_versioned_static_allowlist_and_has_install_icon():
     assert "const STATIC_ASSETS = new Set([" in service_worker
     assert "new Request(path, { cache: 'reload' })" in service_worker
     for forbidden in ("'/api/", "'/login", "'/logout", "'/'"):
-        assert forbidden not in service_worker.split("const STATIC_ASSETS", 1)[1].split("]);", 1)[0]
+        assert (
+            forbidden
+            not in service_worker.split("const STATIC_ASSETS", 1)[1].split("]);", 1)[0]
+        )
     assert "if (!STATIC_ASSETS.has(url.pathname)) return null" in service_worker
     assert "if (event.request.method !== 'GET') return" in service_worker
     assert "name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME" in service_worker
@@ -404,7 +423,10 @@ def test_storage_dashboard_distinguishes_initial_partial_and_total_failures():
     assert "timeoutMs: includeRemote ? 70000 : 30000" in javascript
     assert "const previous = new Map(this.storagePairs()" in javascript
     assert "source_size: pair.source_size || old.source_size" in javascript
-    assert "`${summary.loaded || 0}/${summary.total || 0} Messungen erfolgreich`" in javascript
+    assert (
+        "`${summary.loaded || 0}/${summary.total || 0} Messungen erfolgreich`"
+        in javascript
+    )
     assert "copySideError(entry, 'local')" in html
     assert "copySideError(entry, 'cloud')" in html
     assert "pairSizeError(pair.name, 'source')" in html

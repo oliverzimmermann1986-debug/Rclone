@@ -285,7 +285,5 @@ def test_slow_apns_batch_renews_remaining_owner_claims(monkeypatch, tmp_path: Pa
     )
 
     assert result["sent"] == 2
-    assert competing_results == [
-        {"sent": 0, "failed": 0, "removed": 0, "retrying": 0}
-    ]
+    assert competing_results == [{"sent": 0, "failed": 0, "removed": 0, "retrying": 0}]
     assert database.push_outbox_status()["sent"] == 2

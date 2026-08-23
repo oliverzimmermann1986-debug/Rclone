@@ -438,9 +438,7 @@ def _queue_backup(
                 (definition or {}).get("execution_mode") or "parallel"
             ),
             "max_parallel_override": (
-                int((definition or {}).get("max_parallel") or 1)
-                if definition
-                else None
+                int((definition or {}).get("max_parallel") or 1) if definition else None
             ),
             "definition_id": definition_id,
             "definition_name": definition_name,
@@ -453,7 +451,9 @@ def _queue_backup(
             details={"dry_run": dry_run, "pairs": pairs_filter or []},
         )
     except Exception as exc:
-        logger.exception("Backup #%s konnte nach der Reservation nicht vorbereitet werden", job_id)
+        logger.exception(
+            "Backup #%s konnte nach der Reservation nicht vorbereitet werden", job_id
+        )
         _abort_reserved_backup_job(
             job_id,
             scope_lock,

@@ -75,9 +75,7 @@ def test_local_targets_on_same_device_count_as_one_scope(tmp_path):
     assert "alle Kopien im selben Speicherort" in row["findings"]
 
 
-def test_local_targets_on_different_devices_count_as_two_scopes(
-    tmp_path, monkeypatch
-):
+def test_local_targets_on_different_devices_count_as_two_scopes(tmp_path, monkeypatch):
     targets = {"/mnt/disk-a/backup": 101, "/mnt/disk-b/backup": 202}
 
     def fake_stat(path):

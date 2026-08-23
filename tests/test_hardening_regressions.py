@@ -52,9 +52,7 @@ def _request(token: str = "direct-test-session") -> Request:
             "type": "http",
             "method": "POST",
             "path": "/api/config",
-            "headers": [
-                (b"cookie", f"rclone_sync_session={token}".encode("ascii"))
-            ],
+            "headers": [(b"cookie", f"rclone_sync_session={token}".encode("ascii"))],
             "client": ("127.0.0.1", 12345),
         }
     )
@@ -131,9 +129,7 @@ def test_username_change_requires_reauthentication(
         )
     assert raised.value.status_code == 403
 
-    monkeypatch.setattr(
-        api_config, "require_reauthentication", lambda *_args: None
-    )
+    monkeypatch.setattr(api_config, "require_reauthentication", lambda *_args: None)
     api_config.update_config(
         _request(),
         api_config.ConfigUpdate(config=candidate, current_password="correct-password"),
@@ -263,9 +259,7 @@ def test_absent_security_fields_are_not_treated_as_change() -> None:
 def test_bcrypt_byte_limit_is_reported_as_client_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        api_config, "require_reauthentication", lambda *_args: None
-    )
+    monkeypatch.setattr(api_config, "require_reauthentication", lambda *_args: None)
     with pytest.raises(HTTPException) as raised:
         api_config.change_password(
             _request(),
