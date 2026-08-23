@@ -600,7 +600,25 @@ def test_definition_batch_creates_separate_ordered_runs_under_one_global_lock(
 
     result = api_jobs._queue_enabled_job_definitions(dry_run=True)
 
-    assert result["definition_ids"] == ["1" * 32, "2" * 32]
+    assert result["definition_ids"] == ["1" * 32]
+    assert result["definition_names"] == ["Seriell"]
+    assert result["started_definitions"] == [
+        {
+            "definition_id": "1" * 32,
+            "definition_name": "Seriell",
+            "state": "started",
+            "job_id": 1,
+        }
+    ]
+    assert result["queued_definitions"] == [
+        {
+            "definition_id": "2" * 32,
+            "definition_name": "Parallel",
+            "state": "queued",
+            "job_id": None,
+        }
+    ]
+    assert result["failed_definitions"] == []
     assert result["config_revision"] == "rev-batch"
     assert [item["definition_id"] for item in database.starts] == [
         "1" * 32,
@@ -619,6 +637,159 @@ def test_definition_batch_creates_separate_ordered_runs_under_one_global_lock(
     assert [status for _job_id, status, _summary in database.finishes] == ["ok", "ok"]
     assert scope_lock.releases == 1
     assert api_jobs._locks["backup"].locked() is False
+
+
+def test_definition_batch_continues_after_reservation_failure_and_audits_item(
+    monkeypatch,
+):
+    definitions = [
+        {"id": char * 32, "name": name, "execution_mode": "sequential"}
+        for char, name in (("1", "Erster"), ("2", "Defekt"), ("3", "Dritter"))
+    ]
+    specs = [
+        {
+            "definition": definition,
+            "pair_names": [definition["name"]],
+            "history_keys": {definition["name"]: f"key-{index}"},
+            "attempts": [],
+        }
+        for index, definition in enumerate(definitions, start=1)
+    ]
+
+    class FakeDb:
+        def __init__(self):
+            self.starts = []
+            self.audits = []
+
+        def job_start(self, _kind, **kwargs):
+            self.starts.append(kwargs["definition_id"])
+            if kwargs["definition_id"] == "2" * 32:
+                raise RuntimeError("temporary reservation failure")
+            return 303
+
+        def audit_add(self, event, **kwargs):
+            self.audits.append((event, kwargs))
+
+    class FakeScopeLock:
+        def __init__(self):
+            self.releases = 0
+
+        def release(self):
+            self.releases += 1
+
+    database = FakeDb()
+    scope_lock = FakeScopeLock()
+    executed = []
+    monkeypatch.setattr(api_jobs, "get_db", lambda: database)
+    monkeypatch.setattr(api_jobs.rclone_job, "is_cancelled", lambda: False)
+    monkeypatch.setattr(
+        api_jobs,
+        "_run_backup_thread",
+        lambda job_id, *_args, **_kwargs: executed.append(job_id),
+    )
+    assert api_jobs._locks["backup"].acquire(blocking=False)
+
+    api_jobs._run_definition_batch_thread(
+        specs,
+        False,
+        {"backup": {}},
+        "batch-revision",
+        scope_lock,
+        101,
+    )
+
+    assert database.starts == ["2" * 32, "3" * 32]
+    assert executed == [101, 303]
+    assert len(database.audits) == 1
+    event, audit = database.audits[0]
+    assert event == "job_definition_batch_item_failed"
+    assert audit["details"] == {
+        "batch_job_id": 101,
+        "definition_id": "2" * 32,
+        "definition_name": "Defekt",
+        "state": "failed",
+        "error_code": "reservation_failed",
+        "error": "temporary reservation failure",
+    }
+    assert scope_lock.releases == 1
+    assert api_jobs._locks["backup"].locked() is False
+
+
+def test_definition_batch_thread_start_failure_marks_first_job_error(
+    tmp_path: Path, monkeypatch
+):
+    config, _ = validate_config(_config(tmp_path))
+    first = copy.deepcopy(config["backup"]["jobs"][0])
+    second = copy.deepcopy(first)
+    second["id"] = "b" * 32
+    second["name"] = "Zweiter"
+    config["backup"]["jobs"] = [first, second]
+
+    class Store:
+        def snapshot_with_revision(self):
+            return copy.deepcopy(config), "thread-failure-revision"
+
+    class FakeDb:
+        def __init__(self):
+            self.finished = []
+
+        def job_start(self, _kind, **_kwargs):
+            return 88
+
+        def job_finish(self, job_id, status, summary):
+            self.finished.append((job_id, status, summary))
+            return True
+
+        def audit_add(self, *_args, **_kwargs):
+            return None
+
+    class FakeScopeLock:
+        def __init__(self):
+            self.releases = 0
+
+        def release(self):
+            self.releases += 1
+
+    class BrokenThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread capacity exhausted")
+
+    database = FakeDb()
+    scope_lock = FakeScopeLock()
+    monkeypatch.setattr(api_jobs, "get_config", lambda: Store())
+    monkeypatch.setattr(api_jobs, "get_db", lambda: database)
+    monkeypatch.setattr(api_jobs, "try_file_lock", lambda _scope: scope_lock)
+    monkeypatch.setattr(
+        api_jobs, "reconcile_locked_scope", lambda *_args, **_kwargs: {"safe": True}
+    )
+    monkeypatch.setattr(api_jobs.rclone_job, "reset_cancel", lambda: None)
+    monkeypatch.setattr(api_jobs.threading, "Thread", BrokenThread)
+
+    with pytest.raises(HTTPException) as caught:
+        api_jobs._queue_enabled_job_definitions(dry_run=False)
+
+    assert caught.value.status_code == 500
+    assert database.finished == [
+        (
+            88,
+            "error",
+            {
+                "ok": False,
+                "error": (
+                    "Batch-Thread konnte nicht gestartet werden: "
+                    "thread capacity exhausted"
+                ),
+                "error_code": "thread_start_failed",
+                "stage": "setup",
+            },
+        )
+    ]
+    assert scope_lock.releases == 1
+    assert api_jobs._locks["backup"].acquire(blocking=False)
+    api_jobs._locks["backup"].release()
 
 
 def test_definition_batch_rejects_enabled_job_without_active_data_path(
