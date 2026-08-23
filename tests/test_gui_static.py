@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import re
+import struct
 from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
 
 STATIC = Path(__file__).resolve().parents[1] / "app" / "static"
+
+
+def _png_dimensions(path: Path) -> tuple[int, int]:
+    data = path.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert data[12:16] == b"IHDR"
+    return struct.unpack(">II", data[16:24])
 
 
 class _TemplateParser(HTMLParser):
@@ -63,7 +71,6 @@ def test_template_direct_calls_exist_in_alpine_component():
         "app",
         "if",
         "in",
-        "confirm",
         "String",
         "Number",
         "Math",
@@ -83,11 +90,16 @@ def test_template_direct_calls_exist_in_alpine_component():
 def test_gui_assets_reference_current_cache_version():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     login = (STATIC / "login.html").read_text(encoding="utf-8")
+    main_source = (STATIC.parent / "main.py").read_text(encoding="utf-8")
     assert "/static/style.css?v=__APP_VERSION__" in html
     assert "/static/alpine.min.js?v=__APP_VERSION__" in html
     assert "/static/ui-helpers.js?v=__APP_VERSION__" in html
     assert "/static/app.js?v=__APP_VERSION__" in html
     assert html.index("/static/ui-helpers.js") < html.index("/static/app.js")
+    assert (
+        'html = html.replace("?v=__APP_VERSION__", f"?v={__version__}")'
+        in main_source
+    )
     assert "Proxmox Backup Console" in login
     assert 'class="shell"' in login
 
@@ -172,7 +184,7 @@ def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
     assert "['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs']" in javascript
     assert "this.status?.restoretest" in javascript
     assert "if (this.status?.restoretest) return 'Restore-Drill'" in javascript
-    assert 'class="table-scroll"' in html
+    assert 'class="table-scroll responsive-table-wrap"' in html
     assert "formatDateTime(target.last_success)" in html
 
 
@@ -226,7 +238,9 @@ def test_dialog_focus_accessibility_and_loading_contracts():
     css = (STATIC / "style.css").read_text(encoding="utf-8")
 
     assert '@keydown.tab.window="trapDialogFocus($event)"' in html
+    assert '@focusin.window="enforceActiveDialogFocus($event)"' in html
     for ref_name in (
+        "confirmationDialog",
         "currentPasswordDialog",
         "planDialog",
         "quickDialog",
@@ -234,10 +248,28 @@ def test_dialog_focus_accessibility_and_loading_contracts():
         "jobDialog",
     ):
         assert f'x-ref="{ref_name}"' in html
-    assert html.count('aria-modal="true"') == 5
+    assert html.count('aria-modal="true"') == 6
     assert "focusableElements(dialog)" in javascript
     assert "restoreDialogFocus()" in javascript
     assert "dialogFocusStack.push(document.activeElement)" in javascript
+    assert "const DIALOG_FOCUS_RETRY_MS = 50" in javascript
+    assert "const generation = ++dialogFocusGeneration" in javascript
+    assert "this.focusOpenedDialog(refName);" in javascript
+    assert "if (generation !== dialogFocusGeneration) return" in javascript
+    assert "}, DIALOG_FOCUS_RETRY_MS)" in javascript
+    assert "dialogFocusGeneration += 1" in javascript
+    assert "window.requestAnimationFrame" not in javascript
+    assert "const initialTarget = dialog.querySelector('[data-dialog-initial-focus]')" in javascript
+    assert "if (initialTarget && !this.visibleElement(initialTarget)) return false" in javascript
+    assert "const focusIsOutside = !dialog.contains(document.activeElement)" in javascript
+    assert "const focusIsNotInitial = document.activeElement !== initialTarget" in javascript
+    assert "if (focusIsOutside || focusIsNotInitial) initialTarget.focus" in javascript
+    assert "enforceActiveDialogFocus(event)" in javascript
+    assert "if (eventTarget?.nodeType && dialog.contains(eventTarget)) return true" in javascript
+    assert "this.visibleElement(initialTarget)" in javascript
+    assert "this.focusableElements(dialog)[0] || dialog" in javascript
+    assert "element.getClientRects().length === 0" in javascript
+    assert "return dialog.contains(document.activeElement)" in javascript
     assert 'role="tablist"' in html
     assert 'role="tabpanel"' in html
     assert ":aria-current=" in html
@@ -248,6 +280,89 @@ def test_dialog_focus_accessibility_and_loading_contracts():
     assert ":focus-visible" in css
     assert ".search-field:focus-within" in css
     assert ".toast.above-unsaved" in css
+
+
+def test_confirmation_navigation_and_pair_actions_are_accessible():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "confirm(" not in html
+    assert "confirm(" not in javascript
+    assert "requestConfirmation(message, options = {})" in javascript
+    assert "respondConfirmation(confirmed)" in javascript
+    assert "if (this.confirmationDialog.show)" in javascript
+    assert 'aria-describedby="confirmation-dialog-message"' in html
+    assert "data-dialog-initial-focus>Abbrechen" in html
+    assert "navigationFocusReturn = document.activeElement" in javascript
+    assert "this.focusableElements(this.$refs.mainSidebar)[0]?.focus()" in javascript
+    assert "this.navigationIsModal() ? this.$refs.mainSidebar : null" in javascript
+    assert 'x-ref="mainSidebar"' in html
+    assert ':inert="navigationIsModal()"' in html
+    assert "document.getElementById('main-content')?.focus" in javascript
+    assert "target?.isConnected ? target : document.getElementById('main-content')" in javascript
+    assert 'role="status" aria-live="polite" aria-atomic="true"' in html
+    assert "selectedPairNames().join(', ')" in html
+    assert "dataPathName(pathId) + ' in Job '" in html
+    assert "(pair.name || 'ohne Namen') + ' nach oben verschieben'" in html
+
+
+def test_mobile_tables_touch_targets_and_dialog_safe_areas_are_hardened():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+
+    assert html.count('class="table responsive-table"') >= 2
+    assert 'class="table copy-table responsive-table"' in html
+    for label in (
+        "Datenweg",
+        "Lokaler Ordner",
+        "Cloud-Ordner",
+        "Dateien",
+        "Größe",
+        "Messalter",
+    ):
+        assert f'data-label="{label}"' in html
+    assert ".responsive-table td::before" in css
+    assert "@media (pointer: coarse)" in css
+    assert "min-height: 44px" in css
+    assert "max-height: calc(100dvh" in css
+    assert "env(safe-area-inset-bottom)" in css
+
+
+def test_pwa_caches_only_versioned_static_allowlist_and_has_install_icon():
+    manifest = (STATIC / "manifest.json").read_text(encoding="utf-8")
+    service_worker = (STATIC / "sw.js").read_text(encoding="utf-8")
+
+    for size in (192, 512, 1024):
+        icon = STATIC / f"app-icon-{size}.png"
+        assert icon.is_file()
+        assert _png_dimensions(icon) == (size, size)
+        assert f'"src": "/static/app-icon-{size}.png"' in manifest
+        assert f'"sizes": "{size}x{size}"' in manifest
+        assert f"'/static/app-icon-{size}.png'" in service_worker
+    assert '"sizes": "1024x1024"' in manifest
+    assert '"purpose": "any"' in manifest
+    assert "const CACHE_PREFIX = 'rclone-sync-static-'" in service_worker
+    assert "const CACHE_NAME = `${CACHE_PREFIX}v2`" in service_worker
+    assert "const STATIC_ASSETS = new Set([" in service_worker
+    assert "new Request(path, { cache: 'reload' })" in service_worker
+    for forbidden in ("'/api/", "'/login", "'/logout", "'/'"):
+        assert forbidden not in service_worker.split("const STATIC_ASSETS", 1)[1].split("]);", 1)[0]
+    assert "if (!STATIC_ASSETS.has(url.pathname)) return null" in service_worker
+    assert "if (event.request.method !== 'GET') return" in service_worker
+    assert "name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME" in service_worker
+    fetch_handler = service_worker.split("self.addEventListener('fetch'", 1)[1]
+    assert "new Request(event.request, { cache: 'no-cache' })" in fetch_handler
+    assert fetch_handler.index("await fetch(request)") < fetch_handler.index(
+        "await cache.match(path)"
+    )
+    assert "if (!response.ok)" in fetch_handler
+    assert "return (await cache.match(path)) || response" in fetch_handler
+    assert "if (response.type === 'basic')" in fetch_handler
+    assert "await cache.put(path, response.clone())" in fetch_handler
+    assert "catch (error)" in fetch_handler
+    assert "if (cached) return cached" in fetch_handler
+    assert "throw error" in fetch_handler
+    assert not (STATIC / "preview-stub.js").exists()
 
 
 def test_sensitive_config_save_uses_transient_password_and_strips_web_secrets():
