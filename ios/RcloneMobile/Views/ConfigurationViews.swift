@@ -43,6 +43,8 @@ struct DataPathsScreen: View {
                             DataPathConfigurationRow(pair: pair)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Datenweg \(pair.name) bearbeiten")
+                        .accessibilityHint("Öffnet die Einstellungen dieses Datenwegs.")
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
                             Button { pendingPathAction = .check(pair) } label: {
                                 Label("Prüfen", systemImage: "checkmark.shield")
@@ -252,6 +254,8 @@ struct JobsScreen: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Job \(definition.name) bearbeiten")
+                        .accessibilityHint("Öffnet Zeitplan, Datenwege und Ausführung dieses Jobs.")
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
                             Button {
                                 Task {

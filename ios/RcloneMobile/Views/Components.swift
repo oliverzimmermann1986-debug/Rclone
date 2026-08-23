@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct StatusBadge: View {
     let status: String?
@@ -39,17 +40,39 @@ struct LoadingSection: View {
 struct ErrorBanner: View {
     let message: String
     let dismiss: () -> Void
+    @AccessibilityFocusState private var isMessageFocused: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-            Text(message).font(.subheadline).frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Aktion erforderlich")
+                    .font(.caption.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Text(message)
+                    .font(.subheadline)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Fehler. \(message)")
+            .accessibilityHint("Prüfe die Angaben oder versuche die Aktion erneut.")
+            .accessibilityFocused($isMessageFocused)
             Button(action: dismiss) { Image(systemName: "xmark") }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Meldung schließen")
+                .accessibilityHint("Blendet diese Fehlermeldung aus.")
         }
         .padding(14)
         .background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onAppear { announce(message) }
+        .onChange(of: message) { _, newMessage in announce(newMessage) }
+    }
+
+    private func announce(_ message: String) {
+        isMessageFocused = true
+        UIAccessibility.post(notification: .announcement, argument: "Fehler. \(message)")
     }
 }
 

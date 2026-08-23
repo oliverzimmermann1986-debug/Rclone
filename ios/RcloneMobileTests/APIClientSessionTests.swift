@@ -3,6 +3,18 @@ import XCTest
 @testable import RcloneMobile
 
 final class APIClientSessionTests: XCTestCase {
+    func testUserFacingConnectionErrorsAreRecoveryOriented() {
+        XCTAssertEqual(
+            APIError.invalidResponse.errorDescription,
+            "Die Serverantwort konnte nicht geprüft werden. Prüfe, ob die Adresse zu Rclone Sync gehört, und versuche es erneut."
+        )
+        XCTAssertEqual(
+            APIError.incompatibleResponse(resource: "Anmeldung").errorDescription,
+            "Anmeldung konnte nicht gelesen werden. Aktualisiere Server oder App und versuche es erneut."
+        )
+        XCTAssertFalse(APIError.invalidResponse.errorDescription?.contains("HTTP") == true)
+    }
+
     func testSharedNativeLoginContractFixturesDecode() throws {
         let url = try XCTUnwrap(
             Bundle(for: Self.self).url(
