@@ -547,6 +547,9 @@ code { font-family: var(--mono); }
 .inline-error .button { margin-left: auto; }
 
 .error-text { overflow: hidden; color: var(--danger); font-size: 12px; }
+.copy-table .error-text, .pair-size-cell .error-text {
+  display: block; margin-top: 4px; white-space: normal;
+}
 
 .loading-state { padding: 18px; color: var(--text-soft); font-size: 12.5px; }
 .loading-state.compact-loading { padding: 10px 0; }

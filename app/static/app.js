@@ -39,6 +39,9 @@ function app() {
     progress: null,
     sse: null,
     storageLoading: false,
+    storageState: 'loading',
+    storageError: '',
+    storageMeasurement: { state: 'loading', total: 0, loaded: 0, failed: 0, stale: 0 },
     recentJobs: [],
     jobs: {
       loading: false, items: [], total: 0, offset: 0, limit: 25,
@@ -1649,16 +1652,64 @@ function app() {
     },
 
     async loadStorage(includeRemote = false, refreshSizes = false) {
+      const hadPairs = this.storagePairs().length > 0;
+      this.storageState = 'loading';
+      this.storageError = '';
       const query = includeRemote
         ? `?include_remote=true&refresh_sizes=${refreshSizes ? 'true' : 'false'}`
         : '';
-      const result = await this.api('GET', `/api/storage/overview${query}`, undefined, { silent: !includeRemote, timeoutMs: includeRemote ? 120000 : 30000 });
+      const result = await this.api('GET', `/api/storage/overview${query}`, undefined, {
+        silent: true,
+        captureError: true,
+        requestKey: 'storage-overview',
+        timeoutMs: includeRemote ? 70000 : 30000,
+      });
+      if (this.isStale(result)) return undefined;
+      if (result?.__error) {
+        const detail = typeof result.detail === 'string'
+          ? result.detail
+          : (result.detail?.message || 'Storage-Übersicht konnte nicht geladen werden');
+        this.storageError = detail;
+        this.storageState = hadPairs ? 'stale' : 'failed';
+        return null;
+      }
       // storage_pairs auch außerhalb des Dashboards ablegen: overview.data ist auf
       // der Pairs-Seite noch null (loadOverview läuft nur dort). Alle Leser nutzen
       // optionales Chaining, ein leeres Objekt ist daher unkritisch.
       if (result?.pairs) {
         if (!this.overview.data) this.overview.data = {};
-        this.overview.data.storage_pairs = result.pairs;
+        const previous = new Map(this.storagePairs().map((pair) => [pair.name, pair]));
+        this.overview.data.storage_pairs = includeRemote
+          ? result.pairs
+          : result.pairs.map((pair) => {
+            const old = previous.get(pair.name) || {};
+            return {
+              ...pair,
+              source_size: pair.source_size || old.source_size,
+              target_size: pair.target_size || old.target_size,
+              source_measurement: old.source_size ? old.source_measurement : pair.source_measurement,
+              target_measurement: old.target_size ? old.target_measurement : pair.target_measurement,
+            };
+          });
+        if (includeRemote || previous.size === 0) {
+          this.storageMeasurement = result.measurement || {
+            state: includeRemote ? 'loaded' : 'loading',
+            total: result.pairs.length * 2,
+            loaded: 0,
+            failed: 0,
+            stale: 0,
+          };
+        }
+        const measuredState = ['loaded', 'partial', 'failed', 'stale'].includes(this.storageMeasurement.state)
+          ? this.storageMeasurement.state
+          : 'partial';
+        this.storageState = includeRemote
+          ? measuredState
+          : (previous.size > 0 && measuredState !== 'loaded' ? measuredState : 'loaded');
+        this.storageError = this.storageMeasurement.measurement_error || '';
+      } else {
+        this.storageError = 'Der Server hat keine Storage-Daten geliefert.';
+        this.storageState = hadPairs ? 'stale' : 'failed';
       }
       return result;
     },
@@ -1680,6 +1731,20 @@ function app() {
       return entry.target_size || entry.source_size || null;
     },
 
+    copySide(entry, kind) {
+      const wantLocal = kind === 'local';
+      const sourceIsLocal = entry?.source && String(entry.source).startsWith('/');
+      const targetIsLocal = entry?.target && String(entry.target).startsWith('/');
+      if (sourceIsLocal === wantLocal) return entry?.source_size || null;
+      if (targetIsLocal === wantLocal) return entry?.target_size || null;
+      return null;
+    },
+
+    copySideError(entry, kind) {
+      const size = this.copySide(entry, kind);
+      return size?.measurement_error || size?.error || '';
+    },
+
     copyMetric(entry, kind) {
       const size = this.copySize(entry);
       if (!size || size.error || size.measurement_status === 'failed') return '—';
@@ -1694,11 +1759,27 @@ function app() {
       this.storageLoading = true;
       try {
         const result = await this.loadStorage(true, true);
-        if (result?.pairs) this.showToast('Dateizahl und Größe berechnet');
-        else this.showToast('Größen konnten nicht berechnet werden', 'warn');
+        if (result?.pairs) {
+          const summary = result.measurement || this.storageMeasurement;
+          const message = `${summary.loaded || 0}/${summary.total || 0} Messungen erfolgreich`;
+          this.showToast(message, summary.state === 'loaded' ? 'ok' : (summary.state === 'failed' ? 'err' : 'warn'));
+        } else {
+          this.showToast(this.storageError || 'Größen konnten nicht berechnet werden', 'err');
+        }
       } finally {
         this.storageLoading = false;
       }
+    },
+
+    storageStatusText() {
+      const summary = this.storageMeasurement || {};
+      if (this.storageState === 'loading') return 'Ordnergrößen werden ermittelt…';
+      if (this.storageState === 'failed') return this.storageError || 'Keine Größenmessung war erfolgreich.';
+      if (this.storageState === 'stale') return this.storageError || 'Es werden veraltete Messwerte angezeigt.';
+      if (this.storageState === 'partial') {
+        return `${summary.loaded || 0}/${summary.total || 0} Messungen erfolgreich; ${summary.failed || 0} fehlgeschlagen, ${summary.stale || 0} veraltet.`;
+      }
+      return '';
     },
 
     pairSize(name) {
@@ -1723,6 +1804,11 @@ function app() {
       if (!size.measured_at) return '';
       const prefix = size.measurement_status === 'stale' ? 'Veraltet' : 'Gemessen';
       return `${prefix} ${this.formatTs(size.measured_at)}`;
+    },
+
+    pairSizeError(name, side) {
+      const size = this.pairSize(name)?.[`${side}_size`];
+      return size?.measurement_error || size?.error || '';
     },
 
     openPicker(mode, idx) {

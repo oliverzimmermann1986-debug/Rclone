@@ -161,11 +161,12 @@
             <div class="table-scroll" tabindex="0" aria-label="Übersicht der Sicherungskopien">
               <table class="table copy-table">
                 <thead><tr><th>Datenweg</th><th>Lokaler Ordner</th><th>Cloud-Ordner</th><th>Dateien</th><th>Größe</th><th>Messalter</th></tr></thead>
-                <tbody><template x-for="entry in storagePairs()" :key="entry.name"><tr><td><strong x-text="entry.name"></strong></td><td class="mono" x-text="copyFolder(entry, 'local')"></td><td class="mono" x-text="copyFolder(entry, 'cloud')"></td><td x-text="copyMetric(entry, 'count')"></td><td x-text="copyMetric(entry, 'bytes')"></td><td x-text="copyMetric(entry, 'age')"></td></tr></template></tbody>
+                <tbody><template x-for="entry in storagePairs()" :key="entry.name"><tr><td><strong x-text="entry.name"></strong></td><td><span class="mono" x-text="copyFolder(entry, 'local')"></span><small class="error-text" x-show="copySideError(entry, 'local')" x-text="copySideError(entry, 'local')"></small></td><td><span class="mono" x-text="copyFolder(entry, 'cloud')"></span><small class="error-text" x-show="copySideError(entry, 'cloud')" x-text="copySideError(entry, 'cloud')"></small></td><td x-text="copyMetric(entry, 'count')"></td><td x-text="copyMetric(entry, 'bytes')"></td><td x-text="copyMetric(entry, 'age')"></td></tr></template></tbody>
               </table>
             </div>
-            <div class="loading-state compact-loading" x-show="storageLoading" role="status">Ordnergrößen werden ermittelt…</div>
-            <div class="empty-state compact" x-show="!storageLoading && !storagePairs().length"><strong>Noch keine Kopien</strong><span>Lege zuerst einen Datenweg an.</span><button class="button secondary" @click="navigate('pairs')">Zu Datenwegen</button></div>
+            <div class="loading-state compact-loading" x-show="storageState === 'loading'" role="status" aria-live="polite" x-text="storageStatusText()"></div>
+            <div class="inline-error panel-error" x-show="['partial', 'failed', 'stale'].includes(storageState)" :role="storageState === 'failed' ? 'alert' : 'status'" aria-live="polite"><span x-text="storageStatusText()"></span><button class="button secondary small" @click="loadPairSizes()" :disabled="storageLoading">Erneut messen</button></div>
+            <div class="empty-state compact" x-show="storageState === 'loaded' && !storagePairs().length"><strong>Noch keine Kopien</strong><span>Lege zuerst einen Datenweg an.</span><button class="button secondary" @click="navigate('pairs')">Zu Datenwegen</button></div>
           </article>
 
           <article class="panel" x-show="config.pbs?.enabled" aria-labelledby="pbs-targets-heading">
@@ -388,9 +389,9 @@
                 </div>
 
                 <div class="pair-size-row" x-show="pairSize(pair.name)" x-cloak>
-                  <span class="pair-size-cell"><small>Quelle</small><strong x-text="pairSizeText(pair.name, 'source')"></strong><small x-text="pairSizeAge(pair.name, 'source')"></small></span>
+                  <span class="pair-size-cell"><small>Quelle</small><strong x-text="pairSizeText(pair.name, 'source')"></strong><small x-text="pairSizeAge(pair.name, 'source')"></small><small class="error-text" x-show="pairSizeError(pair.name, 'source')" x-text="pairSizeError(pair.name, 'source')"></small></span>
                   <span class="pair-size-arrow" aria-hidden="true">→</span>
-                  <span class="pair-size-cell"><small>Ziel</small><strong x-text="pairSizeText(pair.name, 'target')"></strong><small x-text="pairSizeAge(pair.name, 'target')"></small></span>
+                  <span class="pair-size-cell"><small>Ziel</small><strong x-text="pairSizeText(pair.name, 'target')"></strong><small x-text="pairSizeAge(pair.name, 'target')"></small><small class="error-text" x-show="pairSizeError(pair.name, 'target')" x-text="pairSizeError(pair.name, 'target')"></small></span>
                 </div>
 
                 <div class="pair-quick-actions">

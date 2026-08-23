@@ -277,6 +277,28 @@ def test_size_recalculation_is_explicit_and_measurement_age_is_visible():
     assert "pairSizeAge(pair.name, 'target')" in html
 
 
+def test_storage_dashboard_distinguishes_initial_partial_and_total_failures():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "storageState: 'loading'" in javascript
+    assert "storageState = hadPairs ? 'stale' : 'failed'" in javascript
+    assert "['loaded', 'partial', 'failed', 'stale']" in javascript
+    assert "captureError: true" in javascript
+    assert "requestKey: 'storage-overview'" in javascript
+    assert "timeoutMs: includeRemote ? 70000 : 30000" in javascript
+    assert "const previous = new Map(this.storagePairs()" in javascript
+    assert "source_size: pair.source_size || old.source_size" in javascript
+    assert "`${summary.loaded || 0}/${summary.total || 0} Messungen erfolgreich`" in javascript
+    assert "copySideError(entry, 'local')" in html
+    assert "copySideError(entry, 'cloud')" in html
+    assert "pairSizeError(pair.name, 'source')" in html
+    assert "pairSizeError(pair.name, 'target')" in html
+    assert "Erneut messen" in html
+    assert "storageState === 'loaded' && !storagePairs().length" in html
+    assert "!storageLoading && !storagePairs().length" not in html
+
+
 def test_webhook_management_is_not_exposed_in_the_user_interface():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     javascript = (STATIC / "app.js").read_text(encoding="utf-8")
