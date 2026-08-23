@@ -357,11 +357,14 @@ def run_pair_restore_test(
     backup = cfg.get("backup", default={}) or {}
     name = str(pair.get("name") or "?")
     source, copy_target = _endpoints(pair)
+    requested_sample_size = int(settings["sample_files"])
     result: dict[str, Any] = {
         "name": name,
         "source": source,
         "target": copy_target,
+        "requested_sample_size": requested_sample_size,
         "sample_size": 0,
+        "sample_status": "not_started",
         "verified": 0,
         "scanned": 0,
         "truncated": False,
@@ -395,9 +398,10 @@ def run_pair_restore_test(
     max_total_bytes = int(settings["max_total_mb"]) * 1024 * 1024
     result["budget_bytes"] = max_total_bytes
     try:
+        result["sample_status"] = "listing"
         sample = _sample_paths(
             copy_target,
-            sample_size=int(settings["sample_files"]),
+            sample_size=requested_sample_size,
             max_scan=int(settings["max_scan_files"]),
             max_total_bytes=max_total_bytes,
             rng=rng,
@@ -409,12 +413,20 @@ def run_pair_restore_test(
         result["skipped_oversized"] = int(sample.get("oversized") or 0)
         result["selected_bytes"] = int(sample.get("selected_bytes") or 0)
         if sample.get("cancelled"):
-            result.update({"ok": False, "cancelled": True, "error": "Abgebrochen"})
+            result.update(
+                {
+                    "ok": False,
+                    "cancelled": True,
+                    "sample_status": "cancelled",
+                    "error": "Abgebrochen",
+                }
+            )
             return result
         if sample.get("timed_out"):
             result.update(
                 {
                     "ok": False,
+                    "sample_status": "listing_timeout",
                     "error": (
                         "Listing-Timeout nach "
                         f"{round(_LISTING_TIMEOUT_SEC / 60)} Minuten"
@@ -423,6 +435,8 @@ def run_pair_restore_test(
             )
             return result
         paths = sample["paths"]
+        result["sample_size"] = len(paths)
+        result["sample_shortfall"] = max(0, requested_sample_size - len(paths))
         if not paths:
             # Ein leeres Ziel ist kein bestandener Drill, sondern ein Befund.
             detail = "Ziel enthält keine Dateien innerhalb des sicheren Gesamtlimits"
@@ -431,15 +445,37 @@ def run_pair_restore_test(
             result.update(
                 {
                     "ok": False,
+                    "sample_status": "no_candidates",
                     "error": detail,
                 }
             )
             return result
 
+        if len(paths) > requested_sample_size:
+            raise RuntimeError(
+                "Stichprobenauswahl enthält mehr Dateien als angefordert"
+            )
+
+        partial_selection = len(paths) < requested_sample_size
+        if partial_selection:
+            if result["truncated"]:
+                shortfall_reason = "listing_truncated"
+            elif result["eligible_files"] < requested_sample_size:
+                shortfall_reason = "insufficient_eligible_files"
+            else:
+                shortfall_reason = "byte_budget"
+            result.update(
+                {
+                    "sample_status": "partial_selection",
+                    "sample_shortfall_reason": shortfall_reason,
+                }
+            )
+        else:
+            result["sample_status"] = "selected"
+
         selected_bytes = int(sample.get("selected_bytes") or 0)
         if selected_bytes < 0 or selected_bytes > max_total_bytes:
             raise RuntimeError("Stichprobe überschreitet das konfigurierte Gesamtlimit")
-        result["sample_size"] = len(paths)
         usage = shutil.disk_usage(workdir)
         safety_margin = max(_FREE_SPACE_MARGIN_BYTES, selected_bytes // 10)
         required_space = selected_bytes + safety_margin
@@ -494,16 +530,16 @@ def run_pair_restore_test(
             result.update(
                 {
                     "ok": False,
+                    "sample_status": "restore_failed",
                     "return_code": rc,
                     "error": f"Rückholen fehlgeschlagen (rclone copy exit {rc})",
                 }
             )
             return result
 
-        pulled = sum(1 for item in restored.rglob("*") if item.is_file())
-        restored_bytes = sum(
-            item.stat().st_size for item in restored.rglob("*") if item.is_file()
-        )
+        restored_items = [item for item in restored.rglob("*") if item.is_file()]
+        pulled = len(restored_items)
+        restored_bytes = sum(item.stat().st_size for item in restored_items)
         result["restored_files"] = pulled
         result["restored_bytes"] = restored_bytes
         if restored_bytes > max_total_bytes:
@@ -518,7 +554,26 @@ def run_pair_restore_test(
             result.update(
                 {
                     "ok": False,
+                    "sample_status": "restore_incomplete",
                     "error": "Keine Datei aus der ausgewählten Stichprobe zurückgeholt",
+                }
+            )
+            return result
+
+        expected_paths = {str(path).replace("\\", "/").lstrip("/") for path in paths}
+        restored_paths = {
+            item.relative_to(restored).as_posix().lstrip("/") for item in restored_items
+        }
+        if pulled != len(paths) or restored_paths != expected_paths:
+            result.update(
+                {
+                    "ok": False,
+                    "sample_status": "restore_incomplete",
+                    "error": (
+                        "Restore-Stichprobe unvollständig: "
+                        f"{pulled} von {len(paths)} ausgewählten Dateien "
+                        "zurückgeholt"
+                    ),
                 }
             )
             return result
@@ -548,11 +603,33 @@ def run_pair_restore_test(
             pair_name=f"restoretest:{name}",
         )
         if is_cancelled():
-            result.update({"ok": False, "cancelled": True, "error": "Abgebrochen"})
+            result.update(
+                {
+                    "ok": False,
+                    "cancelled": True,
+                    "sample_status": "cancelled",
+                    "error": "Abgebrochen",
+                }
+            )
             return result
         result["return_code"] = rc
         if rc == 0:
-            result.update({"ok": True, "verified": pulled})
+            if partial_selection:
+                result.update(
+                    {
+                        "ok": False,
+                        "verified": pulled,
+                        "error": (
+                            "Teil-Stichprobe: "
+                            f"{pulled} von {requested_sample_size} angeforderten "
+                            "Dateien ausgewählt und erfolgreich geprüft"
+                        ),
+                    }
+                )
+            else:
+                result.update(
+                    {"ok": True, "verified": pulled, "sample_status": "complete"}
+                )
         else:
             # Bewusst ohne Log-Auszug: rclone check listet die abweichenden
             # Dateipfade auf. Die gehören ins Logfile mit 0600, nicht ins
@@ -561,6 +638,7 @@ def run_pair_restore_test(
             result.update(
                 {
                     "ok": False,
+                    "sample_status": "verification_failed",
                     "error": (
                         "Prüfsummen weichen ab oder Dateien fehlen in der Quelle "
                         f"(rclone check exit {rc}) — Details im Joblog"
@@ -571,6 +649,7 @@ def run_pair_restore_test(
         result.update(
             {
                 "ok": False,
+                "sample_status": "runtime_timeout",
                 "error": (
                     f"Maximale Laufzeit von {round(timeout_sec / 3600, 1)} h überschritten"
                     if getattr(exc, "watchdog_reason", "stalled") == "max_runtime"
@@ -580,18 +659,41 @@ def run_pair_restore_test(
         )
     except Exception as exc:
         logger.exception("Restore-Drill für %s fehlgeschlagen", name)
-        result.update({"ok": False, "error": str(exc)})
+        result.update({"ok": False, "sample_status": "error", "error": str(exc)})
     finally:
         # Produktivdaten dürfen nicht liegen bleiben — auch nicht nach Abbruch
         # oder Ausnahme.
-        shutil.rmtree(workdir, ignore_errors=True)
-        if workdir.exists():
+        cleanup_error = ""
+        try:
+            shutil.rmtree(workdir)
+        except Exception as exc:
+            cleanup_error = str(exc).strip() or type(exc).__name__
+        if cleanup_error or workdir.exists():
+            if not cleanup_error:
+                cleanup_error = "Temp-Verzeichnis besteht nach der Bereinigung weiter"
+            cleanup_detail = (
+                f"Temp-Bereinigung fehlgeschlagen für {workdir}: {cleanup_error}"
+            )
             logger.error(
                 "Temp-Verzeichnis %s konnte nicht entfernt werden; "
-                "enthält zurückgeholte Produktivdaten",
+                "enthält möglicherweise zurückgeholte Produktivdaten: %s",
                 workdir,
+                cleanup_error,
             )
-            result["temp_cleanup_failed"] = True
+            previous_error = str(result.get("error") or "").strip()
+            result.update(
+                {
+                    "ok": False,
+                    "temp_cleanup_failed": True,
+                    "temp_cleanup_path": str(workdir),
+                    "cleanup_error": cleanup_error,
+                    "error": (
+                        f"{previous_error}; {cleanup_detail}"
+                        if previous_error
+                        else cleanup_detail
+                    ),
+                }
+            )
     return result
 
 

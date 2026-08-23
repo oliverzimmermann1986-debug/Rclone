@@ -309,7 +309,15 @@ def test_silent_listing_honors_cancel_and_unregisters(monkeypatch):
     assert calls == ["register", "unregister"]
 
 
-def _patch_common(monkeypatch, tmp_path, *, sample, copy_rc=0, check_rc=0):
+def _patch_common(
+    monkeypatch,
+    tmp_path,
+    *,
+    sample,
+    sample_files=1,
+    copy_rc=0,
+    check_rc=0,
+):
     cfg = _cfg(
         tmp_path,
         pairs=[
@@ -321,6 +329,7 @@ def _patch_common(monkeypatch, tmp_path, *, sample, copy_rc=0, check_rc=0):
                 "enabled": True,
             }
         ],
+        sample_files=sample_files,
     )
     sample = dict(sample)
     sample.setdefault("eligible", len(sample.get("paths") or []))
@@ -385,6 +394,68 @@ def test_drill_success_reports_verified_and_cleans_up(monkeypatch, tmp_path: Pat
     assert calls[1][-1] == str(tmp_path / "src")
     # Kein Temp-Rest mit Produktivdaten.
     assert list((tmp_path / "temp").glob("restore-*")) == []
+
+
+def test_partial_selection_is_checked_but_fails_closed(monkeypatch, tmp_path: Path):
+    cfg, calls = _patch_common(
+        monkeypatch,
+        tmp_path,
+        sample={"paths": ["datei.bin"], "scanned": 1, "truncated": False},
+        sample_files=2,
+    )
+
+    result = drill.run_pair_restore_test(
+        {
+            "name": "archiv",
+            "direction": "push",
+            "local": str(tmp_path / "src"),
+            "remote": "wasabi:archiv",
+        },
+        log_file=tmp_path / "logs" / "drill.log",
+        settings=drill.restore_test_settings(cfg),
+    )
+
+    assert result["ok"] is False
+    assert result["requested_sample_size"] == 2
+    assert result["sample_size"] == 1
+    assert result["verified"] == 1
+    assert result["sample_status"] == "partial_selection"
+    assert result["sample_shortfall"] == 1
+    assert result["sample_shortfall_reason"] == "insufficient_eligible_files"
+    assert "Teil-Stichprobe" in result["error"]
+    assert len(calls) == 2
+
+
+def test_incomplete_restore_never_reaches_checksum_success(monkeypatch, tmp_path: Path):
+    cfg, calls = _patch_common(
+        monkeypatch,
+        tmp_path,
+        sample={
+            "paths": ["datei.bin", "zweite.bin"],
+            "scanned": 2,
+            "truncated": False,
+        },
+        sample_files=2,
+    )
+
+    result = drill.run_pair_restore_test(
+        {
+            "name": "archiv",
+            "direction": "push",
+            "local": str(tmp_path / "src"),
+            "remote": "wasabi:archiv",
+        },
+        log_file=tmp_path / "logs" / "drill.log",
+        settings=drill.restore_test_settings(cfg),
+    )
+
+    assert result["ok"] is False
+    assert result["sample_status"] == "restore_incomplete"
+    assert result["sample_size"] == 2
+    assert result["restored_files"] == 1
+    assert result["verified"] == 0
+    assert "1 von 2" in result["error"]
+    assert len(calls) == 1
 
 
 def test_drill_refuses_transfer_when_free_space_is_too_low(monkeypatch, tmp_path: Path):
@@ -486,6 +557,39 @@ def test_empty_target_is_a_finding_not_a_pass(monkeypatch, tmp_path: Path):
     )
     assert result["ok"] is False
     assert "keine Dateien" in result["error"]
+    assert result["sample_status"] == "no_candidates"
+    assert result["sample_shortfall"] == 1
+
+
+def test_cleanup_failure_fails_pair_and_aggregate_with_evidence(
+    monkeypatch, tmp_path: Path
+):
+    _cfg_value, _calls = _patch_common(
+        monkeypatch,
+        tmp_path,
+        sample={"paths": ["datei.bin"], "scanned": 1, "truncated": False},
+    )
+    monkeypatch.setattr(drill, "notify", lambda *a, **kw: None)
+    monkeypatch.setattr(drill, "reset_cancel", lambda *a, **kw: None)
+
+    def _cleanup_fails(_path):
+        raise OSError("Zugriff verweigert")
+
+    monkeypatch.setattr(drill.shutil, "rmtree", _cleanup_fails)
+
+    summary = drill.run_restore_test(trigger="manual", seed=1)
+
+    pair_result = summary["pairs"][0]
+    aggregate = summary["pairs"][-1]
+    assert summary["ok"] is False
+    assert pair_result["ok"] is False
+    assert aggregate["ok"] is False
+    assert pair_result["temp_cleanup_failed"] is True
+    assert pair_result["temp_cleanup_path"]
+    assert Path(pair_result["temp_cleanup_path"]).exists()
+    assert pair_result["cleanup_error"] == "Zugriff verweigert"
+    assert pair_result["temp_cleanup_path"] in pair_result["error"]
+    assert "Zugriff verweigert" in pair_result["error"]
 
 
 def test_missing_endpoint_is_rejected(tmp_path: Path, monkeypatch):
