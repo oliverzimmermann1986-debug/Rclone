@@ -18,11 +18,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from .. import __version__
-from ..auth import require_auth, verify_password
+from ..auth import require_auth, require_reauthentication
 from ..config_store import ConfigConflictError, get_config
 from ..config_validation import ConfigValidationError, validate_config
 from ..db import get_db
@@ -56,11 +56,15 @@ _SENSITIVE_EXPORT_KEYS = {
 }
 
 
-def _audit_best_effort(event: str, details: dict[str, Any]) -> None:
+def _audit_best_effort(
+    event: str, details: dict[str, Any], *, actor: str = "web"
+) -> bool:
     try:
-        get_db().audit_add(event, actor="web", details=details)
+        get_db().audit_add(event, actor=actor, details=details)
+        return True
     except Exception:
         logger.exception("Audit-Ereignis %s konnte nicht gespeichert werden", event)
+        return False
 
 
 def _redact_diagnostics(value: Any) -> Any:
@@ -333,10 +337,11 @@ class SnapshotRestore(BaseModel):
 
 @router.post("/config/snapshots/restore")
 def restore_config_snapshot(
-    body: SnapshotRestore, user: str = Depends(require_auth)
+    request: Request,
+    body: SnapshotRestore,
+    user: str = Depends(require_auth),
 ) -> dict[str, Any]:
-    if not verify_password(user, body.current_password):
-        raise HTTPException(403, "Aktuelles Passwort falsch")
+    require_reauthentication(request, user, body.current_password)
     if not _SNAPSHOT_NAME_RE.fullmatch(body.name):
         raise HTTPException(400, "Ungültiger Snapshot-Name")
     root = _snapshot_dir()
@@ -399,14 +404,20 @@ def restore_config_snapshot(
         new_revision = store.replace(normalized, expected_revision=revision)
     except ConfigConflictError as exc:
         raise HTTPException(409, "Konfiguration wurde parallel geändert") from exc
-    get_db().audit_add(
+    response_warnings = list(warnings)
+    if not _audit_best_effort(
         "config_snapshot_restored",
+        {"name": body.name, "revision": new_revision},
         actor=user,
-        details={"name": body.name, "revision": new_revision},
-    )
+    ):
+        response_warnings.append(
+            "Snapshot wurde wiederhergestellt, das Audit-Protokoll war jedoch "
+            "nicht verfügbar"
+        )
     return {
         "ok": True,
-        "warnings": warnings,
+        "status": "success_with_warning" if response_warnings else "success",
+        "warnings": response_warnings,
         "revision": new_revision,
         "reauthenticate": True,
     }
