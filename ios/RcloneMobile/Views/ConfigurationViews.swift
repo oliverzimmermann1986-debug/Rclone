@@ -5,6 +5,7 @@ struct DataPathsScreen: View {
     @Binding var showingSettings: Bool
     @State private var pairs: [PairConfig] = []
     @State private var isDirty = false
+    @State private var draftBaseRevision: String?
     @State private var editor: PairEditorRequest?
     @State private var localError: String?
     @State private var currentPassword = ""
@@ -95,7 +96,7 @@ struct DataPathsScreen: View {
                 } else {
                     pairs.append(updated)
                 }
-                isDirty = true
+                markDirty()
             }
         }
         .alert("Änderung nicht möglich", isPresented: Binding(
@@ -145,7 +146,7 @@ struct DataPathsScreen: View {
                 continue
             }
             pairs.remove(at: index)
-            isDirty = true
+            markDirty()
         }
     }
 
@@ -153,6 +154,7 @@ struct DataPathsScreen: View {
         guard force || !isDirty else { return }
         pairs = model.config?.backup.pairs ?? []
         isDirty = false
+        draftBaseRevision = model.config?.revision
     }
 
     private func reload(discardDirty: Bool) async {
@@ -165,9 +167,14 @@ struct DataPathsScreen: View {
     }
 
     private func save(password: String?) async {
+        guard let draftBaseRevision else {
+            localError = "Der Serverstand dieses Entwurfs ist unbekannt. Lade die Konfiguration neu."
+            return
+        }
         if await model.saveConfiguration(
             pairs: pairs,
             definitions: model.jobDefinitions,
+            baseRevision: draftBaseRevision,
             currentPassword: password
         ) {
             isDirty = false
@@ -178,6 +185,11 @@ struct DataPathsScreen: View {
 
     private func saveWithPassword() {
         Task { await save(password: currentPassword) }
+    }
+
+    private func markDirty() {
+        if !isDirty { draftBaseRevision = model.config?.revision }
+        isDirty = true
     }
 }
 
@@ -205,6 +217,7 @@ struct JobsScreen: View {
     @Binding var showingSettings: Bool
     @State private var definitions: [JobDefinition] = []
     @State private var isDirty = false
+    @State private var draftBaseRevision: String?
     @State private var editor: JobEditorRequest?
     @State private var plan: PlanPresentation?
     @State private var pendingRun: PendingJobRun?
@@ -230,12 +243,15 @@ struct JobsScreen: View {
                     )
                 } else {
                     ForEach(Array(definitions.enumerated()), id: \.element.id) { index, definition in
-                        JobDefinitionRow(
-                            definition: definition,
-                            pathNames: pathNames(for: definition)
-                        )
-                        .contentShape(Rectangle())
-                        .onTapGesture { editor = JobEditorRequest(index: index, definition: definition) }
+                        Button {
+                            editor = JobEditorRequest(index: index, definition: definition)
+                        } label: {
+                            JobDefinitionRow(
+                                definition: definition,
+                                pathNames: pathNames(for: definition)
+                            )
+                        }
+                        .buttonStyle(.plain)
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
                             Button {
                                 Task {
@@ -250,7 +266,7 @@ struct JobsScreen: View {
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             Button(role: .destructive) {
                                 definitions.remove(at: index)
-                                isDirty = true
+                                markDirty()
                             } label: { Label("Löschen", systemImage: "trash") }
                             Button {
                                 pendingRun = PendingJobRun(definition: definition, dryRun: true)
@@ -293,7 +309,7 @@ struct JobsScreen: View {
                 } else {
                     definitions.append(updated)
                 }
-                isDirty = true
+                markDirty()
             }
         }
         .sheet(item: $plan) { presentation in JobPlanView(plan: presentation.plan) }
@@ -346,6 +362,7 @@ struct JobsScreen: View {
         guard force || !isDirty else { return }
         definitions = model.jobDefinitions
         isDirty = false
+        draftBaseRevision = model.config?.revision
     }
 
     private func reload(discardDirty: Bool) async {
@@ -358,9 +375,14 @@ struct JobsScreen: View {
     }
 
     private func save(password: String?) async {
+        guard let draftBaseRevision else {
+            localError = "Der Serverstand dieses Entwurfs ist unbekannt. Lade die Konfiguration neu."
+            return
+        }
         if await model.saveConfiguration(
             pairs: model.config?.backup.pairs ?? [],
             definitions: definitions,
+            baseRevision: draftBaseRevision,
             currentPassword: password
         ) {
             isDirty = false
@@ -371,6 +393,11 @@ struct JobsScreen: View {
 
     private func saveWithPassword() {
         Task { await save(password: currentPassword) }
+    }
+
+    private func markDirty() {
+        if !isDirty { draftBaseRevision = model.config?.revision }
+        isDirty = true
     }
 }
 
