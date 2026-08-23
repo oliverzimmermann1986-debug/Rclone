@@ -309,6 +309,25 @@ final class APIClientSessionTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(StorageTimeoutURLProtocol.timeout), 60)
     }
 
+    func testMalformedStorageResponseNamesTheAffectedArea() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MalformedStorageURLProtocol.self]
+        let client = APIClient(
+            baseURL: try XCTUnwrap(URL(string: "https://storage.example")),
+            session: URLSession(configuration: configuration)
+        )
+
+        do {
+            _ = try await client.getStorage(includeSizes: false, forceRefresh: false)
+            XCTFail("Malformed storage response should fail")
+        } catch let error as APIError {
+            XCTAssertEqual(
+                error,
+                .incompatibleResponse(resource: "Dateizahlen und Größen")
+            )
+        }
+    }
+
     func testRemoteBrowserUsesCanonicalRcloneRouteAndPreservesPath() async throws {
         BrowseURLProtocol.requestURL = nil
         let configuration = URLSessionConfiguration.ephemeral
@@ -471,6 +490,23 @@ private final class StorageTimeoutURLProtocol: URLProtocol {
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(#"{"pairs":[]}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class MalformedStorageURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"pairs":"not-an-array"}"#.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
 
