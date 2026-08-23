@@ -15,7 +15,6 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
 from . import __version__
@@ -43,6 +42,7 @@ from .config_store import get_config
 from .db import get_db
 from .rclone_args import rclone_subprocess_env
 from .security import CSRF_COOKIE, new_csrf_token, require_csrf
+from .static_assets import AllowlistedStaticFiles
 from .utils import bounded_number as _bounded_number
 from .routes import (
     api_pbs,
@@ -484,7 +484,27 @@ app.include_router(api_pbs.router)
 app.include_router(api_push.router)
 
 STATIC_DIR = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+STATIC_ASSET_ALLOWLIST = frozenset(
+    {
+        "alpine.min.js",
+        "app.js",
+        "ui-helpers.js",
+        "style.css",
+        "manifest.json",
+        "sw.js",
+        "app-icon-192.png",
+        "app-icon-512.png",
+        "app-icon-1024.png",
+    }
+)
+app.mount(
+    "/static",
+    AllowlistedStaticFiles(
+        directory=STATIC_DIR,
+        allowed_files=STATIC_ASSET_ALLOWLIST,
+    ),
+    name="static",
+)
 
 
 @app.get("/login", response_class=HTMLResponse)
