@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootTabView: View {
     @EnvironmentObject private var model: AppModel
+    @StateObject private var configurationDraft = ConfigurationDraftStore()
     @State private var selectedTab: Int
     @State private var showingSettings = false
 
@@ -42,6 +43,7 @@ struct RootTabView: View {
             }
         }
         .sheet(isPresented: $showingSettings) { SettingsView() }
+        .environmentObject(configurationDraft)
         .alert("Hinweis", isPresented: Binding(
             get: { model.actionMessage != nil },
             set: { if !$0 { model.dismissMessages() } }
@@ -52,6 +54,10 @@ struct RootTabView: View {
         }
         .onAppear { selectRequestedRunIfNeeded() }
         .onChange(of: model.requestedRunID) { _, _ in selectRequestedRunIfNeeded() }
+        .task { configurationDraft.load(from: model.config) }
+        .onChange(of: model.config?.revision) { _, _ in
+            configurationDraft.load(from: model.config)
+        }
     }
 
     private func selectRequestedRunIfNeeded() {

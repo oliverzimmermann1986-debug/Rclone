@@ -2,10 +2,8 @@ import SwiftUI
 
 struct DataPathsScreen: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var configurationDraft: ConfigurationDraftStore
     @Binding var showingSettings: Bool
-    @State private var pairs: [PairConfig] = []
-    @State private var isDirty = false
-    @State private var draftBaseRevision: String?
     @State private var editor: PairEditorRequest?
     @State private var localError: String?
     @State private var currentPassword = ""
@@ -31,14 +29,14 @@ struct DataPathsScreen: View {
                 }
             }
             Section {
-                if pairs.isEmpty {
+                if configurationDraft.pairs.isEmpty {
                     ContentUnavailableView(
                         "Keine Datenwege",
                         systemImage: "arrow.left.arrow.right",
                         description: Text("Lege zuerst die Verbindung zwischen lokalem Ordner und Ziel an.")
                     )
                 } else {
-                    ForEach(Array(pairs.enumerated()), id: \.element.id) { index, pair in
+                    ForEach(Array(configurationDraft.pairs.enumerated()), id: \.element.id) { index, pair in
                         Button { editor = PairEditorRequest(index: index, pair: pair) } label: {
                             DataPathConfigurationRow(pair: pair)
                         }
@@ -50,12 +48,12 @@ struct DataPathsScreen: View {
                                 Label("Prüfen", systemImage: "checkmark.shield")
                             }
                             .tint(.blue)
-                            .disabled(isDirty)
+                            .disabled(configurationDraft.isDirty)
                             Button { pendingPathAction = .restore(pair) } label: {
                                 Label("Restore-Test", systemImage: "arrow.uturn.backward.circle")
                             }
                             .tint(.orange)
-                            .disabled(isDirty)
+                            .disabled(configurationDraft.isDirty)
                         }
                     }
                     .onDelete(perform: deletePairs)
@@ -63,7 +61,7 @@ struct DataPathsScreen: View {
             } header: {
                 Text("Datenwege")
             } footer: {
-                if isDirty { Text("Nicht gespeicherte Änderungen") }
+                if configurationDraft.isDirty { Text("Nicht gespeicherte Änderungen") }
             }
             Section("Werkzeuge") {
                 NavigationLink { QuickSyncView() } label: {
@@ -72,7 +70,7 @@ struct DataPathsScreen: View {
                 Button { confirmFullRestoreTest = true } label: {
                     Label("Systemweiten Restore-Test starten", systemImage: "arrow.counterclockwise.circle")
                 }
-                .disabled(isDirty)
+                .disabled(configurationDraft.isDirty)
             }
         }
         .listStyle(.insetGrouped)
@@ -87,18 +85,13 @@ struct DataPathsScreen: View {
                 }
                 .accessibilityLabel("Datenweg hinzufügen")
                 Button("Speichern") { Task { await save(password: nil) } }
-                    .disabled(!isDirty || model.isSavingConfig)
+                    .disabled(!configurationDraft.isDirty || model.isSavingConfig)
             }
         }
         .refreshable { await reload(discardDirty: false) }
         .sheet(item: $editor) { request in
             DataPathEditor(pair: request.pair) { updated in
-                if let index = request.index, pairs.indices.contains(index) {
-                    pairs[index] = updated
-                } else {
-                    pairs.append(updated)
-                }
-                markDirty()
+                configurationDraft.upsertPair(updated, at: request.index)
             }
         }
         .alert("Änderung nicht möglich", isPresented: Binding(
@@ -109,8 +102,10 @@ struct DataPathsScreen: View {
         } message: {
             Text(localError ?? "")
         }
-        .task { loadFromModel(force: false) }
-        .onChange(of: model.config?.revision) { _, _ in loadFromModel(force: false) }
+        .task { configurationDraft.load(from: model.config) }
+        .onChange(of: model.config?.revision) { _, _ in
+            configurationDraft.load(from: model.config)
+        }
         .confirmationDialog("Aktion starten?", isPresented: Binding(
             get: { pendingPathAction != nil },
             set: { if !$0 { pendingPathAction = nil } }
@@ -140,58 +135,44 @@ struct DataPathsScreen: View {
 
     private func deletePairs(at offsets: IndexSet) {
         for index in offsets.sorted(by: >) {
-            guard pairs.indices.contains(index) else { continue }
-            let pair = pairs[index]
-            let referencedBy = model.jobDefinitions.filter { $0.dataPathIDs.contains(pair.id) }
+            guard configurationDraft.pairs.indices.contains(index) else { continue }
+            let pair = configurationDraft.pairs[index]
+            let referencedBy = configurationDraft.definitions.filter { $0.dataPathIDs.contains(pair.id) }
             if !referencedBy.isEmpty {
                 localError = "„\(pair.name)“ ist noch \(referencedBy.count) Job(s) zugewiesen. Entferne zuerst diese Zuweisungen."
                 continue
             }
-            pairs.remove(at: index)
-            markDirty()
+            configurationDraft.removePair(at: index)
         }
     }
 
-    private func loadFromModel(force: Bool) {
-        guard force || !isDirty else { return }
-        pairs = model.config?.backup.pairs ?? []
-        isDirty = false
-        draftBaseRevision = model.config?.revision
-    }
-
     private func reload(discardDirty: Bool) async {
-        if isDirty && !discardDirty {
+        if configurationDraft.isDirty && !discardDirty {
             localError = "Ungespeicherte Änderungen wurden nicht verworfen. Speichere sie zuerst oder nutze bei einem Konflikt bewusst „Serverstand laden“."
             return
         }
         await model.reloadConfiguration()
-        loadFromModel(force: true)
+        configurationDraft.load(from: model.config, force: true)
     }
 
     private func save(password: String?) async {
-        guard let draftBaseRevision else {
+        guard let draftBaseRevision = configurationDraft.baseRevision else {
             localError = "Der Serverstand dieses Entwurfs ist unbekannt. Lade die Konfiguration neu."
             return
         }
         if await model.saveConfiguration(
-            pairs: pairs,
-            definitions: model.jobDefinitions,
+            pairs: configurationDraft.pairs,
+            definitions: configurationDraft.definitions,
             baseRevision: draftBaseRevision,
             currentPassword: password
         ) {
-            isDirty = false
             currentPassword = ""
-            loadFromModel(force: true)
+            configurationDraft.load(from: model.config, force: true)
         }
     }
 
     private func saveWithPassword() {
         Task { await save(password: currentPassword) }
-    }
-
-    private func markDirty() {
-        if !isDirty { draftBaseRevision = model.config?.revision }
-        isDirty = true
     }
 }
 
@@ -216,10 +197,8 @@ private enum DataPathAction: Identifiable {
 
 struct JobsScreen: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var configurationDraft: ConfigurationDraftStore
     @Binding var showingSettings: Bool
-    @State private var definitions: [JobDefinition] = []
-    @State private var isDirty = false
-    @State private var draftBaseRevision: String?
     @State private var editor: JobEditorRequest?
     @State private var plan: PlanPresentation?
     @State private var pendingRun: PendingJobRun?
@@ -237,14 +216,14 @@ struct JobsScreen: View {
                 )
             }
             Section {
-                if definitions.isEmpty {
+                if configurationDraft.definitions.isEmpty {
                     ContentUnavailableView(
                         "Keine Jobs",
                         systemImage: "calendar.badge.plus",
                         description: Text("Jobs legen Zeitplan, Reihenfolge und Ausführung der Datenwege fest.")
                     )
                 } else {
-                    ForEach(Array(definitions.enumerated()), id: \.element.id) { index, definition in
+                    ForEach(Array(configurationDraft.definitions.enumerated()), id: \.element.id) { index, definition in
                         Button {
                             editor = JobEditorRequest(index: index, definition: definition)
                         } label: {
@@ -265,25 +244,24 @@ struct JobsScreen: View {
                                 }
                             } label: { Label("Plan", systemImage: "list.bullet.clipboard") }
                                 .tint(.blue)
-                                .disabled(isDirty)
+                                .disabled(configurationDraft.isDirty)
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             Button(role: .destructive) {
-                                definitions.remove(at: index)
-                                markDirty()
+                                configurationDraft.removeDefinition(at: index)
                             } label: { Label("Löschen", systemImage: "trash") }
                             Button {
                                 pendingRun = PendingJobRun(definition: definition, dryRun: true)
                             } label: { Label("Test", systemImage: "play.circle") }
                                 .tint(.orange)
-                                .disabled(isDirty)
+                                .disabled(configurationDraft.isDirty)
                         }
                     }
                 }
             } header: {
                 Text("Jobdefinitionen")
             } footer: {
-                Text(isDirty ? "Änderungen speichern, bevor du Plan oder Lauf startest." : "Nach links wischen: Plan prüfen. Nach rechts wischen: Probelauf oder Löschen.")
+                Text(configurationDraft.isDirty ? "Änderungen speichern, bevor du Plan oder Lauf startest." : "Nach links wischen: Plan prüfen. Nach rechts wischen: Probelauf oder Löschen.")
             }
         }
         .listStyle(.insetGrouped)
@@ -296,24 +274,19 @@ struct JobsScreen: View {
                 Button { editor = JobEditorRequest(index: nil, definition: nil) } label: {
                     Image(systemName: "plus")
                 }
-                .disabled(model.config?.backup.pairs.isEmpty != false)
+                .disabled(configurationDraft.pairs.isEmpty)
                 .accessibilityLabel("Job hinzufügen")
                 Button("Speichern") { Task { await save(password: nil) } }
-                    .disabled(!isDirty || model.isSavingConfig)
+                    .disabled(!configurationDraft.isDirty || model.isSavingConfig)
             }
         }
         .refreshable { await reload(discardDirty: false) }
         .sheet(item: $editor) { request in
             JobDefinitionEditor(
                 definition: request.definition,
-                paths: model.config?.backup.pairs ?? []
+                paths: configurationDraft.pairs
             ) { updated in
-                if let index = request.index, definitions.indices.contains(index) {
-                    definitions[index] = updated
-                } else {
-                    definitions.append(updated)
-                }
-                markDirty()
+                configurationDraft.upsertDefinition(updated, at: request.index)
             }
         }
         .sheet(item: $plan) { presentation in JobPlanView(plan: presentation.plan) }
@@ -343,8 +316,10 @@ struct JobsScreen: View {
         } message: {
             Text("Prüfe vor einem produktiven Lauf den Plan und die Löschschutz-Einstellungen.")
         }
-        .task { loadFromModel(force: false) }
-        .onChange(of: model.config?.revision) { _, _ in loadFromModel(force: false) }
+        .task { configurationDraft.load(from: model.config) }
+        .onChange(of: model.config?.revision) { _, _ in
+            configurationDraft.load(from: model.config)
+        }
         .alert("Entwurf behalten", isPresented: Binding(
             get: { localError != nil },
             set: { if !$0 { localError = nil } }
@@ -357,51 +332,38 @@ struct JobsScreen: View {
 
     private func pathNames(for definition: JobDefinition) -> String {
         let names = definition.dataPathIDs.compactMap { id in
-            model.config?.backup.pairs.first { $0.id == id }?.name
+            configurationDraft.pairs.first { $0.id == id }?.name
         }
         return names.isEmpty ? "Keine Datenwege" : names.joined(separator: " → ")
     }
 
-    private func loadFromModel(force: Bool) {
-        guard force || !isDirty else { return }
-        definitions = model.jobDefinitions
-        isDirty = false
-        draftBaseRevision = model.config?.revision
-    }
-
     private func reload(discardDirty: Bool) async {
-        if isDirty && !discardDirty {
+        if configurationDraft.isDirty && !discardDirty {
             localError = "Ungespeicherte Job-Änderungen wurden nicht verworfen. Speichere sie zuerst oder nutze bei einem Konflikt bewusst „Serverstand laden“."
             return
         }
         await model.reloadConfiguration()
-        loadFromModel(force: true)
+        configurationDraft.load(from: model.config, force: true)
     }
 
     private func save(password: String?) async {
-        guard let draftBaseRevision else {
+        guard let draftBaseRevision = configurationDraft.baseRevision else {
             localError = "Der Serverstand dieses Entwurfs ist unbekannt. Lade die Konfiguration neu."
             return
         }
         if await model.saveConfiguration(
-            pairs: model.config?.backup.pairs ?? [],
-            definitions: definitions,
+            pairs: configurationDraft.pairs,
+            definitions: configurationDraft.definitions,
             baseRevision: draftBaseRevision,
             currentPassword: password
         ) {
-            isDirty = false
             currentPassword = ""
-            loadFromModel(force: true)
+            configurationDraft.load(from: model.config, force: true)
         }
     }
 
     private func saveWithPassword() {
         Task { await save(password: currentPassword) }
-    }
-
-    private func markDirty() {
-        if !isDirty { draftBaseRevision = model.config?.revision }
-        isDirty = true
     }
 }
 
