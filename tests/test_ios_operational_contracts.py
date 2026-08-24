@@ -239,3 +239,23 @@ def test_native_tappable_rows_use_semantic_controls_with_specific_labels():
     assert 'accessibilityLabel("Datenweg \\(pair.name)' in backups
     assert 'accessibilityLabel("Datenweg \\(pair.name) bearbeiten")' in config
     assert 'accessibilityLabel("Job \\(definition.name) bearbeiten")' in config
+
+
+def test_native_target_browser_can_switch_storage_and_create_folders():
+    api = _swift("Core/APIClient.swift")
+    models = _swift("Core/Models.swift")
+    operations = _swift("Views/OperationalViews.swift")
+    config = _swift("Views/ConfigurationViews.swift")
+
+    assert "func createDirectory(kind: String, parent: String, name: String)" in api
+    assert '"/api/browse/directory"' in api
+    assert "struct CreateDirectoryRequest: Encodable" in models
+    assert 'Picker("Zieltyp", selection: $selectedKind)' in operations
+    assert 'Label("Cloud", systemImage: "icloud")' in operations
+    assert 'Label("Lokal", systemImage: "externaldrive")' in operations
+    assert (
+        'Label("Neuen Ordner anlegen", systemImage: "folder.badge.plus")' in operations
+    )
+    assert "allowsKindSwitch: target == .remote" in operations
+    assert "allowsKindSwitch: target == .remote" in config
+    assert "createDirectory(" in operations

@@ -64,6 +64,7 @@ protocol APIClientProtocol: AnyObject {
     func runRestoreTest(pair: String?) async throws -> ActionResponse
     func browseLocal(path: String) async throws -> BrowseResponse
     func browseRemote(path: String) async throws -> BrowseResponse
+    func createDirectory(kind: String, parent: String, name: String) async throws -> CreateDirectoryResponse
     func getAuditEvents(limit: Int) async throws -> AuditResponse
     func getMaintenanceLogs(limit: Int) async throws -> MaintenanceLogsResponse
     func getDatabaseStatus() async throws -> DatabaseStatus
@@ -100,6 +101,10 @@ protocol APIClientProtocol: AnyObject {
 }
 
 extension APIClientProtocol {
+    func createDirectory(kind: String, parent: String, name: String) async throws -> CreateDirectoryResponse {
+        throw APIError.invalidResponse
+    }
+
     func registerPushDevice(token: String, environment: String, appVersion: String) async throws -> PushRegistrationResponse {
         throw APIError.invalidResponse
     }
@@ -441,6 +446,13 @@ final class APIClient: APIClientProtocol {
 
     func browseRemote(path: String = "") async throws -> BrowseResponse {
         try await get("/api/browse/rclone?path=\(Self.queryEncode(path))")
+    }
+
+    func createDirectory(kind: String, parent: String, name: String) async throws -> CreateDirectoryResponse {
+        try await post(
+            "/api/browse/directory",
+            body: CreateDirectoryRequest(kind: kind, parent: parent, name: name)
+        )
     }
 
     func getAuditEvents(limit: Int = 100) async throws -> AuditResponse {
