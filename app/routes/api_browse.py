@@ -6,12 +6,14 @@ import heapq
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from ..auth import require_auth
 from ..config_store import get_config
+from ..db import get_db
 from ..rclone_args import rclone_subprocess_env
 from ..security import (
     DEFAULT_HIDDEN_REMOTE_PATHS,
@@ -31,6 +33,41 @@ router = APIRouter(
 
 _MAX_ENTRIES = 1000
 _BLOCKED_NAMES = {".snapshot", ".zfs", "__pycache__", "$RECYCLE.BIN"}
+
+
+class CreateDirectoryPayload(BaseModel):
+    kind: Literal["local", "remote"]
+    parent: str = Field(min_length=1, max_length=4096)
+    name: str = Field(min_length=1, max_length=255)
+
+
+def _audit_best_effort(kind: str, path: str) -> None:
+    try:
+        get_db().audit_add(
+            "directory_created",
+            actor="web",
+            details={"kind": kind, "path": path},
+        )
+    except Exception:
+        # Der Ordner ist bereits erstellt; ein Audit-Problem darf die korrekte
+        # API-Antwort nicht in einen scheinbaren Fehler verwandeln.
+        pass
+
+
+def _directory_name(value: str) -> str:
+    name = value.strip()
+    blocked = {entry.casefold() for entry in _BLOCKED_NAMES}
+    if (
+        not name
+        or name in {".", ".."}
+        or name.startswith(".")
+        or name.casefold() in blocked
+        or any(char in name for char in ("/", "\\", "\x00", "\n", "\r"))
+    ):
+        raise HTTPException(
+            400, "Bitte einen einfachen, sichtbaren Ordnernamen eingeben"
+        )
+    return name
 
 
 def _hidden_remote_paths() -> set[str]:
@@ -270,3 +307,83 @@ def browse_local(path: str = "") -> dict[str, Any]:
         "is_root": False,
         "truncated": truncated,
     }
+
+
+@router.post("/directory")
+def create_directory(payload: CreateDirectoryPayload) -> dict[str, Any]:
+    """Legt genau einen sichtbaren Unterordner im aktuellen Browser-Pfad an."""
+    name = _directory_name(payload.name)
+    if payload.kind == "local":
+        roots = _browse_roots()
+        if not roots:
+            raise HTTPException(
+                503, "Keine vorhandenen lokalen Browser-Roots konfiguriert"
+            )
+        parent = ensure_within(Path(payload.parent), roots)
+        if not parent.is_dir():
+            raise HTTPException(404, "Übergeordneter Ordner wurde nicht gefunden")
+        target = ensure_within(parent / name, roots)
+        try:
+            target.mkdir(mode=0o750)
+        except FileExistsError as exc:
+            raise HTTPException(
+                409, "Ein Ordner mit diesem Namen existiert bereits"
+            ) from exc
+        except PermissionError as exc:
+            raise HTTPException(
+                403, "Keine Schreibberechtigung in diesem Ordner"
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(
+                500, f"Ordner konnte nicht angelegt werden: {exc}"
+            ) from exc
+        created_path = str(target)
+    else:
+        parent_text = payload.parent.strip()
+        if (
+            len(parent_text) > 4096
+            or parent_text.startswith("-")
+            or any(char in parent_text for char in ("\x00", "\n", "\r"))
+            or ":" not in parent_text
+        ):
+            raise HTTPException(400, "Remote-Pfad ist ungültig")
+        remote, remote_path = parent_text.split(":", 1)
+        if any(segment == ".." for segment in remote_path.split("/")):
+            raise HTTPException(400, "Pfad darf keine '..'-Segmente enthalten")
+        if remote + ":" not in _rclone_remotes():
+            raise HTTPException(403, "Remote ist nicht konfiguriert")
+        hidden = _hidden_remote_paths()
+        if _is_hidden_remote_path(parent_text, hidden):
+            raise HTTPException(403, "Dieser Remote-Pfad ist im Browser ausgeblendet")
+        created_path = parent_text.rstrip("/") + "/" + name
+        if len(created_path) > 4096:
+            raise HTTPException(400, "Der vollständige Remote-Pfad ist zu lang")
+        if _is_hidden_remote_path(created_path, hidden):
+            raise HTTPException(403, "Dieser Remote-Pfad ist im Browser ausgeblendet")
+        try:
+            names, _truncated = _rclone_directories(parent_text)
+            if any(existing.casefold() == name.casefold() for existing in names):
+                raise HTTPException(
+                    409, "Ein Ordner mit diesem Namen existiert bereits"
+                )
+            result = subprocess.run(
+                ["rclone", "mkdir", "--", created_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                stdin=subprocess.DEVNULL,
+                env=rclone_subprocess_env(),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(504, "rclone Timeout beim Anlegen des Ordners") from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(500, "rclone nicht installiert") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()[:300]
+            raise HTTPException(
+                502,
+                f"Remote-Ordner konnte nicht angelegt werden: {detail or f'exit {result.returncode}'}",
+            )
+
+    _audit_best_effort(payload.kind, created_path)
+    return {"ok": True, "kind": payload.kind, "path": created_path}

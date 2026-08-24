@@ -111,7 +111,8 @@ function app() {
     quick: emptyQuick(),
     picker: {
       show: false, mode: null, idx: null, current: '', parent: null,
-      entries: [], loading: false, search: '', error: '',
+      kind: 'local', paths: { local: '', remote: '' }, isRoot: true,
+      entries: [], loading: false, creating: false, newFolderName: '', search: '', error: '',
     },
     jobModal: {
       show: false, job: null, log: '', loading: false, logLoading: false,
@@ -1865,7 +1866,12 @@ function app() {
     },
 
     openPicker(mode, idx) {
-      this.picker = { show: true, mode, idx, current: '', parent: null, entries: [], loading: true, search: '', error: '' };
+      const kind = this.pickerKindForMode(mode);
+      this.picker = {
+        show: true, mode, idx, kind, current: '', parent: null,
+        paths: { local: '', remote: '' }, isRoot: true,
+        entries: [], loading: true, creating: false, newFolderName: '', search: '', error: '',
+      };
       this.openDialog('pickerDialog');
       this.loadPicker('');
     },
@@ -1873,12 +1879,30 @@ function app() {
     openQuickPicker(mode) { this.openPicker(mode, -1); },
     openPbsPicker(index) { this.openPicker('pbs-target', index); },
 
+    pickerKindForMode(mode = this.picker.mode) {
+      return mode?.endsWith('-remote') || mode === 'remote' ? 'remote' : 'local';
+    },
+
+    pickerCanSwitchKind() {
+      return this.picker.mode?.startsWith('target-') || ['remote', 'remote-local'].includes(this.picker.mode);
+    },
+
+    switchPickerKind(kind) {
+      if (!this.pickerCanSwitchKind() || !['local', 'remote'].includes(kind) || this.picker.kind === kind) return;
+      if (this.picker.mode?.startsWith('target-')) this.picker.mode = `target-${kind}`;
+      else this.picker.mode = kind === 'remote' ? 'remote' : 'remote-local';
+      this.picker.kind = kind;
+      this.picker.search = '';
+      this.picker.error = '';
+      this.loadPicker(this.picker.paths[kind] || '');
+    },
+
     async loadPicker(path) {
       if (path === 'pbs:') { this.pickPath('pbs:'); return; }
       this.picker.loading = true;
       this.picker.error = '';
       this.picker.current = path;
-      const endpoint = this.picker.mode.endsWith('-remote') || this.picker.mode === 'remote' ? '/api/browse/rclone' : '/api/browse/local';
+      const endpoint = this.picker.kind === 'remote' ? '/api/browse/rclone' : '/api/browse/local';
       // 'remote-local': lokaler Browser, Auswahl landet im Remote-Feld (lokal→lokal-Sync)
       const result = await this.api(
         'GET',
@@ -1891,8 +1915,10 @@ function app() {
         this.picker.parent = result.parent;
         this.picker.entries = result.entries || [];
         this.picker.current = result.path || path || '';
+        this.picker.paths[this.picker.kind] = this.picker.current;
+        this.picker.isRoot = result.is_root === true;
         this.picker.error = result.error || '';
-        const cloudRoot = (this.picker.mode.endsWith('-remote') || this.picker.mode === 'remote') && !this.picker.current;
+        const cloudRoot = this.picker.kind === 'remote' && !this.picker.current;
         if (cloudRoot && this.config?.pbs?.enabled) {
           this.picker.entries = [
             { name: 'Proxmox Backup Server', path: 'pbs:', pbs: true },
@@ -1904,6 +1930,37 @@ function app() {
         this.picker.error = 'Verzeichnis konnte nicht geladen werden.';
       }
       this.picker.loading = false;
+    },
+
+    canCreatePickerFolder() {
+      return !this.picker.loading && !this.picker.error
+        && Boolean(this.picker.current) && this.picker.current !== '/' && !this.picker.isRoot;
+    },
+
+    async createPickerFolder() {
+      const name = String(this.picker.newFolderName || '').trim();
+      if (!this.canCreatePickerFolder()) {
+        this.showToast('Öffne zuerst einen lokalen oder Cloud-Ordner.', 'err'); return;
+      }
+      if (!name || name === '.' || name === '..' || name.startsWith('.') || /[\\/\r\n]/.test(name)) {
+        this.showToast('Bitte einen einfachen, sichtbaren Ordnernamen eingeben.', 'err'); return;
+      }
+      this.picker.creating = true;
+      try {
+        const result = await this.api('POST', '/api/browse/directory', {
+          kind: this.picker.kind,
+          parent: this.picker.current,
+          name,
+        }, { requestKey: 'picker-create' });
+        if (this.isStale(result)) return;
+        if (result?.ok) {
+          this.picker.newFolderName = '';
+          await this.loadPicker(result.path);
+          this.showToast(`Ordner angelegt: ${result.path}`);
+        }
+      } finally {
+        this.picker.creating = false;
+      }
     },
 
     pickerEntries() {
@@ -2120,6 +2177,7 @@ function app() {
         password_changed: 'Passwort geändert', config_snapshot_created: 'Snapshot erstellt',
         config_snapshot_restored: 'Snapshot wiederhergestellt', backup_requested: 'Backup angefordert',
         check_requested: 'Check angefordert', quicksync_requested: 'Quick-Sync angefordert',
+        directory_created: 'Ordner angelegt',
       })[type] || type;
     },
 
@@ -2387,6 +2445,7 @@ function app() {
       if (!this.picker.show) return;
       this.picker.show = false;
       requestControllers.get('picker')?.abort();
+      requestControllers.get('picker-create')?.abort();
       this.restoreDialogFocus();
     },
 

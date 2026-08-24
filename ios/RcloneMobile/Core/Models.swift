@@ -1227,6 +1227,18 @@ struct BrowseEntry: Decodable, Identifiable {
     }
 }
 
+struct CreateDirectoryRequest: Encodable {
+    let kind: String
+    let parent: String
+    let name: String
+}
+
+struct CreateDirectoryResponse: Decodable {
+    let ok: Bool
+    let kind: String
+    let path: String
+}
+
 struct AuditResponse: Decodable {
     let ok: Bool
     let events: [AuditEvent]

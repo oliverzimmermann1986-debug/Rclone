@@ -1839,6 +1839,11 @@ input[type="checkbox"], input[type="radio"] {
 .log-toolbar .search-field { width: 210px; }
 .auto-refresh { display: flex; align-items: center; gap: 6px; color: var(--text-soft); font-size: 12px; }
 
+.picker-kind-switch {
+  display: flex; align-items: center; gap: 7px;
+  padding: 12px 18px 0;
+}
+.picker-kind-switch span { margin-left: 4px; color: var(--text-soft); font-size: 12px; }
 .picker-toolbar { display: grid; grid-template-columns: 36px 1fr 210px; gap: 8px; }
 .picker-list {
   min-height: 320px; overflow: auto;
@@ -1876,6 +1881,14 @@ input[type="checkbox"], input[type="radio"] {
   background: var(--surface-3); color: var(--text-soft);
 }
 .picker-select { align-self: center; min-height: 30px; margin-right: 12px; }
+.picker-create-bar {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end; gap: 10px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface-2);
+}
+.picker-create-bar .field { margin: 0; }
 
 .unsaved-bar {
   position: fixed; right: 24px; bottom: 24px; z-index: 80;
@@ -2036,6 +2049,9 @@ html[data-density="compact"] .job-row { min-height: 54px; }
   .modal-footer { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
   .picker-toolbar { grid-template-columns: 36px 1fr; }
   .picker-toolbar .compact-search { grid-column: 1 / -1; }
+  .picker-kind-switch { flex-wrap: wrap; }
+  .picker-kind-switch span { width: 100%; margin: 0; }
+  .picker-create-bar { grid-template-columns: 1fr; }
   .log-toolbar { align-items: stretch; flex-wrap: wrap; }
   .log-toolbar .subheading { width: 100%; }
   .log-toolbar .search-field { flex: 1; width: auto; }

@@ -364,6 +364,47 @@ final class APIClientSessionTests: XCTestCase {
         XCTAssertEqual(components.queryItems?.first(where: { $0.name == "path" })?.value, "pcloud:/Fotos & Familie")
     }
 
+    func testCreateDirectoryUsesProtectedJSONEndpoint() async throws {
+        CreateDirectoryURLProtocol.request = nil
+        CreateDirectoryURLProtocol.requestBody = nil
+        let baseURL = try XCTUnwrap(URL(string: "https://browse.example"))
+        let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
+            forGroupContainerIdentifier: "APIClientCreateDirectoryTests-\(UUID().uuidString)"
+        )
+        cookieStorage.setCookie(try XCTUnwrap(cookie(
+            named: APIClient.csrfCookie,
+            value: "csrf-create-folder",
+            domain: "browse.example"
+        )))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CreateDirectoryURLProtocol.self]
+        configuration.httpCookieStorage = cookieStorage
+        let client = APIClient(
+            baseURL: baseURL,
+            session: URLSession(configuration: configuration),
+            cookieStorage: cookieStorage
+        )
+
+        let result = try await client.createDirectory(
+            kind: "remote",
+            parent: "pcloud:/Fotos",
+            name: "2026 Urlaub"
+        )
+
+        XCTAssertEqual(result.path, "pcloud:/Fotos/2026 Urlaub")
+        let request = try XCTUnwrap(CreateDirectoryURLProtocol.request)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/api/browse/directory")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-CSRF-Token"), "csrf-create-folder")
+        let body = try XCTUnwrap(CreateDirectoryURLProtocol.requestBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+        XCTAssertEqual(json, [
+            "kind": "remote",
+            "parent": "pcloud:/Fotos",
+            "name": "2026 Urlaub"
+        ])
+    }
+
     func testReverseProxyBasePathIsNormalizedAndKeptForEveryEndpoint() async throws {
         BasePathURLProtocol.requestURL = nil
         let normalized = try APIClient.normalizedServerURL(
@@ -585,6 +626,40 @@ private final class BrowseURLProtocol: URLProtocol {
             "entries": [],
             "truncated": false
         ])
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class CreateDirectoryURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var request: URLRequest?
+    nonisolated(unsafe) static var requestBody: Data?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.request = request
+        Self.requestBody = request.httpBody ?? request.httpBodyStream.flatMap { stream in
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }
+                data.append(contentsOf: buffer.prefix(count))
+            }
+            return data
+        }
+        let body = Data(#"{"ok":true,"kind":"remote","path":"pcloud:/Fotos/2026 Urlaub"}"#.utf8)
         let response = HTTPURLResponse(
             url: request.url!, statusCode: 200, httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]
