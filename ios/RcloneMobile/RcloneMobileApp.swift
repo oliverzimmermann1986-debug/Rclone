@@ -43,6 +43,7 @@ private struct AppRootView: View {
                 }
                 return
             }
+            guard !model.isDemoMode else { return }
             if await pushCoordinator.registerIfAlreadyAuthorized() {
                 await registerCurrentPushToken()
             } else if pushPrimerDecision == "notAsked" {

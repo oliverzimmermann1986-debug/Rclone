@@ -58,7 +58,7 @@ Tastaturkürzel: `Strg/Cmd + S` speichert offene Konfigurations- bzw. Filteränd
 
 Unter [`ios/`](ios/) liegt eine dependency-freie SwiftUI-App ab iOS 17. Sie bietet das verdichtete Lagebild, lokale/cloudseitige Kopien mit Dateizahl und Größe, Jobs, Live-Fortschritt samt Watchdog-Status und Abbruch, Laufhistorie mit Logs und sicherem Retry, getrennte Datenwege, Push-Diagnose, Scheduler-Wartungsfenster, Systemdiagnose und PBS-Starts. Fehler-Pushs öffnen direkt den betroffenen Lauf. Seltene oder riskante Aktionen öffnen in nativen Detailansichten und Bestätigungsdialogen.
 
-Das Xcode-Projekt wird mit XcodeGen erzeugt. Ohne eigenen Mac übernimmt Codemagic Build, Signierung und TestFlight-Upload; GitHub Actions kompiliert und testet jede iOS-Änderung mit Xcode 26. Einrichtung, Sicherheitsmodell und den nativen Funktionsumfang beschreibt [`ios/README.md`](ios/README.md).
+Das Xcode-Projekt wird mit XcodeGen erzeugt. Ohne eigenen Mac übernimmt Codemagic Build, Signierung, native App-Store-Screenshots und den Upload zu App Store Connect; GitHub Actions kompiliert und testet jede iOS-Änderung mit Xcode 26. Einrichtung, Sicherheitsmodell und den nativen Funktionsumfang beschreibt [`ios/README.md`](ios/README.md). [Support](https://oliverzimmermann1986-debug.github.io/Rclone/) und [Datenschutz](https://oliverzimmermann1986-debug.github.io/Rclone/datenschutz.html) werden ohne Tracking über GitHub Pages bereitgestellt.
 
 ## Proxmox-Betrieb
 
