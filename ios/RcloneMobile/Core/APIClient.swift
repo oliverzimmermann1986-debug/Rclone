@@ -5,6 +5,7 @@ enum APIError: LocalizedError, Equatable {
     case unauthenticated
     case invalidResponse
     case incompatibleResponse(resource: String)
+    case serverFeatureUnavailable(feature: String)
     case server(status: Int, message: String)
     case loginFailed
     case loginRateLimited(retryAfterSeconds: Int)
@@ -27,6 +28,8 @@ enum APIError: LocalizedError, Equatable {
             "Die Serverantwort konnte nicht geprüft werden. Prüfe, ob die Adresse zu Rclone Sync gehört, und versuche es erneut."
         case let .incompatibleResponse(resource):
             "\(resource) konnte nicht gelesen werden. Aktualisiere Server oder App und versuche es erneut."
+        case let .serverFeatureUnavailable(feature):
+            "Diese Serverversion unterstützt „\(feature)“ noch nicht. Aktualisiere Rclone Sync auf dem Server und versuche es erneut."
         case let .server(_, message):
             message
         case .loginFailed:
@@ -449,10 +452,15 @@ final class APIClient: APIClientProtocol {
     }
 
     func createDirectory(kind: String, parent: String, name: String) async throws -> CreateDirectoryResponse {
-        try await post(
-            "/api/browse/directory",
-            body: CreateDirectoryRequest(kind: kind, parent: parent, name: name)
-        )
+        do {
+            return try await post(
+                "/api/browse/directory",
+                body: CreateDirectoryRequest(kind: kind, parent: parent, name: name)
+            )
+        } catch APIError.server(let status, let message)
+            where Self.isMissingCreateDirectoryEndpoint(status: status, message: message) {
+            throw APIError.serverFeatureUnavailable(feature: "Neue Ordner")
+        }
     }
 
     func getAuditEvents(limit: Int = 100) async throws -> AuditResponse {
@@ -788,6 +796,16 @@ final class APIClient: APIClientProtocol {
         if let text = detail as? String { return text }
         if let dictionary = detail as? [String: Any], let message = dictionary["message"] as? String { return message }
         return nil
+    }
+
+    private static func isMissingCreateDirectoryEndpoint(status: Int, message: String) -> Bool {
+        if status == 405 { return true }
+        guard status == 404 else { return false }
+        return Set([
+            "not found",
+            "http 404",
+            "serverfehler (http 404)"
+        ]).contains(message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
     }
 
     private static func responseResource(for path: String) -> String {
