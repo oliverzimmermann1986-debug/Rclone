@@ -3,6 +3,16 @@ import XCTest
 @testable import RcloneMobile
 
 final class FixtureDecodingTests: XCTestCase {
+    func testStorePreviewFixtureDecodesFromBundledResource() throws {
+        let fixture = try StorePreviewData.load(bundle: Bundle(for: Self.self))
+
+        XCTAssertTrue(fixture.overview.alerts.isEmpty)
+        XCTAssertEqual(fixture.storage.pairs.count, 2)
+        XCTAssertEqual(fixture.config.backup.jobs.count, 2)
+        XCTAssertGreaterThanOrEqual(fixture.jobs.count, 3)
+        XCTAssertTrue(fixture.doctor.ok)
+    }
+
     func testOverviewDecodesSharedBackendContract() throws {
         let overview: OverviewResponse = try decode("diagnostics_overview")
 

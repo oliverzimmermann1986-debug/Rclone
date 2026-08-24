@@ -226,6 +226,21 @@ private struct RunsListView: View {
         let selectedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let offset = jobs.count
         defer { if loadingGeneration == generation { loadingGeneration = nil } }
+        if model.isDemoMode {
+            let normalizedQuery = selectedQuery.lowercased()
+            let filtered = model.jobs.filter { job in
+                (selectedKind.isEmpty || job.kind == selectedKind)
+                    && (selectedStatus.isEmpty || job.status == selectedStatus)
+                    && (normalizedQuery.isEmpty
+                        || String(job.id).contains(normalizedQuery)
+                        || (job.definitionName ?? "").lowercased().contains(normalizedQuery))
+            }
+            guard generation == requestGeneration else { return }
+            jobs = Array(filtered.prefix(pageSize))
+            total = filtered.count
+            errorMessage = nil
+            return
+        }
         do {
             let response = try await model.withCurrentClient {
                 try await $0.searchJobs(
@@ -248,6 +263,10 @@ private struct RunsListView: View {
     }
 
     private func prepareCSV() async {
+        if model.isDemoMode {
+            errorMessage = "Der CSV-Export ist in der lokalen Vorschau deaktiviert."
+            return
+        }
         let generation = requestGeneration
         let selectedKind = kind
         let selectedStatus = status
@@ -378,6 +397,13 @@ struct RunDetailView: View {
         .navigationTitle("Lauf #\(job.id)")
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            if model.isDemoMode {
+                detail = job
+                log = "Demo-Protokoll\nÜbertragung abgeschlossen\nPrüfungen: erfolgreich"
+                isDetailLoading = false
+                isLogLoading = false
+                return
+            }
             async let detailTask: Void = loadDetail()
             async let logTask: Void = loadLog()
             _ = await (detailTask, logTask)
