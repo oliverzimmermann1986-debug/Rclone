@@ -544,9 +544,7 @@ def test_native_f14_revision_safety_history_and_run_all_contracts():
     assert "model.runBackup()" not in dashboard
     assert "getJobDefinitions()" not in app_model
     assert "jobDefinitions = newConfig.backup.jobs" in app_model
-    assert configuration.count(
-        "if configurationDraft.isDirty && !discardDirty"
-    ) == 2
+    assert configuration.count("if configurationDraft.isDirty && !discardDirty") == 2
     assert configuration.count("Ungespeicherte") >= 2
     assert "searchJobs(" in backups
     assert "downloadJobsCSV(" in backups
@@ -573,14 +571,20 @@ def test_native_configuration_draft_is_shared_across_data_paths_and_jobs():
 
     assert "@StateObject private var configurationDraft" in root
     assert ".environmentObject(configurationDraft)" in root
-    assert configuration.count(
-        "@EnvironmentObject private var configurationDraft: ConfigurationDraftStore"
-    ) == 2
+    assert (
+        configuration.count(
+            "@EnvironmentObject private var configurationDraft: ConfigurationDraftStore"
+        )
+        == 2
+    )
     assert "paths: configurationDraft.pairs" in configuration
     assert "pairs: configurationDraft.pairs" in configuration
     assert "definitions: configurationDraft.definitions" in configuration
     assert "func upsertPair(_ pair: PairConfig, at index: Int?)" in draft_store
-    assert "func upsertDefinition(_ definition: JobDefinition, at index: Int?)" in draft_store
+    assert (
+        "func upsertDefinition(_ definition: JobDefinition, at index: Int?)"
+        in draft_store
+    )
 
 
 def test_native_pbs_configuration_is_revision_safe_and_feature_complete():
