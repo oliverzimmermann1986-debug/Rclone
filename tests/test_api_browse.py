@@ -6,6 +6,20 @@ from fastapi import HTTPException
 from app.routes import api_browse
 
 
+def test_create_directory_route_is_registered_on_full_app():
+    from app.main import app
+
+    # FastAPI keeps included routers lazy in current releases, so inspecting
+    # app.routes directly does not expose their individual paths.
+    assert str(app.url_path_for("create_directory")) == "/api/browse/directory"
+    route = next(
+        route
+        for route in api_browse.router.routes
+        if getattr(route, "name", None) == "create_directory"
+    )
+    assert "POST" in route.methods
+
+
 def test_pcloud_crypto_folder_is_hidden_from_remote_browser(monkeypatch):
     monkeypatch.setattr(api_browse, "_rclone_remotes", lambda: ["pcloud:"])
     monkeypatch.setattr(

@@ -41,6 +41,26 @@ struct LoginView: View {
                     loginButton
                         .padding(.top, 22)
 
+                    Button {
+                        focusedField = nil
+                        model.enterDemoMode()
+                    } label: {
+                        Label("App mit Beispieldaten ansehen", systemImage: "sparkles.rectangle.stack")
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity, minHeight: 48)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .padding(.top, 10)
+                    .accessibilityHint("Öffnet eine lokale, unveränderliche Vorschau ohne Server und ohne echte Daten.")
+
+                    Text("Die Vorschau läuft vollständig auf diesem iPhone und verbindet sich mit keinem Server.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 8)
+
                     Label("Die App speichert dein Passwort nicht. Es wird zur Anmeldung an den angegebenen Server gesendet.", systemImage: "lock.shield")
                         .font(.footnote)
                         .foregroundStyle(.secondary)

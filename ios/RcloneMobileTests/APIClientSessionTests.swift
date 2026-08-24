@@ -12,6 +12,10 @@ final class APIClientSessionTests: XCTestCase {
             APIError.incompatibleResponse(resource: "Anmeldung").errorDescription,
             "Anmeldung konnte nicht gelesen werden. Aktualisiere Server oder App und versuche es erneut."
         )
+        XCTAssertEqual(
+            APIError.serverFeatureUnavailable(feature: "Neue Ordner").errorDescription,
+            "Diese Serverversion unterstützt „Neue Ordner“ noch nicht. Aktualisiere Rclone Sync auf dem Server und versuche es erneut."
+        )
         XCTAssertFalse(APIError.invalidResponse.errorDescription?.contains("HTTP") == true)
     }
 
@@ -405,6 +409,33 @@ final class APIClientSessionTests: XCTestCase {
         ])
     }
 
+    func testCreateDirectoryExplainsMissingServerEndpoint() async throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://old-server.example"))
+        let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
+            forGroupContainerIdentifier: "APIClientMissingCreateDirectoryTests-\(UUID().uuidString)"
+        )
+        cookieStorage.setCookie(try XCTUnwrap(cookie(
+            named: APIClient.csrfCookie,
+            value: "csrf-create-folder",
+            domain: "old-server.example"
+        )))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MissingCreateDirectoryURLProtocol.self]
+        configuration.httpCookieStorage = cookieStorage
+        let client = APIClient(
+            baseURL: baseURL,
+            session: URLSession(configuration: configuration),
+            cookieStorage: cookieStorage
+        )
+
+        do {
+            _ = try await client.createDirectory(kind: "remote", parent: "pcloud:", name: "Neu")
+            XCTFail("An older server must report the unavailable feature")
+        } catch let error as APIError {
+            XCTAssertEqual(error, .serverFeatureUnavailable(feature: "Neue Ordner"))
+        }
+    }
+
     func testReverseProxyBasePathIsNormalizedAndKeptForEveryEndpoint() async throws {
         BasePathURLProtocol.requestURL = nil
         let normalized = try APIClient.normalizedServerURL(
@@ -662,6 +693,24 @@ private final class CreateDirectoryURLProtocol: URLProtocol {
         let body = Data(#"{"ok":true,"kind":"remote","path":"pcloud:/Fotos/2026 Urlaub"}"#.utf8)
         let response = HTTPURLResponse(
             url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class MissingCreateDirectoryURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let body = Data(#"{"detail":"Not Found"}"#.utf8)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 404, httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

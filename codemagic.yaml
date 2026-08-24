@@ -33,7 +33,7 @@ workflows:
       - name: Validate shared native API contracts and release version tooling
         script: |
           cd "$CM_BUILD_DIR"
-          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_version.py
+          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_version.py tests/test_ios_app_store_release.py
       - name: Install XcodeGen
         script: brew install xcodegen
       - name: Generate Xcode project
@@ -43,8 +43,7 @@ workflows:
       - name: Apply App Store signing profiles
         script: |
           xcode-project use-profiles \
-            --project "$CM_BUILD_DIR/$XCODE_PROJECT" \
-            --custom-export-options='{"testFlightInternalTestingOnly": true}'
+            --project "$CM_BUILD_DIR/$XCODE_PROJECT"
       - name: Set unique build number
         script: |
           case "${BUILD_NUMBER:-}" in
@@ -68,6 +67,45 @@ workflows:
             -scheme "$XCODE_SCHEME" \
             -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
             CODE_SIGNING_ALLOWED=NO
+      - name: Capture localized App Store screenshots
+        script: |
+          SCREENSHOT_DEVICE="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = [d for runtime in json.load(sys.stdin)["devices"].values() for d in runtime if d.get("isAvailable")]
+          preferred = ["iPhone 17 Pro Max", "iPhone 17 Pro", "iPhone 17"]
+          for name in preferred:
+              match = next((d for d in devices if d.get("name") == name), None)
+              if match:
+                  print(match["udid"])
+                  break
+          else:
+              raise SystemExit("Kein unterstützter iPhone-Simulator gefunden")
+          ')"
+          xcrun simctl boot "$SCREENSHOT_DEVICE" 2>/dev/null || true
+          xcrun simctl bootstatus "$SCREENSHOT_DEVICE" -b
+          SCREENSHOT_DERIVED="$CM_BUILD_DIR/build/store-preview-derived"
+          xcodebuild build \
+            -project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -destination "platform=iOS Simulator,id=$SCREENSHOT_DEVICE" \
+            -derivedDataPath "$SCREENSHOT_DERIVED" \
+            CODE_SIGNING_ALLOWED=NO
+          SCREENSHOT_APP="$(find "$SCREENSHOT_DERIVED/Build/Products" -path '*Release-iphonesimulator/RcloneMobile.app' -print -quit)"
+          test -n "$SCREENSHOT_APP"
+          xcrun simctl install "$SCREENSHOT_DEVICE" "$SCREENSHOT_APP"
+          SCREENSHOT_DIR="$CM_BUILD_DIR/build/app-store-screenshots"
+          mkdir -p "$SCREENSHOT_DIR/raw"
+          for screen in dashboard paths jobs system; do
+            xcrun simctl terminate "$SCREENSHOT_DEVICE" de.oliverzimmermann.rclonesync 2>/dev/null || true
+            xcrun simctl launch "$SCREENSHOT_DEVICE" de.oliverzimmermann.rclonesync \
+              --args -AppleLanguages '(de)' -AppleLocale de_DE --store-preview "$screen" >/dev/null
+            sleep 2
+            xcrun simctl io "$SCREENSHOT_DEVICE" screenshot "$SCREENSHOT_DIR/raw/$screen.png"
+            sips --resampleHeightWidth 2688 1242 "$SCREENSHOT_DIR/raw/$screen.png" \
+              --out "$SCREENSHOT_DIR/$screen-1242x2688.png" >/dev/null
+          done
+          rm -rf "$SCREENSHOT_DIR/raw"
       - name: Build signed IPA
         script: |
           xcode-project build-ipa \
@@ -90,6 +128,7 @@ workflows:
           test -f "$APP_PATH/Assets.car"
     artifacts:
       - build/ios/ipa/*.ipa
+      - build/app-store-screenshots/*.png
       - /tmp/xcodebuild_logs/*.log
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
     publishing:

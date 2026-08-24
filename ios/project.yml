@@ -43,6 +43,8 @@ targets:
         buildPhase: resources
       - path: ../contracts/native_read_contract_v1.json
         buildPhase: resources
+      - path: RcloneMobile/StorePreviewData.json
+        buildPhase: resources
     dependencies:
       - target: RcloneMobile
     settings:
