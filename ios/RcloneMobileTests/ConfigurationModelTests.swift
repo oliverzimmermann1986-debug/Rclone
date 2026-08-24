@@ -197,3 +197,67 @@ final class ConfigurationModelTests: XCTestCase {
         XCTAssertEqual(target["schedule"] as? String, "manual")
     }
 }
+
+@MainActor
+final class ConfigurationDraftStoreTests: XCTestCase {
+    func testUnsavedSecondPairIsImmediatelyAvailableToJobDraft() {
+        let photos = pair(id: "photos", name: "Fotos")
+        let recipes = pair(id: "recipes", name: "Rezepte")
+        let store = ConfigurationDraftStore()
+        store.load(from: snapshot(revision: "revision-1", pairs: [photos]))
+
+        store.upsertPair(recipes, at: nil)
+        store.upsertDefinition(
+            JobDefinition(id: "daily", name: "Täglich", dataPathIDs: [recipes.id]),
+            at: nil
+        )
+
+        XCTAssertEqual(store.pairs.map(\.name), ["Fotos", "Rezepte"])
+        XCTAssertEqual(store.definitions.first?.dataPathIDs, [recipes.id])
+        XCTAssertEqual(store.baseRevision, "revision-1")
+        XCTAssertTrue(store.isDirty)
+    }
+
+    func testDirtyDraftSurvivesBackgroundReloadUntilExplicitDiscard() {
+        let photos = pair(id: "photos", name: "Fotos")
+        let recipes = pair(id: "recipes", name: "Rezepte")
+        let store = ConfigurationDraftStore()
+        store.load(from: snapshot(revision: "revision-1", pairs: [photos]))
+        store.upsertPair(recipes, at: nil)
+
+        store.load(from: snapshot(revision: "revision-2", pairs: [photos]))
+        XCTAssertEqual(store.pairs.map(\.name), ["Fotos", "Rezepte"])
+        XCTAssertEqual(store.baseRevision, "revision-1")
+
+        store.load(from: snapshot(revision: "revision-2", pairs: [photos]), force: true)
+        XCTAssertEqual(store.pairs.map(\.name), ["Fotos"])
+        XCTAssertEqual(store.baseRevision, "revision-2")
+        XCTAssertFalse(store.isDirty)
+    }
+
+    private func pair(id: String, name: String) -> PairConfig {
+        PairConfig(
+            stableID: id,
+            name: name,
+            local: "/mnt/\(name.lowercased())",
+            remote: "cloud:\(name)"
+        )
+    }
+
+    private func snapshot(
+        revision: String,
+        pairs: [PairConfig],
+        jobs: [JobDefinition] = []
+    ) -> ConfigSnapshot {
+        ConfigSnapshot(
+            revision: revision,
+            backup: BackupConfig(
+                enabled: true,
+                timezone: "Europe/Berlin",
+                defaultSchedule: nil,
+                pairs: pairs,
+                jobs: jobs
+            )
+        )
+    }
+}
