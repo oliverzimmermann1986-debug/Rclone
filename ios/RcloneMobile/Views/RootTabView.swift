@@ -2,8 +2,12 @@ import SwiftUI
 
 struct RootTabView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var selectedTab = 0
+    @State private var selectedTab: Int
     @State private var showingSettings = false
+
+    init(initialTab: Int = StorePreviewMode.initialTab) {
+        _selectedTab = State(initialValue: initialTab)
+    }
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -75,6 +79,10 @@ private struct SettingsView: View {
                 Section("Verbindung") {
                     LabeledContent("Server", value: model.serverAddress)
                     LabeledContent("Benutzer", value: model.savedUsername)
+                    if model.isDemoMode {
+                        Label("Nur lokale Beispieldaten", systemImage: "checkmark.shield")
+                            .foregroundStyle(.green)
+                    }
                     if let version = model.overview?.app.version {
                         LabeledContent("Server-Version", value: version)
                     }
@@ -84,9 +92,17 @@ private struct SettingsView: View {
                     LabeledContent("TestFlight-Build", value: appBuild)
                 }
                 Section {
-                    Button("Abmelden", role: .destructive) { confirmLogout = true }
+                    Button(model.isDemoMode ? "Vorschau beenden" : "Abmelden", role: model.isDemoMode ? nil : .destructive) {
+                        if model.isDemoMode {
+                            Task { await model.logout(); dismiss() }
+                        } else {
+                            confirmLogout = true
+                        }
+                    }
                 } footer: {
-                    Text("Die Abmeldung beendet aus Sicherheitsgründen alle aktiven Administrationssitzungen.")
+                    Text(model.isDemoMode
+                        ? "Die Vorschau enthält keine echten Server- oder Dateidaten."
+                        : "Die Abmeldung beendet aus Sicherheitsgründen alle aktiven Administrationssitzungen.")
                 }
             }
             .navigationTitle("Konto")

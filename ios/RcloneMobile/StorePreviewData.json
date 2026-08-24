@@ -1,0 +1,72 @@
+{
+  "overview": {
+    "app": {"version": "2.2.1", "timezone": "Europe/Berlin"},
+    "system": {
+      "hostname": "backup-home",
+      "platform": "Linux",
+      "kernel": "6.8.12",
+      "python": "3.13.5",
+      "virtualization": "lxc",
+      "addresses": ["192.168.1.67"],
+      "uptime_seconds": 864000,
+      "cpu": {"count": 4, "capacity": 4.0, "source": "cgroup-v2", "load_1": 0.31, "load_5": 0.27, "load_15": 0.22, "load_percent": 18.0},
+      "memory": {"total_bytes": 4294967296, "available_bytes": 2791728742, "used_bytes": 1503238554, "percent_used": 35.0, "source": "cgroup-v2"},
+      "pids": {"current": 47, "max": 512, "percent_used": 9.2},
+      "data_disk": {"path": "/opt/rclone-sync/data", "total_bytes": 536870912000, "used_bytes": 187904819200, "free_bytes": 348966092800, "percent_used": 35.0}
+    },
+    "services": {
+      "web": {"enabled": "enabled", "active": "active"},
+      "scheduler": {"enabled": "enabled", "active": "active", "configured_enabled": true, "control": {"paused": false, "until": null, "reason": "", "actor": "system"}}
+    },
+    "pairs": {
+      "total": 2,
+      "enabled": 2,
+      "scheduled": 2,
+      "manual": 0,
+      "destructive": 0,
+      "health": [
+        {"name": "Fotos", "history_key": "rclone:id:fotos", "direction": "push", "mode": "copy", "jobs": [{"id": "job-fotos", "name": "Fotos täglich", "schedule": "0 3 * * *"}], "next_run": 1787619600, "last_status": "ok", "last_run": 1787560200, "job_id": 104, "overdue": false, "error": null},
+        {"name": "Dokumente", "history_key": "rclone:id:dokumente", "direction": "push", "mode": "copy", "jobs": [{"id": "job-dokumente", "name": "Dokumente abends", "schedule": "0 22 * * *"}], "next_run": 1787608800, "last_status": "ok", "last_run": 1787558280, "job_id": 103, "overdue": false, "error": null}
+      ]
+    },
+    "jobs": {
+      "last": {"id": 104, "kind": "backup", "status": "ok", "started_at": 1787560000, "ended_at": 1787560200, "log_file": "/logs/104.log", "definition_id": "job-fotos", "definition_name": "Fotos täglich", "config_revision": "demo-revision"},
+      "last_success": {"id": 104, "kind": "backup", "status": "ok", "started_at": 1787560000, "ended_at": 1787560200, "log_file": "/logs/104.log"},
+      "last_error": null
+    },
+    "alerts": [],
+    "generated_at": 1787560200
+  },
+  "storage": {
+    "pairs": [
+      {"name": "Fotos", "local": "/mnt/medien/Fotos", "remote": "pcloud:/Fotos", "direction": "push", "source": "/mnt/medien/Fotos", "target": "pcloud:/Fotos", "local_disk": {"path": "/mnt/medien/Fotos", "exists": true, "total_bytes": 536870912000, "free_bytes": 348966092800, "percent_used": 35.0}, "last_sync": 1787560200, "last_transferred": "1,8 GB", "source_size": {"path": "/mnt/medien/Fotos", "count": 18432, "bytes": 128849018880, "measured_at": 1787560200, "measurement_status": "fresh"}, "target_size": {"path": "pcloud:/Fotos", "count": 18432, "bytes": 128849018880, "measured_at": 1787560200, "measurement_status": "fresh"}},
+      {"name": "Dokumente", "local": "/mnt/daten/Dokumente", "remote": "pcloud:/Dokumente", "direction": "push", "source": "/mnt/daten/Dokumente", "target": "pcloud:/Dokumente", "local_disk": {"path": "/mnt/daten/Dokumente", "exists": true, "total_bytes": 536870912000, "free_bytes": 348966092800, "percent_used": 35.0}, "last_sync": 1787558280, "last_transferred": "84 MB", "source_size": {"path": "/mnt/daten/Dokumente", "count": 3261, "bytes": 8589934592, "measured_at": 1787560200, "measurement_status": "fresh"}, "target_size": {"path": "pcloud:/Dokumente", "count": 3261, "bytes": 8589934592, "measured_at": 1787560200, "measurement_status": "fresh"}}
+    ],
+    "measurement": {"state": "fresh", "total": 2, "loaded": 2, "failed": 0, "stale": 0, "measurement_error": null, "measured_at": 1787560200}
+  },
+  "config": {
+    "_revision": "demo-revision",
+    "backup": {
+      "enabled": true,
+      "timezone": "Europe/Berlin",
+      "default_schedule": "0 3 * * *",
+      "pairs": [
+        {"id": "path-fotos", "name": "Fotos", "local": "/mnt/medien/Fotos", "remote": "pcloud:/Fotos", "direction": "push", "mode": "copy", "enabled": true, "allow_delete": false},
+        {"id": "path-dokumente", "name": "Dokumente", "local": "/mnt/daten/Dokumente", "remote": "pcloud:/Dokumente", "direction": "push", "mode": "copy", "enabled": true, "allow_delete": false}
+      ],
+      "jobs": [
+        {"id": "job-fotos", "name": "Fotos täglich", "enabled": true, "data_path_ids": ["path-fotos"], "schedule": "0 3 * * *", "execution_mode": "sequential", "max_parallel": 1, "retry_minutes": 60},
+        {"id": "job-dokumente", "name": "Dokumente abends", "enabled": true, "data_path_ids": ["path-dokumente"], "schedule": "0 22 * * *", "execution_mode": "sequential", "max_parallel": 1, "retry_minutes": 60}
+      ]
+    }
+  },
+  "jobs": [
+    {"id": 104, "kind": "backup", "status": "ok", "started_at": 1787560000, "ended_at": 1787560200, "log_file": "/logs/104.log", "definition_id": "job-fotos", "definition_name": "Fotos täglich", "config_revision": "demo-revision"},
+    {"id": 103, "kind": "backup", "status": "ok", "started_at": 1787558100, "ended_at": 1787558280, "log_file": "/logs/103.log", "definition_id": "job-dokumente", "definition_name": "Dokumente abends", "config_revision": "demo-revision"},
+    {"id": 102, "kind": "check", "status": "ok", "started_at": 1787475600, "ended_at": 1787475654, "log_file": "/logs/102.log", "definition_id": "job-fotos", "definition_name": "Fotos prüfen", "config_revision": "demo-revision"},
+    {"id": 101, "kind": "backup", "status": "ok", "started_at": 1787472000, "ended_at": 1787472240, "log_file": "/logs/101.log", "definition_id": "job-fotos", "definition_name": "Fotos täglich", "config_revision": "demo-revision"}
+  ],
+  "doctor": {"ok": true, "level": "ok", "checks": [{"name": "Konfiguration", "level": "ok", "message": "Schema und Werte gültig"}, {"name": "rclone", "level": "ok", "message": "Remote erreichbar"}, {"name": "Zeitplan", "level": "ok", "message": "Scheduler aktiv"}], "generated_at": 1787560200},
+  "progress": {"running": false, "job_id": null, "started_at": null, "elapsed_sec": 0, "pairs": [], "total_pairs": 0, "done_pairs": 0, "last": {"id": 104, "kind": "backup", "status": "ok", "started_at": 1787560000, "ended_at": 1787560200, "log_file": "/logs/104.log"}},
+  "pbs": {"enabled": false, "client_available": true, "repository": "", "namespace": "", "running": false, "running_job": null, "targets": []}
+}

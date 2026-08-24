@@ -1,4 +1,4 @@
-# TestFlight-Veröffentlichung ohne eigenen Mac
+# TestFlight- und App-Store-Veröffentlichung ohne eigenen Mac
 
 Das Repository ist vollständig für Codemagic vorbereitet. Der Bundle Identifier lautet:
 
@@ -42,9 +42,14 @@ Die Pipeline:
 4. setzt eine eindeutige Buildnummer,
 5. führt die iOS-Unit-Tests auf einem iPhone-17-Simulator aus,
 6. erstellt die signierte IPA und
-7. lädt sie zu App Store Connect/TestFlight hoch.
+7. erzeugt echte, lokalisierte App-Store-Screenshots aus dem nativen Simulator,
+8. baut eine öffentlich verteilbare IPA und lädt sie zu App Store Connect/TestFlight hoch.
 
 Nach Apples Verarbeitung erscheint der Build unter **TestFlight**. Für interne Tests eine interne Testergruppe anlegen und den Build hinzufügen. Externe Tester benötigen beim ersten Build eine TestFlight-Betaprüfung.
+
+Der Export ist nicht auf interne TestFlight-Gruppen beschränkt. Derselbe verarbeitete Build kann deshalb auch unter **App Store → iOS-App** ausgewählt und nach Pflege der Metadaten zur öffentlichen Prüfung eingereicht werden. Die Veröffentlichung bleibt in App Store Connect bewusst auf **manuell**, damit ein genehmigter Build nicht ungeplant live geht.
+
+Für Apples Prüfung steht auf der Anmeldeseite eine vollständig lokale Vorschau mit Beispieldaten bereit. Sie benötigt weder private Serverzugänge noch eine Netzwerkverbindung. Die vorbereiteten Texte, URLs und Prüferhinweise stehen in [`APP_STORE_METADATA.md`](APP_STORE_METADATA.md).
 
 ## Sicherheitsregeln
 

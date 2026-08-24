@@ -83,6 +83,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var requestedRunID: Int?
     @Published private(set) var batchDefinitions: [BatchDefinitionState] = []
     @Published private(set) var batchIsRunning = false
+    @Published private(set) var isDemoMode = false
 
     private(set) var client: (any APIClientProtocol)?
     private var registeredPushToken: String?
@@ -103,10 +104,12 @@ final class AppModel: ObservableObject {
     private var knownPushTokens: Set<String> = []
 
     var serverAddress: String {
+        if isDemoMode { return "Sichere Demo · keine Serververbindung" }
         defaults.string(forKey: "serverAddress") ?? ""
     }
 
     var savedUsername: String {
+        if isDemoMode { return "Vorschau" }
         defaults.string(forKey: "username") ?? "admin"
     }
 
@@ -128,6 +131,10 @@ final class AppModel: ObservableObject {
     }
 
     func restoreSession() async {
+        if StorePreviewMode.isLaunchEnabled {
+            enterDemoMode()
+            return
+        }
         let generation = beginSessionTransition()
         errorMessage = nil
         guard !serverAddress.isEmpty else {
@@ -404,6 +411,39 @@ final class AppModel: ObservableObject {
         } catch is CancellationError {
         } catch {
             errorMessage = userMessage(for: error)
+        }
+    }
+
+    func enterDemoMode() {
+        beginSessionTransition()
+        clearSessionState()
+        do {
+            let fixture = try StorePreviewData.load()
+            overview = fixture.overview
+            storage = fixture.storage
+            config = fixture.config
+            jobDefinitions = fixture.config.backup.jobs
+            jobs = fixture.jobs
+            doctor = fixture.doctor
+            progress = fixture.progress
+            pbs = fixture.pbs
+            overviewState = .loaded
+            storageState = .loaded
+            configState = .loaded
+            jobsState = .loaded
+            pbsState = .loaded
+            storageSizeState = StorageSizeState(
+                status: .loaded,
+                message: nil,
+                lastUpdated: Date(timeIntervalSince1970: fixture.overview.generatedAt)
+            )
+            progressLastSuccessAt = Date(timeIntervalSince1970: fixture.overview.generatedAt)
+            doctorLastCheckedAt = Date(timeIntervalSince1970: fixture.doctor.generatedAt)
+            isDemoMode = true
+            phase = .signedIn
+        } catch {
+            errorMessage = "Die lokale Vorschau konnte nicht geladen werden."
+            phase = .signedOut
         }
     }
 
@@ -799,6 +839,11 @@ final class AppModel: ObservableObject {
     }
 
     func logout() async {
+        if isDemoMode {
+            beginSessionTransition()
+            clearSessionState()
+            return
+        }
         let exitingClient = client
         let exitingServer = serverAddress
         let pendingRegistration = pushSyncTask
@@ -1237,6 +1282,7 @@ final class AppModel: ObservableObject {
         runTrackingTask = nil
         batchDefinitions = []
         batchIsRunning = false
+        isDemoMode = false
         phase = .signedOut
     }
 
