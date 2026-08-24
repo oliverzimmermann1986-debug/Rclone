@@ -105,12 +105,12 @@ final class AppModel: ObservableObject {
 
     var serverAddress: String {
         if isDemoMode { return "Sichere Demo · keine Serververbindung" }
-        defaults.string(forKey: "serverAddress") ?? ""
+        return defaults.string(forKey: "serverAddress") ?? ""
     }
 
     var savedUsername: String {
         if isDemoMode { return "Vorschau" }
-        defaults.string(forKey: "username") ?? "admin"
+        return defaults.string(forKey: "username") ?? "admin"
     }
 
     var progressIsStale: Bool {
