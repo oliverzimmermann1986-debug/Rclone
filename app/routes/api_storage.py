@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,7 @@ from fastapi import APIRouter, Depends
 from ..auth import require_auth
 from ..config_store import get_config
 from ..db import get_db
-from ..jobs.rclone_sync import _is_remote
+from ..jobs.rclone_sync import _filter_args, _is_remote
 from ..jobs.scheduler import rclone_history_key
 from ..rclone_args import rclone_subprocess_env
 from ..security import require_csrf
@@ -54,9 +55,9 @@ _SIZE_MEASUREMENT_WORKERS = _bounded_env_int(
     "RCLONE_SIZE_MEASUREMENT_WORKERS", 8, 2, 16
 )
 _size_cache_lock = threading.Lock()
-_size_cache: OrderedDict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = (
-    OrderedDict()
-)
+_size_cache: OrderedDict[
+    tuple[str, str, str, str, tuple[str, ...]], tuple[float, dict[str, Any]]
+] = OrderedDict()
 
 
 def _disk_usage(path: str) -> dict[str, Any]:
@@ -79,30 +80,58 @@ def _disk_usage(path: str) -> dict[str, Any]:
         return {"path": path, "exists": True, "error": str(exc)}
 
 
-def _rclone_size(remote: str, timeout: float = 45) -> dict[str, Any]:
+def _rclone_size(
+    remote: str, timeout: float = 45, filter_args: Sequence[str] = ()
+) -> dict[str, Any]:
     if not remote:
         return {"path": remote, "error": "Pfad fehlt"}
     cache_dir = os.getenv("RCLONE_CACHE_DIR", "/opt/rclone-sync/data/.rclone-cache")
     try:
         result = subprocess.run(
-            ["rclone", "size", "--json", "--cache-dir", cache_dir, "--", remote],
+            [
+                "rclone",
+                "size",
+                "--json",
+                "--cache-dir",
+                cache_dir,
+                *(str(value) for value in filter_args),
+                "--",
+                remote,
+            ],
             capture_output=True,
             text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
             env=rclone_subprocess_env(),
         )
+        data: dict[str, Any] | None = None
+        try:
+            parsed = json.loads(result.stdout) if result.stdout.strip() else None
+            if isinstance(parsed, dict):
+                data = parsed
+        except json.JSONDecodeError:
+            if result.returncode == 0:
+                raise
+
         if result.returncode == 0:
-            data = json.loads(result.stdout or "{}")
+            data = data or {}
             return {
                 "path": remote,
                 "count": data.get("count"),
                 "bytes": data.get("bytes"),
             }
-        return {
+        error = (result.stderr or result.stdout).strip()[:300]
+        partial = {
             "path": remote,
-            "error": (result.stderr or result.stdout).strip()[:300],
+            "error": error,
         }
+        if (
+            data is not None
+            and isinstance(data.get("count"), int)
+            and isinstance(data.get("bytes"), int)
+        ):
+            partial.update(count=data["count"], bytes=data["bytes"])
+        return partial
     except subprocess.TimeoutExpired:
         return {"path": remote, "error": "Timeout"}
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -110,14 +139,15 @@ def _rclone_size(remote: str, timeout: float = 45) -> dict[str, Any]:
 
 
 def _size_cache_key(
-    pair: dict[str, Any], side: str, path: str
-) -> tuple[str, str, str, str]:
+    pair: dict[str, Any], side: str, path: str, filter_args: Sequence[str] = ()
+) -> tuple[str, str, str, str, tuple[str, ...]]:
     """Bindet Messwerte an Datenweg, Richtung, Seite und exakten Pfad."""
     return (
         rclone_history_key(pair),
         str(pair.get("direction") or "").lower(),
         side,
         path,
+        tuple(str(value) for value in filter_args),
     )
 
 
@@ -136,6 +166,7 @@ def _decorate_measurement(
     state = {
         "fresh": "loaded",
         "cached": "loaded",
+        "partial": "failed",
         "stale": "stale",
         "failed": "failed",
     }.get(status, "failed")
@@ -170,6 +201,7 @@ def _cached_rclone_size(
     side: str,
     path: str,
     *,
+    filter_args: Sequence[str] = (),
     force_refresh: bool = False,
     deadline: float | None = None,
 ) -> dict[str, Any]:
@@ -179,7 +211,8 @@ def _cached_rclone_size(
     scheitert, bleibt ein vorhandener alter Wert ausdrücklich als ``stale``
     erkennbar, statt wie ein frischer Nullwert auszusehen.
     """
-    key = _size_cache_key(pair, side, path)
+    normalized_filter_args = tuple(str(value) for value in filter_args)
+    key = _size_cache_key(pair, side, path, normalized_filter_args)
     now = time.time()
     with _size_cache_lock:
         cached = _size_cache.get(key)
@@ -190,16 +223,22 @@ def _cached_rclone_size(
             )
 
     if deadline is None:
-        result = _rclone_size(path)
+        result = (
+            _rclone_size(path, filter_args=normalized_filter_args)
+            if normalized_filter_args
+            else _rclone_size(path)
+        )
     else:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             result = {"path": path, "error": "Globale Messzeit überschritten"}
         else:
-            result = _rclone_size(
-                path,
-                timeout=min(_SIZE_MEASUREMENT_TIMEOUT_SECONDS, max(0.1, remaining)),
-            )
+            measure_kwargs: dict[str, Any] = {
+                "timeout": min(_SIZE_MEASUREMENT_TIMEOUT_SECONDS, max(0.1, remaining))
+            }
+            if normalized_filter_args:
+                measure_kwargs["filter_args"] = normalized_filter_args
+            result = _rclone_size(path, **measure_kwargs)
     measured_at = time.time()
     if _is_successful_size(result):
         clean = {
@@ -214,6 +253,17 @@ def _cached_rclone_size(
                 _size_cache.popitem(last=False)
         return _decorate_measurement(clean, measured_at=measured_at, status="fresh")
 
+    if isinstance(result.get("count"), int) and isinstance(result.get("bytes"), int):
+        partial = {
+            "path": path,
+            "count": result["count"],
+            "bytes": result["bytes"],
+            "measurement_error": str(
+                result.get("error") or "Messung nur teilweise erfolgreich"
+            ),
+        }
+        return _decorate_measurement(partial, measured_at=measured_at, status="partial")
+
     if cached:
         stale = _decorate_measurement(
             dict(cached[1]), measured_at=cached[0], status="stale"
@@ -226,6 +276,26 @@ def _cached_rclone_size(
         {"path": path, "error": str(result.get("error") or "Messung fehlgeschlagen")},
         measured_at=None,
         status="failed",
+    )
+
+
+def _cached_pair_rclone_size(
+    cfg,
+    pair: dict[str, Any],
+    side: str,
+    path: str,
+    *,
+    force_refresh: bool = False,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """Misst einen Pair-Endpunkt mit denselben Filtern wie der echte Sync."""
+    return _cached_rclone_size(
+        pair,
+        side,
+        path,
+        filter_args=tuple(_filter_args(cfg, pair, "size")),
+        force_refresh=force_refresh,
+        deadline=deadline,
     )
 
 
@@ -332,9 +402,10 @@ def _last_success_by_identity(
 def overview(
     include_remote: bool = False, refresh_sizes: bool = False
 ) -> dict[str, Any]:
+    cfg = get_config()
     pairs = [
         pair
-        for pair in (get_config().get("backup", "pairs", default=[]) or [])
+        for pair in (cfg.get("backup", "pairs", default=[]) or [])
         if isinstance(pair, dict)
     ]
     last_success = _last_success_by_identity(pairs)
@@ -374,7 +445,8 @@ def overview(
         ) as pool:
             futures = {
                 pool.submit(
-                    _cached_rclone_size,
+                    _cached_pair_rclone_size,
+                    cfg,
                     pair,
                     side,
                     str(output[index].get(side) or ""),

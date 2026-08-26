@@ -1,5 +1,7 @@
 """Tests für Quelle/Ziel-Auflösung und Dateizahl/Größe in der Storage-Übersicht."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.routes import api_storage
@@ -25,6 +27,82 @@ def test_resolve_endpoints_by_direction():
 
 def test_blank_size_path_uses_the_same_response_contract():
     assert api_storage._rclone_size("") == {"path": "", "error": "Pfad fehlt"}
+
+
+def test_rclone_size_preserves_parseable_values_after_traversal_error(monkeypatch):
+    def run(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=6,
+            stdout='{"count":214,"bytes":783674923,"sizeless":0}\n',
+            stderr=(
+                'ERROR : backups: failed to open directory "backups": permission denied'
+            ),
+        )
+
+    monkeypatch.setattr(api_storage.subprocess, "run", run)
+
+    result = api_storage._rclone_size("/mnt/data/rezepte")
+
+    assert result["count"] == 214
+    assert result["bytes"] == 783_674_923
+    assert "permission denied" in result["error"]
+
+
+def test_cached_size_exposes_partial_values_without_caching_them_as_complete(
+    monkeypatch,
+):
+    pair = {
+        "id": "recipes",
+        "name": "Rezepte",
+        "local": "/mnt/data/rezepte",
+        "remote": "pcloud:/Rezepte",
+        "direction": "push",
+    }
+    monkeypatch.setattr(
+        api_storage,
+        "_rclone_size",
+        lambda _path: {
+            "path": "/mnt/data/rezepte",
+            "count": 214,
+            "bytes": 783_674_923,
+            "error": "permission denied",
+        },
+    )
+
+    result = api_storage._cached_rclone_size(pair, "source", "/mnt/data/rezepte")
+
+    assert result["count"] == 214
+    assert result["bytes"] == 783_674_923
+    assert result["measurement_status"] == "partial"
+    assert result["measurement_state"] == "failed"
+    assert result["measurement_error"] == "permission denied"
+    assert not api_storage._size_cache
+
+
+def test_overview_measures_with_the_same_pair_filters_as_sync(monkeypatch):
+    pair = {
+        "id": "recipes",
+        "name": "Rezepte",
+        "local": "/mnt/data/rezepte",
+        "remote": "pcloud:/Rezepte",
+        "direction": "push",
+        "exclude": "/.work/**",
+    }
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
+    monkeypatch.setattr(api_storage, "get_db", lambda: _FakeDB())
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+    calls = []
+
+    def measure(path, **kwargs):
+        calls.append((path, kwargs))
+        return {"path": path, "count": 1, "bytes": 2}
+
+    monkeypatch.setattr(api_storage, "_rclone_size", measure)
+
+    api_storage.overview(include_remote=True, refresh_sizes=True)
+
+    assert len(calls) == 2
+    assert all(call[1]["filter_args"] == ("--exclude", "/.work/**") for call in calls)
 
 
 class _FakeConfig:
