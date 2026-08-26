@@ -122,6 +122,7 @@ updated: 2026-08-26T21:18:00+02:00
     production_overview: {result: pass, local_count: 215, cloud_count: 215, local_bytes: 784327422, cloud_bytes: 784327422, measurement_state: loaded}
     guardrail_verdict: accepted
     human_device_confirmation: {result: not_performed, reason: "Production job 49 and the matching overview were accepted as sufficient end-to-end completion evidence; no separate visual iPhone verification was performed."}
+    semantic_index: {result: skipped, reason: "MemPalace is disabled in the project configuration; knowledge-base.md remains the durable fallback."}
 - files_changed:
     - app/routes/api_storage.py
     - tests/test_storage_sizes.py
