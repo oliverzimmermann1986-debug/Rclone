@@ -249,6 +249,10 @@ final class APIClient: APIClientProtocol {
         return url
     }
 
+    static func requiresExplicitInsecureTransportConfirmation(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "http"
+    }
+
     private static func isLocalHost(_ host: String) -> Bool {
         let normalized = host.lowercased()
         if normalized == "localhost" || normalized.hasSuffix(".local") || !normalized.contains(".") {
