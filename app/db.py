@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -160,6 +160,37 @@ CREATE INDEX IF NOT EXISTS idx_push_outbox_due
 ON push_outbox(status, next_attempt_at, lease_until, id);
 CREATE INDEX IF NOT EXISTS idx_push_outbox_created
 ON push_outbox(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS job_batches (
+    id TEXT PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'running',
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    config_revision TEXT NOT NULL DEFAULT '',
+    snapshot_json TEXT NOT NULL,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    completed_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_job_batches_state_created
+ON job_batches(state, created_at);
+
+CREATE TABLE IF NOT EXISTS job_batch_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT NOT NULL REFERENCES job_batches(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    definition_id TEXT,
+    definition_name TEXT,
+    spec_json TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'queued',
+    job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+    error TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(batch_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_job_batch_items_state
+ON job_batch_items(batch_id, state, position);
 """
 
 
@@ -462,6 +493,42 @@ class Database:
                 (time.time(),),
             )
             connection.execute("PRAGMA user_version=8")
+            version = 8
+        if version < 9:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS job_batches (
+                    id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL DEFAULT 'running',
+                    dry_run INTEGER NOT NULL DEFAULT 0,
+                    config_revision TEXT NOT NULL DEFAULT '',
+                    snapshot_json TEXT NOT NULL,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    completed_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_job_batches_state_created
+                ON job_batches(state, created_at);
+                CREATE TABLE IF NOT EXISTS job_batch_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id TEXT NOT NULL REFERENCES job_batches(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL,
+                    definition_id TEXT,
+                    definition_name TEXT,
+                    spec_json TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'queued',
+                    job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+                    error TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(batch_id, position)
+                );
+                CREATE INDEX IF NOT EXISTS idx_job_batch_items_state
+                ON job_batch_items(batch_id, state, position);
+                """
+            )
+            connection.execute("PRAGMA user_version=9")
 
     @staticmethod
     def _record_job_definition_schedule_state(
@@ -1017,6 +1084,184 @@ class Database:
                 dry_run=effective_dry_run,
             )
             return True
+
+    def job_batch_create(
+        self,
+        *,
+        specs: list[dict[str, Any]],
+        snapshot: dict[str, Any],
+        config_revision: str,
+        dry_run: bool,
+        first_job_id: int,
+    ) -> str:
+        """Persistiert einen akzeptierten Definitions-Batch vor der HTTP-Antwort."""
+        if not specs:
+            raise ValueError("Ein Job-Batch benoetigt mindestens ein Element")
+        batch_id = uuid.uuid4().hex
+        now = time.time()
+        snapshot_json = _json_dumps_bounded(snapshot, 2 * 1024 * 1024)
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT INTO job_batches "
+                "(id, state, dry_run, config_revision, snapshot_json, "
+                "cancel_requested, created_at, updated_at) "
+                "VALUES (?, 'running', ?, ?, ?, 0, ?, ?)",
+                (
+                    batch_id,
+                    1 if dry_run else 0,
+                    str(config_revision or ""),
+                    snapshot_json,
+                    now,
+                    now,
+                ),
+            )
+            for position, spec in enumerate(specs):
+                definition = spec.get("definition") or {}
+                connection.execute(
+                    "INSERT INTO job_batch_items "
+                    "(batch_id, position, definition_id, definition_name, "
+                    "spec_json, state, job_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        batch_id,
+                        position,
+                        str(definition.get("id") or "") or None,
+                        str(definition.get("name") or "") or None,
+                        _json_dumps_bounded(spec, _MAX_JOB_SUMMARY_BYTES),
+                        "running" if position == 0 else "queued",
+                        int(first_job_id) if position == 0 else None,
+                        now,
+                        now,
+                    ),
+                )
+        return batch_id
+
+    def job_batch_get(self, batch_id: str) -> Optional[Dict[str, Any]]:
+        with self.conn() as connection:
+            batch = connection.execute(
+                "SELECT * FROM job_batches WHERE id=?", (batch_id,)
+            ).fetchone()
+            if not batch:
+                return None
+            items = connection.execute(
+                "SELECT * FROM job_batch_items WHERE batch_id=? ORDER BY position",
+                (batch_id,),
+            ).fetchall()
+        data = dict(batch)
+        try:
+            data["snapshot"] = json.loads(data.pop("snapshot_json"))
+        except (json.JSONDecodeError, TypeError):
+            data["snapshot"] = {}
+        data["dry_run"] = bool(data.get("dry_run"))
+        data["cancel_requested"] = bool(data.get("cancel_requested"))
+        decoded_items = []
+        for row in items:
+            item = dict(row)
+            try:
+                item["spec"] = json.loads(item.pop("spec_json"))
+            except (json.JSONDecodeError, TypeError):
+                item["spec"] = {}
+            decoded_items.append(item)
+        data["items"] = decoded_items
+        return data
+
+    def job_batches_pending(self) -> List[Dict[str, Any]]:
+        with self.conn() as connection:
+            rows = connection.execute(
+                "SELECT id FROM job_batches WHERE state='running' ORDER BY created_at"
+            ).fetchall()
+        return [batch for row in rows if (batch := self.job_batch_get(str(row["id"])))]
+
+    def job_batch_item_start(self, batch_id: str, position: int, job_id: int) -> bool:
+        now = time.time()
+        with self.conn() as connection:
+            cursor = connection.execute(
+                "UPDATE job_batch_items SET state='running', job_id=?, updated_at=? "
+                "WHERE batch_id=? AND position=? AND state='queued'",
+                (int(job_id), now, batch_id, int(position)),
+            )
+            return int(cursor.rowcount or 0) == 1
+
+    def job_batch_item_finish(
+        self, batch_id: str, position: int, state: str, *, error: str | None = None
+    ) -> bool:
+        if state not in {"done", "failed", "cancelled"}:
+            raise ValueError("Ungueltiger Batch-Item-Status")
+        now = time.time()
+        with self.conn() as connection:
+            cursor = connection.execute(
+                "UPDATE job_batch_items SET state=?, error=?, updated_at=? "
+                "WHERE batch_id=? AND position=? AND state IN ('queued', 'running')",
+                (state, error, now, batch_id, int(position)),
+            )
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM job_batch_items WHERE batch_id=? "
+                "AND state IN ('queued', 'running')",
+                (batch_id,),
+            ).fetchone()[0]
+            if int(remaining or 0) == 0:
+                cancelled = connection.execute(
+                    "SELECT cancel_requested FROM job_batches WHERE id=?", (batch_id,)
+                ).fetchone()
+                final_state = "cancelled" if cancelled and cancelled[0] else "done"
+                connection.execute(
+                    "UPDATE job_batches SET state=?, updated_at=?, completed_at=? "
+                    "WHERE id=? AND state='running'",
+                    (final_state, now, now, batch_id),
+                )
+            return int(cursor.rowcount or 0) == 1
+
+    def job_batch_request_cancel(self) -> int:
+        now = time.time()
+        with self.conn() as connection:
+            cursor = connection.execute(
+                "UPDATE job_batches SET cancel_requested=1, updated_at=? "
+                "WHERE state='running' AND cancel_requested=0",
+                (now,),
+            )
+            return int(cursor.rowcount or 0)
+
+    def job_batch_recover(self, batch_id: str) -> Optional[Dict[str, Any]]:
+        """Ordnet beim Neustart verwaiste aktive Items ein, ohne sie neu zu starten."""
+        now = time.time()
+        with self.conn() as connection:
+            rows = connection.execute(
+                "SELECT position, job_id FROM job_batch_items "
+                "WHERE batch_id=? AND state='running'",
+                (batch_id,),
+            ).fetchall()
+            for row in rows:
+                job = connection.execute(
+                    "SELECT status FROM jobs WHERE id=?", (row["job_id"],)
+                ).fetchone()
+                if job and str(job["status"]) == "running":
+                    continue
+                status = str(job["status"]) if job else "stale"
+                item_state = "done" if status == "ok" else "failed"
+                connection.execute(
+                    "UPDATE job_batch_items SET state=?, error=?, updated_at=? "
+                    "WHERE batch_id=? AND position=? AND state='running'",
+                    (
+                        item_state,
+                        None if item_state == "done" else f"Unterbrochener Lauf: {status}",
+                        now,
+                        batch_id,
+                        int(row["position"]),
+                    ),
+                )
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM job_batch_items WHERE batch_id=? "
+                "AND state IN ('queued', 'running')",
+                (batch_id,),
+            ).fetchone()[0]
+            if int(remaining or 0) == 0:
+                connection.execute(
+                    "UPDATE job_batches SET state='done', updated_at=?, completed_at=? "
+                    "WHERE id=? AND state='running'",
+                    (now, now, batch_id),
+                )
+        return self.job_batch_get(batch_id)
 
     @staticmethod
     def _store_pair_results(

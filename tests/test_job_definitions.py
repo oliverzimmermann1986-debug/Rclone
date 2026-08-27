@@ -534,6 +534,7 @@ def test_definition_batch_creates_separate_ordered_runs_under_one_global_lock(
             self.starts: list[dict] = []
             self.finishes: list[tuple[int, str, dict]] = []
             self.audits: list[tuple[str, dict]] = []
+            self.batch = None
 
         def job_start(self, kind, **kwargs):
             job_id = len(self.rows) + 1
@@ -554,6 +555,42 @@ def test_definition_batch_creates_separate_ordered_runs_under_one_global_lock(
 
         def audit_add(self, event, **kwargs):
             self.audits.append((event, kwargs))
+
+        def job_batch_create(
+            self, *, specs, snapshot, config_revision, dry_run, first_job_id
+        ):
+            self.batch = {
+                "id": "batch-1",
+                "state": "running",
+                "dry_run": dry_run,
+                "snapshot": snapshot,
+                "config_revision": config_revision,
+                "cancel_requested": False,
+                "items": [
+                    {
+                        "position": position,
+                        "state": "running" if position == 0 else "queued",
+                        "job_id": first_job_id if position == 0 else None,
+                        "spec": spec,
+                    }
+                    for position, spec in enumerate(specs)
+                ],
+            }
+            return "batch-1"
+
+        def job_batch_get(self, _batch_id):
+            return copy.deepcopy(self.batch)
+
+        def job_batch_item_start(self, _batch_id, position, job_id):
+            item = self.batch["items"][position]
+            if item["state"] != "queued":
+                return False
+            item.update(state="running", job_id=job_id)
+            return True
+
+        def job_batch_item_finish(self, _batch_id, position, state, **_kwargs):
+            self.batch["items"][position]["state"] = state
+            return True
 
     class FakeScopeLock:
         def __init__(self):
@@ -620,6 +657,7 @@ def test_definition_batch_creates_separate_ordered_runs_under_one_global_lock(
     ]
     assert result["failed_definitions"] == []
     assert result["config_revision"] == "rev-batch"
+    assert result["batch_id"] == "batch-1"
     assert [item["definition_id"] for item in database.starts] == [
         "1" * 32,
         "2" * 32,
@@ -660,6 +698,23 @@ def test_definition_batch_continues_after_reservation_failure_and_audits_item(
         def __init__(self):
             self.starts = []
             self.audits = []
+            self.batch = {
+                "id": "batch-recovery",
+                "state": "running",
+                "dry_run": False,
+                "snapshot": {"backup": {}},
+                "config_revision": "batch-revision",
+                "cancel_requested": False,
+                "items": [
+                    {
+                        "position": position,
+                        "state": "running" if position == 0 else "queued",
+                        "job_id": 101 if position == 0 else None,
+                        "spec": spec,
+                    }
+                    for position, spec in enumerate(specs)
+                ],
+            }
 
         def job_start(self, _kind, **kwargs):
             self.starts.append(kwargs["definition_id"])
@@ -669,6 +724,23 @@ def test_definition_batch_continues_after_reservation_failure_and_audits_item(
 
         def audit_add(self, event, **kwargs):
             self.audits.append((event, kwargs))
+
+        def job_batch_get(self, _batch_id):
+            return copy.deepcopy(self.batch)
+
+        def job_batch_item_start(self, _batch_id, position, job_id):
+            self.batch["items"][position].update(state="running", job_id=job_id)
+            return True
+
+        def job_batch_item_finish(self, _batch_id, position, state, **_kwargs):
+            self.batch["items"][position]["state"] = state
+            return True
+
+        def job_get(self, _job_id):
+            return {"status": "ok"}
+
+        def job_finish(self, *_args, **_kwargs):
+            return True
 
     class FakeScopeLock:
         def __init__(self):
@@ -689,14 +761,7 @@ def test_definition_batch_continues_after_reservation_failure_and_audits_item(
     )
     assert api_jobs._locks["backup"].acquire(blocking=False)
 
-    api_jobs._run_definition_batch_thread(
-        specs,
-        False,
-        {"backup": {}},
-        "batch-revision",
-        scope_lock,
-        101,
-    )
+    api_jobs._run_definition_batch_thread("batch-recovery", scope_lock)
 
     assert database.starts == ["2" * 32, "3" * 32]
     assert executed == [101, 303]
@@ -711,6 +776,64 @@ def test_definition_batch_continues_after_reservation_failure_and_audits_item(
         "error_code": "reservation_failed",
         "error": "temporary reservation failure",
     }
+    assert scope_lock.releases == 1
+    assert api_jobs._locks["backup"].locked() is False
+
+
+def test_persisted_definition_batch_cancel_skips_every_followup(tmp_path, monkeypatch):
+    database = Database(tmp_path / "cancel-batch.db")
+    first_job_id = database.job_start(
+        "backup", exclusive_scope=True, definition_id="1" * 32
+    )
+    specs = [
+        {
+            "definition": {"id": "1" * 32, "name": "Erster"},
+            "pair_names": ["Fotos"],
+            "history_keys": {"Fotos": "rclone:id:fotos"},
+            "attempts": [],
+        },
+        {
+            "definition": {"id": "2" * 32, "name": "Zweiter"},
+            "pair_names": ["Dokumente"],
+            "history_keys": {"Dokumente": "rclone:id:dokumente"},
+            "attempts": [],
+        },
+    ]
+    batch_id = database.job_batch_create(
+        specs=specs,
+        snapshot={"backup": {}},
+        config_revision="cancel-revision",
+        dry_run=False,
+        first_job_id=first_job_id,
+    )
+
+    class FakeScopeLock:
+        def __init__(self):
+            self.releases = 0
+
+        def release(self):
+            self.releases += 1
+
+    scope_lock = FakeScopeLock()
+    executed = []
+
+    def run_first(job_id, *_args, **_kwargs):
+        executed.append(job_id)
+        database.job_finish(job_id, "ok", {"ok": True, "pairs": []})
+        database.job_batch_request_cancel()
+
+    monkeypatch.setattr(api_jobs, "get_db", lambda: database)
+    monkeypatch.setattr(api_jobs, "_run_backup_thread", run_first)
+    monkeypatch.setattr(api_jobs.rclone_job, "is_cancelled", lambda: False)
+    monkeypatch.setattr(api_jobs, "_audit_best_effort", lambda *_args, **_kwargs: None)
+    assert api_jobs._locks["backup"].acquire(blocking=False)
+
+    api_jobs._run_definition_batch_thread(batch_id, scope_lock)
+
+    batch = database.job_batch_get(batch_id)
+    assert executed == [first_job_id]
+    assert [item["state"] for item in batch["items"]] == ["done", "cancelled"]
+    assert batch["state"] == "cancelled"
     assert scope_lock.releases == 1
     assert api_jobs._locks["backup"].locked() is False
 
@@ -742,6 +865,9 @@ def test_definition_batch_thread_start_failure_marks_first_job_error(
 
         def audit_add(self, *_args, **_kwargs):
             return None
+
+        def job_batch_create(self, **_kwargs):
+            return "batch-thread-failure"
 
     class FakeScopeLock:
         def __init__(self):
