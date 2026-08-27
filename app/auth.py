@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import logging
 import secrets
 import threading
@@ -108,10 +109,63 @@ def bump_session_version() -> int:
     return result["version"]
 
 
+def _trusted_proxy_networks() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    configured = get_config().get("web", "trusted_proxy_ips", default=[]) or []
+    if isinstance(configured, str):
+        configured = [configured]
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for value in configured:
+        try:
+            networks.append(ipaddress.ip_network(str(value).strip(), strict=False))
+        except ValueError:
+            logger.error("Ungültiger vertrauenswürdiger Proxy wird ignoriert: %r", value)
+    return tuple(networks)
+
+
+def client_host(request: Request) -> str:
+    """Return the socket peer or the first untrusted hop from the right.
+
+    The web service deliberately disables Uvicorn's implicit proxy-header
+    rewriting so ``request.client`` remains the actual socket peer. Forwarded
+    chains are considered only when that peer and every traversed proxy hop are
+    explicitly trusted by CIDR.
+    """
+
+    peer = request.client.host if request.client else "unknown"
+    try:
+        peer_ip = ipaddress.ip_address(peer.split("%", 1)[0])
+    except ValueError:
+        return peer[:255]
+    networks = _trusted_proxy_networks()
+
+    def trusted(value: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        return any(value.version == network.version and value in network for network in networks)
+
+    if not networks or not trusted(peer_ip):
+        return str(peer_ip)
+    raw_chain = request.headers.get("x-forwarded-for", "")
+    values = [item.strip() for item in raw_chain.split(",") if item.strip()]
+    if not values or len(values) > 32:
+        return str(peer_ip)
+    try:
+        forwarded = [ipaddress.ip_address(value.split("%", 1)[0]) for value in values]
+    except ValueError:
+        logger.warning("Ungültige X-Forwarded-For-Kette verworfen")
+        return str(peer_ip)
+
+    selected = peer_ip
+    current = peer_ip
+    for hop in reversed(forwarded):
+        if not trusted(current):
+            break
+        selected = hop
+        current = hop
+    return str(selected)[:255]
+
+
 def login_key(request: Request, username: str) -> str:
     del username  # Ein Administratorkonto: Fantasie-Nutzernamen dürfen die IP-Bremse nicht umgehen.
-    host = request.client.host if request.client else "unknown"
-    return host[:255]
+    return client_host(request)
 
 
 def _fallback_retry_after(key: str, window_sec: int) -> int:
@@ -183,7 +237,7 @@ def reauth_keys(request: Request) -> tuple[str, str]:
     IP-Schlüssel durch simples Durchprobieren zurückgerechnet werden kann.
     """
     session_token = str(request.cookies.get(SESSION_COOKIE, "") or "")
-    client_host = request.client.host if request.client else "unknown"
+    client_identity = client_host(request)
     secret = str(get_config().get("web", "secret_key", default="") or "")
     secret_bytes = secret.encode("utf-8") or b"rclone-sync-reauth-v1"
 
@@ -193,7 +247,7 @@ def reauth_keys(request: Request) -> tuple[str, str]:
 
     return (
         f"reauth:session:{digest('session', session_token)}",
-        f"reauth:ip:{digest('ip', client_host)}",
+        f"reauth:ip:{digest('ip', client_identity)}",
     )
 
 
