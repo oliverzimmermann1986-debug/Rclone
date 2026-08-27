@@ -1048,6 +1048,25 @@ def test_job_search_matches_summary_log_and_exact_id(tmp_path: Path):
     assert database.job_count(kind="backup", status="error", query="fotos") == 1
 
 
+def test_job_export_iterator_keeps_one_snapshot_during_concurrent_insert(tmp_path: Path):
+    database = Database(tmp_path / "export-snapshot.db")
+    initial_ids = []
+    for index in range(8):
+        job_id = database.job_start("backup", definition_name=f"Job {index}")
+        database.job_finish(job_id, "ok", {"index": index})
+        initial_ids.append(job_id)
+
+    exported = database.job_iter(limit=100, batch_size=2)
+    first = next(exported)
+    concurrent_id = database.job_start("backup", definition_name="Concurrent")
+    database.job_finish(concurrent_id, "ok", {})
+    exported_ids = [first["id"], *(job["id"] for job in exported)]
+
+    assert exported_ids == list(reversed(initial_ids))
+    assert len(exported_ids) == len(set(exported_ids))
+    assert concurrent_id not in exported_ids
+
+
 def test_runtime_settings_and_audit_are_persistent(tmp_path):
     database = Database(tmp_path / "events.db")
     database.runtime_set("feature", {"enabled": True})
