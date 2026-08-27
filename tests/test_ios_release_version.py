@@ -61,6 +61,7 @@ def test_codemagic_verifies_fetched_main_and_exact_signed_tag_before_release_cha
     config = (root / "codemagic.yaml").read_text(encoding="utf-8")
     provenance = config.index("ios_release_preflight.py")
     version_write = config.index("ios_release_version.py")
+    verifier_install = config.index("brew install gnupg")
 
     assert "refs/heads/main:refs/remotes/origin/main" in config
     assert "refs/tags/$CM_TAG:refs/tags/$CM_TAG" in config
@@ -70,6 +71,8 @@ def test_codemagic_verifies_fetched_main_and_exact_signed_tag_before_release_cha
     assert "groups:\n        - ios-release" in config
     assert 'config --local gpg.format openpgp' in config
     assert 'config --local gpg.program "$(command -v gpg)"' in config
+    assert 'gpg (GnuPG) 2.5.21' in config
+    assert verifier_install < config.index("gpg --batch --quiet --import")
     assert config.index("IMPORTED_FINGERPRINT") < provenance
     assert config.index("gpg --batch --quiet --import") < provenance
     assert provenance < version_write
