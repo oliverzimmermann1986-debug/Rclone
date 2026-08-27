@@ -23,6 +23,7 @@ SOURCE_UPDATE_STARTED=0
 VENV_ROLLBACK=""
 SYSTEM_FILES_ROLLBACK=""
 SYSTEM_FILES_STARTED=0
+RUNTIME_MUTATION_STARTED=0
 SYSTEM_TARGETS=(
   /etc/systemd/system/rclone-sync-web.service
   /etc/systemd/system/rclone-sync.service
@@ -31,6 +32,82 @@ SYSTEM_TARGETS=(
   /etc/systemd/system/sync-scheduler.timer
   /etc/sudoers.d/rclone-sync
 )
+RUNTIME_BACKUP_FILES=(
+  config.yaml
+  config.yaml.bak
+  rclone-sync.db
+)
+
+runtime_backup_dir() {
+  local candidate leaf
+  [[ -n "${backup_dir:-}" ]] || return 1
+  candidate=$(realpath -m -- "$backup_dir") || return 1
+  case "$candidate" in
+    "$BACKUP_ROOT_CANONICAL"/*) ;;
+    *) return 1 ;;
+  esac
+  leaf=${candidate##*/}
+  [[ "$leaf" =~ ^[0-9]{8}-[0-9]{6}$ ]] || return 1
+  [[ -d "$candidate" && ! -L "$candidate" ]] || return 1
+  [[ -f "$candidate/$BACKUP_MARKER" && ! -L "$candidate/$BACKUP_MARKER" ]] || return 1
+  [[ "$(< "$candidate/$BACKUP_MARKER")" == "rclone-sync-backup-v1" ]] || return 1
+  [[ -f "$candidate/source-path.txt" && ! -L "$candidate/source-path.txt" ]] || return 1
+  [[ "$(< "$candidate/source-path.txt")" == "$APP_DIR_CANONICAL" ]] || return 1
+  [[ -d "$candidate/runtime-state" && ! -L "$candidate/runtime-state" ]] || return 1
+  printf '%s\n' "$candidate"
+}
+
+restore_runtime_file() {
+  local restore_dir="$1"
+  local name="$2"
+  local state_dir="$restore_dir/runtime-state"
+  local source="$restore_dir/data/$name"
+  local destination="$APP_DIR_CANONICAL/data/$name"
+  local destination_dir tmp
+
+  destination_dir=$(realpath -m -- "$APP_DIR_CANONICAL/data") || return 1
+  [[ "$destination_dir" == "$APP_DIR_CANONICAL/data" ]] || return 1
+  [[ -d "$destination_dir" && ! -L "$destination_dir" ]] || return 1
+
+  if [[ -f "$state_dir/$name.present" && ! -L "$state_dir/$name.present" ]] &&
+    [[ ! -e "$state_dir/$name.missing" && ! -L "$state_dir/$name.missing" ]]; then
+    [[ -f "$source" && ! -L "$source" ]] || return 1
+    if [[ "$name" == "rclone-sync.db" ]]; then
+      [[ "$(sqlite3 "$source" "PRAGMA quick_check;")" == "ok" ]] || return 1
+    fi
+    tmp=$(mktemp "$destination_dir/.rollback-$name.XXXXXX") || return 1
+    if ! install -m 0600 -o "$APP_USER" -g "$APP_GROUP" -- "$source" "$tmp"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    if ! mv -fT -- "$tmp" "$destination"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  elif [[ -f "$state_dir/$name.missing" && ! -L "$state_dir/$name.missing" ]] &&
+    [[ ! -e "$state_dir/$name.present" && ! -L "$state_dir/$name.present" ]]; then
+    rm -f -- "$destination" || return 1
+  else
+    return 1
+  fi
+}
+
+restore_runtime_backup() {
+  local restore_dir name
+  restore_dir=$(runtime_backup_dir) || {
+    echo "Rollback-Sicherung konnte nicht sicher validiert werden; Dienste bleiben gestoppt." >&2
+    return 1
+  }
+  rm -f -- \
+    "$APP_DIR_CANONICAL/data/rclone-sync.db-wal" \
+    "$APP_DIR_CANONICAL/data/rclone-sync.db-shm" || return 1
+  for name in "${RUNTIME_BACKUP_FILES[@]}"; do
+    if ! restore_runtime_file "$restore_dir" "$name"; then
+      echo "Runtime-Rollback für $name fehlgeschlagen; Dienste bleiben gestoppt." >&2
+      return 1
+    fi
+  done
+}
 
 restore_enabled_state() {
   local unit="$1"
@@ -55,10 +132,18 @@ restore_active_state() {
 on_error() {
   local line="$1"
   local status="${2:-1}"
+  local rollback_failed=0
   if (( status == 0 )); then status=1; fi
   trap - ERR
   set +e
   echo "Installation fehlgeschlagen (Zeile $line). Rollback wird versucht." >&2
+  systemctl stop sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service >/dev/null 2>&1 || true
+  for unit in sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service; do
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      echo "Rollback: Dienst $unit konnte nicht gestoppt werden." >&2
+      rollback_failed=1
+    fi
+  done
   if (( SOURCE_UPDATE_STARTED )) && [[ -n "$PREVIOUS_GIT_HEAD" && -d "$APP_DIR/.git" ]]; then
     git -c safe.directory="$APP_DIR" -C "$APP_DIR" reset --hard "$PREVIOUS_GIT_HEAD" >/dev/null 2>&1 || true
   fi
@@ -76,15 +161,22 @@ on_error() {
       fi
     done
   fi
+  if (( RUNTIME_MUTATION_STARTED )) && [[ -n "${backup_dir:-}" ]]; then
+    restore_runtime_backup || rollback_failed=1
+  fi
   [[ -z "$SYSTEM_FILES_ROLLBACK" ]] || rm -rf "$SYSTEM_FILES_ROLLBACK"
   systemctl daemon-reload >/dev/null 2>&1 || true
   if (( UNIT_STATES_CAPTURED )); then
     restore_enabled_state rclone-sync-web.service "$WEB_WAS_ENABLED"
     restore_enabled_state sync-scheduler.timer "$SCHEDULER_TIMER_WAS_ENABLED"
     restore_enabled_state rclone-sync.timer "$LEGACY_TIMER_WAS_ENABLED"
-    restore_active_state rclone-sync-web.service "$WEB_WAS_ACTIVE"
-    restore_active_state sync-scheduler.timer "$SCHEDULER_TIMER_WAS_ACTIVE"
-    restore_active_state rclone-sync.timer "$LEGACY_TIMER_WAS_ACTIVE"
+    if (( rollback_failed == 0 )); then
+      restore_active_state rclone-sync-web.service "$WEB_WAS_ACTIVE"
+      restore_active_state sync-scheduler.timer "$SCHEDULER_TIMER_WAS_ACTIVE"
+      restore_active_state rclone-sync.timer "$LEGACY_TIMER_WAS_ACTIVE"
+    else
+      echo "Rollback unvollständig; alle Anwendungsdienste bleiben gestoppt." >&2
+    fi
   fi
   # Die Scheduler-Oneshot-Unit wird nie direkt neu gestartet: der Timer
   # übernimmt den nächsten Lauf, ohne einen abgebrochenen Tick zu duplizieren.
@@ -183,6 +275,10 @@ if [[ -d "$APP_DIR/data" || -d "/home/$APP_USER/.config/rclone" ]]; then
   printf '%s\n' "rclone-sync-backup-v1" > "$backup_dir/$BACKUP_MARKER"
   chmod 0600 "$backup_dir/$BACKUP_MARKER"
   if [[ -d "$APP_DIR/data" ]]; then
+    if [[ -L "$APP_DIR/data" ]]; then
+      echo "Abbruch: Das Laufzeitdatenverzeichnis darf kein Symlink sein." >&2
+      false
+    fi
     install -d -m 0700 "$backup_dir/data"
     shopt -s dotglob nullglob
     data_items=("$APP_DIR/data"/*)
@@ -207,8 +303,20 @@ if [[ -d "$APP_DIR/data" || -d "/home/$APP_USER/.config/rclone" ]]; then
       chmod 0600 "$sqlite_backup"
     fi
   fi
+  install -d -m 0700 "$backup_dir/runtime-state"
+  for name in "${RUNTIME_BACKUP_FILES[@]}"; do
+    if [[ -L "$APP_DIR/data/$name" ]] ||
+      [[ -e "$APP_DIR/data/$name" && ! -f "$APP_DIR/data/$name" ]]; then
+      echo "Abbruch: Nicht reguläre Runtime-Datei kann nicht sicher gesichert werden: $name" >&2
+      false
+    elif [[ -f "$APP_DIR/data/$name" ]]; then
+      touch "$backup_dir/runtime-state/$name.present"
+    else
+      touch "$backup_dir/runtime-state/$name.missing"
+    fi
+  done
   [[ ! -d "/home/$APP_USER/.config/rclone" ]] || cp -a "/home/$APP_USER/.config/rclone" "$backup_dir/rclone-config"
-  printf '%s\n' "$APP_DIR" > "$backup_dir/source-path.txt"
+  printf '%s\n' "$APP_DIR_CANONICAL" > "$backup_dir/source-path.txt"
   chmod -R go-rwx "$backup_dir"
   if [[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] && (( BACKUP_KEEP > 0 )); then
     mapfile -t old_backups < <(
@@ -271,6 +379,7 @@ install -d -m 0700 -o "$APP_USER" -g "$APP_GROUP" \
   "$APP_DIR/logs" "$APP_DIR/temp" \
   "/home/$APP_USER/.config" "/home/$APP_USER/.config/rclone"
 
+RUNTIME_MUTATION_STARTED=1
 INITIAL_PASSWORD=""
 if [[ ! -f "$APP_DIR/data/config.yaml" ]]; then
   printf '%s\n' "📝 Sichere Erstkonfiguration erzeugen …"
@@ -372,6 +481,7 @@ SOURCE_UPDATE_STARTED=0
 SYSTEM_FILES_ROLLBACK=""
 SYSTEM_FILES_STARTED=0
 UNIT_STATES_CAPTURED=0
+RUNTIME_MUTATION_STARTED=0
 trap - ERR
 
 printf '\n%s\n' "✅ Installation abgeschlossen"
