@@ -47,13 +47,15 @@ workflows:
       - name: Validate shared native API contracts and release version tooling
         script: |
           cd "$CM_BUILD_DIR"
-          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_preflight.py tests/test_ios_release_version.py tests/test_ios_app_store_release.py
-      - name: Install XcodeGen
-        script: brew install xcodegen
+          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_install_pinned_xcodegen.py tests/test_ios_release_preflight.py tests/test_ios_release_version.py tests/test_ios_app_store_release.py
+      - name: Install verified pinned XcodeGen
+        script: |
+          python3 "$CM_BUILD_DIR/scripts/install_pinned_xcodegen.py" \
+            --destination "$CM_BUILD_DIR/.tools"
       - name: Generate Xcode project
         script: |
           cd "$CM_BUILD_DIR/ios"
-          xcodegen generate
+          "$CM_BUILD_DIR/.tools/xcodegen/bin/xcodegen" generate
       - name: Apply App Store signing profiles
         script: |
           xcode-project use-profiles \
