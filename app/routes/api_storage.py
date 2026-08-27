@@ -10,7 +10,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +58,9 @@ _size_cache_lock = threading.Lock()
 _size_cache: OrderedDict[
     tuple[str, str, str, str, tuple[str, ...]], tuple[float, dict[str, Any]]
 ] = OrderedDict()
+_size_inflight: dict[
+    tuple[str, str, str, str, tuple[str, ...]], Future[dict[str, Any]]
+] = {}
 
 
 def _disk_usage(path: str) -> dict[str, Any]:
@@ -221,62 +224,91 @@ def _cached_rclone_size(
             return _decorate_measurement(
                 dict(cached[1]), measured_at=cached[0], status="cached"
             )
+        flight = _size_inflight.get(key)
+        leader = flight is None
+        if flight is None:
+            flight = Future()
+            _size_inflight[key] = flight
 
-    if deadline is None:
-        result = (
-            _rclone_size(path, filter_args=normalized_filter_args)
-            if normalized_filter_args
-            else _rclone_size(path)
-        )
-    else:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            result = {"path": path, "error": "Globale Messzeit überschritten"}
+    # Wait outside the cache lock: other identities must remain free to start
+    # and complete while this measurement is running.
+    if not leader:
+        return dict(flight.result())
+
+    try:
+        if deadline is None:
+            result = (
+                _rclone_size(path, filter_args=normalized_filter_args)
+                if normalized_filter_args
+                else _rclone_size(path)
+            )
         else:
-            measure_kwargs: dict[str, Any] = {
-                "timeout": min(_SIZE_MEASUREMENT_TIMEOUT_SECONDS, max(0.1, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                result = {"path": path, "error": "Globale Messzeit überschritten"}
+            else:
+                measure_kwargs: dict[str, Any] = {
+                    "timeout": min(
+                        _SIZE_MEASUREMENT_TIMEOUT_SECONDS, max(0.1, remaining)
+                    )
+                }
+                if normalized_filter_args:
+                    measure_kwargs["filter_args"] = normalized_filter_args
+                result = _rclone_size(path, **measure_kwargs)
+        measured_at = time.time()
+        if _is_successful_size(result):
+            clean = {
+                "path": path,
+                "count": result["count"],
+                "bytes": result["bytes"],
             }
-            if normalized_filter_args:
-                measure_kwargs["filter_args"] = normalized_filter_args
-            result = _rclone_size(path, **measure_kwargs)
-    measured_at = time.time()
-    if _is_successful_size(result):
-        clean = {
-            "path": path,
-            "count": result["count"],
-            "bytes": result["bytes"],
-        }
+            with _size_cache_lock:
+                _size_cache[key] = (measured_at, clean)
+                _size_cache.move_to_end(key)
+                while len(_size_cache) > _SIZE_CACHE_MAX_ENTRIES:
+                    _size_cache.popitem(last=False)
+            decorated = _decorate_measurement(
+                clean, measured_at=measured_at, status="fresh"
+            )
+        elif isinstance(result.get("count"), int) and isinstance(
+            result.get("bytes"), int
+        ):
+            partial = {
+                "path": path,
+                "count": result["count"],
+                "bytes": result["bytes"],
+                "measurement_error": str(
+                    result.get("error") or "Messung nur teilweise erfolgreich"
+                ),
+            }
+            decorated = _decorate_measurement(
+                partial, measured_at=measured_at, status="partial"
+            )
+        elif cached:
+            decorated = _decorate_measurement(
+                dict(cached[1]), measured_at=cached[0], status="stale"
+            )
+            decorated["measurement_error"] = str(
+                result.get("error") or "Messung fehlgeschlagen"
+            )
+        else:
+            decorated = _decorate_measurement(
+                {
+                    "path": path,
+                    "error": str(result.get("error") or "Messung fehlgeschlagen"),
+                },
+                measured_at=None,
+                status="failed",
+            )
+        flight.set_result(dict(decorated))
+        return decorated
+    except BaseException as exc:
+        flight.set_exception(exc)
+        raise
+    finally:
         with _size_cache_lock:
-            _size_cache[key] = (measured_at, clean)
-            _size_cache.move_to_end(key)
-            while len(_size_cache) > _SIZE_CACHE_MAX_ENTRIES:
-                _size_cache.popitem(last=False)
-        return _decorate_measurement(clean, measured_at=measured_at, status="fresh")
-
-    if isinstance(result.get("count"), int) and isinstance(result.get("bytes"), int):
-        partial = {
-            "path": path,
-            "count": result["count"],
-            "bytes": result["bytes"],
-            "measurement_error": str(
-                result.get("error") or "Messung nur teilweise erfolgreich"
-            ),
-        }
-        return _decorate_measurement(partial, measured_at=measured_at, status="partial")
-
-    if cached:
-        stale = _decorate_measurement(
-            dict(cached[1]), measured_at=cached[0], status="stale"
-        )
-        stale["measurement_error"] = str(
-            result.get("error") or "Messung fehlgeschlagen"
-        )
-        return stale
-    return _decorate_measurement(
-        {"path": path, "error": str(result.get("error") or "Messung fehlgeschlagen")},
-        measured_at=None,
-        status="failed",
-    )
+            if _size_inflight.get(key) is flight:
+                del _size_inflight[key]
 
 
 def _cached_pair_rclone_size(
