@@ -155,10 +155,19 @@ final class AppModel: ObservableObject {
                 errorMessage = "Eine gespeicherte HTTP-Verbindung wird aus Sicherheitsgründen nicht automatisch wiederhergestellt. Tippe erneut auf Verbinden und bestätige die unverschlüsselte Verbindung ausdrücklich."
                 return
             }
-            try await revokePendingPushRegistrationsBeforeRestore(
-                using: newClient,
-                server: url.absoluteString
-            )
+            do {
+                try await revokePendingPushRegistrationsBeforeRestore(
+                    using: newClient,
+                    server: url.absoluteString
+                )
+            } catch {
+                // Session restoration is deliberately fail-closed when a push
+                // registration from an earlier logout cannot be revoked. Only
+                // this cleanup failure invalidates the persisted cookie; an
+                // ordinary transient refresh error keeps it available for retry.
+                newClient.clearLocalSession()
+                throw error
+            }
             try Task.checkCancellation()
             guard isCurrentSession(generation) else {
                 newClient.clearLocalSession()
@@ -172,7 +181,7 @@ final class AppModel: ObservableObject {
             jobDefinitions = restoredConfig.backup.jobs
             configState = .loaded
             phase = .signedIn
-            await refresh()
+            await refresh(reloadConfig: false)
         } catch is CancellationError {
             // A superseded restore must not overwrite the newer session state.
         } catch let urlError as URLError where urlError.code == .cancelled {
@@ -221,7 +230,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refresh() async {
+    func refresh(reloadConfig: Bool = true) async {
         guard let refreshClient = client else { return }
         refreshTask?.cancel()
         let session = sessionGeneration
@@ -236,7 +245,12 @@ final class AppModel: ObservableObject {
         if pbs == nil { pbsState = .loading }
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.performRefresh(client: refreshClient, session: session, refresh: refresh)
+            await self.performRefresh(
+                client: refreshClient,
+                session: session,
+                refresh: refresh,
+                reloadConfig: reloadConfig
+            )
         }
         refreshTask = task
         await task.value
@@ -246,7 +260,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func performRefresh(client refreshClient: any APIClientProtocol, session: Int, refresh: Int) async {
+    private func performRefresh(
+        client refreshClient: any APIClientProtocol,
+        session: Int,
+        refresh: Int,
+        reloadConfig: Bool
+    ) async {
         let activity = beginActivity()
         errorMessage = nil
         storageSizesAreLoading = true
@@ -267,7 +286,9 @@ final class AppModel: ObservableObject {
             group.addTask { .overview(await Self.capture { try await refreshClient.getOverview() }) }
             group.addTask { .baseStorage(await Self.capture { try await refreshClient.getStorage(includeSizes: false, forceRefresh: false) }) }
             group.addTask { .detailedStorage(await Self.capture { try await refreshClient.getStorage(includeSizes: true, forceRefresh: false) }) }
-            group.addTask { .config(await Self.capture { try await refreshClient.getConfig() }) }
+            if reloadConfig {
+                group.addTask { .config(await Self.capture { try await refreshClient.getConfig() }) }
+            }
             group.addTask { .jobs(await Self.capture { try await refreshClient.getJobs(limit: 50) }) }
             group.addTask { .progress(await Self.capture { try await refreshClient.getProgress() }) }
             group.addTask { .pbs(await Self.capture { try await refreshClient.getPBSStatus() }) }
