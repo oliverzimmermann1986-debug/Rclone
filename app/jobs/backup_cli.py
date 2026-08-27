@@ -128,6 +128,7 @@ def main() -> int:
         )
 
         try:
+            external_result = None
             summary = run_job(
                 dry_run=args.dry_run,
                 pairs_filter=pairs_filter,
@@ -143,7 +144,9 @@ def main() -> int:
             summary.setdefault("dry_run", args.dry_run)
             summary["history_keys"] = history_keys
             status = _job_status(summary)
-            transitioned = db.job_finish(job_id, status, summary)
+            external_result = (status, summary)
+            durable_finish = getattr(db, "job_finish_external", db.job_finish)
+            transitioned = durable_finish(job_id, status, summary)
             if transitioned:
                 _finish_runtime_for_job(job_id, status)
             else:
@@ -156,6 +159,13 @@ def main() -> int:
             return 0 if status == "ok" else 1
         except Exception as e:
             logger.exception("Backup-Job fehlgeschlagen")
+            if external_result is not None:
+                logger.error(
+                    "Externer CLI-Lauf #%s beendet; "
+                    "terminaler DB-Abschluss bleibt ausstehend",
+                    job_id,
+                )
+                return 1
             transitioned = db.job_finish(
                 job_id,
                 "error",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import copy
+import sqlite3
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -836,6 +837,57 @@ def test_persisted_definition_batch_cancel_skips_every_followup(tmp_path, monkey
     assert batch["state"] == "cancelled"
     assert scope_lock.releases == 1
     assert api_jobs._locks["backup"].locked() is False
+
+
+def test_web_backup_does_not_repeat_external_action_after_finish_lock(
+    tmp_path, monkeypatch
+):
+    database = Database(tmp_path / "external-success.db")
+    job_id = database.job_start("backup")
+    original_finish = database.job_finish
+    finish_calls = 0
+    external_calls = 0
+
+    def transient_finish(*args, **kwargs):
+        nonlocal finish_calls
+        finish_calls += 1
+        if finish_calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_finish(*args, **kwargs)
+
+    def successful_external_action(**_kwargs):
+        nonlocal external_calls
+        external_calls += 1
+        return {"ok": True, "pairs": [{"name": "Fotos", "ok": True}]}
+
+    class ScopeLock:
+        def release(self):
+            raise AssertionError("release_locks=False muss den Batch-Lock behalten")
+
+    monkeypatch.setattr(database, "job_finish", transient_finish)
+    monkeypatch.setattr(api_jobs, "get_db", lambda: database)
+    monkeypatch.setattr(
+        api_jobs, "_setup_job_logger", lambda *_args: (tmp_path / "job.log", None)
+    )
+    monkeypatch.setattr(
+        api_jobs, "_finish_runtime_for_job", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(api_jobs.rclone_job, "run_job", successful_external_action)
+    monkeypatch.setattr(api_jobs.rclone_job, "is_cancelled", lambda: False)
+
+    api_jobs._run_backup_thread(
+        job_id,
+        False,
+        ["Fotos"],
+        {"Fotos": "rclone:id:fotos"},
+        ScopeLock(),
+        {"config_snapshot": {"backup": {}}, "config_revision": "rev"},
+        release_locks=False,
+    )
+
+    assert external_calls == 1
+    assert finish_calls == 2
+    assert database.job_get(job_id)["status"] == "ok"
 
 
 def test_definition_batch_thread_start_failure_marks_first_job_error(

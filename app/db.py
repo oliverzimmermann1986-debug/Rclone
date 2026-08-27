@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -191,6 +191,17 @@ CREATE TABLE IF NOT EXISTS job_batch_items (
 );
 CREATE INDEX IF NOT EXISTS idx_job_batch_items_state
 ON job_batch_items(batch_id, state, position);
+
+CREATE TABLE IF NOT EXISTS job_terminal_intents (
+    job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    summary_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    applied_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_job_terminal_intents_pending
+ON job_terminal_intents(applied_at, updated_at);
 """
 
 
@@ -529,6 +540,23 @@ class Database:
                 """
             )
             connection.execute("PRAGMA user_version=9")
+            version = 9
+        if version < 10:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS job_terminal_intents (
+                    job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    applied_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_job_terminal_intents_pending
+                ON job_terminal_intents(applied_at, updated_at);
+                """
+            )
+            connection.execute("PRAGMA user_version=10")
 
     @staticmethod
     def _record_job_definition_schedule_state(
@@ -1084,6 +1112,126 @@ class Database:
                 dry_run=effective_dry_run,
             )
             return True
+
+    def job_terminal_stage(
+        self, job_id: int, status: str, summary: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Schreibt das externe Ergebnis idempotent vor den terminalen CAS."""
+        if status not in {"ok", "error", "skipped", "cancelled", "stale"}:
+            raise ValueError(f"Ungueltiger terminaler Job-Status: {status}")
+        payload = _json_dumps_bounded(summary or {}, _MAX_JOB_SUMMARY_BYTES)
+        now = time.time()
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            job = connection.execute(
+                "SELECT id FROM jobs WHERE id=?", (int(job_id),)
+            ).fetchone()
+            if not job:
+                raise ValueError(f"Job nicht gefunden: {job_id}")
+            connection.execute(
+                "INSERT OR IGNORE INTO job_terminal_intents "
+                "(job_id, status, summary_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (int(job_id), status, payload, now, now),
+            )
+            existing = connection.execute(
+                "SELECT status, summary_json FROM job_terminal_intents WHERE job_id=?",
+                (int(job_id),),
+            ).fetchone()
+            if not existing or (
+                str(existing["status"]) != status
+                or str(existing["summary_json"]) != payload
+            ):
+                raise RuntimeError(
+                    f"Abweichender terminaler Abschluss fuer Job #{job_id}"
+                )
+            connection.execute(
+                "UPDATE job_terminal_intents SET updated_at=? WHERE job_id=?",
+                (now, int(job_id)),
+            )
+
+    def job_terminal_apply(self, job_id: int) -> bool:
+        with self.conn() as connection:
+            row = connection.execute(
+                "SELECT status, summary_json, applied_at FROM job_terminal_intents "
+                "WHERE job_id=?",
+                (int(job_id),),
+            ).fetchone()
+        if not row:
+            raise ValueError(f"Kein terminaler Abschluss fuer Job #{job_id}")
+        status = str(row["status"])
+        try:
+            summary = json.loads(row["summary_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            summary = {}
+        transitioned = self.job_finish(int(job_id), status, summary)
+        actual = self.job_get(int(job_id)) or {}
+        actual_status = str(actual.get("status") or "")
+        if not transitioned and actual_status != status:
+            raise RuntimeError(
+                f"Terminaler CAS-Konflikt fuer Job #{job_id}: {actual_status} != {status}"
+            )
+        now = time.time()
+        with self.conn() as connection:
+            connection.execute(
+                "UPDATE job_terminal_intents SET applied_at=COALESCE(applied_at, ?), "
+                "updated_at=? WHERE job_id=?",
+                (now, now, int(job_id)),
+            )
+        return transitioned or actual_status == status
+
+    def job_finish_external(
+        self,
+        job_id: int,
+        status: str,
+        summary: Optional[Dict[str, Any]] = None,
+        *,
+        attempts: int = 3,
+    ) -> bool:
+        """Retryt nur Persistenz/CAS, niemals die bereits beendete externe Aktion."""
+        last_error: Exception | None = None
+        for retry in range(max(1, int(attempts))):
+            try:
+                self.job_terminal_stage(job_id, status, summary)
+                return self.job_terminal_apply(job_id)
+            except sqlite3.OperationalError as exc:
+                last_error = exc
+                if retry + 1 < max(1, int(attempts)):
+                    time.sleep(0.05 * (retry + 1))
+        assert last_error is not None
+        raise last_error
+
+    def job_terminal_recover_pending(self) -> dict[str, Any]:
+        """Vollendet vor Lifecycle-Recovery bereits extern beendete Jobs."""
+        with self.conn() as connection:
+            rows = connection.execute(
+                "SELECT job_id FROM job_terminal_intents WHERE applied_at IS NULL "
+                "ORDER BY created_at"
+            ).fetchall()
+        recovered = 0
+        recovered_job_ids: list[int] = []
+        failed = 0
+        for row in rows:
+            try:
+                if self.job_terminal_apply(int(row["job_id"])):
+                    recovered += 1
+                    recovered_job_ids.append(int(row["job_id"]))
+            except Exception:
+                failed += 1
+        return {
+            "recovered": recovered,
+            "failed": failed,
+            "recovered_job_ids": recovered_job_ids,
+        }
+
+    def job_terminal_pending(self, job_id: int) -> bool:
+        with self.conn() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM job_terminal_intents "
+                "WHERE job_id=? AND applied_at IS NULL",
+                (int(job_id),),
+            ).fetchone()
+        return row is not None
 
     def job_batch_create(
         self,

@@ -193,6 +193,31 @@ def _run_push_dispatcher(stop_event: threading.Event) -> None:
 @asynccontextmanager
 async def _lifespan(_app):
     db = get_db()
+    recover_terminal = getattr(db, "job_terminal_recover_pending", None)
+    terminal_recovery = recover_terminal() if callable(recover_terminal) else {}
+    if terminal_recovery.get("recovered"):
+        logger.warning(
+            "%d extern beendete(r) Job(s) terminal nachgetragen",
+            terminal_recovery["recovered"],
+        )
+    if terminal_recovery.get("failed"):
+        logger.error(
+            "%d terminale(r) Jobabschluss/-abschluesse weiter ausstehend",
+            terminal_recovery["failed"],
+        )
+    for recovered_job_id in terminal_recovery.get("recovered_job_ids") or []:
+        state = runtime_state.load_run_state() or {}
+        try:
+            state_job_id = int(state.get("job_id") or -1)
+        except (TypeError, ValueError):
+            continue
+        run_id = str(state.get("run_id") or "")
+        if state.get("status") != "running" or state_job_id != recovered_job_id:
+            continue
+        recovered_job = db.job_get(recovered_job_id) or {}
+        recovered_status = str(recovered_job.get("status") or "ok")
+        if run_id:
+            runtime_state.finish_run(run_id, recovered_status)
     recovered = 0
     for scope, kinds in (
         (runtime_state.DEFAULT_CANCEL_SCOPE, BACKUP_KINDS),
