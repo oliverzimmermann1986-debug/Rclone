@@ -149,11 +149,19 @@ final class AppModel: ObservableObject {
             let url = try APIClient.normalizedServerURL(serverAddress)
             let newClient = clientFactory(url)
             candidate = newClient
+            try await revokePendingPushRegistrationsBeforeRestore(
+                using: newClient,
+                server: url.absoluteString
+            )
+            try Task.checkCancellation()
+            guard isCurrentSession(generation) else {
+                newClient.clearLocalSession()
+                return
+            }
             let restoredConfig = try await newClient.getConfig()
             try Task.checkCancellation()
             guard isCurrentSession(generation) else { return }
             client = newClient
-            await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
             config = restoredConfig
             jobDefinitions = restoredConfig.backup.jobs
             configState = .loaded
@@ -1125,6 +1133,24 @@ final class AppModel: ObservableObject {
             }
         }
         savePendingPushRevocations(remaining)
+    }
+
+    /// A stored cookie must not become an active app session while revocations
+    /// from an earlier logout are still outstanding. Unlike an explicit login,
+    /// startup restore has no fresh user confirmation, so any cleanup failure is
+    /// handled fail-closed and the persisted cookie is discarded by the caller.
+    private func revokePendingPushRegistrationsBeforeRestore(
+        using client: any APIClientProtocol,
+        server: String
+    ) async throws {
+        let matching = pendingPushRevocations().filter { $0.server == server }
+        guard !matching.isEmpty else { return }
+        var remaining = pendingPushRevocations()
+        for item in matching {
+            _ = try await client.unregisterPushDevice(token: item.token)
+            remaining.removeAll { $0 == item }
+            savePendingPushRevocations(remaining)
+        }
     }
 
     func cancelSessionRestore() {

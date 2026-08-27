@@ -17,6 +17,63 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertTrue(model.errorMessage?.contains("Zeitlimits") == true)
     }
 
+    func testRestoreWaitsForPendingPushRevocationBeforeActivatingSession() async throws {
+        let defaults = makeDefaults()
+        let server = "https://backup.example.de"
+        let token = String(repeating: "ab", count: 32)
+        defaults.set(server, forKey: "serverAddress")
+        defaults.set(
+            try JSONEncoder().encode([
+                PendingPushRevocationFixture(server: server, token: token)
+            ]),
+            forKey: "pendingPushRevocations"
+        )
+        let client = StubAPIClient()
+        client.suspendUnregisterPush = true
+        let model = AppModel(defaults: defaults) { _ in client }
+
+        let restore = Task { await model.restoreSession() }
+        for _ in 0..<100 where client.unregisterPushCallCount == 0 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(client.unregisterPushCallCount, 1)
+        XCTAssertEqual(client.configCallCount, 0)
+        XCTAssertEqual(model.phase, .checking)
+
+        client.resumeUnregisterPush()
+        await restore.value
+
+        XCTAssertEqual(client.configCallCount, 1)
+        XCTAssertEqual(model.phase, .signedIn)
+        XCTAssertNil(defaults.data(forKey: "pendingPushRevocations"))
+    }
+
+    func testRestoreFailsClosedWhenPendingPushRevocationFails() async throws {
+        let defaults = makeDefaults()
+        let server = "https://backup.example.de"
+        defaults.set(server, forKey: "serverAddress")
+        defaults.set(
+            try JSONEncoder().encode([
+                PendingPushRevocationFixture(
+                    server: server,
+                    token: String(repeating: "cd", count: 32)
+                )
+            ]),
+            forKey: "pendingPushRevocations"
+        )
+        let client = StubAPIClient()
+        client.unregisterPushError = URLError(.notConnectedToInternet)
+        let model = AppModel(defaults: defaults) { _ in client }
+
+        await model.restoreSession()
+
+        XCTAssertEqual(client.configCallCount, 0)
+        XCTAssertTrue(client.clearedLocalSession)
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertNotNil(defaults.data(forKey: "pendingPushRevocations"))
+    }
+
     func testRefreshPublishesSuccessfulEndpointsWhenOthersFail() async {
         let defaults = makeDefaults()
         let client = StubAPIClient()
@@ -441,10 +498,13 @@ private final class StubAPIClient: APIClientProtocol {
     var detailedStorage: StorageOverview?
     var detailedStorageError: Error?
     var pushDelay: Duration?
+    var suspendUnregisterPush = false
+    private var unregisterPushContinuation: CheckedContinuation<Void, Never>?
     var baseConfig: ConfigSnapshot?
     private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
     private(set) var jobsCallCount = 0
+    private(set) var configCallCount = 0
     private(set) var doctorCallCount = 0
     private(set) var runAllCallCount = 0
     private(set) var retriedJobIDs: [Int] = []
@@ -469,6 +529,7 @@ private final class StubAPIClient: APIClientProtocol {
     }
 
     func getConfig() async throws -> ConfigSnapshot {
+        configCallCount += 1
         if let configError { throw configError }
         if let updatedConfig { return updatedConfig }
         if let baseConfig { return baseConfig }
@@ -582,15 +643,31 @@ private final class StubAPIClient: APIClientProtocol {
     }
     func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
         unregisterPushCallCount += 1
+        if suspendUnregisterPush {
+            await withCheckedContinuation { continuation in
+                unregisterPushContinuation = continuation
+            }
+        }
         if let unregisterPushError { throw unregisterPushError }
         unregisteredPushTokens.append(token)
         return PushRegistrationResponse(ok: true)
+    }
+
+    func resumeUnregisterPush() {
+        suspendUnregisterPush = false
+        unregisterPushContinuation?.resume()
+        unregisterPushContinuation = nil
     }
     func logout() async throws -> LogoutResult { logoutResult }
 
     func clearLocalSession() {
         clearedLocalSession = true
     }
+}
+
+private struct PendingPushRevocationFixture: Encodable {
+    let server: String
+    let token: String
 }
 
 private extension BackupProgress {

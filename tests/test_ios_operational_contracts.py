@@ -106,6 +106,20 @@ def test_offline_logout_bounds_and_retries_push_revocation():
     assert "pushCoordinator.unregisterLocally()" in app
 
 
+def test_session_restore_revokes_pending_push_before_loading_credentials():
+    model = _swift("Core/AppModel.swift")
+
+    restore = model[model.index("func restoreSession() async"):model.index("func login(")]
+    assert "try await revokePendingPushRegistrationsBeforeRestore" in restore
+    assert restore.index("try await revokePendingPushRegistrationsBeforeRestore") < restore.index(
+        "try await newClient.getConfig()"
+    )
+    assert restore.index("try await revokePendingPushRegistrationsBeforeRestore") < restore.index(
+        "client = newClient"
+    )
+    assert "_ = try await client.unregisterPushDevice" in model
+
+
 def test_failed_run_retry_and_push_deep_link_are_revision_safe():
     api = _swift("Core/APIClient.swift")
     model = _swift("Core/AppModel.swift")
