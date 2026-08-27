@@ -41,7 +41,7 @@ def test_database_backfills_and_indexes_pair_history(tmp_path: Path):
     assert db.stats()["pair_runs"] == 1
     assert db.integrity_check()["ok"] is True
     with db.conn() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
         indexes = {
             row["name"]
             for row in connection.execute("PRAGMA index_list(jobs)").fetchall()
@@ -199,7 +199,7 @@ def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(pair_runs)").fetchall()
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
     assert {"history_key", "dry_run", "scheduled_slot"} <= columns
 
 
@@ -412,7 +412,7 @@ def test_schema_7_push_claim_is_migrated_without_ambiguous_owner(tmp_path: Path)
         row = connection.execute(
             "SELECT status, lease_until, claim_owner FROM push_outbox"
         ).fetchone()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
 
     assert "claim_owner" in columns
     assert dict(row) == {
@@ -940,6 +940,59 @@ def test_bulk_history_uses_typed_key_and_tracks_running_attempt(tmp_path: Path):
     assert history["last_result"]["pair"]["trigger"] == "scheduler"
     assert history["last_result"]["scheduled_slot"] == "slot-1"
     assert history["last_success"] is None
+
+
+def test_bulk_history_work_does_not_scale_with_matching_history_rows(
+    tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "large-history.db"
+    database = Database(path)
+    key = "pbs:id:archive"
+    row_count = 30_000
+    with sqlite3.connect(path) as connection:
+        connection.executemany(
+            "INSERT INTO pair_runs (job_id, pair_name, history_key, ok, dry_run, "
+            "status, started_at, ended_at, result_json) "
+            "VALUES (?, 'pbs:archive', ?, ?, 0, ?, ?, ?, ?)",
+            (
+                (
+                    index + 1,
+                    key,
+                    1 if index % 2 == 0 else 0,
+                    "ok" if index % 2 == 0 else "error",
+                    float(index),
+                    float(index),
+                    json.dumps({"name": "pbs:archive", "ok": index % 2 == 0}),
+                )
+                for index in range(row_count)
+            ),
+        )
+
+    vm_steps = 0
+    original_conn = database.conn
+
+    @contextmanager
+    def measured_conn(*, initialize: bool = False):
+        nonlocal vm_steps
+
+        def count_step() -> int:
+            nonlocal vm_steps
+            vm_steps += 1
+            return 0
+
+        with original_conn(initialize=initialize) as connection:
+            connection.set_progress_handler(count_step, 1)
+            try:
+                yield connection
+            finally:
+                connection.set_progress_handler(None, 0)
+
+    monkeypatch.setattr(database, "conn", measured_conn)
+    history = database.pair_last_history({key: "pbs:archive"})[key]
+
+    assert history["last_result"]["started_at"] == row_count - 1
+    assert history["last_success"]["started_at"] == row_count - 2
+    assert vm_steps < 1_000
 
 
 def test_typed_history_survives_rename_and_rejects_restore_or_name_reuse(
