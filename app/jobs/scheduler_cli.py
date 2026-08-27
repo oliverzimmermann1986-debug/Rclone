@@ -22,6 +22,7 @@ from .job_lifecycle import (
     PBS_KINDS,
     reconcile_locked_scope,
 )
+from .logging_scope import JobScopeFilter
 from .locks import file_lock_or_none
 from .pbs_backup import PBS_CANCEL_SCOPE, prune_failures, run_pbs_backup
 from .rclone_sync import is_cancelled, reset_cancel, run_job
@@ -199,9 +200,10 @@ def _job_log_file(log_dir: Path, kind: str, name: str) -> Path:
     return path
 
 
-def _attach_job_log(path: Path) -> logging.FileHandler:
+def _attach_job_log(path: Path, kind: str) -> logging.FileHandler:
     handler = logging.FileHandler(path, encoding="utf-8")
     handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    handler.addFilter(JobScopeFilter(kind))
     logging.getLogger().addHandler(handler)
     return handler
 
@@ -410,7 +412,7 @@ def main() -> int:
                             "backup",
                             str(definition.get("name") or "job"),
                         )
-                        job_log_handler = _attach_job_log(job_log_file)
+                        job_log_handler = _attach_job_log(job_log_file, "backup")
                         try:
                             job_id = db.job_start(
                                 "backup",
@@ -554,7 +556,7 @@ def main() -> int:
                     "pbs",
                     "-".join(pbs_due) or "targets",
                 )
-                job_log_handler = _attach_job_log(job_log_file)
+                job_log_handler = _attach_job_log(job_log_file, "pbs")
                 try:
                     job_id = db.job_start(
                         "pbs",
@@ -647,7 +649,7 @@ def main() -> int:
                     RESTORE_JOB_KIND,
                     RESTORE_AGGREGATE_NAME,
                 )
-                job_log_handler = _attach_job_log(job_log_file)
+                job_log_handler = _attach_job_log(job_log_file, RESTORE_JOB_KIND)
                 try:
                     job_id = db.job_start(
                         RESTORE_JOB_KIND,
