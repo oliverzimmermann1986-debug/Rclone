@@ -27,12 +27,17 @@ de.oliverzimmermann.rclonesync
 
 ## Erster Build
 
-Nach der Einrichtung kann der Workflow **Rclone Sync · TestFlight** in Codemagic manuell gestartet werden. Danach löst jeder Release-Tag automatisch einen Build aus:
+Nach der Einrichtung kann der Workflow **Rclone Sync · TestFlight** in Codemagic durch einen Release-Tag gestartet werden. Der Tag muss annotiert und kryptografisch signiert sein und exakt auf einem Commit liegen, der bereits in `origin/main` enthalten ist:
 
 ```bash
-git tag ios-v1.0.0
+git switch main
+git pull --ff-only origin main
+git tag -s ios-v1.0.0 -m "Rclone Sync iOS 1.0.0"
+git tag -v ios-v1.0.0
 git push origin ios-v1.0.0
 ```
+
+Der öffentliche Signierschlüssel muss im Codemagic-Buildschlüsselbund verfügbar sein. Die Pipeline holt `origin/main` und den exakten Tag erneut und bricht vor Versionsänderung, Build oder Publishing ab, wenn der Tag nur lightweight, nicht kryptografisch prüfbar, nicht auf dem Checkout oder nicht in der Main-Historie ist.
 
 Die Pipeline:
 
