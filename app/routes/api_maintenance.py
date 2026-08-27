@@ -28,6 +28,7 @@ from ..config_validation import ConfigValidationError, validate_config
 from ..db import get_db
 from ..maintenance import iter_logs, logs_root, prune_logs as prune_log_files
 from ..rclone_args import redact_command_text
+from ..push_notifications import revoke_all_push_devices
 from ..security import require_csrf
 from ..system_info import system_snapshot
 
@@ -401,6 +402,7 @@ def restore_config_snapshot(
         session_version = 1
     restored_web["session_version"] = max(1, session_version) + 1
     try:
+        revoke_all_push_devices()
         new_revision = store.replace(normalized, expected_revision=revision)
     except ConfigConflictError as exc:
         raise HTTPException(409, "Konfiguration wurde parallel geändert") from exc

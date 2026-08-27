@@ -25,6 +25,7 @@ from ..file_lock import release as release_file_lock
 from ..config_validation import ConfigValidationError, validate_config
 from ..db import get_db
 from ..security import ensure_within, require_csrf
+from ..push_notifications import revoke_all_push_devices
 
 router = APIRouter(
     prefix="/api/config",
@@ -352,6 +353,13 @@ def update_config(
             status_code=422,
             detail={"message": "Konfiguration ungültig", "errors": exc.errors},
         ) from exc
+    if username_changed:
+        try:
+            revoke_all_push_devices()
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                503, "Geräteregistrierungen konnten nicht widerrufen werden"
+            ) from exc
     try:
         revision = store.replace(normalized, expected_revision=expected_revision)
     except ConfigConflictError as exc:
@@ -590,6 +598,7 @@ def change_password(
 
     store = get_config()
     try:
+        revoke_all_push_devices()
         store.update(updater)
     except (OSError, ValueError) as exc:
         raise HTTPException(

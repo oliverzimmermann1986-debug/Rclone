@@ -24,6 +24,7 @@ from .db import get_db
 from .file_lock import acquire as acquire_file_lock
 from .file_lock import release as release_file_lock
 from .maintenance import prune_logs
+from .push_notifications import revoke_all_push_devices
 
 
 def _rotate_sessions(data: dict) -> dict:
@@ -68,7 +69,12 @@ def cmd_set_password(args) -> int:
         web["password"] = ""
 
     store = get_config()
-    store.update(updater)
+    try:
+        revoke_all_push_devices()
+        store.update(updater)
+    except (OSError, ValueError) as exc:
+        print(f"✗ Sitzungen und Push-Geräte konnten nicht widerrufen werden: {exc}")
+        return 1
     data_dir = Path(store.get("paths", "data_dir", default="/opt/rclone-sync/data"))
     try:
         (data_dir / ".initial-password").unlink(missing_ok=True)
@@ -85,7 +91,12 @@ def cmd_gen_secret(_args) -> int:
         web = _rotate_sessions(data)
         web["secret_key"] = secret
 
-    get_config().update(updater)
+    try:
+        revoke_all_push_devices()
+        get_config().update(updater)
+    except (OSError, ValueError) as exc:
+        print(f"✗ Sitzungen und Push-Geräte konnten nicht widerrufen werden: {exc}")
+        return 1
     print(
         f"✓ Neuer secret_key gesetzt ({len(secret)} Zeichen); bestehende Sessions wurden abgemeldet"
     )
