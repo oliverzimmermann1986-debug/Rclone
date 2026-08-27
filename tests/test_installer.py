@@ -119,6 +119,22 @@ def test_installer_rollback_restores_normalized_config_and_migrated_database():
     assert 'if (( rollback_failed == 0 )); then' in script
 
 
+def test_installer_starts_web_service_exactly_once_before_healthcheck():
+    script = INSTALLER.read_text(encoding="utf-8")
+
+    assert "systemctl enable --now rclone-sync-web.service" not in script
+    assert script.count("systemctl enable rclone-sync-web.service") == 1
+    assert script.count("systemctl restart rclone-sync-web.service") == 1
+    assert "systemctl enable --now sync-scheduler.timer" in script
+    activation = script.index("# Nur der Per-Pair-Scheduler")
+    enable = script.index("systemctl enable rclone-sync-web.service", activation)
+    restart = script.index("systemctl restart rclone-sync-web.service", enable)
+    health = script.index("systemctl is-active --quiet rclone-sync-web.service", restart)
+    assert enable < restart < health
+    assert "curl --fail --silent --show-error --max-time 10" in script
+    assert "restore_active_state rclone-sync-web.service" in script
+
+
 def test_ci_covers_supported_python_dependencies_ui_and_systemd_units():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
