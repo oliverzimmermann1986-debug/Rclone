@@ -78,13 +78,13 @@ def test_scheduler_job_logs_are_unique_private_and_isolated(tmp_path):
     root_logger.setLevel(logging.INFO)
     try:
         first = scheduler_cli._job_log_file(tmp_path, "backup", "Fotos täglich")
-        first_handler = scheduler_cli._attach_job_log(first)
-        logging.getLogger("scheduler-test").info("nur erster Job")
+        first_handler = scheduler_cli._attach_job_log(first, "backup")
+        logging.getLogger("app.jobs.rclone_sync").info("nur erster Job")
         scheduler_cli._detach_job_log(first_handler)
 
         second = scheduler_cli._job_log_file(tmp_path, "backup", "Dokumente")
-        second_handler = scheduler_cli._attach_job_log(second)
-        logging.getLogger("scheduler-test").info("nur zweiter Job")
+        second_handler = scheduler_cli._attach_job_log(second, "backup")
+        logging.getLogger("app.jobs.rclone_sync").info("nur zweiter Job")
         scheduler_cli._detach_job_log(second_handler)
     finally:
         root_logger.setLevel(previous_level)

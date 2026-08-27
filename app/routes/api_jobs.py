@@ -29,6 +29,7 @@ from ..jobs import rclone_sync as rclone_job
 from ..jobs import restore_test
 from ..jobs import runtime_state
 from ..jobs.job_lifecycle import BACKUP_KINDS, reconcile_locked_scope
+from ..jobs.logging_scope import JobScopeFilter
 from ..jobs.locks import HeldFileLock, try_file_lock
 from ..jobs.scheduler import rclone_history_key
 from ..rclone_args import redact_command_text, rclone_subprocess_env
@@ -95,6 +96,7 @@ def _setup_job_logger(job_id: int, kind: str) -> tuple[Path, logging.FileHandler
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
+    handler.addFilter(JobScopeFilter(kind))
     _job_log_target().addHandler(handler)
     return log_file, handler
 
