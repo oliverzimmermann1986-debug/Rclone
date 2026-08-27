@@ -15,7 +15,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -1216,29 +1216,121 @@ def backup_progress() -> dict[str, Any]:
     )
 
 
+class _ProgressBroadcaster:
+    """One paced progress snapshot producer shared by all SSE clients."""
+
+    def __init__(
+        self, snapshot_factory: Callable[[], dict[str, Any]], *, interval: float = 1.5
+    ):
+        self._snapshot_factory = snapshot_factory
+        self._interval = max(0.01, float(interval))
+        self._subscribers: set[asyncio.Queue[str | None]] = set()
+        self._task: asyncio.Task[None] | None = None
+        self._last_payload: str | None = None
+
+    @property
+    def subscriber_count(self) -> int:
+        return len(self._subscribers)
+
+    async def subscribe(self) -> asyncio.Queue[str | None]:
+        queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=1)
+        self._subscribers.add(queue)
+        if self._last_payload is not None:
+            queue.put_nowait(self._last_payload)
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(
+                self._run(), name="progress-sse-broadcaster"
+            )
+        return queue
+
+    async def unsubscribe(self, queue: asyncio.Queue[str | None]) -> None:
+        self._subscribers.discard(queue)
+        if self._subscribers:
+            return
+        self._last_payload = None
+        await self._cancel_producer()
+
+    async def stop(self) -> None:
+        subscribers = tuple(self._subscribers)
+        self._subscribers.clear()
+        self._last_payload = None
+        for queue in subscribers:
+            if queue.full():
+                queue.get_nowait()
+            queue.put_nowait(None)
+        await self._cancel_producer()
+
+    async def _cancel_producer(self) -> None:
+        task = self._task
+        self._task = None
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def _publish(self, payload: str) -> None:
+        for queue in tuple(self._subscribers):
+            # Bounded latest-value delivery prevents slow/suspended tabs from
+            # accumulating an unbounded progress backlog.
+            if queue.full():
+                queue.get_nowait()
+            queue.put_nowait(payload)
+
+    async def _run(self) -> None:
+        try:
+            while self._subscribers:
+                try:
+                    data = await asyncio.to_thread(self._snapshot_factory)
+                    payload = json.dumps(data, default=str)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    payload = json.dumps({"error": "progress unavailable"})
+                if payload != self._last_payload:
+                    self._last_payload = payload
+                    self._publish(payload)
+                await asyncio.sleep(self._interval)
+        finally:
+            if self._task is asyncio.current_task():
+                self._task = None
+
+
+_progress_broadcaster = _ProgressBroadcaster(backup_progress)
+
+
+async def stop_progress_broadcaster() -> None:
+    """Release SSE tasks and subscribers during application shutdown."""
+
+    await _progress_broadcaster.stop()
+
+
 @router.get("/progress/stream")
 async def progress_stream(request: Request) -> StreamingResponse:
     """Server-Sent Events für Live-Progress.
 
-    Der bestehende Polling-Endpoint ``/backup/progress`` bleibt als Fallback
-    erhalten. Der synchrone Snapshot wird im Threadpool erzeugt, damit der
-    einzelne Uvicorn-Worker während des Log-Lesens nicht blockiert.
+    Der bestehende Polling-Endpoint ``/backup/progress`` bleibt als Fallback.
+    Alle verbundenen Clients teilen einen getakteten Snapshot-Produzenten.
     """
 
     async def event_generator():
-        last_payload = None
-        while True:
-            if await request.is_disconnected():
-                break
-            try:
-                data = await asyncio.to_thread(backup_progress)
-                payload = json.dumps(data, default=str)
-                if payload != last_payload:
-                    yield f"data: {payload}\n\n"
-                    last_payload = payload
-            except Exception:
-                yield f"data: {json.dumps({'error': 'progress unavailable'})}\n\n"
-            await asyncio.sleep(1.5)
+        queue = await _progress_broadcaster.subscribe()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=1.5)
+                except TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                if payload is None:
+                    break
+                yield f"data: {payload}\n\n"
+        finally:
+            await asyncio.shield(_progress_broadcaster.unsubscribe(queue))
 
     return StreamingResponse(
         event_generator(),

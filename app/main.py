@@ -292,6 +292,7 @@ async def _lifespan(_app):
     try:
         yield
     finally:
+        await api_jobs.stop_progress_broadcaster()
         maintenance_stop.set()
         push_stop.set()
         maintenance_thread.join(timeout=5)
