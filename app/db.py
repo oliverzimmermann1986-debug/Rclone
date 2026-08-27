@@ -1763,6 +1763,34 @@ class Database:
                 ).fetchone()[0]
             )
 
+    def job_search(
+        self,
+        *,
+        kind: Optional[str] = None,
+        status: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[List[Dict[str, Any]], int]:
+        """Liest Treffer und Gesamtzahl aus derselben SQLite-Read-Transaktion."""
+
+        bounded_limit = max(1, min(int(limit or 50), 200))
+        bounded_offset = max(0, min(int(offset or 0), 1_000_000))
+        where, params = self._job_filter(kind=kind, status=status, query=query)
+        with self.conn() as connection:
+            connection.execute("BEGIN")
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM jobs{where}", tuple(params)
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                f"SELECT * FROM jobs{where} "
+                "ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?",
+                (*params, bounded_limit, bounded_offset),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows], total
+
     def job_statistics(self, *, since: Optional[float] = None) -> Dict[str, Any]:
         clauses = ["1=1"]
         params: list[Any] = []

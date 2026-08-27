@@ -1490,18 +1490,16 @@ def search_jobs(
     db = get_db()
     bounded_limit = max(1, min(limit, 200))
     bounded_offset = max(0, min(offset, 1_000_000))
+    items, total = db.job_search(
+        kind=kind,
+        status=status,
+        query=q,
+        limit=bounded_limit,
+        offset=bounded_offset,
+    )
     return {
-        "items": [
-            _redact_result(job)
-            for job in db.job_list(
-                kind=kind,
-                status=status,
-                query=q,
-                limit=bounded_limit,
-                offset=bounded_offset,
-            )
-        ],
-        "total": db.job_count(kind=kind, status=status, query=q),
+        "items": [_redact_result(job) for job in items],
+        "total": total,
         "limit": bounded_limit,
         "offset": bounded_offset,
     }
