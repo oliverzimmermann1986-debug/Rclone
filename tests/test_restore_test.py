@@ -1,3 +1,4 @@
+import copy
 import random
 import subprocess
 from pathlib import Path
@@ -26,6 +27,9 @@ class _Cfg:
                 return default
             node = node[key]
         return node
+
+    def snapshot(self):
+        return copy.deepcopy(self._data)
 
 
 def _cfg(tmp_path: Path, pairs=None, **restore):
@@ -63,6 +67,72 @@ def test_settings_defaults_and_clamping(tmp_path: Path):
     )
     assert snapshot_settings["enabled"] is True
     assert snapshot_settings["schedule"] == "0 4 * * *"
+
+
+def test_restore_drill_keeps_deep_initial_snapshot_when_input_mutates(
+    tmp_path: Path, monkeypatch
+):
+    supplied = {
+        "backup": {
+            "pairs": [
+                {
+                    "name": "one",
+                    "direction": "push",
+                    "local": "/source-one",
+                    "remote": "cloud:one",
+                    "enabled": True,
+                },
+                {
+                    "name": "two",
+                    "direction": "push",
+                    "local": "/source-two",
+                    "remote": "cloud:two",
+                    "enabled": True,
+                },
+            ],
+            "timeout_hours": 1,
+            "restore_test": {"sample_files": 1, "max_total_mb": 1},
+        },
+        "paths": {
+            "temp_dir": str(tmp_path / "original-temp"),
+            "logs_dir": str(tmp_path / "original-logs"),
+        },
+    }
+    observations: list[tuple[str, int]] = []
+
+    def fake_pair(pair, *, config, **_kwargs):
+        observations.append(
+            (
+                config.get("paths", "temp_dir"),
+                config.get("backup", "timeout_hours"),
+            )
+        )
+        supplied["paths"]["temp_dir"] = str(tmp_path / "mutated-temp")
+        supplied["backup"]["timeout_hours"] = 99
+        return {
+            "name": pair["name"],
+            "ok": True,
+            "verified": 1,
+            "sample_size": 1,
+        }
+
+    monkeypatch.setattr(
+        drill,
+        "get_config",
+        lambda: (_ for _ in ()).throw(AssertionError("live config read")),
+    )
+    monkeypatch.setattr(drill, "run_pair_restore_test", fake_pair)
+    monkeypatch.setattr(drill, "reset_cancel", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(drill, "is_cancelled", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(drill, "_notify_result", lambda *_args, **_kwargs: None)
+
+    summary = drill.run_restore_test(config_snapshot=supplied)
+
+    assert summary["ok"] is True
+    assert observations == [
+        (str(tmp_path / "original-temp"), 1),
+        (str(tmp_path / "original-temp"), 1),
+    ]
 
 
 def test_endpoints_follow_direction():

@@ -13,6 +13,7 @@ Support-Bundle. Protokolliert werden ausschließlich Pfadnamen und Zähler.
 
 from __future__ import annotations
 
+import copy
 import logging
 import queue
 import random
@@ -351,9 +352,10 @@ def run_pair_restore_test(
     log_file: Path,
     settings: Mapping[str, Any],
     seed: Optional[int] = None,
+    config: Any | None = None,
 ) -> dict[str, Any]:
     """Drill für ein einzelnes Pair. Wirft nicht, meldet über das Ergebnis."""
-    cfg = get_config()
+    cfg = config if config is not None else get_config()
     backup = cfg.get("backup", default={}) or {}
     name = str(pair.get("name") or "?")
     source, copy_target = _endpoints(pair)
@@ -724,11 +726,12 @@ def run_restore_test(
     config_snapshot: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Drill über alle ausgewählten Pairs. Rückgabe im Job-Summary-Format."""
-    cfg = (
-        _SnapshotConfig(dict(config_snapshot))
+    snapshot = (
+        copy.deepcopy(dict(config_snapshot))
         if config_snapshot is not None
-        else get_config()
+        else get_config().snapshot()
     )
+    cfg = _SnapshotConfig(snapshot)
     settings = restore_test_settings(cfg)
     if reset_cancel_state:
         reset_cancel(DEFAULT_CANCEL_SCOPE)
@@ -752,7 +755,13 @@ def run_restore_test(
             / f"restoretest-{_safe_name(name)}-{datetime.now():%Y%m%d-%H%M%S-%f}.log"
         )
         results.append(
-            run_pair_restore_test(pair, log_file=log_file, settings=settings, seed=seed)
+            run_pair_restore_test(
+                pair,
+                log_file=log_file,
+                settings=settings,
+                seed=seed,
+                config=cfg,
+            )
         )
 
     ok = bool(results) and all(item.get("ok") for item in results)
