@@ -207,6 +207,8 @@ def _sensitive_config_changed(
         return True
     if old_web.get("local_browse_roots") != new_web.get("local_browse_roots"):
         return True
+    if old_web.get("trusted_proxy_ips", []) != new_web.get("trusted_proxy_ips", []):
+        return True
     for key, fallback in _SENSITIVE_WEB_SCALARS.items():
         old_value = old_web.get(key, fallback)
         new_value = new_web.get(key, fallback)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import ipaddress
 import re
 import uuid
 from collections import Counter
@@ -34,6 +35,7 @@ _KNOWN_WEB_KEYS = frozenset(
         "session_version",
         "session_max_age_seconds",
         "allowed_hosts",
+        "trusted_proxy_ips",
         "local_browse_roots",
         "hidden_remote_paths",
         "secure_cookie",
@@ -291,6 +293,18 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         else:
             clean_hosts.append(host.casefold())
     web["allowed_hosts"] = list(dict.fromkeys(clean_hosts or ["*"]))
+    try:
+        trusted_proxy_ips = _normalize_string_list(web.get("trusted_proxy_ips", []))
+    except ValueError:
+        errors.append("web.trusted_proxy_ips muss Text oder Liste sein")
+        trusted_proxy_ips = []
+    clean_proxies: list[str] = []
+    for value in trusted_proxy_ips:
+        try:
+            clean_proxies.append(str(ipaddress.ip_network(value, strict=False)))
+        except ValueError:
+            errors.append(f"Ungültiges CIDR in web.trusted_proxy_ips: {value}")
+    web["trusted_proxy_ips"] = list(dict.fromkeys(clean_proxies))
     roots = web.get(
         "local_browse_roots", ["/mnt", "/media", "/srv", "/opt/rclone-sync/data"]
     )

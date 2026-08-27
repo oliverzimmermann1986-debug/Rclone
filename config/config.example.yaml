@@ -31,6 +31,9 @@ web:
   # In Produktion besser konkrete DNS-Namen/IPs statt "*" verwenden.
   allowed_hosts:
     - "*"
+  # Nur diese direkten Proxy-Hops dürfen X-Forwarded-For liefern. Leer bedeutet:
+  # Forwarding ignorieren und ausschließlich den Socket-Peer verwenden.
+  trusted_proxy_ips: []
 
   # Der lokale Dateibrowser und Quick-Sync dürfen nur hier zugreifen.
   local_browse_roots:
