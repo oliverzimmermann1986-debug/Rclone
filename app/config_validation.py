@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 import re
 import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +57,9 @@ _MAX_JOBS = 256
 _MAX_PBS_TARGETS = 128
 _MAX_PBS_PATHS = 64
 CONFIG_SCHEMA_VERSION = 3
+SESSION_SECRET_PLACEHOLDER = "change-this-to-random-string-32chars-min"
+MIN_SESSION_SECRET_BYTES = 32
+MIN_SESSION_SECRET_ENTROPY_BITS = 128.0
 _NOTIFICATION_EVENTS = {
     "sync_started",
     "sync_ok",
@@ -72,6 +77,34 @@ class ConfigValidationError(ValueError):
     def __init__(self, errors: list[str]):
         self.errors = errors
         super().__init__("; ".join(errors))
+
+
+def session_secret_strength_error(value: str) -> str | None:
+    """Validate explicit session secrets while preserving auto-generation migration."""
+
+    if not value or value == SESSION_SECRET_PLACEHOLDER:
+        return None
+    raw = value.encode("utf-8", errors="strict")
+    if len(raw) < MIN_SESSION_SECRET_BYTES:
+        return (
+            f"web.secret_key muss mindestens {MIN_SESSION_SECRET_BYTES} "
+            "UTF-8-Bytes lang sein"
+        )
+    for period in range(1, min(16, len(raw) // 2) + 1):
+        if len(raw) % period == 0 and raw == raw[:period] * (len(raw) // period):
+            return "web.secret_key darf kein wiederholtes Muster enthalten"
+    counts = Counter(raw)
+    entropy_per_byte = -sum(
+        (count / len(raw)) * math.log2(count / len(raw)) for count in counts.values()
+    )
+    entropy_bits = entropy_per_byte * len(raw)
+    if entropy_bits < MIN_SESSION_SECRET_ENTROPY_BITS:
+        return (
+            "web.secret_key besitzt zu wenig Entropie; mindestens "
+            f"{int(MIN_SESSION_SECRET_ENTROPY_BITS)} Bit und keine "
+            "Wiederholungsmuster erforderlich"
+        )
+    return None
 
 
 def _number(
@@ -179,6 +212,14 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     if not username or len(username) > 128 or any(c in username for c in "\r\n\x00"):
         errors.append("web.username ist ungültig")
     web["username"] = username or "admin"
+    secret_key = str(web.get("secret_key") or "")
+    try:
+        secret_error = session_secret_strength_error(secret_key)
+    except UnicodeError:
+        secret_error = "web.secret_key enthält ungültigen Unicode-Text"
+    if secret_error:
+        errors.append(secret_error)
+    web["secret_key"] = secret_key
     secure_cookie = web.get("secure_cookie", False)
     if isinstance(secure_cookie, str) and secure_cookie.strip().lower() == "auto":
         web["secure_cookie"] = "auto"

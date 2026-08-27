@@ -16,6 +16,7 @@ from fastapi import Cookie, HTTPException, Request
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from .config_store import get_config
+from .config_validation import SESSION_SECRET_PLACEHOLDER, session_secret_strength_error
 from .db import get_db
 from .utils import bounded_int as _bounded_int
 
@@ -61,7 +62,7 @@ def session_max_age() -> int:
 def _serializer() -> URLSafeTimedSerializer:
     cfg = get_config()
     secret = str(cfg.get("web", "secret_key", default="") or "")
-    if not secret or secret == "change-this-to-random-string-32chars-min":
+    if not secret or secret == SESSION_SECRET_PLACEHOLDER:
         generated = secrets.token_urlsafe(48)
 
         def updater(data: dict) -> None:
@@ -69,12 +70,16 @@ def _serializer() -> URLSafeTimedSerializer:
             if not isinstance(web, dict):
                 raise ValueError("web muss ein Mapping sein")
             current = str(web.get("secret_key") or "")
-            if not current or current == "change-this-to-random-string-32chars-min":
+            if not current or current == SESSION_SECRET_PLACEHOLDER:
                 web["secret_key"] = generated
 
         cfg.update(updater)
         secret = str(cfg.get("web", "secret_key", default=generated) or generated)
         logger.warning("web.secret_key war leer/default — neuer wurde generiert.")
+    strength_error = session_secret_strength_error(secret)
+    if strength_error:
+        logger.critical("Unsicheres Session-Secret abgelehnt: %s", strength_error)
+        raise RuntimeError(strength_error)
     return URLSafeTimedSerializer(secret, salt="rclone-sync-session-v3")
 
 
