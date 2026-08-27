@@ -125,6 +125,10 @@ _OVERVIEW_CACHE: tuple[float, dict[str, Any]] | None = None
 _OVERVIEW_CACHE_LOCK = threading.Lock()
 _OVERVIEW_BUILD_LOCK = threading.Lock()
 _OVERVIEW_CACHE_TTL = 8.0
+_OPERATIONAL_CACHE: tuple[float, tuple[int, str, int], dict[str, Any]] | None = None
+_OPERATIONAL_CACHE_LOCK = threading.Lock()
+_OPERATIONAL_BUILD_LOCK = threading.Lock()
+_OPERATIONAL_CACHE_TTL = 8.0
 
 
 def _systemctl_state(unit: str) -> tuple[str, str]:
@@ -162,14 +166,61 @@ def _systemctl_state(unit: str) -> tuple[str, str]:
     return result
 
 
+def operational_snapshot(
+    *,
+    config_snapshot: dict[str, Any] | None = None,
+    database: Any | None = None,
+) -> dict[str, Any]:
+    """Berechnet die teure DB-/System-Sicht einmal für parallele Diagnose-Reads."""
+
+    global _OPERATIONAL_CACHE
+    snapshot = config_snapshot or get_config().snapshot()
+    paths = snapshot.get("paths") or {}
+    data_dir = str(paths.get("data_dir") or "/opt/rclone-sync/data")
+    db = database or get_db()
+    key = (id(db), data_dir, id(system_snapshot))
+    now = time.monotonic()
+    with _OPERATIONAL_CACHE_LOCK:
+        cached = _OPERATIONAL_CACHE
+        if cached and cached[1] == key and now - cached[0] < _OPERATIONAL_CACHE_TTL:
+            return copy.deepcopy(cached[2])
+
+    with _OPERATIONAL_BUILD_LOCK:
+        now = time.monotonic()
+        with _OPERATIONAL_CACHE_LOCK:
+            cached = _OPERATIONAL_CACHE
+            if (
+                cached
+                and cached[1] == key
+                and now - cached[0] < _OPERATIONAL_CACHE_TTL
+            ):
+                return copy.deepcopy(cached[2])
+        result = {
+            "database": {
+                "ok": True,
+                "stats": db.stats(),
+                "integrity": db.integrity_check(),
+            },
+            "system": system_snapshot(data_dir),
+            "services": {
+                "legacy_scheduler": _systemctl_state("rclone-sync.timer"),
+                "scheduler": _systemctl_state("sync-scheduler.timer"),
+                "web": _systemctl_state("rclone-sync-web.service"),
+            },
+        }
+        with _OPERATIONAL_CACHE_LOCK:
+            _OPERATIONAL_CACHE = (time.monotonic(), key, copy.deepcopy(result))
+        return result
+
+
 @router.get("/doctor")
 def doctor() -> dict[str, Any]:
-    cfg = get_config()
-    snapshot = cfg.snapshot()
+    snapshot = get_config().snapshot()
     backup = snapshot.get("backup") or {}
     paths = snapshot.get("paths") or {}
     checks: list[dict[str, Any]] = []
     pair_checks: list[dict[str, Any]] = []
+    operational: dict[str, Any] | None = None
 
     try:
         _normalized, warnings = validate_config(snapshot)
@@ -180,8 +231,9 @@ def doctor() -> dict[str, Any]:
 
     try:
         db = get_db()
-        integrity = db.integrity_check()
-        stats = db.stats()
+        operational = operational_snapshot(config_snapshot=snapshot, database=db)
+        integrity = operational["database"]["integrity"]
+        stats = operational["database"]["stats"]
         if integrity.get("ok"):
             checks.append(
                 _ok(
@@ -212,30 +264,12 @@ def doctor() -> dict[str, Any]:
         result["name"] = label
         checks.append(result)
 
-    try:
-        version = subprocess.run(
-            ["rclone", "version"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            stdin=subprocess.DEVNULL,
-            env=rclone_subprocess_env(),
-        )
-        if version.returncode == 0:
-            checks.append(
-                _ok(
-                    "rclone",
-                    version.stdout.splitlines()[0] if version.stdout else "rclone ok",
-                )
-            )
-        else:
-            checks.append(
-                _err("rclone", (version.stderr or version.stdout).strip()[:300])
-            )
-    except FileNotFoundError:
-        checks.append(_err("rclone", "Binary nicht gefunden"))
-    except Exception as exc:
-        checks.append(_err("rclone", f"Version-Check fehlgeschlagen: {exc}"))
+    version_check = _rclone_version_check()
+    checks.append(
+        _err("rclone", str(version_check.get("message") or "Version-Check fehlgeschlagen"))
+        if version_check.get("level") == "error"
+        else _ok("rclone", str(version_check.get("message") or "rclone ok"))
+    )
 
     remotes: list[str] = []
     try:
@@ -304,8 +338,14 @@ def doctor() -> dict[str, Any]:
     else:
         checks.append(_ok("Pre/Post-Stats", "deaktiviert"))
 
-    legacy_enabled, legacy_active = _systemctl_state("rclone-sync.timer")
-    scheduler_enabled, scheduler_active = _systemctl_state("sync-scheduler.timer")
+    if operational is None:
+        legacy_enabled, legacy_active = _systemctl_state("rclone-sync.timer")
+        scheduler_enabled, scheduler_active = _systemctl_state(
+            "sync-scheduler.timer"
+        )
+    else:
+        legacy_enabled, legacy_active = operational["services"]["legacy_scheduler"]
+        scheduler_enabled, scheduler_active = operational["services"]["scheduler"]
     if legacy_enabled == "enabled" and scheduler_enabled == "enabled":
         checks.append(
             _err(
@@ -328,7 +368,7 @@ def doctor() -> dict[str, Any]:
         )
 
     names: dict[str, int] = {}
-    definitions = effective_job_definitions(cfg)
+    definitions = effective_job_definitions(snapshot)
     assignments: dict[str, list[dict[str, Any]]] = {}
     for definition in definitions:
         for path_id in definition.get("data_path_ids") or []:
@@ -446,12 +486,12 @@ def doctor() -> dict[str, Any]:
     )
 
     try:
-        plan = build_job_plan(dry_run=True)
+        plan = build_job_plan(dry_run=True, config_snapshot=snapshot)
         checks.extend(_warn("Plan", warning) for warning in plan.get("warnings", []))
     except Exception as exc:
         checks.append(_err("Plan", f"Plan konnte nicht erstellt werden: {exc}"))
 
-    checks.append(_rclone_version_check())
+    checks.append(version_check)
 
     all_items = checks + [
         check for pair in pair_checks for check in pair.get("checks", [])
@@ -505,7 +545,6 @@ def _build_overview() -> dict[str, Any]:
     global _OVERVIEW_CACHE
     cfg = get_config().snapshot()
     backup = cfg.get("backup") or {}
-    paths = cfg.get("paths") or {}
     pairs = [p for p in (backup.get("pairs") or []) if isinstance(p, dict)]
     enabled = [p for p in pairs if p.get("enabled", True)]
     definitions = effective_job_definitions(cfg)
@@ -528,6 +567,7 @@ def _build_overview() -> dict[str, Any]:
             destructive.append(pair)
 
     db = get_db()
+    operational = operational_snapshot(config_snapshot=cfg, database=db)
     last_jobs = db.job_list(limit=20)
     last_job = last_jobs[0] if last_jobs else None
     last_success = next((job for job in last_jobs if job.get("status") == "ok"), None)
@@ -605,10 +645,10 @@ def _build_overview() -> dict[str, Any]:
             }
         )
 
-    scheduler_enabled, scheduler_active = _systemctl_state("sync-scheduler.timer")
+    scheduler_enabled, scheduler_active = operational["services"]["scheduler"]
     scheduler_control = scheduler_state(db, now=now)
-    web_enabled, web_active = _systemctl_state("rclone-sync-web.service")
-    system = system_snapshot(str(paths.get("data_dir") or "/opt/rclone-sync/data"))
+    web_enabled, web_active = operational["services"]["web"]
+    system = operational["system"]
     alerts: list[dict[str, str]] = []
     if not bool(backup.get("enabled", True)):
         alerts.append(
