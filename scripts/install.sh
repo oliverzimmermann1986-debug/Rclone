@@ -463,7 +463,7 @@ systemctl daemon-reload
 # Nur der Per-Pair-Scheduler darf automatisch laufen. Der Legacy-Timer würde
 # dieselben Pairs zusätzlich pauschal starten.
 systemctl disable --now rclone-sync.timer >/dev/null 2>&1 || true
-systemctl enable --now rclone-sync-web.service
+systemctl enable rclone-sync-web.service
 systemctl enable --now sync-scheduler.timer
 systemctl restart rclone-sync-web.service
 
