@@ -42,7 +42,7 @@ Der öffentliche Signierschlüssel muss im Codemagic-Buildschlüsselbund verfüg
 Die Pipeline:
 
 1. verwendet die aktuelle stabile Xcode-26-Version,
-2. generiert `RcloneMobile.xcodeproj` mit XcodeGen,
+2. lädt ausschließlich XcodeGen 2.46.0 aus dem offiziellen Releasearchiv, prüft dessen fest hinterlegte SHA-256-Prüfsumme und die ausgeführte Version und generiert damit `RcloneMobile.xcodeproj`,
 3. installiert das App-Store-Profil,
 4. setzt eine eindeutige Buildnummer,
 5. führt die iOS-Unit-Tests auf einem iPhone-17-Simulator aus,

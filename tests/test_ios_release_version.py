@@ -49,7 +49,8 @@ def test_duplicate_marketing_version_is_rejected(tmp_path: Path):
 def test_codemagic_applies_tag_before_generation_and_keeps_monotonic_build_number():
     root = Path(__file__).parents[1]
     config = (root / "codemagic.yaml").read_text(encoding="utf-8")
-    assert config.index("ios_release_version.py") < config.index("xcodegen generate")
+    generate_command = '"$CM_BUILD_DIR/.tools/xcodegen/bin/xcodegen" generate'
+    assert config.index("ios_release_version.py") < config.index(generate_command)
     assert 'agvtool new-version -all "$BUILD_NUMBER"' in config
     assert "CFBundleShortVersionString" in config
     assert "CFBundleVersion" in config
@@ -77,14 +78,15 @@ def test_codemagic_validates_live_backend_contracts_before_xcode_build():
     )
     contract_test_run = (
         "python3 -m pytest tests/test_native_login_contract.py "
-        "tests/test_native_read_contract.py tests/test_ios_release_preflight.py "
-        "tests/test_ios_release_version.py"
+        "tests/test_native_read_contract.py tests/test_install_pinned_xcodegen.py "
+        "tests/test_ios_release_preflight.py tests/test_ios_release_version.py"
     )
 
     assert dependency_install in normalized
     assert contract_test_run in normalized
     assert normalized.index(dependency_install) < normalized.index(contract_test_run)
-    assert normalized.index(contract_test_run) < normalized.index("xcodegen generate")
+    generate_command = '"$CM_BUILD_DIR/.tools/xcodegen/bin/xcodegen" generate'
+    assert normalized.index(contract_test_run) < normalized.index(generate_command)
     assert normalized.index(contract_test_run) < normalized.index(
         "xcode-project build-ipa"
     )
@@ -105,6 +107,19 @@ def test_codemagic_pins_the_verified_simulator_image():
 
     assert "xcode: 26.4" in config
     assert '-destination "platform=iOS Simulator,name=iPhone 17,OS=latest"' in config
+
+
+def test_codemagic_uses_checksum_verified_exact_xcodegen_before_generation():
+    root = Path(__file__).parents[1]
+    config = (root / "codemagic.yaml").read_text(encoding="utf-8")
+    project = yaml.safe_load((root / "ios" / "project.yml").read_text(encoding="utf-8"))
+
+    install = config.index("install_pinned_xcodegen.py")
+    generate = config.index('"$CM_BUILD_DIR/.tools/xcodegen/bin/xcodegen" generate')
+    assert "brew install xcodegen" not in config
+    assert install < generate
+    assert "tests/test_install_pinned_xcodegen.py" in config
+    assert project["options"]["minimumXcodeGenVersion"] == "2.46.0"
 
 
 def test_ios_ci_tracks_native_contract_sources():

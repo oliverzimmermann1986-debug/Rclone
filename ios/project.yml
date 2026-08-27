@@ -1,5 +1,6 @@
 name: RcloneMobile
 options:
+  minimumXcodeGenVersion: "2.46.0"
   bundleIdPrefix: de.rclonesync
   deploymentTarget:
     iOS: "17.0"
