@@ -149,6 +149,12 @@ final class AppModel: ObservableObject {
             let url = try APIClient.normalizedServerURL(serverAddress)
             let newClient = clientFactory(url)
             candidate = newClient
+            if APIClient.requiresExplicitInsecureTransportConfirmation(url) {
+                newClient.clearLocalSession()
+                clearSessionState()
+                errorMessage = "Eine gespeicherte HTTP-Verbindung wird aus Sicherheitsgründen nicht automatisch wiederhergestellt. Tippe erneut auf Verbinden und bestätige die unverschlüsselte Verbindung ausdrücklich."
+                return
+            }
             try await revokePendingPushRegistrationsBeforeRestore(
                 using: newClient,
                 server: url.absoluteString

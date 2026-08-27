@@ -120,6 +120,22 @@ def test_session_restore_revokes_pending_push_before_loading_credentials():
     assert "_ = try await client.unregisterPushDevice" in model
 
 
+def test_stored_http_session_restore_is_fail_closed_and_manual_login_reconfirms():
+    api = _swift("Core/APIClient.swift")
+    model = _swift("Core/AppModel.swift")
+    login = _swift("Views/LoginView.swift")
+
+    assert "requiresExplicitInsecureTransportConfirmation" in api
+    restore = model[model.index("func restoreSession() async"):model.index("func login(")]
+    assert "if APIClient.requiresExplicitInsecureTransportConfirmation(url)" in restore
+    assert "newClient.clearLocalSession()" in restore
+    assert restore.index("requiresExplicitInsecureTransportConfirmation") < restore.index(
+        "try await newClient.getConfig()"
+    )
+    assert "if APIClient.requiresExplicitInsecureTransportConfirmation(url)" in login
+    assert "showHTTPWarning = true" in login
+
+
 def test_failed_run_retry_and_push_deep_link_are_revision_safe():
     api = _swift("Core/APIClient.swift")
     model = _swift("Core/AppModel.swift")

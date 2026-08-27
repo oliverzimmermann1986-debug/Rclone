@@ -74,6 +74,21 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertNotNil(defaults.data(forKey: "pendingPushRevocations"))
     }
 
+    func testStoredHTTPConnectionRequiresFreshConfirmationAndClearsSession() async {
+        let defaults = makeDefaults()
+        defaults.set("http://192.168.1.20:8001", forKey: "serverAddress")
+        let client = StubAPIClient()
+        let model = AppModel(defaults: defaults) { _ in client }
+
+        await model.restoreSession()
+
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertTrue(client.clearedLocalSession)
+        XCTAssertEqual(client.configCallCount, 0)
+        XCTAssertEqual(model.serverAddress, "http://192.168.1.20:8001")
+        XCTAssertTrue(model.errorMessage?.contains("nicht automatisch wiederhergestellt") == true)
+    }
+
     func testRefreshPublishesSuccessfulEndpointsWhenOthersFail() async {
         let defaults = makeDefaults()
         let client = StubAPIClient()

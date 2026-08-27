@@ -207,7 +207,7 @@ struct LoginView: View {
             performLogin()
             return
         }
-        if url.scheme?.lowercased() == "http" {
+        if APIClient.requiresExplicitInsecureTransportConfirmation(url) {
             showHTTPWarning = true
             return
         }
