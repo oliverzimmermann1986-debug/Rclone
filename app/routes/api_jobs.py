@@ -151,6 +151,17 @@ def _finish_status(result: dict[str, Any]) -> str:
     return "ok" if result.get("ok") else "error"
 
 
+def _finish_external_result(
+    db, job_id: int, status: str, summary: dict[str, Any]
+) -> bool:
+    durable_finish = getattr(db, "job_finish_external", None)
+    if callable(durable_finish):
+        return bool(durable_finish(job_id, status, summary))
+    # Kleine Test-Doubles und alte Integrationen bleiben kompatibel; die echte
+    # Database besitzt immer den dauerhaften Abschluss.
+    return bool(db.job_finish(job_id, status, summary))
+
+
 def _run_backup_thread(
     job_id: int,
     dry_run: bool,
@@ -163,6 +174,7 @@ def _run_backup_thread(
     db = None
     handler: logging.FileHandler | None = None
     worker_error: str | None = None
+    external_result: tuple[str, dict[str, Any]] | None = None
     try:
         db = get_db()
         current = db.job_get(job_id) or {}
@@ -190,11 +202,18 @@ def _run_backup_thread(
         if status == "cancelled":
             summary.setdefault("error", "Abgebrochen")
             summary["cancelled"] = True
-        db.job_finish(job_id, status, summary)
+        external_result = (status, summary)
+        _finish_external_result(db, job_id, status, summary)
         logger.info("Backup #%s %s", job_id, status)
     except Exception as exc:
-        worker_error = str(exc)
-        logger.exception("Backup #%s Setup fehlgeschlagen", job_id)
+        if external_result is None:
+            worker_error = str(exc)
+            logger.exception("Backup #%s Setup fehlgeschlagen", job_id)
+        else:
+            logger.exception(
+                "Backup #%s extern beendet; terminaler DB-Abschluss bleibt ausstehend",
+                job_id,
+            )
     finally:
         final_db = db
         if final_db is None:
@@ -680,6 +699,16 @@ def _run_definition_batch_thread(batch_id: str, scope_lock: HeldFileLock) -> Non
             )
             completed = db.job_get(job_id) or {}
             status = str(completed.get("status") or "stale")
+            terminal_pending = getattr(db, "job_terminal_pending", None)
+            if status == "running" and callable(terminal_pending) and terminal_pending(
+                job_id
+            ):
+                logger.error(
+                    "Batch %s pausiert: terminaler Abschluss fuer Job #%s ausstehend",
+                    batch_id,
+                    job_id,
+                )
+                return
             item_state = (
                 "done"
                 if status == "ok"
@@ -985,6 +1014,7 @@ def check_pair(
         db = None
         handler: logging.FileHandler | None = None
         worker_error: str | None = None
+        external_result: tuple[str, dict[str, Any]] | None = None
         try:
             db = get_db()
             current = db.job_get(job_id) or {}
@@ -999,10 +1029,17 @@ def check_pair(
                 reset_cancel_state=False,
                 config_snapshot=config_snapshot,
             )
-            db.job_finish(job_id, _finish_status(result), result)
+            status = _finish_status(result)
+            external_result = (status, result)
+            _finish_external_result(db, job_id, status, result)
         except Exception as exc:
-            worker_error = str(exc)
-            logger.exception("Check #%s fehlgeschlagen", job_id)
+            if external_result is None:
+                worker_error = str(exc)
+                logger.exception("Check #%s fehlgeschlagen", job_id)
+            else:
+                logger.exception(
+                    "Check #%s extern beendet; DB-Abschluss bleibt ausstehend", job_id
+                )
         finally:
             final_db = db
             if final_db is None:
@@ -1065,6 +1102,7 @@ def start_restore_test(pairs: Optional[str] = Query(None)) -> dict[str, Any]:
         db = None
         handler: logging.FileHandler | None = None
         worker_error: str | None = None
+        external_result: tuple[str, dict[str, Any]] | None = None
         try:
             db = get_db()
             current = db.job_get(job_id) or {}
@@ -1078,10 +1116,18 @@ def start_restore_test(pairs: Optional[str] = Query(None)) -> dict[str, Any]:
                 reset_cancel_state=False,
                 config_snapshot=config_snapshot,
             )
-            db.job_finish(job_id, _finish_status(result), result)
+            status = _finish_status(result)
+            external_result = (status, result)
+            _finish_external_result(db, job_id, status, result)
         except Exception as exc:
-            worker_error = str(exc)
-            logger.exception("Restore-Drill #%s fehlgeschlagen", job_id)
+            if external_result is None:
+                worker_error = str(exc)
+                logger.exception("Restore-Drill #%s fehlgeschlagen", job_id)
+            else:
+                logger.exception(
+                    "Restore-Drill #%s extern beendet; DB-Abschluss bleibt ausstehend",
+                    job_id,
+                )
         finally:
             final_db = db
             if final_db is None:
@@ -1337,6 +1383,7 @@ def run_quick_sync(payload: QuickSyncPayload) -> dict[str, Any]:
         db = None
         handler: logging.FileHandler | None = None
         worker_error: str | None = None
+        external_result: tuple[str, dict[str, Any]] | None = None
         try:
             db = get_db()
             current = db.job_get(job_id) or {}
@@ -1357,10 +1404,18 @@ def run_quick_sync(payload: QuickSyncPayload) -> dict[str, Any]:
                 reset_cancel_state=False,
                 config_snapshot=config_snapshot,
             )
-            db.job_finish(job_id, _finish_status(result), result)
+            status = _finish_status(result)
+            external_result = (status, result)
+            _finish_external_result(db, job_id, status, result)
         except Exception as exc:
-            worker_error = str(exc)
-            logger.exception("QuickSync #%s fehlgeschlagen", job_id)
+            if external_result is None:
+                worker_error = str(exc)
+                logger.exception("QuickSync #%s fehlgeschlagen", job_id)
+            else:
+                logger.exception(
+                    "QuickSync #%s extern beendet; DB-Abschluss bleibt ausstehend",
+                    job_id,
+                )
         finally:
             final_db = db
             if final_db is None:

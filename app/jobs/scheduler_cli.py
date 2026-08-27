@@ -49,6 +49,13 @@ def _job_status(summary: dict) -> str:
     return "ok" if summary.get("ok") else "error"
 
 
+def _finish_external_result(db, job_id: int, status: str, summary: dict) -> bool:
+    durable_finish = getattr(db, "job_finish_external", None)
+    if callable(durable_finish):
+        return bool(durable_finish(job_id, status, summary))
+    return bool(db.job_finish(job_id, status, summary))
+
+
 def _attempt_metadata(
     due: list[str], status: list[dict]
 ) -> tuple[list[dict], dict[str, str], dict[str, str]]:
@@ -423,6 +430,7 @@ def main() -> int:
                             _detach_job_log(job_log_handler)
                             raise
                         try:
+                            external_result = None
                             summary = run_job(
                                 dry_run=False,
                                 pairs_filter=pair_names,
@@ -452,7 +460,10 @@ def main() -> int:
                                 scheduler_slots=scheduler_slots,
                             )
                             status_name = _job_status(summary)
-                            transitioned = db.job_finish(job_id, status_name, summary)
+                            external_result = (status_name, summary)
+                            transitioned = _finish_external_result(
+                                db, job_id, status_name, summary
+                            )
                             if transitioned:
                                 _finish_runtime_for_job(job_id, status_name)
                             else:
@@ -471,6 +482,14 @@ def main() -> int:
                                 rc = 1
                         except Exception as e:
                             logger.exception("Scheduler-Run gescheitert: %s", e)
+                            if external_result is not None:
+                                logger.error(
+                                    "Externer Scheduler-Lauf #%s beendet; "
+                                    "terminaler DB-Abschluss bleibt ausstehend",
+                                    job_id,
+                                )
+                                rc = 1
+                                continue
                             transitioned = db.job_finish(
                                 job_id,
                                 "error",
@@ -548,6 +567,7 @@ def main() -> int:
                     _detach_job_log(job_log_handler)
                     raise
                 try:
+                    external_result = None
                     summary = run_pbs_backup(
                         pbs_due,
                         trigger="scheduler",
@@ -560,25 +580,34 @@ def main() -> int:
                         scheduler_slots=pbs_scheduler_slots,
                     )
                     status_name = _job_status(summary)
-                    db.job_finish(job_id, status_name, summary)
+                    external_result = (status_name, summary)
+                    _finish_external_result(db, job_id, status_name, summary)
                     _audit_pbs_prune_failures(db, summary, job_id=job_id)
                     if status_name != "ok":
                         rc = 1
                 except Exception as e:
                     logger.exception("PBS-Scheduler-Run gescheitert: %s", e)
-                    db.job_finish(
-                        job_id,
-                        "error",
-                        {
-                            "ok": False,
-                            "error": str(e),
-                            "due": pbs_run_names,
-                            "trigger": "scheduler",
-                            "history_keys": pbs_history_keys,
-                            "scheduler_slots": pbs_scheduler_slots,
-                        },
-                    )
-                    rc = 1
+                    if external_result is not None:
+                        logger.error(
+                            "Externer PBS-Lauf #%s beendet; "
+                            "terminaler DB-Abschluss bleibt ausstehend",
+                            job_id,
+                        )
+                        rc = 1
+                    else:
+                        db.job_finish(
+                            job_id,
+                            "error",
+                            {
+                                "ok": False,
+                                "error": str(e),
+                                "due": pbs_run_names,
+                                "trigger": "scheduler",
+                                "history_keys": pbs_history_keys,
+                                "scheduler_slots": pbs_scheduler_slots,
+                            },
+                        )
+                        rc = 1
                 finally:
                     _detach_job_log(job_log_handler)
 
@@ -638,6 +667,7 @@ def main() -> int:
                     _detach_job_log(job_log_handler)
                     raise
                 try:
+                    external_result = None
                     summary = run_restore_test(
                         trigger="scheduler",
                         reset_cancel_state=False,
@@ -652,7 +682,8 @@ def main() -> int:
                         scheduler_slots=scheduler_slots,
                     )
                     status_name = _job_status(summary)
-                    db.job_finish(job_id, status_name, summary)
+                    external_result = (status_name, summary)
+                    _finish_external_result(db, job_id, status_name, summary)
                     logger.info(
                         "Restore-Drill fertig: %s von %s Stichproben identisch",
                         summary.get("verified_files"),
@@ -662,18 +693,26 @@ def main() -> int:
                         rc = 1
                 except Exception as e:
                     logger.exception("Restore-Drill gescheitert: %s", e)
-                    db.job_finish(
-                        job_id,
-                        "error",
-                        {
-                            "ok": False,
-                            "error": str(e),
-                            "trigger": "scheduler",
-                            "history_keys": history_keys,
-                            "scheduler_slots": scheduler_slots,
-                        },
-                    )
-                    rc = 1
+                    if external_result is not None:
+                        logger.error(
+                            "Externer Restore-Drill #%s beendet; "
+                            "terminaler DB-Abschluss bleibt ausstehend",
+                            job_id,
+                        )
+                        rc = 1
+                    else:
+                        db.job_finish(
+                            job_id,
+                            "error",
+                            {
+                                "ok": False,
+                                "error": str(e),
+                                "trigger": "scheduler",
+                                "history_keys": history_keys,
+                                "scheduler_slots": scheduler_slots,
+                            },
+                        )
+                        rc = 1
                 finally:
                     _detach_job_log(job_log_handler)
 

@@ -39,7 +39,7 @@ def test_database_backfills_and_indexes_pair_history(tmp_path: Path):
     assert db.stats()["pair_runs"] == 1
     assert db.integrity_check()["ok"] is True
     with db.conn() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 10
         indexes = {
             row["name"]
             for row in connection.execute("PRAGMA index_list(jobs)").fetchall()
@@ -176,7 +176,7 @@ def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(pair_runs)").fetchall()
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 10
     assert {"history_key", "dry_run", "scheduled_slot"} <= columns
 
 
@@ -389,7 +389,7 @@ def test_schema_7_push_claim_is_migrated_without_ambiguous_owner(tmp_path: Path)
         row = connection.execute(
             "SELECT status, lease_until, claim_owner FROM push_outbox"
         ).fetchone()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 10
 
     assert "claim_owner" in columns
     assert dict(row) == {
@@ -743,6 +743,63 @@ def test_definition_batch_queue_survives_restart_and_claims_items_once(tmp_path:
     assert restarted.job_batch_item_start(batch_id, 1, second_job) is False
     assert restarted.job_batch_request_cancel() == 1
     assert Database(db_path).job_batch_get(batch_id)["cancel_requested"] is True
+
+
+def test_external_success_retries_only_terminal_database_finish(
+    tmp_path: Path, monkeypatch
+):
+    database = Database(tmp_path / "terminal-retry.db")
+    job_id = database.job_start("backup")
+    original_finish = database.job_finish
+    calls = 0
+
+    def transient_finish(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("database is temporarily locked")
+        return original_finish(*args, **kwargs)
+
+    monkeypatch.setattr(database, "job_finish", transient_finish)
+
+    assert database.job_finish_external(job_id, "ok", {"ok": True}) is True
+    assert calls == 2
+    assert database.job_get(job_id)["status"] == "ok"
+    assert database.job_terminal_pending(job_id) is False
+
+
+def test_external_success_recovers_after_ambiguous_commit_and_restart(
+    tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "terminal-recovery.db"
+    database = Database(path)
+    committed_job = database.job_start("backup")
+    original_finish = database.job_finish
+    calls = 0
+
+    def commit_then_disconnect(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        transitioned = original_finish(*args, **kwargs)
+        if calls == 1:
+            raise sqlite3.OperationalError("connection lost after commit")
+        return transitioned
+
+    monkeypatch.setattr(database, "job_finish", commit_then_disconnect)
+    assert database.job_finish_external(committed_job, "ok", {"ok": True}) is True
+    assert database.job_get(committed_job)["status"] == "ok"
+
+    pending_job = database.job_start("backup")
+    database.job_terminal_stage(pending_job, "ok", {"ok": True, "source": "rclone"})
+    restarted = Database(path)
+
+    assert restarted.job_terminal_recover_pending() == {
+        "recovered": 1,
+        "failed": 0,
+        "recovered_job_ids": [pending_job],
+    }
+    assert restarted.job_get(pending_job)["status"] == "ok"
+    assert restarted.job_terminal_pending(pending_job) is False
 
 
 def test_prune_never_deletes_running_jobs(tmp_path: Path):

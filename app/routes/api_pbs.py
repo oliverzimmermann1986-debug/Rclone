@@ -115,6 +115,7 @@ def _run_thread(
 ) -> None:
     db = None
     worker_error: str | None = None
+    external_result: tuple[str, dict[str, Any]] | None = None
     try:
         db = get_db()
         current = db.job_get(job_id) or {}
@@ -132,11 +133,18 @@ def _run_thread(
             if summary.get("cancelled")
             else ("ok" if summary.get("ok") else "error")
         )
-        db.job_finish(job_id, status, summary)
+        external_result = (status, summary)
+        durable_finish = getattr(db, "job_finish_external", db.job_finish)
+        durable_finish(job_id, status, summary)
         _audit_prune_failures(summary, job_id=job_id)
     except Exception as exc:
-        worker_error = str(exc)
-        logger.exception("PBS-Job %s gescheitert", job_id)
+        if external_result is None:
+            worker_error = str(exc)
+            logger.exception("PBS-Job %s gescheitert", job_id)
+        else:
+            logger.exception(
+                "PBS-Job %s extern beendet; DB-Abschluss bleibt ausstehend", job_id
+            )
     finally:
         final_db = db
         if final_db is None:
