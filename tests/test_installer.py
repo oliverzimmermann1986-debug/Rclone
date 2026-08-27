@@ -103,8 +103,8 @@ def test_installer_rollback_restores_normalized_config_and_migrated_database():
 
     for name in ("config.yaml", "config.yaml.bak", "rclone-sync.db"):
         assert name in script
-        assert f'"$backup_dir/runtime-state/$name.present"' in script
-        assert f'"$backup_dir/runtime-state/$name.missing"' in script
+        assert '"$backup_dir/runtime-state/$name.present"' in script
+        assert '"$backup_dir/runtime-state/$name.missing"' in script
     assert "restore_runtime_backup || rollback_failed=1" in script
     assert '[[ "$(< "$candidate/source-path.txt")" == "$APP_DIR_CANONICAL" ]]' in script
     assert '[[ -d "$candidate" && ! -L "$candidate" ]]' in script
