@@ -143,7 +143,20 @@ def test_snapshot_restore_keeps_identity_and_invalidates_sessions(
 def test_support_bundle_is_redacted_and_contains_diagnostics(tmp_path, monkeypatch):
     store, database = _setup(tmp_path, monkeypatch)
     job_id = database.job_start("backup")
-    database.job_finish(job_id, "error", {"error": "diagnostic failure"})
+    database.job_finish(
+        job_id,
+        "error",
+        {
+            "error": "diagnostic failure",
+            "provider": {
+                "vendorRefreshTokenV3": "UNKNOWN_NESTED_CANARY",
+                "headers": [
+                    {"name": "Authorization", "value": "Bearer LIST_CANARY_TOKEN"}
+                ],
+                "url": "https://user:pass@example.test/?api_key=QUERY_CANARY",
+            },
+        },
+    )
     (tmp_path / "logs" / "job.log").write_text("not bundled", encoding="utf-8")
 
     response = api_maintenance.support_bundle()
@@ -158,10 +171,14 @@ def test_support_bundle_is_redacted_and_contains_diagnostics(tmp_path, monkeypat
         }
         redacted = archive.read("config-redacted.yaml").decode("utf-8")
         diagnostics = json.loads(archive.read("diagnostics.json"))
+        diagnostics_text = json.dumps(diagnostics, ensure_ascii=False)
 
     assert store.get("web", "secret_key") not in redacted
     assert "CANARY_TOKEN_MUST_NOT_LEAK" not in redacted
     assert "CANARY_PASS" not in redacted
+    assert "UNKNOWN_NESTED_CANARY" not in diagnostics_text
+    assert "LIST_CANARY_TOKEN" not in diagnostics_text
+    assert "QUERY_CANARY" not in diagnostics_text
     assert "***REDACTED***" in redacted
     assert diagnostics["app_version"] == app_version
     assert diagnostics["database"]["integrity"]["ok"] is True

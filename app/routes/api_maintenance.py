@@ -27,8 +27,8 @@ from ..config_store import ConfigConflictError, get_config
 from ..config_validation import ConfigValidationError, validate_config
 from ..db import get_db
 from ..maintenance import iter_logs, logs_root, prune_logs as prune_log_files
-from ..rclone_args import redact_command_text
 from ..push_notifications import revoke_all_push_devices
+from ..secret_redaction import REDACTED, redact_secrets
 from ..security import require_csrf
 from ..system_info import system_snapshot
 
@@ -38,25 +38,6 @@ router = APIRouter(
     dependencies=[Depends(require_auth), Depends(require_csrf)],
 )
 logger = logging.getLogger(__name__)
-_SENSITIVE_EXPORT_KEYS = {
-    "access_token",
-    "api_key",
-    "authorization",
-    "client_secret",
-    "cookie",
-    "password",
-    "password_hash",
-    "secret",
-    "secret_key",
-    "token",
-    "credential",
-    "credentials",
-    "access_key",
-    "private_key",
-    "refresh_token",
-}
-
-
 def _audit_best_effort(
     event: str, details: dict[str, Any], *, actor: str = "web"
 ) -> bool:
@@ -69,20 +50,7 @@ def _audit_best_effort(
 
 
 def _redact_diagnostics(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_command_text(value)
-    if isinstance(value, list):
-        return [_redact_diagnostics(item) for item in value]
-    if isinstance(value, dict):
-        return {
-            str(key): (
-                "***REDACTED***"
-                if str(key).casefold() in _SENSITIVE_EXPORT_KEYS
-                else _redact_diagnostics(item)
-            )
-            for key, item in value.items()
-        }
-    return value
+    return redact_secrets(value)
 
 
 @router.get("/logs")
@@ -184,10 +152,10 @@ def _redacted_export() -> dict[str, Any]:
     if isinstance(web, dict):
         for key in ("password", "password_hash", "secret_key"):
             if key in web:
-                web[key] = "***REDACTED***"
+                web[key] = REDACTED
     pbs = config.get("pbs")
     if isinstance(pbs, dict) and "password" in pbs:
-        pbs["password"] = "***REDACTED***"
+        pbs["password"] = REDACTED
     redacted = _redact_diagnostics(config)
     return redacted if isinstance(redacted, dict) else {}
 

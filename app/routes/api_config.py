@@ -26,6 +26,7 @@ from ..config_validation import ConfigValidationError, validate_config
 from ..db import get_db
 from ..security import ensure_within, require_csrf
 from ..push_notifications import revoke_all_push_devices
+from ..secret_redaction import is_secret_key
 
 router = APIRouter(
     prefix="/api/config",
@@ -41,23 +42,6 @@ _SENSITIVE = (
     ("web", "password"),
     ("pbs", "password"),
 )
-_SENSITIVE_KEY_NAMES = {
-    "access_key",
-    "access_token",
-    "api_key",
-    "authorization",
-    "client_secret",
-    "cookie",
-    "credential",
-    "credentials",
-    "password",
-    "password_hash",
-    "private_key",
-    "refresh_token",
-    "secret",
-    "secret_key",
-    "token",
-}
 _MAX_FILTER_BYTES = 2 * 1024 * 1024
 _BCRYPT_MAX_PASSWORD_BYTES = 72
 _SERVER_OWNED_WEB_FIELDS = (
@@ -103,7 +87,7 @@ def _redact_nested(value: Any) -> None:
     if not isinstance(value, dict):
         return
     for raw_key, item in list(value.items()):
-        if str(raw_key).casefold() in _SENSITIVE_KEY_NAMES and item not in (None, ""):
+        if is_secret_key(raw_key) and item not in (None, ""):
             value[raw_key] = _PLACEHOLDER
         else:
             _redact_nested(item)
@@ -119,7 +103,7 @@ def _preserve_nested_placeholders(new_value: Any, old_value: Any) -> None:
         return
     for raw_key, item in list(new_value.items()):
         old_item = old_value.get(raw_key)
-        if str(raw_key).casefold() in _SENSITIVE_KEY_NAMES and item == _PLACEHOLDER:
+        if is_secret_key(raw_key) and item == _PLACEHOLDER:
             new_value[raw_key] = copy.deepcopy(old_item)
         else:
             _preserve_nested_placeholders(item, old_item)
