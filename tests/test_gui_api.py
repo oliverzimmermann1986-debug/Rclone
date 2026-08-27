@@ -273,6 +273,10 @@ def test_restoretest_is_supported_by_history_filters_and_current_status(monkeypa
             assert kwargs.get("kind") == "restoretest"
             return 1
 
+        def job_iter(self, **kwargs):
+            assert kwargs.get("kind") == "restoretest"
+            yield running
+
     monkeypatch.setattr(api_jobs, "get_db", lambda: FakeDB())
 
     assert api_jobs.list_jobs(kind="restoretest") == [running]

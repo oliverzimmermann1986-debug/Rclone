@@ -1660,6 +1660,44 @@ class Database:
             ).fetchone()
             return self._row_to_dict(row) if row else None
 
+    @staticmethod
+    def _job_filter(
+        *,
+        kind: Optional[str] = None,
+        status: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> tuple[str, list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if kind:
+            clauses.append("kind=?")
+            params.append(kind)
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        needle = str(query or "").strip().casefold()
+        if needle:
+            escaped = (
+                needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            clauses.append(
+                "(CAST(id AS TEXT)=? OR LOWER(COALESCE(summary_json, '')) LIKE ? ESCAPE '\\' "
+                "OR LOWER(COALESCE(log_file, '')) LIKE ? ESCAPE '\\' "
+                "OR LOWER(COALESCE(definition_id, '')) LIKE ? ESCAPE '\\' "
+                "OR LOWER(COALESCE(definition_name, '')) LIKE ? ESCAPE '\\')"
+            )
+            params.extend(
+                [
+                    needle,
+                    f"%{escaped}%",
+                    f"%{escaped}%",
+                    f"%{escaped}%",
+                    f"%{escaped}%",
+                ]
+            )
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        return where, params
+
     def job_list(
         self,
         kind: Optional[str] = None,
@@ -1671,42 +1709,44 @@ class Database:
     ) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit or 50), 2000))
         offset = max(0, min(int(offset or 0), 1_000_000))
-        clauses: list[str] = []
-        params: list[Any] = []
-        if kind:
-            clauses.append("kind=?")
-            params.append(kind)
-        if status:
-            clauses.append("status=?")
-            params.append(status)
-        needle = str(query or "").strip().casefold()
-        if needle:
-            escaped = (
-                needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            )
-            clauses.append(
-                "(CAST(id AS TEXT)=? OR LOWER(COALESCE(summary_json, '')) LIKE ? ESCAPE '\\' "
-                "OR LOWER(COALESCE(log_file, '')) LIKE ? ESCAPE '\\' "
-                "OR LOWER(COALESCE(definition_id, '')) LIKE ? ESCAPE '\\' "
-                "OR LOWER(COALESCE(definition_name, '')) LIKE ? ESCAPE '\\')"
-            )
-            params.extend(
-                [
-                    needle,
-                    f"%{escaped}%",
-                    f"%{escaped}%",
-                    f"%{escaped}%",
-                    f"%{escaped}%",
-                ]
-            )
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        where, params = self._job_filter(kind=kind, status=status, query=query)
         params.extend([limit, offset])
         with self.conn() as connection:
             rows = connection.execute(
-                f"SELECT * FROM jobs{where} ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                f"SELECT * FROM jobs{where} "
+                "ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?",
                 tuple(params),
             ).fetchall()
             return [self._row_to_dict(row) for row in rows]
+
+    def job_iter(
+        self,
+        *,
+        kind: Optional[str] = None,
+        status: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: int = 5000,
+        batch_size: int = 250,
+    ) -> Iterator[Dict[str, Any]]:
+        """Streamt Jobs aus genau einem SQLite-Statement-Snapshot.
+
+        Der offene Cursor hält die Sicht auf die Ergebnismenge stabil, während
+        ``fetchmany`` den Python-Speicher unabhängig von der Exportgröße begrenzt.
+        """
+
+        bounded_limit = max(1, min(int(limit or 5000), 10000))
+        bounded_batch = max(1, min(int(batch_size or 250), 1000))
+        where, params = self._job_filter(kind=kind, status=status, query=query)
+        params.append(bounded_limit)
+        with self.conn() as connection:
+            cursor = connection.execute(
+                f"SELECT * FROM jobs{where} "
+                "ORDER BY started_at DESC, id DESC LIMIT ?",
+                tuple(params),
+            )
+            while rows := cursor.fetchmany(bounded_batch):
+                for row in rows:
+                    yield self._row_to_dict(row)
 
     def job_count(
         self,
@@ -1715,35 +1755,7 @@ class Database:
         status: Optional[str] = None,
         query: Optional[str] = None,
     ) -> int:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if kind:
-            clauses.append("kind=?")
-            params.append(kind)
-        if status:
-            clauses.append("status=?")
-            params.append(status)
-        needle = str(query or "").strip().casefold()
-        if needle:
-            escaped = (
-                needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            )
-            clauses.append(
-                "(CAST(id AS TEXT)=? OR LOWER(COALESCE(summary_json, '')) LIKE ? ESCAPE '\\' "
-                "OR LOWER(COALESCE(log_file, '')) LIKE ? ESCAPE '\\' "
-                "OR LOWER(COALESCE(definition_id, '')) LIKE ? ESCAPE '\\' "
-                "OR LOWER(COALESCE(definition_name, '')) LIKE ? ESCAPE '\\')"
-            )
-            params.extend(
-                [
-                    needle,
-                    f"%{escaped}%",
-                    f"%{escaped}%",
-                    f"%{escaped}%",
-                    f"%{escaped}%",
-                ]
-            )
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        where, params = self._job_filter(kind=kind, status=status, query=query)
         with self.conn() as connection:
             return int(
                 connection.execute(

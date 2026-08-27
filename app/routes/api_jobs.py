@@ -1519,6 +1519,7 @@ def export_jobs_csv(
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
         raise HTTPException(400, "Unbekannter Job-Status")
+    db = get_db()
 
     def rows():
         buffer = io.StringIO(newline="")
@@ -1545,50 +1546,40 @@ def export_jobs_csv(
                 "zusammenfassung",
             ]
         )
-        exported = 0
-        page_size = min(250, limit)
-        while exported < limit:
-            requested = min(page_size, limit - exported)
-            jobs = get_db().job_list(
-                kind=kind,
-                status=status,
-                query=q,
-                limit=requested,
-                offset=exported,
+        for job in db.job_iter(
+            kind=kind,
+            status=status,
+            query=q,
+            limit=limit,
+            batch_size=min(250, limit),
+        ):
+            started = float(job.get("started_at") or 0)
+            ended = float(job.get("ended_at") or 0)
+            yield emit(
+                [
+                    job.get("id"),
+                    job.get("kind"),
+                    job.get("definition_id"),
+                    job.get("definition_name"),
+                    job.get("config_revision"),
+                    job.get("scheduled_slot"),
+                    job.get("status"),
+                    datetime.fromtimestamp(started).astimezone().isoformat()
+                    if started
+                    else "",
+                    datetime.fromtimestamp(ended).astimezone().isoformat()
+                    if ended
+                    else "",
+                    round(max(0.0, ended - started), 3)
+                    if started and ended
+                    else "",
+                    json.dumps(
+                        _redact_result(job.get("summary") or {}),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                ]
             )
-            if not jobs:
-                break
-            for job in jobs:
-                started = float(job.get("started_at") or 0)
-                ended = float(job.get("ended_at") or 0)
-                yield emit(
-                    [
-                        job.get("id"),
-                        job.get("kind"),
-                        job.get("definition_id"),
-                        job.get("definition_name"),
-                        job.get("config_revision"),
-                        job.get("scheduled_slot"),
-                        job.get("status"),
-                        datetime.fromtimestamp(started).astimezone().isoformat()
-                        if started
-                        else "",
-                        datetime.fromtimestamp(ended).astimezone().isoformat()
-                        if ended
-                        else "",
-                        round(max(0.0, ended - started), 3)
-                        if started and ended
-                        else "",
-                        json.dumps(
-                            _redact_result(job.get("summary") or {}),
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                    ]
-                )
-            exported += len(jobs)
-            if len(jobs) < requested:
-                break
 
     stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     return StreamingResponse(
