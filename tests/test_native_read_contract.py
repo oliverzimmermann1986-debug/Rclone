@@ -192,6 +192,7 @@ def test_new_native_operations_fixtures_match_supported_read_routes(
             return copy.deepcopy(_body("maintenance_database")["integrity"])
 
     monkeypatch.setattr(api_maintenance, "get_db", lambda: OperationsDB())
+    monkeypatch.setattr(api_maintenance, "get_config", lambda: config)
     _assert_shape(
         api_maintenance.audit_events(limit=100, event_type=""),
         _body("maintenance_audit"),

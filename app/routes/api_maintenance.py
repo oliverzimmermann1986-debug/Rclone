@@ -31,6 +31,7 @@ from ..push_notifications import revoke_all_push_devices
 from ..secret_redaction import REDACTED, redact_secrets
 from ..security import require_csrf
 from ..system_info import system_snapshot
+from .api_diagnostics import operational_snapshot
 
 router = APIRouter(
     prefix="/api/maintenance",
@@ -107,7 +108,9 @@ def audit_events(
 @router.get("/database")
 def database_status() -> dict[str, Any]:
     db = get_db()
-    return {"ok": True, "stats": db.stats(), "integrity": db.integrity_check()}
+    return operational_snapshot(
+        config_snapshot=get_config().snapshot(), database=db
+    )["database"]
 
 
 @router.post("/database/prune")
