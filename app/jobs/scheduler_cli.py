@@ -24,7 +24,7 @@ from .job_lifecycle import (
 )
 from .locks import file_lock_or_none
 from .pbs_backup import PBS_CANCEL_SCOPE, prune_failures, run_pbs_backup
-from .rclone_sync import reset_cancel, run_job
+from .rclone_sync import is_cancelled, reset_cancel, run_job
 from .restore_test import AGGREGATE_RUN_NAME as RESTORE_AGGREGATE_NAME
 from .restore_test import JOB_KIND as RESTORE_JOB_KIND
 from .restore_test import run_restore_test
@@ -373,7 +373,19 @@ def main() -> int:
                             "Rclone-Fälligkeit nach Lock-Erwerb bereits erledigt"
                         )
                 else:
-                    for definition in due_definitions:
+                    # Ein Scheduler-Tick ist ein zusammenhaengender Batch im
+                    # Backup-Scope. Alte Cancel-Marker werden genau einmal
+                    # beim atomaren Batch-Start entfernt. Ein danach gesetzter
+                    # Abbruch bleibt fuer alle Folgedefinitionen sichtbar.
+                    reset_cancel()
+                    for index, definition in enumerate(due_definitions):
+                        if index > 0 and is_cancelled():
+                            logger.warning(
+                                "Scheduler-Batch abgebrochen - %d "
+                                "Folgedefinition(en) werden uebersprungen",
+                                len(due_definitions) - index,
+                            )
+                            break
                         (
                             pair_names,
                             attempts,
@@ -386,7 +398,6 @@ def main() -> int:
                                 definition.get("name"),
                             )
                             continue
-                        reset_cancel()
                         job_log_file = _job_log_file(
                             log_dir,
                             "backup",
