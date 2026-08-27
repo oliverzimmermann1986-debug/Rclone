@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -298,10 +298,12 @@ class Database:
             pass
         with self.conn(initialize=True) as connection:
             connection.executescript(_DDL)
+            # Serialize schema decisions across concurrently starting processes.
+            # Every migration, including its data backfill and version marker,
+            # remains in this transaction so a crash can only leave the old
+            # user_version behind and the idempotent migration will resume.
+            connection.execute("BEGIN IMMEDIATE")
             self._migrate_schema(connection)
-            self._backfill_pair_runs(connection)
-            self._backfill_pair_history_state(connection)
-            self._backfill_job_definition_schedule_state(connection)
         try:
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
@@ -506,57 +508,59 @@ class Database:
             connection.execute("PRAGMA user_version=8")
             version = 8
         if version < 9:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS job_batches (
-                    id TEXT PRIMARY KEY,
-                    state TEXT NOT NULL DEFAULT 'running',
-                    dry_run INTEGER NOT NULL DEFAULT 0,
-                    config_revision TEXT NOT NULL DEFAULT '',
-                    snapshot_json TEXT NOT NULL,
-                    cancel_requested INTEGER NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    completed_at REAL
-                );
-                CREATE INDEX IF NOT EXISTS idx_job_batches_state_created
-                ON job_batches(state, created_at);
-                CREATE TABLE IF NOT EXISTS job_batch_items (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    batch_id TEXT NOT NULL REFERENCES job_batches(id) ON DELETE CASCADE,
-                    position INTEGER NOT NULL,
-                    definition_id TEXT,
-                    definition_name TEXT,
-                    spec_json TEXT NOT NULL,
-                    state TEXT NOT NULL DEFAULT 'queued',
-                    job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
-                    error TEXT,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    UNIQUE(batch_id, position)
-                );
-                CREATE INDEX IF NOT EXISTS idx_job_batch_items_state
-                ON job_batch_items(batch_id, state, position);
-                """
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS job_batches ("
+                "id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'running', "
+                "dry_run INTEGER NOT NULL DEFAULT 0, "
+                "config_revision TEXT NOT NULL DEFAULT '', "
+                "snapshot_json TEXT NOT NULL, "
+                "cancel_requested INTEGER NOT NULL DEFAULT 0, "
+                "created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+                "completed_at REAL)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_job_batches_state_created "
+                "ON job_batches(state, created_at)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS job_batch_items ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "batch_id TEXT NOT NULL REFERENCES job_batches(id) ON DELETE CASCADE, "
+                "position INTEGER NOT NULL, definition_id TEXT, "
+                "definition_name TEXT, spec_json TEXT NOT NULL, "
+                "state TEXT NOT NULL DEFAULT 'queued', "
+                "job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL, "
+                "error TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+                "UNIQUE(batch_id, position))"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_job_batch_items_state "
+                "ON job_batch_items(batch_id, state, position)"
             )
             connection.execute("PRAGMA user_version=9")
             version = 9
         if version < 10:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS job_terminal_intents (
-                    job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
-                    status TEXT NOT NULL,
-                    summary_json TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    applied_at REAL
-                );
-                CREATE INDEX IF NOT EXISTS idx_job_terminal_intents_pending
-                ON job_terminal_intents(applied_at, updated_at);
-                """
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS job_terminal_intents ("
+                "job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE, "
+                "status TEXT NOT NULL, summary_json TEXT NOT NULL, "
+                "created_at REAL NOT NULL, updated_at REAL NOT NULL, applied_at REAL)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_job_terminal_intents_pending "
+                "ON job_terminal_intents(applied_at, updated_at)"
             )
             connection.execute("PRAGMA user_version=10")
+            version = 10
+        if version < 11:
+            # These scans used to run unconditionally from __init__. Keeping
+            # them behind the durable marker removes scheduler hot-path scans.
+            # All three routines are idempotent, so an interrupted migration can
+            # safely restart while user_version is still 10.
+            cls._backfill_pair_runs(connection)
+            cls._backfill_pair_history_state(connection)
+            cls._backfill_job_definition_schedule_state(connection)
+            connection.execute("PRAGMA user_version=11")
 
     @staticmethod
     def _record_job_definition_schedule_state(

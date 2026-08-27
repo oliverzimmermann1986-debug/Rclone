@@ -41,7 +41,7 @@ def test_database_backfills_and_indexes_pair_history(tmp_path: Path):
     assert db.stats()["pair_runs"] == 1
     assert db.integrity_check()["ok"] is True
     with db.conn() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
         indexes = {
             row["name"]
             for row in connection.execute("PRAGMA index_list(jobs)").fetchall()
@@ -101,6 +101,9 @@ def test_database_resumes_partial_pair_backfill_without_duplicates(tmp_path: Pat
             {"pairs": [first_summary["pairs"][0]]},
             job_kind="backup",
         )
+        # Version 10 represents the state immediately before the one-time
+        # backfill migration. The first Database() resumes it atomically.
+        connection.execute("PRAGMA user_version=10")
 
     Database(path)
     Database(path)  # wiederholter Start muss vollständig idempotent bleiben
@@ -125,6 +128,24 @@ def test_database_resumes_partial_pair_backfill_without_duplicates(tmp_path: Pat
         "rclone:id:photos": (1, 1),
         "rclone:id:videos": (1, 1),
     }
+
+
+def test_database_does_not_rescan_backfills_after_migration(
+    tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "already-migrated.db"
+    Database(path)
+
+    def unexpected_scan(*_args, **_kwargs):
+        raise AssertionError("completed backfill was executed again")
+
+    monkeypatch.setattr(Database, "_backfill_pair_runs", unexpected_scan)
+    monkeypatch.setattr(Database, "_backfill_pair_history_state", unexpected_scan)
+    monkeypatch.setattr(
+        Database, "_backfill_job_definition_schedule_state", unexpected_scan
+    )
+
+    Database(path)
 
 
 def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
@@ -178,7 +199,7 @@ def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(pair_runs)").fetchall()
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
     assert {"history_key", "dry_run", "scheduled_slot"} <= columns
 
 
@@ -391,7 +412,7 @@ def test_schema_7_push_claim_is_migrated_without_ambiguous_owner(tmp_path: Path)
         row = connection.execute(
             "SELECT status, lease_until, claim_owner FROM push_outbox"
         ).fetchone()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
 
     assert "claim_owner" in columns
     assert dict(row) == {
