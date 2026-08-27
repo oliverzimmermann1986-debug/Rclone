@@ -25,6 +25,13 @@ workflows:
       - name: Verify signed release provenance
         script: |
           test -n "${CM_TAG:-}" || { echo "TestFlight-Build benötigt einen ios-vX.Y.Z-Tag" >&2; exit 1; }
+          test -n "${IOS_RELEASE_GPG_PUBLIC_KEY_B64:-}" || { echo "Öffentlicher iOS-Release-Signierschlüssel fehlt" >&2; exit 1; }
+          export GNUPGHOME="$CM_BUILD_DIR/.tools/release-gnupg"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          python3 -c 'import base64, os, pathlib; pathlib.Path(os.environ["GNUPGHOME"], "release-key.asc").write_bytes(base64.b64decode(os.environ["IOS_RELEASE_GPG_PUBLIC_KEY_B64"], validate=True))'
+          chmod 600 "$GNUPGHOME/release-key.asc"
+          gpg --batch --quiet --import "$GNUPGHOME/release-key.asc" >/dev/null 2>&1
           if test "$(git -C "$CM_BUILD_DIR" rev-parse --is-shallow-repository)" = "true"; then
             git -C "$CM_BUILD_DIR" fetch --unshallow --force --no-tags origin \
               "+refs/heads/main:refs/remotes/origin/main"

@@ -24,6 +24,7 @@ de.oliverzimmermann.rclonesync
    ```
 
    Benötigt werden Issuer ID, Key ID und die `.p8`-Datei. Codemagic erzeugt beziehungsweise lädt damit Distribution-Zertifikat und Provisioning Profile automatisch.
+7. Den öffentlichen GPG-Schlüssel, der die iOS-Release-Tags prüft, ASCII-armored exportieren, Base64-kodieren und in Codemagic als geschützte Variable `IOS_RELEASE_GPG_PUBLIC_KEY_B64` hinterlegen. Der private Schlüssel bleibt ausschließlich beim Release-Verantwortlichen. Die Pipeline importiert nur den öffentlichen Schlüssel in einen isolierten, leeren GPG-Schlüsselbund und akzeptiert deshalb keine Signaturen anderer Schlüssel.
 
 ## Erster Build
 
@@ -37,7 +38,7 @@ git tag -v ios-v1.0.0
 git push origin ios-v1.0.0
 ```
 
-Der öffentliche Signierschlüssel muss im Codemagic-Buildschlüsselbund verfügbar sein. Die Pipeline holt `origin/main` und den exakten Tag erneut und bricht vor Versionsänderung, Build oder Publishing ab, wenn der Tag nur lightweight, nicht kryptografisch prüfbar, nicht auf dem Checkout oder nicht in der Main-Historie ist.
+Der öffentliche Signierschlüssel muss über `IOS_RELEASE_GPG_PUBLIC_KEY_B64` verfügbar sein. Die Pipeline holt `origin/main` und den exakten Tag erneut und bricht vor Versionsänderung, Build oder Publishing ab, wenn Schlüsselimport oder Signaturprüfung scheitern, der Tag nur lightweight, nicht auf dem Checkout oder nicht in der Main-Historie ist.
 
 Die Pipeline:
 
