@@ -16,6 +16,7 @@ workflows:
       vars:
         XCODE_PROJECT: ios/RcloneMobile.xcodeproj
         XCODE_SCHEME: RcloneMobile
+        IOS_RELEASE_GPG_FINGERPRINT: 47F84407A9D876BCC960973F7E69CA7201C4C7B3
       xcode: 26.4
     triggering:
       events:
@@ -34,6 +35,10 @@ workflows:
           python3 -c 'import base64, os, pathlib; pathlib.Path(os.environ["GNUPGHOME"], "release-key.asc").write_bytes(base64.b64decode(os.environ["IOS_RELEASE_GPG_PUBLIC_KEY_B64"], validate=True))'
           chmod 600 "$GNUPGHOME/release-key.asc"
           gpg --batch --quiet --import "$GNUPGHOME/release-key.asc" >/dev/null 2>&1
+          IMPORTED_FINGERPRINT="$(gpg --batch --with-colons --fingerprint "$IOS_RELEASE_GPG_FINGERPRINT" | awk -F: '$1 == "fpr" { print $10; exit }')"
+          test "$IMPORTED_FINGERPRINT" = "$IOS_RELEASE_GPG_FINGERPRINT" || { echo "Unerwarteter iOS-Release-Signierschlüssel" >&2; exit 1; }
+          git -C "$CM_BUILD_DIR" config --local gpg.format openpgp
+          git -C "$CM_BUILD_DIR" config --local gpg.program "$(command -v gpg)"
           if test "$(git -C "$CM_BUILD_DIR" rev-parse --is-shallow-repository)" = "true"; then
             git -C "$CM_BUILD_DIR" fetch --unshallow --force --no-tags origin \
               "+refs/heads/main:refs/remotes/origin/main"

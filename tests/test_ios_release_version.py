@@ -66,7 +66,11 @@ def test_codemagic_verifies_fetched_main_and_exact_signed_tag_before_release_cha
     assert "refs/tags/$CM_TAG:refs/tags/$CM_TAG" in config
     assert "--unshallow --force --no-tags" in config
     assert "IOS_RELEASE_GPG_PUBLIC_KEY_B64" in config
+    assert "IOS_RELEASE_GPG_FINGERPRINT" in config
     assert "groups:\n        - ios-release" in config
+    assert 'config --local gpg.format openpgp' in config
+    assert 'config --local gpg.program "$(command -v gpg)"' in config
+    assert config.index("IMPORTED_FINGERPRINT") < provenance
     assert config.index("gpg --batch --quiet --import") < provenance
     assert provenance < version_write
     assert "tests/test_ios_release_preflight.py" in config
