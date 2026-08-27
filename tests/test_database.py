@@ -39,7 +39,7 @@ def test_database_backfills_and_indexes_pair_history(tmp_path: Path):
     assert db.stats()["pair_runs"] == 1
     assert db.integrity_check()["ok"] is True
     with db.conn() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
         indexes = {
             row["name"]
             for row in connection.execute("PRAGMA index_list(jobs)").fetchall()
@@ -176,7 +176,7 @@ def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(pair_runs)").fetchall()
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
     assert {"history_key", "dry_run", "scheduled_slot"} <= columns
 
 
@@ -389,7 +389,7 @@ def test_schema_7_push_claim_is_migrated_without_ambiguous_owner(tmp_path: Path)
         row = connection.execute(
             "SELECT status, lease_until, claim_owner FROM push_outbox"
         ).fetchone()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
 
     assert "claim_owner" in columns
     assert dict(row) == {
@@ -700,6 +700,49 @@ def test_terminal_job_finish_is_cas_and_cancelled_pairs_stay_cancelled(
     assert database.job_finish(job_id, "ok", {"pairs": []}) is False
     assert database.job_get(job_id)["status"] == "cancelled"
     assert database.pair_last_result("Fotos")["status"] == "cancelled"
+
+
+def test_definition_batch_queue_survives_restart_and_claims_items_once(tmp_path: Path):
+    db_path = tmp_path / "batch-restart.db"
+    database = Database(db_path)
+    first_job = database.job_start(
+        "backup", exclusive_scope=True, definition_id="1" * 32
+    )
+    specs = [
+        {
+            "definition": {"id": "1" * 32, "name": "Erster"},
+            "pair_names": ["Fotos"],
+            "history_keys": {"Fotos": "rclone:id:fotos"},
+            "attempts": [],
+        },
+        {
+            "definition": {"id": "2" * 32, "name": "Zweiter"},
+            "pair_names": ["Dokumente"],
+            "history_keys": {"Dokumente": "rclone:id:dokumente"},
+            "attempts": [],
+        },
+    ]
+    batch_id = database.job_batch_create(
+        specs=specs,
+        snapshot={"backup": {"pairs": []}},
+        config_revision="revision-1",
+        dry_run=False,
+        first_job_id=first_job,
+    )
+    database.job_finish(first_job, "stale", {"error": "service restart"})
+
+    restarted = Database(db_path)
+    recovered = restarted.job_batch_recover(batch_id)
+
+    assert recovered is not None
+    assert [item["state"] for item in recovered["items"]] == ["failed", "queued"]
+    second_job = restarted.job_start(
+        "backup", exclusive_scope=True, definition_id="2" * 32
+    )
+    assert restarted.job_batch_item_start(batch_id, 1, second_job) is True
+    assert restarted.job_batch_item_start(batch_id, 1, second_job) is False
+    assert restarted.job_batch_request_cancel() == 1
+    assert Database(db_path).job_batch_get(batch_id)["cancel_requested"] is True
 
 
 def test_prune_never_deletes_running_jobs(tmp_path: Path):

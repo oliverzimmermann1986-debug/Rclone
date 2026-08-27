@@ -216,6 +216,12 @@ async def _lifespan(_app):
                 )
     if recovered:
         logger.warning("%d verwaiste laufende Job(s) als stale markiert", recovered)
+    resumed_batches = api_jobs.resume_pending_definition_batches()
+    if resumed_batches:
+        logger.warning(
+            "%d persistierte(r) Jobdefinitions-Batch(es) wiederaufgenommen",
+            resumed_batches,
+        )
     security_warnings = _production_security_warnings()
     if security_warnings:
         logger.warning(

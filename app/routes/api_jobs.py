@@ -542,7 +542,7 @@ def _enabled_definition_specs(
     return specs
 
 
-def _acquire_definition_batch_scope() -> HeldFileLock:
+def _acquire_definition_batch_scope(*, reset_cancel_state: bool = True) -> HeldFileLock:
     if not _locks["backup"].acquire(blocking=False):
         raise HTTPException(409, "Backup läuft bereits")
     try:
@@ -563,7 +563,8 @@ def _acquire_definition_batch_scope() -> HeldFileLock:
             raise HTTPException(
                 409, "Ein registrierter Sync-Unterprozess ist noch aktiv"
             )
-        rclone_job.reset_cancel()
+        if reset_cancel_state:
+            rclone_job.reset_cancel()
         return scope_lock
     except Exception:
         scope_lock.release()
@@ -571,22 +572,37 @@ def _acquire_definition_batch_scope() -> HeldFileLock:
         raise
 
 
-def _run_definition_batch_thread(
-    specs: list[dict[str, Any]],
-    dry_run: bool,
-    snapshot: dict[str, Any],
-    config_revision: str,
-    scope_lock: HeldFileLock,
-    first_job_id: int,
-) -> None:
-    """Run definitions serially while one process-wide backup scope is held."""
+def _run_definition_batch_thread(batch_id: str, scope_lock: HeldFileLock) -> None:
+    """Fuehrt ausschliesslich die zuvor dauerhaft gespeicherten Batch-Items aus."""
 
     try:
-        for index, spec in enumerate(specs):
+        db = get_db()
+        batch = db.job_batch_get(batch_id)
+        if not batch:
+            logger.error("Persistierter Jobdefinitions-Batch %s fehlt", batch_id)
+            return
+        dry_run = bool(batch["dry_run"])
+        snapshot = batch["snapshot"]
+        config_revision = str(batch.get("config_revision") or "")
+        first_job_id = next(
+            (
+                int(item["job_id"])
+                for item in batch["items"]
+                if item.get("job_id") is not None
+            ),
+            0,
+        )
+        for item in batch["items"]:
+            if item.get("state") in {"done", "failed", "cancelled"}:
+                continue
+            index = int(item["position"])
+            spec = item["spec"]
             definition = spec["definition"]
             definition_id = str(definition.get("id") or "") or None
             definition_name = str(definition.get("name") or "") or None
-            if index > 0 and rclone_job.is_cancelled():
+            current_batch = db.job_batch_get(batch_id) or {}
+            if current_batch.get("cancel_requested") or rclone_job.is_cancelled():
+                db.job_batch_item_finish(batch_id, index, "cancelled")
                 _audit_best_effort(
                     "job_definition_batch_item_failed",
                     actor="web",
@@ -600,8 +616,8 @@ def _run_definition_batch_thread(
                     },
                 )
                 continue
-            if index == 0:
-                job_id = first_job_id
+            if item.get("state") == "running" and item.get("job_id") is not None:
+                job_id = int(item["job_id"])
             else:
                 try:
                     job_id = get_db().job_start(
@@ -612,6 +628,17 @@ def _run_definition_batch_thread(
                         definition_name=definition_name,
                         config_revision=config_revision,
                     )
+                    if not db.job_batch_item_start(batch_id, index, job_id):
+                        db.job_finish(
+                            job_id,
+                            "error",
+                            {
+                                "ok": False,
+                                "error": "Batch-Item wurde bereits beansprucht",
+                                "error_code": "batch_item_claim_lost",
+                            },
+                        )
+                        continue
                 except Exception as exc:
                     logger.exception(
                         "Jobdefinition %s konnte nicht reserviert werden",
@@ -628,6 +655,9 @@ def _run_definition_batch_thread(
                             "error_code": "reservation_failed",
                             "error": str(exc),
                         },
+                    )
+                    db.job_batch_item_finish(
+                        batch_id, index, "failed", error=str(exc)
                     )
                     continue
             _run_backup_thread(
@@ -647,6 +677,21 @@ def _run_definition_batch_thread(
                     "config_snapshot": snapshot,
                 },
                 release_locks=False,
+            )
+            completed = db.job_get(job_id) or {}
+            status = str(completed.get("status") or "stale")
+            item_state = (
+                "done"
+                if status == "ok"
+                else "cancelled"
+                if status == "cancelled"
+                else "failed"
+            )
+            db.job_batch_item_finish(
+                batch_id,
+                index,
+                item_state,
+                error=None if item_state == "done" else f"Jobstatus: {status}",
             )
     finally:
         scope_lock.release()
@@ -680,6 +725,23 @@ def _queue_enabled_job_definitions(*, dry_run: bool) -> dict[str, Any]:
         _locks["backup"].release()
         logger.exception("Erste Jobdefinition konnte nicht reserviert werden")
         raise HTTPException(500, "Jobs konnten nicht reserviert werden") from exc
+    try:
+        batch_id = get_db().job_batch_create(
+            specs=specs,
+            snapshot=snapshot,
+            config_revision=revision,
+            dry_run=dry_run,
+            first_job_id=first_job_id,
+        )
+    except Exception as exc:
+        _abort_reserved_backup_job(
+            first_job_id,
+            scope_lock,
+            error=f"Batch konnte nicht persistiert werden: {exc}",
+            error_code="batch_persist_failed",
+        )
+        logger.exception("Jobdefinitions-Batch konnte nicht persistiert werden")
+        raise HTTPException(500, "Jobs konnten nicht gespeichert werden") from exc
     _audit_best_effort(
         "job_definition_batch_requested",
         actor="web",
@@ -691,8 +753,8 @@ def _queue_enabled_job_definitions(*, dry_run: bool) -> dict[str, Any]:
     try:
         thread = threading.Thread(
             target=_run_definition_batch_thread,
-            args=(specs, dry_run, snapshot, revision, scope_lock, first_job_id),
-            name="job-definition-batch",
+            args=(batch_id, scope_lock),
+            name=f"job-definition-batch-{batch_id[:8]}",
             daemon=True,
         )
         thread.start()
@@ -723,6 +785,7 @@ def _queue_enabled_job_definitions(*, dry_run: bool) -> dict[str, Any]:
     return {
         "ok": True,
         "job_id": first_job_id,
+        "batch_id": batch_id,
         # Backwards-compatible fields now describe only definitions that really
         # own a DB run at response time.  Accepted serial successors are exposed
         # separately as queued instead of being falsely reported as started.
@@ -735,6 +798,40 @@ def _queue_enabled_job_definitions(*, dry_run: bool) -> dict[str, Any]:
         "config_revision": revision,
         "dry_run": dry_run,
     }
+
+
+def resume_pending_definition_batches() -> int:
+    """Startet nach Webdienst-Restart die noch ausstehende dauerhafte Queue."""
+    db = get_db()
+    resumed = 0
+    for pending in db.job_batches_pending():
+        batch_id = str(pending["id"])
+        batch = db.job_batch_recover(batch_id) or {}
+        if batch.get("state") != "running":
+            continue
+        try:
+            scope_lock = _acquire_definition_batch_scope(
+                reset_cancel_state=not bool(batch.get("cancel_requested"))
+            )
+        except HTTPException as exc:
+            logger.info("Batch %s wartet weiter: %s", batch_id, exc.detail)
+            continue
+        try:
+            thread = threading.Thread(
+                target=_run_definition_batch_thread,
+                args=(batch_id, scope_lock),
+                name=f"job-definition-recovery-{batch_id[:8]}",
+                daemon=True,
+            )
+            thread.start()
+            resumed += 1
+        except Exception:
+            scope_lock.release()
+            _locks["backup"].release()
+            logger.exception("Batch %s konnte nicht wiederaufgenommen werden", batch_id)
+        # Es kann konstruktionsbedingt nur einen aktiven Backup-Scope geben.
+        break
+    return resumed
 
 
 @router.post("/backup/run")
@@ -830,10 +927,12 @@ def backup_plan(
 @router.post("/backup/cancel")
 def cancel_backup(response: Response) -> dict[str, Any]:
     db = get_db()
+    queued_batches = db.job_batch_request_cancel()
     running = any(db.job_running(kind) for kind in BACKUP_KINDS)
     state = rclone_job.get_runtime_state() or {}
     if (
         not running
+        and not queued_batches
         and state.get("status") != "running"
         and not runtime_state.active_processes()
     ):
