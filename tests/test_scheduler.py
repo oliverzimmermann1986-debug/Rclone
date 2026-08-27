@@ -98,6 +98,96 @@ def test_scheduler_job_logs_are_unique_private_and_isolated(tmp_path):
         assert stat.S_IMODE(first.stat().st_mode) == 0o600
 
 
+def test_scheduler_cancel_survives_first_definition_and_skips_followups(
+    tmp_path, monkeypatch
+):
+    class Config:
+        data = {
+            "backup": {"enabled": True, "pairs": [{"name": "Fotos"}]},
+            "paths": {"logs_dir": str(tmp_path)},
+        }
+
+        def get(self, *keys, default=None):
+            value = self.data
+            for key in keys:
+                if not isinstance(value, dict) or key not in value:
+                    return default
+                value = value[key]
+            return value
+
+    class Db:
+        def __init__(self):
+            self.started = []
+            self.finished = []
+
+        def job_start(self, _kind, **kwargs):
+            self.started.append(kwargs["definition_name"])
+            return len(self.started)
+
+        def job_finish(self, job_id, status, summary):
+            self.finished.append((job_id, status, summary))
+            return True
+
+        def job_get(self, job_id):
+            return {"id": job_id, "status": "ok"}
+
+    @contextmanager
+    def lock(_name):
+        yield object()
+
+    definitions = [
+        {"name": "Erster", "definition_id": "1" * 32, "due": True},
+        {"name": "Zweiter", "definition_id": "2" * 32, "due": True},
+    ]
+    database = Db()
+    cancelled = False
+    resets = []
+
+    def run_once(**_kwargs):
+        nonlocal cancelled
+        cancelled = True
+        return {"ok": False, "cancelled": True, "pairs": []}
+
+    monkeypatch.setattr(scheduler_cli, "get_config", Config)
+    monkeypatch.setattr(scheduler_cli, "get_db", lambda: database)
+    monkeypatch.setattr(scheduler_cli, "_configure_logging", lambda _path=None: None)
+    monkeypatch.setattr(scheduler_cli, "check_overdue", lambda *_args: [])
+    monkeypatch.setattr(scheduler_cli, "scheduler_state", lambda _db: {"paused": False})
+    monkeypatch.setattr(
+        scheduler_cli, "find_due_pairs", lambda *_args, **_kwargs: (["Erster", "Zweiter"], definitions)
+    )
+    monkeypatch.setattr(
+        scheduler_cli, "find_due_pbs_targets", lambda *_args, **_kwargs: ([], [])
+    )
+    monkeypatch.setattr(
+        scheduler_cli, "restore_test_due", lambda *_args, **_kwargs: {"due": False}
+    )
+    monkeypatch.setattr(scheduler_cli, "file_lock_or_none", lock)
+    monkeypatch.setattr(
+        scheduler_cli, "reconcile_locked_scope", lambda *_args, **_kwargs: {"safe": True}
+    )
+    monkeypatch.setattr(
+        scheduler_cli,
+        "_definition_attempt_metadata",
+        lambda definition, _cfg: (
+            [definition["name"]],
+            [{"name": definition["name"]}],
+            {definition["name"]: f"key:{definition['name']}"},
+            {},
+        ),
+    )
+    monkeypatch.setattr(scheduler_cli, "reset_cancel", lambda *_args: resets.append(True))
+    monkeypatch.setattr(scheduler_cli, "is_cancelled", lambda *_args: cancelled)
+    monkeypatch.setattr(scheduler_cli, "run_job", run_once)
+    monkeypatch.setattr(
+        scheduler_cli, "_finish_runtime_for_job", lambda *_args, **_kwargs: None
+    )
+
+    assert scheduler_cli.main() == 1
+    assert resets == [True]
+    assert database.started == ["Erster"]
+
+
 def test_scheduled_first_failure_retries_after_backoff():
     now = datetime(2026, 7, 10, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")).timestamp()
     attempt = now - 61 * 60
