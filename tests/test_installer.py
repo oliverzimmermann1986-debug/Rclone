@@ -98,6 +98,27 @@ def test_installer_rollback_restores_unit_states_without_starting_scheduler_ones
     assert "/etc/systemd/system/sync-scheduler.timer" in script
 
 
+def test_installer_rollback_restores_normalized_config_and_migrated_database():
+    script = INSTALLER.read_text(encoding="utf-8")
+
+    for name in ("config.yaml", "config.yaml.bak", "rclone-sync.db"):
+        assert name in script
+        assert f'"$backup_dir/runtime-state/$name.present"' in script
+        assert f'"$backup_dir/runtime-state/$name.missing"' in script
+    assert "restore_runtime_backup || rollback_failed=1" in script
+    assert '[[ "$(< "$candidate/source-path.txt")" == "$APP_DIR_CANONICAL" ]]' in script
+    assert '[[ -d "$candidate" && ! -L "$candidate" ]]' in script
+    assert '[[ -f "$source" && ! -L "$source" ]]' in script
+    assert 'sqlite3 "$source" "PRAGMA quick_check;"' in script
+    assert '"$APP_DIR_CANONICAL/data/rclone-sync.db-wal"' in script
+    assert '"$APP_DIR_CANONICAL/data/rclone-sync.db-shm"' in script
+    assert 'rm -rf "$APP_DIR/data"' not in script
+    assert script.index("restore_runtime_backup || rollback_failed=1") < script.index(
+        'restore_active_state rclone-sync-web.service "$WEB_WAS_ACTIVE"'
+    )
+    assert 'if (( rollback_failed == 0 )); then' in script
+
+
 def test_ci_covers_supported_python_dependencies_ui_and_systemd_units():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
