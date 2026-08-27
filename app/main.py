@@ -39,7 +39,7 @@ from .auth_contract import (
     NativeLoginResponse,
 )
 from .config_store import get_config
-from .db import get_db
+from .db import check_database_readonly, database_path, get_db
 from .rclone_args import rclone_subprocess_env
 from .security import CSRF_COOKIE, new_csrf_token, require_csrf
 from .static_assets import AllowlistedStaticFiles
@@ -748,10 +748,12 @@ def readyz():
     try:
         cfg = get_config()
         paths = cfg.get("paths", default={}) or {}
-        with get_db().conn() as connection:
-            connection.execute("SELECT 1").fetchone()
         data_dir = Path(str(paths.get("data_dir") or "/opt/rclone-sync/data"))
-        ready = data_dir.exists() and os.access(data_dir, os.R_OK | os.W_OK)
+        ready = (
+            data_dir.is_dir()
+            and os.access(data_dir, os.R_OK | os.W_OK)
+            and check_database_readonly(database_path())
+        )
     except Exception:
         ready = False
     warnings = _production_security_warnings() if ready else []

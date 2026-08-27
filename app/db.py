@@ -3062,6 +3062,53 @@ class Database:
 _db: Optional[Database] = None
 
 
+def database_path() -> Path:
+    """Liefert den aktiven DB-Pfad, ohne den Singleton zu initialisieren."""
+
+    return _db.path if _db is not None else _DB_PATH
+
+
+def check_database_readonly(path: Path | None = None) -> bool:
+    """Prüft die bestehende SQLite-Datei strikt read-only und ohne Anlage."""
+
+    candidate = Path(path or database_path())
+    try:
+        if candidate.is_symlink():
+            return False
+        before = candidate.stat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
+            return False
+        resolved = candidate.resolve(strict=True)
+        if not resolved.parent.is_dir():
+            return False
+        uri = f"{resolved.as_uri()}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=5)
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version <= 0 or version > _SCHEMA_VERSION:
+                return False
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "jobs" not in tables:
+                return False
+            quick_check = str(
+                connection.execute("PRAGMA quick_check(1)").fetchone()[0]
+            )
+            if quick_check != "ok":
+                return False
+        finally:
+            connection.close()
+        after = candidate.stat()
+        return (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return False
+
+
 def get_db() -> Database:
     global _db
     if _db is None:
