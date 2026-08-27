@@ -92,6 +92,9 @@ class _DB:
     def job_count(self, **_kwargs: Any) -> int:
         return 1
 
+    def job_search(self, **_kwargs: Any) -> tuple[list[dict[str, Any]], int]:
+        return [copy.deepcopy(self.job)], 1
+
     def job_get(self, _job_id: int) -> dict[str, Any]:
         return copy.deepcopy(_body("job_detail"))
 

@@ -1,6 +1,8 @@
 import json
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -1065,6 +1067,61 @@ def test_job_export_iterator_keeps_one_snapshot_during_concurrent_insert(tmp_pat
     assert exported_ids == list(reversed(initial_ids))
     assert len(exported_ids) == len(set(exported_ids))
     assert concurrent_id not in exported_ids
+
+
+def test_job_search_items_and_total_share_snapshot_during_concurrent_insert(
+    tmp_path: Path, monkeypatch
+):
+    database = Database(tmp_path / "search-snapshot.db")
+    initial_ids = []
+    for index in range(3):
+        job_id = database.job_start("backup", definition_name=f"Initial {index}")
+        database.job_finish(job_id, "ok", {})
+        initial_ids.append(job_id)
+    writer = Database(database.path)
+
+    original_conn = database.conn
+    count_finished = threading.Event()
+    continue_select = threading.Event()
+
+    class _ConnectionProxy:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, sql, parameters=()):
+            result = self.connection.execute(sql, parameters)
+            if sql.startswith("SELECT COUNT(*) FROM jobs"):
+                count_finished.set()
+                assert continue_select.wait(timeout=5)
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+    @contextmanager
+    def controlled_conn(*, initialize=False):
+        with original_conn(initialize=initialize) as connection:
+            yield _ConnectionProxy(connection)
+
+    monkeypatch.setattr(database, "conn", controlled_conn)
+    outcome = {}
+
+    def search():
+        outcome["value"] = database.job_search(limit=50)
+
+    worker = threading.Thread(target=search)
+    worker.start()
+    assert count_finished.wait(timeout=5)
+    concurrent_id = writer.job_start("backup", definition_name="Concurrent")
+    writer.job_finish(concurrent_id, "ok", {})
+    continue_select.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    items, total = outcome["value"]
+    assert total == len(initial_ids)
+    assert [item["id"] for item in items] == list(reversed(initial_ids))
+    assert concurrent_id not in {item["id"] for item in items}
 
 
 def test_runtime_settings_and_audit_are_persistent(tmp_path):
