@@ -6,6 +6,8 @@ workflows:
     integrations:
       app_store_connect: rclone-sync-testflight
     environment:
+      groups:
+        - ios-release
       ios_signing:
         provisioning_profiles:
           - rclone-sync-app-store-push
