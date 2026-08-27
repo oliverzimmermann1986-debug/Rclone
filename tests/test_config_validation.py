@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from app.config_validation import ConfigValidationError, validate_config
+from app.config_validation import (
+    ConfigValidationError,
+    SESSION_SECRET_PLACEHOLDER,
+    session_secret_strength_error,
+    validate_config,
+)
 
 
 def _base(tmp_path: Path) -> dict:
@@ -16,6 +21,34 @@ def _base(tmp_path: Path) -> dict:
         "backup": {"pairs": [], "default_schedule": "manual"},
         "notifications": {"webhooks": []},
     }
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "short-secret",
+        "a" * 64,
+        "abcd" * 16,
+    ],
+)
+def test_explicit_weak_session_secrets_are_rejected(tmp_path: Path, secret: str):
+    cfg = _base(tmp_path)
+    cfg["web"]["secret_key"] = secret
+
+    with pytest.raises(ConfigValidationError, match="web.secret_key"):
+        validate_config(cfg)
+
+
+def test_strong_session_secret_and_migration_values_are_accepted(tmp_path: Path):
+    strong = "Qm8!tZ4#pL2@vN7$xR5&cD9*kF3-wY6+uH1=sJ0_eG"
+    assert session_secret_strength_error(strong) is None
+    assert session_secret_strength_error("") is None
+    assert session_secret_strength_error(SESSION_SECRET_PLACEHOLDER) is None
+
+    cfg = _base(tmp_path)
+    cfg["web"]["secret_key"] = strong
+    normalized, _warnings = validate_config(cfg)
+    assert normalized["web"]["secret_key"] == strong
 
 
 def test_option_like_remote_is_rejected(tmp_path: Path):
