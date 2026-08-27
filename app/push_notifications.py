@@ -32,6 +32,7 @@ _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: tuple[tuple[str, str, str, int], str, float] | None = None
 _BACKGROUND_DISPATCH_LOCK = threading.Lock()
 _DELIVERY_FENCE = threading.RLock()
+_CLAIM_HEARTBEAT_INTERVAL_SECONDS = 5.0
 _INVALID_TOKEN_REASONS = {
     "BadDeviceToken",
     "DeviceTokenNotForTopic",
@@ -48,6 +49,55 @@ def revoke_all_push_devices(*, db: Database | None = None) -> int:
             return database.push_devices_revoke_all()
         except Exception as exc:
             raise OSError("APNs-Geräteregistrierungen konnten nicht widerrufen werden") from exc
+
+
+def _post_with_claim_heartbeat(
+    client: httpx.Client,
+    url: str,
+    *,
+    content: bytes,
+    headers: Mapping[str, str],
+    database: Database,
+    row_id: int,
+    claim_owner: str,
+    lease_seconds: int,
+) -> httpx.Response:
+    """Keep an owner-bound outbox claim alive for the full blocking POST."""
+
+    done = threading.Event()
+    result: dict[str, Any] = {}
+
+    def post() -> None:
+        try:
+            result["response"] = client.post(url, content=content, headers=headers)
+        except BaseException as exc:  # re-raised unchanged on the dispatcher thread
+            result["error"] = exc
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=post, name=f"apns-post-{row_id}", daemon=True)
+    worker.start()
+    interval = max(
+        0.01,
+        min(float(_CLAIM_HEARTBEAT_INTERVAL_SECONDS), float(lease_seconds) / 3.0),
+    )
+    while not done.wait(interval):
+        renewed = database.push_outbox_renew_claims(
+            [row_id],
+            claim_owner=claim_owner,
+            lease_seconds=lease_seconds,
+        )
+        if row_id not in renewed:
+            logger.error(
+                "APNs-Outbox-Lease %s von Dispatcher %s ging während POST verloren",
+                row_id,
+                claim_owner,
+            )
+    worker.join()
+    error = result.get("error")
+    if error is not None:
+        raise error
+    return result["response"]
 _RETRYABLE_STATUS_CODES = {429, 500, 503}
 _RETRYABLE_REASONS = {"ExpiredProviderToken", "TooManyProviderTokenUpdates"}
 _SENSITIVE_CONTEXT_KEYS = {
@@ -263,13 +313,21 @@ def dispatch_pending_pushes(
     client_factory: Callable[..., httpx.Client] = httpx.Client,
     limit: int = 32,
     claim_owner: str | None = None,
+    lease_seconds: int | None = None,
 ) -> dict[str, int]:
     """Claimt fällige Outbox-Zeilen atomar und stellt sie best-effort zu."""
 
     database = db or get_db()
     owner = str(claim_owner or uuid.uuid4().hex)
     database.push_device_prune_expired()
-    rows = database.push_outbox_claim_due(claim_owner=owner, limit=limit)
+    requested_lease = (
+        max(10, min(int(lease_seconds), 300)) if lease_seconds is not None else 60
+    )
+    rows = database.push_outbox_claim_due(
+        claim_owner=owner,
+        limit=limit,
+        lease_seconds=requested_lease,
+    )
     result = {"sent": 0, "failed": 0, "removed": 0, "retrying": 0}
     if not rows:
         return result
@@ -277,7 +335,11 @@ def dispatch_pending_pushes(
     row_settings = [_settings(str(row.get("event") or "")) for row in rows]
     timeouts = [float(item["timeout"]) for item in row_settings if item]
     client_timeout = max(timeouts, default=10.0)
-    lease_seconds = max(60, min(300, int(client_timeout * 2) + 10))
+    active_lease_seconds = (
+        requested_lease
+        if lease_seconds is not None
+        else max(60, min(300, int(client_timeout * 2) + 10))
+    )
     with client_factory(http2=True, timeout=client_timeout) as client:
         for index, (row, settings) in enumerate(zip(rows, row_settings)):
             row_id = int(row["id"])
@@ -286,7 +348,7 @@ def dispatch_pending_pushes(
                 database.push_outbox_renew_claims(
                     remaining_ids,
                     claim_owner=owner,
-                    lease_seconds=lease_seconds,
+                    lease_seconds=active_lease_seconds,
                 )
             )
             if row_id not in renewed_ids:
@@ -355,10 +417,15 @@ def dispatch_pending_pushes(
                             error="APNs-Gerät wurde widerrufen",
                         )
                         continue
-                    response = client.post(
+                    response = _post_with_claim_heartbeat(
+                        client,
                         f"{host}/3/device/{token}",
                         content=_payload(row),
                         headers=headers,
+                        database=database,
+                        row_id=row_id,
+                        claim_owner=owner,
+                        lease_seconds=active_lease_seconds,
                     )
                 reason = _response_reason(response)
                 if response.status_code == 200:

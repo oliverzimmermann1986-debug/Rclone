@@ -311,3 +311,64 @@ def test_slow_apns_batch_renews_remaining_owner_claims(monkeypatch, tmp_path: Pa
     assert result["sent"] == 2
     assert competing_results == [{"sent": 0, "failed": 0, "removed": 0, "retrying": 0}]
     assert database.push_outbox_status()["sent"] == 2
+
+
+def test_slow_apns_post_heartbeats_current_claim_against_second_dispatcher(
+    monkeypatch, tmp_path: Path
+):
+    database = Database(tmp_path / "slow-post-heartbeat.db")
+    database.push_device_upsert(TOKEN, "production", now=100)
+    assert database.push_outbox_enqueue(
+        event="sync_error",
+        title="Fehler",
+        message="Langsamer POST",
+        payload={},
+        dedupe_key="slow-current-row",
+        retention_seconds=86400,
+        now=100,
+    ) == 1
+    clock = {"now": 100.0}
+    monkeypatch.setattr("app.db.time.time", lambda: clock["now"])
+    monkeypatch.setattr(push_notifications, "_CLAIM_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        push_notifications,
+        "_settings",
+        lambda _event: {
+            "team_id": "ABCDEFGHIJ",
+            "key_id": "KLMNOPQRST",
+            "key_file": str(tmp_path / "AuthKey.p8"),
+            "topic": "de.oliverzimmermann.rclonesync",
+            "timeout": 5,
+            "max_attempts": 8,
+        },
+    )
+    monkeypatch.setattr(push_notifications, "_provider_token", lambda _settings: "jwt")
+    competitor_results = []
+
+    class BlockingClient(_Client):
+        def post(self, url, *, content, headers):
+            self.calls.append((url, content, headers))
+            clock["now"] = 111.0  # initial 10-second claim has expired
+            time.sleep(0.05)  # heartbeat renews the owner-bound claim at fake time 111
+            competitor_results.append(
+                push_notifications.dispatch_pending_pushes(
+                    db=database,
+                    client_factory=lambda **_kwargs: pytest.fail(
+                        "Dispatcher B darf die aktuell sendende Zeile nicht claimen"
+                    ),
+                    claim_owner="dispatcher-b",
+                    lease_seconds=10,
+                )
+            )
+            return _Response(200)
+
+    result = push_notifications.dispatch_pending_pushes(
+        db=database,
+        client_factory=lambda **kwargs: BlockingClient([], [], **kwargs),
+        claim_owner="dispatcher-a",
+        lease_seconds=10,
+    )
+
+    assert result["sent"] == 1
+    assert competitor_results == [{"sent": 0, "failed": 0, "removed": 0, "retrying": 0}]
+    assert database.push_outbox_status()["sent"] == 1
