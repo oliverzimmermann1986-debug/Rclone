@@ -168,13 +168,30 @@ def _production_security_warnings() -> list[str]:
     return warnings
 
 
-def _run_startup_maintenance() -> None:
+_MAINTENANCE_INTERVAL_SECONDS = 6 * 60 * 60
+
+
+def _run_automatic_maintenance_once() -> None:
     try:
         maintenance = run_automatic_maintenance()
         if maintenance.get("enabled"):
             logger.info("Automatische Wartung: %s", maintenance)
     except Exception:
         logger.exception("Automatische Wartung fehlgeschlagen")
+
+
+def _run_maintenance_loop(
+    stop_event: threading.Event,
+    *,
+    interval_seconds: float = _MAINTENANCE_INTERVAL_SECONDS,
+) -> None:
+    """Wartet zwischen vollständigen Läufen und kann daher nie überlappen."""
+
+    if stop_event.is_set():
+        return
+    _run_automatic_maintenance_once()
+    while not stop_event.wait(max(1.0, float(interval_seconds))):
+        _run_automatic_maintenance_once()
 
 
 def _run_push_dispatcher(stop_event: threading.Event) -> None:
@@ -256,11 +273,14 @@ async def _lifespan(_app):
         )
     _sd_notify("READY=1")
     logger.info("rclone-sync app ready")
-    threading.Thread(
-        target=_run_startup_maintenance,
-        name="startup-maintenance",
+    maintenance_stop = threading.Event()
+    maintenance_thread = threading.Thread(
+        target=_run_maintenance_loop,
+        args=(maintenance_stop,),
+        name="automatic-maintenance",
         daemon=True,
-    ).start()
+    )
+    maintenance_thread.start()
     push_stop = threading.Event()
     push_thread = threading.Thread(
         target=_run_push_dispatcher,
@@ -272,7 +292,9 @@ async def _lifespan(_app):
     try:
         yield
     finally:
+        maintenance_stop.set()
         push_stop.set()
+        maintenance_thread.join(timeout=5)
         push_thread.join(timeout=2)
         _sd_notify("STOPPING=1")
 
