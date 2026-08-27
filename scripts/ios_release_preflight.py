@@ -17,9 +17,7 @@ class ReleaseSourceError(ValueError):
     """Raised when the release checkout is not trusted for publishing."""
 
 
-GitRunner = Callable[
-    [Sequence[str], Path], subprocess.CompletedProcess[str]
-]
+GitRunner = Callable[[Sequence[str], Path], subprocess.CompletedProcess[str]]
 
 
 def _run_git(args: Sequence[str], repository: Path) -> subprocess.CompletedProcess[str]:
@@ -110,9 +108,7 @@ def verify_release_source(
         ["merge-base", "--is-ancestor", tag_commit, main_commit], repository
     )
     if ancestry.returncode != 0:
-        raise ReleaseSourceError(
-            "Release-Commit stammt nicht von origin/main ab"
-        )
+        raise ReleaseSourceError("Release-Commit stammt nicht von origin/main ab")
 
     return tag_commit
 

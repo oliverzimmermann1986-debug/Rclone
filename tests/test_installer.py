@@ -116,7 +116,7 @@ def test_installer_rollback_restores_normalized_config_and_migrated_database():
     assert script.index("restore_runtime_backup || rollback_failed=1") < script.index(
         'restore_active_state rclone-sync-web.service "$WEB_WAS_ACTIVE"'
     )
-    assert 'if (( rollback_failed == 0 )); then' in script
+    assert "if (( rollback_failed == 0 )); then" in script
 
 
 def test_installer_starts_web_service_exactly_once_before_healthcheck():
@@ -129,7 +129,9 @@ def test_installer_starts_web_service_exactly_once_before_healthcheck():
     activation = script.index("# Nur der Per-Pair-Scheduler")
     enable = script.index("systemctl enable rclone-sync-web.service", activation)
     restart = script.index("systemctl restart rclone-sync-web.service", enable)
-    health = script.index("systemctl is-active --quiet rclone-sync-web.service", restart)
+    health = script.index(
+        "systemctl is-active --quiet rclone-sync-web.service", restart
+    )
     assert enable < restart < health
     assert "curl --fail --silent --show-error --max-time 10" in script
     assert "restore_active_state rclone-sync-web.service" in script

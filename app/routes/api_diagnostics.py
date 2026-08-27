@@ -189,11 +189,7 @@ def operational_snapshot(
         now = time.monotonic()
         with _OPERATIONAL_CACHE_LOCK:
             cached = _OPERATIONAL_CACHE
-            if (
-                cached
-                and cached[1] == key
-                and now - cached[0] < _OPERATIONAL_CACHE_TTL
-            ):
+            if cached and cached[1] == key and now - cached[0] < _OPERATIONAL_CACHE_TTL:
                 return copy.deepcopy(cached[2])
         result = {
             "database": {
@@ -266,7 +262,10 @@ def doctor() -> dict[str, Any]:
 
     version_check = _rclone_version_check()
     checks.append(
-        _err("rclone", str(version_check.get("message") or "Version-Check fehlgeschlagen"))
+        _err(
+            "rclone",
+            str(version_check.get("message") or "Version-Check fehlgeschlagen"),
+        )
         if version_check.get("level") == "error"
         else _ok("rclone", str(version_check.get("message") or "rclone ok"))
     )
@@ -340,9 +339,7 @@ def doctor() -> dict[str, Any]:
 
     if operational is None:
         legacy_enabled, legacy_active = _systemctl_state("rclone-sync.timer")
-        scheduler_enabled, scheduler_active = _systemctl_state(
-            "sync-scheduler.timer"
-        )
+        scheduler_enabled, scheduler_active = _systemctl_state("sync-scheduler.timer")
     else:
         legacy_enabled, legacy_active = operational["services"]["legacy_scheduler"]
         scheduler_enabled, scheduler_active = operational["services"]["scheduler"]

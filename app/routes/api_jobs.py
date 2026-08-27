@@ -677,9 +677,7 @@ def _run_definition_batch_thread(batch_id: str, scope_lock: HeldFileLock) -> Non
                             "error": str(exc),
                         },
                     )
-                    db.job_batch_item_finish(
-                        batch_id, index, "failed", error=str(exc)
-                    )
+                    db.job_batch_item_finish(batch_id, index, "failed", error=str(exc))
                     continue
             _run_backup_thread(
                 job_id,
@@ -702,8 +700,10 @@ def _run_definition_batch_thread(batch_id: str, scope_lock: HeldFileLock) -> Non
             completed = db.job_get(job_id) or {}
             status = str(completed.get("status") or "stale")
             terminal_pending = getattr(db, "job_terminal_pending", None)
-            if status == "running" and callable(terminal_pending) and terminal_pending(
-                job_id
+            if (
+                status == "running"
+                and callable(terminal_pending)
+                and terminal_pending(job_id)
             ):
                 logger.error(
                     "Batch %s pausiert: terminaler Abschluss fuer Job #%s ausstehend",
@@ -1662,9 +1662,7 @@ def export_jobs_csv(
                     datetime.fromtimestamp(ended).astimezone().isoformat()
                     if ended
                     else "",
-                    round(max(0.0, ended - started), 3)
-                    if started and ended
-                    else "",
+                    round(max(0.0, ended - started), 3) if started and ended else "",
                     json.dumps(
                         _redact_result(job.get("summary") or {}),
                         ensure_ascii=False,

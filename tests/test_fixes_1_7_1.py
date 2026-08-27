@@ -162,14 +162,17 @@ def test_logout_revokes_apns_devices_and_pending_delivery(tmp_path, monkeypatch)
         database = db.get_db()
         token = "ab" * 32
         database.push_device_upsert(token, "production")
-        assert database.push_outbox_enqueue(
-            event="sync_error",
-            title="Fehler",
-            message="Nicht mehr zustellen",
-            payload={},
-            dedupe_key="logout-revocation",
-            retention_seconds=3600,
-        ) == 1
+        assert (
+            database.push_outbox_enqueue(
+                event="sync_error",
+                title="Fehler",
+                message="Nicht mehr zustellen",
+                payload={},
+                dedupe_key="logout-revocation",
+                retention_seconds=3600,
+            )
+            == 1
+        )
         csrf = client.cookies.get("rclone_sync_csrf")
 
         response = client.post(

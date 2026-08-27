@@ -109,14 +109,16 @@ def test_offline_logout_bounds_and_retries_push_revocation():
 def test_session_restore_revokes_pending_push_before_loading_credentials():
     model = _swift("Core/AppModel.swift")
 
-    restore = model[model.index("func restoreSession() async"):model.index("func login(")]
+    restore = model[
+        model.index("func restoreSession() async") : model.index("func login(")
+    ]
     assert "try await revokePendingPushRegistrationsBeforeRestore" in restore
-    assert restore.index("try await revokePendingPushRegistrationsBeforeRestore") < restore.index(
-        "try await newClient.getConfig()"
-    )
-    assert restore.index("try await revokePendingPushRegistrationsBeforeRestore") < restore.index(
-        "client = newClient"
-    )
+    assert restore.index(
+        "try await revokePendingPushRegistrationsBeforeRestore"
+    ) < restore.index("try await newClient.getConfig()")
+    assert restore.index(
+        "try await revokePendingPushRegistrationsBeforeRestore"
+    ) < restore.index("client = newClient")
     assert "_ = try await client.unregisterPushDevice" in model
 
 
@@ -126,12 +128,14 @@ def test_stored_http_session_restore_is_fail_closed_and_manual_login_reconfirms(
     login = _swift("Views/LoginView.swift")
 
     assert "requiresExplicitInsecureTransportConfirmation" in api
-    restore = model[model.index("func restoreSession() async"):model.index("func login(")]
+    restore = model[
+        model.index("func restoreSession() async") : model.index("func login(")
+    ]
     assert "if APIClient.requiresExplicitInsecureTransportConfirmation(url)" in restore
     assert "newClient.clearLocalSession()" in restore
-    assert restore.index("requiresExplicitInsecureTransportConfirmation") < restore.index(
-        "try await newClient.getConfig()"
-    )
+    assert restore.index(
+        "requiresExplicitInsecureTransportConfirmation"
+    ) < restore.index("try await newClient.getConfig()")
     assert "if APIClient.requiresExplicitInsecureTransportConfirmation(url)" in login
     assert "showHTTPWarning = true" in login
 

@@ -48,14 +48,17 @@ def test_push_device_registry_is_idempotent_and_removable(tmp_path: Path):
 def test_session_rotation_revokes_devices_and_prevents_queued_delivery(tmp_path: Path):
     database = Database(tmp_path / "revoke-all.db")
     database.push_device_upsert(TOKEN, "production")
-    assert database.push_outbox_enqueue(
-        event="sync_error",
-        title="Fehler",
-        message="Altgerät",
-        payload={},
-        dedupe_key="old-session",
-        retention_seconds=3600,
-    ) == 1
+    assert (
+        database.push_outbox_enqueue(
+            event="sync_error",
+            title="Fehler",
+            message="Altgerät",
+            payload={},
+            dedupe_key="old-session",
+            retention_seconds=3600,
+        )
+        == 1
+    )
 
     assert push_notifications.revoke_all_push_devices(db=database) == 1
 
@@ -318,15 +321,18 @@ def test_slow_apns_post_heartbeats_current_claim_against_second_dispatcher(
 ):
     database = Database(tmp_path / "slow-post-heartbeat.db")
     database.push_device_upsert(TOKEN, "production", now=100)
-    assert database.push_outbox_enqueue(
-        event="sync_error",
-        title="Fehler",
-        message="Langsamer POST",
-        payload={},
-        dedupe_key="slow-current-row",
-        retention_seconds=86400,
-        now=100,
-    ) == 1
+    assert (
+        database.push_outbox_enqueue(
+            event="sync_error",
+            title="Fehler",
+            message="Langsamer POST",
+            payload={},
+            dedupe_key="slow-current-row",
+            retention_seconds=86400,
+            now=100,
+        )
+        == 1
+    )
     clock = {"now": 100.0}
     monkeypatch.setattr("app.db.time.time", lambda: clock["now"])
     monkeypatch.setattr(push_notifications, "_CLAIM_HEARTBEAT_INTERVAL_SECONDS", 0.01)

@@ -154,7 +154,9 @@ def test_scheduler_cancel_survives_first_definition_and_skips_followups(
     monkeypatch.setattr(scheduler_cli, "check_overdue", lambda *_args: [])
     monkeypatch.setattr(scheduler_cli, "scheduler_state", lambda _db: {"paused": False})
     monkeypatch.setattr(
-        scheduler_cli, "find_due_pairs", lambda *_args, **_kwargs: (["Erster", "Zweiter"], definitions)
+        scheduler_cli,
+        "find_due_pairs",
+        lambda *_args, **_kwargs: (["Erster", "Zweiter"], definitions),
     )
     monkeypatch.setattr(
         scheduler_cli, "find_due_pbs_targets", lambda *_args, **_kwargs: ([], [])
@@ -164,7 +166,9 @@ def test_scheduler_cancel_survives_first_definition_and_skips_followups(
     )
     monkeypatch.setattr(scheduler_cli, "file_lock_or_none", lock)
     monkeypatch.setattr(
-        scheduler_cli, "reconcile_locked_scope", lambda *_args, **_kwargs: {"safe": True}
+        scheduler_cli,
+        "reconcile_locked_scope",
+        lambda *_args, **_kwargs: {"safe": True},
     )
     monkeypatch.setattr(
         scheduler_cli,
@@ -176,7 +180,9 @@ def test_scheduler_cancel_survives_first_definition_and_skips_followups(
             {},
         ),
     )
-    monkeypatch.setattr(scheduler_cli, "reset_cancel", lambda *_args: resets.append(True))
+    monkeypatch.setattr(
+        scheduler_cli, "reset_cancel", lambda *_args: resets.append(True)
+    )
     monkeypatch.setattr(scheduler_cli, "is_cancelled", lambda *_args: cancelled)
     monkeypatch.setattr(scheduler_cli, "run_job", run_once)
     monkeypatch.setattr(

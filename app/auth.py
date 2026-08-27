@@ -115,7 +115,9 @@ def bump_session_version() -> int:
     return result["version"]
 
 
-def _trusted_proxy_networks() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+def _trusted_proxy_networks() -> tuple[
+    ipaddress.IPv4Network | ipaddress.IPv6Network, ...
+]:
     configured = get_config().get("web", "trusted_proxy_ips", default=[]) or []
     if isinstance(configured, str):
         configured = [configured]
@@ -124,7 +126,9 @@ def _trusted_proxy_networks() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Net
         try:
             networks.append(ipaddress.ip_network(str(value).strip(), strict=False))
         except ValueError:
-            logger.error("Ungültiger vertrauenswürdiger Proxy wird ignoriert: %r", value)
+            logger.error(
+                "Ungültiger vertrauenswürdiger Proxy wird ignoriert: %r", value
+            )
     return tuple(networks)
 
 
@@ -145,7 +149,10 @@ def client_host(request: Request) -> str:
     networks = _trusted_proxy_networks()
 
     def trusted(value: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-        return any(value.version == network.version and value in network for network in networks)
+        return any(
+            value.version == network.version and value in network
+            for network in networks
+        )
 
     if not networks or not trusted(peer_ip):
         return str(peer_ip)

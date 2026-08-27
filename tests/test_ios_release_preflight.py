@@ -10,9 +10,7 @@ from scripts.ios_release_preflight import ReleaseSourceError, verify_release_sou
 
 
 class FakeGit:
-    def __init__(
-        self, responses: dict[tuple[str, ...], tuple[int, str] | int]
-    ) -> None:
+    def __init__(self, responses: dict[tuple[str, ...], tuple[int, str] | int]) -> None:
         self.responses = responses
         self.calls: list[tuple[str, ...]] = []
 

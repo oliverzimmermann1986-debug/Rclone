@@ -37,7 +37,9 @@ def _runner(version: str, *, returncode: int = 0):
     def run(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
         assert Path(args[0]).is_file()
         assert args[1:] == ["--version"]
-        return subprocess.CompletedProcess(args, returncode, f"Version: {version}\n", "")
+        return subprocess.CompletedProcess(
+            args, returncode, f"Version: {version}\n", ""
+        )
 
     return run
 
@@ -97,7 +99,9 @@ def test_unexpected_binary_version_fails_closed(tmp_path: Path):
         )
 
 
-@pytest.mark.parametrize("unsafe_name", ["../outside/xcodegen", "..\\outside\\xcodegen"])
+@pytest.mark.parametrize(
+    "unsafe_name", ["../outside/xcodegen", "..\\outside\\xcodegen"]
+)
 def test_archive_path_traversal_is_rejected(tmp_path: Path, unsafe_name: str):
     payload = _archive(unsafe_name=unsafe_name)
 
