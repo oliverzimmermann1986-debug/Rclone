@@ -147,7 +147,8 @@ class _FailingMarkerPath:
 def test_password_change_stays_successful_when_post_cleanup_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store, _database = _setup(tmp_path, monkeypatch)
+    store, database = _setup(tmp_path, monkeypatch)
+    database.push_device_upsert("ab" * 32, "production")
     monkeypatch.setattr(api_config, "Path", lambda *_args: _FailingMarkerPath())
     monkeypatch.setattr(api_config, "get_db", lambda: _FailingAuditDB())
 
@@ -169,6 +170,7 @@ def test_password_change_stays_successful_when_post_cleanup_fails(
         store.get("web", "password_hash").encode("ascii"),
     )
     assert store.get("web", "session_version") == 2
+    assert database.push_devices() == []
 
 
 def test_config_update_stays_successful_when_post_audit_fails(

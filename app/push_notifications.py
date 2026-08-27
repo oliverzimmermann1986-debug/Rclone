@@ -31,11 +31,23 @@ DEFAULT_ERROR_EVENTS = (
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: tuple[tuple[str, str, str, int], str, float] | None = None
 _BACKGROUND_DISPATCH_LOCK = threading.Lock()
+_DELIVERY_FENCE = threading.RLock()
 _INVALID_TOKEN_REASONS = {
     "BadDeviceToken",
     "DeviceTokenNotForTopic",
     "Unregistered",
 }
+
+
+def revoke_all_push_devices(*, db: Database | None = None) -> int:
+    """Fence APNs I/O and revoke all registrations for a session-version change."""
+
+    database = db or get_db()
+    with _DELIVERY_FENCE:
+        try:
+            return database.push_devices_revoke_all()
+        except Exception as exc:
+            raise OSError("APNs-Geräteregistrierungen konnten nicht widerrufen werden") from exc
 _RETRYABLE_STATUS_CODES = {429, 500, 503}
 _RETRYABLE_REASONS = {"ExpiredProviderToken", "TooManyProviderTokenUpdates"}
 _SENSITIVE_CONTEXT_KEYS = {
@@ -331,11 +343,23 @@ def dispatch_pending_pushes(
                 logger.warning("APNs Provider-Token fehlgeschlagen: %s", exc)
                 continue
             try:
-                response = client.post(
-                    f"{host}/3/device/{token}",
-                    content=_payload(row),
-                    headers=headers,
-                )
+                with _DELIVERY_FENCE:
+                    if not database.push_device_exists(token):
+                        logger.info(
+                            "APNs-Gerät %s wurde vor Zustellung widerrufen", token[-8:]
+                        )
+                        database.push_outbox_finish(
+                            row_id,
+                            claim_owner=owner,
+                            sent=False,
+                            error="APNs-Gerät wurde widerrufen",
+                        )
+                        continue
+                    response = client.post(
+                        f"{host}/3/device/{token}",
+                        content=_payload(row),
+                        headers=headers,
+                    )
                 reason = _response_reason(response)
                 if response.status_code == 200:
                     status = database.push_outbox_finish(

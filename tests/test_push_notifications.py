@@ -45,6 +45,30 @@ def test_push_device_registry_is_idempotent_and_removable(tmp_path: Path):
     assert database.push_devices() == []
 
 
+def test_session_rotation_revokes_devices_and_prevents_queued_delivery(tmp_path: Path):
+    database = Database(tmp_path / "revoke-all.db")
+    database.push_device_upsert(TOKEN, "production")
+    assert database.push_outbox_enqueue(
+        event="sync_error",
+        title="Fehler",
+        message="Altgerät",
+        payload={},
+        dedupe_key="old-session",
+        retention_seconds=3600,
+    ) == 1
+
+    assert push_notifications.revoke_all_push_devices(db=database) == 1
+
+    assert database.push_devices() == []
+    assert database.push_outbox_status() == {
+        "pending": 0,
+        "sent": 0,
+        "failed": 0,
+        "last_error": None,
+        "last_error_at": None,
+    }
+
+
 def test_apns_config_is_fail_closed_and_restricted_to_data_dir(tmp_path: Path):
     invalid = _base_config(tmp_path)
     invalid["notifications"]["apns"] = {

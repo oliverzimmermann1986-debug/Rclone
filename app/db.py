@@ -2444,6 +2444,26 @@ class Database:
             )
             return bool(cursor.rowcount)
 
+    def push_device_exists(self, token: str, *, now: Optional[float] = None) -> bool:
+        now_value = float(time.time() if now is None else now)
+        with self.conn() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM push_devices WHERE token=? AND expires_at>?",
+                (token, now_value),
+            ).fetchone()
+        return row is not None
+
+    def push_devices_revoke_all(self) -> int:
+        """Atomically remove every device and all queued/in-flight delivery rows."""
+
+        with self.conn() as connection:
+            count = int(
+                connection.execute("SELECT COUNT(*) FROM push_devices").fetchone()[0]
+            )
+            connection.execute("DELETE FROM push_outbox")
+            connection.execute("DELETE FROM push_devices")
+        return count
+
     def push_devices(
         self, *, limit: int = 32, now: Optional[float] = None
     ) -> List[Dict[str, Any]]:

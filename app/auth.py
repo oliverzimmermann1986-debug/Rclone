@@ -92,6 +92,12 @@ def _session_version() -> int:
 
 
 def bump_session_version() -> int:
+    # Das bestehende Sitzungsmodell widerruft global. APNs-Registrierungen sind
+    # an genau diese Sitzungsgeneration gebunden und müssen vor der Rotation
+    # verschwinden, damit nach erfolgreicher Rückkehr kein Altgerät mehr sendbar ist.
+    from .push_notifications import revoke_all_push_devices
+
+    revoke_all_push_devices()
     result: dict[str, int] = {}
 
     def updater(data: dict) -> None:
