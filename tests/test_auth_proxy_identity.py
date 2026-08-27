@@ -44,7 +44,9 @@ def test_untrusted_socket_peer_cannot_spoof_or_rotate_forwarded_identity(monkeyp
     assert rotated == first
 
 
-def test_trusted_proxy_chain_is_validated_from_right_and_ignores_left_spoofing(monkeypatch):
+def test_trusted_proxy_chain_is_validated_from_right_and_ignores_left_spoofing(
+    monkeypatch,
+):
     monkeypatch.setattr(
         auth,
         "get_config",

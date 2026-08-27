@@ -22,9 +22,7 @@ XCODEGEN_URL = (
 XCODEGEN_SHA256 = "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
 
 BinaryOpener = Callable[[urllib.request.Request], BinaryIO]
-ToolRunner = Callable[
-    [Sequence[str]], subprocess.CompletedProcess[str]
-]
+ToolRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 
 class ToolVerificationError(ValueError):

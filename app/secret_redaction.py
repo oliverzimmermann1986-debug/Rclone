@@ -64,12 +64,8 @@ _SENSITIVE_HEADER_NAMES = {
     "x-auth-token",
 }
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
-_AUTH_SCHEME_RE = re.compile(
-    r"(?i)\b(?P<scheme>bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"
-)
-_JWT_RE = re.compile(
-    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
-)
+_AUTH_SCHEME_RE = re.compile(r"(?i)\b(?P<scheme>bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _KNOWN_TOKEN_RE = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|"
     r"xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[A-Z0-9]{16})\b"
@@ -94,9 +90,7 @@ _SAFE_VALUE_PATH_WORDS = {
 
 
 def _key_words(key: object) -> tuple[str, ...]:
-    return tuple(
-        word.casefold() for word in _WORD_BOUNDARY_RE.split(str(key)) if word
-    )
+    return tuple(word.casefold() for word in _WORD_BOUNDARY_RE.split(str(key)) if word)
 
 
 def is_secret_key(key: object) -> bool:
@@ -137,9 +131,10 @@ def _redact_url(raw_url: str, placeholder: str) -> str:
             ],
             doseq=True,
         )
-        return urlunsplit(
-            (parsed.scheme, netloc, parsed.path, query, parsed.fragment)
-        ) + trailing
+        return (
+            urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+            + trailing
+        )
     except ValueError:
         return placeholder + trailing
 
@@ -153,9 +148,7 @@ def redact_secret_text(value: str, *, placeholder: str = REDACTED) -> str:
     )
     text = _JWT_RE.sub(placeholder, text)
     text = _KNOWN_TOKEN_RE.sub(placeholder, text)
-    return _URL_RE.sub(
-        lambda match: _redact_url(match.group(0), placeholder), text
-    )
+    return _URL_RE.sub(lambda match: _redact_url(match.group(0), placeholder), text)
 
 
 def _looks_like_opaque_secret(value: str, path: tuple[str, ...]) -> bool:
@@ -163,9 +156,7 @@ def _looks_like_opaque_secret(value: str, path: tuple[str, ...]) -> bool:
 
     if not _HIGH_ENTROPY_RE.fullmatch(value):
         return False
-    path_words = {
-        word for part in path for word in _key_words(part)
-    }
+    path_words = {word for part in path for word in _key_words(part)}
     if path_words & _SAFE_VALUE_PATH_WORDS:
         return False
     return (
@@ -210,7 +201,11 @@ def redact_secrets(
             if (
                 item not in (None, "")
                 and not isinstance(item, (bool, int, float))
-                and (is_secret_key(key) or (in_headers and is_secret_key(key)) or descriptor_value)
+                and (
+                    is_secret_key(key)
+                    or (in_headers and is_secret_key(key))
+                    or descriptor_value
+                )
             ):
                 redacted[key] = placeholder
             else:

@@ -48,7 +48,9 @@ def revoke_all_push_devices(*, db: Database | None = None) -> int:
         try:
             return database.push_devices_revoke_all()
         except Exception as exc:
-            raise OSError("APNs-Geräteregistrierungen konnten nicht widerrufen werden") from exc
+            raise OSError(
+                "APNs-Geräteregistrierungen konnten nicht widerrufen werden"
+            ) from exc
 
 
 def _post_with_claim_heartbeat(
@@ -98,6 +100,8 @@ def _post_with_claim_heartbeat(
     if error is not None:
         raise error
     return result["response"]
+
+
 _RETRYABLE_STATUS_CODES = {429, 500, 503}
 _RETRYABLE_REASONS = {"ExpiredProviderToken", "TooManyProviderTokenUpdates"}
 _SENSITIVE_CONTEXT_KEYS = {

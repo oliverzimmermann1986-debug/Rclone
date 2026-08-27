@@ -39,6 +39,8 @@ router = APIRouter(
     dependencies=[Depends(require_auth), Depends(require_csrf)],
 )
 logger = logging.getLogger(__name__)
+
+
 def _audit_best_effort(
     event: str, details: dict[str, Any], *, actor: str = "web"
 ) -> bool:
@@ -108,9 +110,9 @@ def audit_events(
 @router.get("/database")
 def database_status() -> dict[str, Any]:
     db = get_db()
-    return operational_snapshot(
-        config_snapshot=get_config().snapshot(), database=db
-    )["database"]
+    return operational_snapshot(config_snapshot=get_config().snapshot(), database=db)[
+        "database"
+    ]
 
 
 @router.post("/database/prune")

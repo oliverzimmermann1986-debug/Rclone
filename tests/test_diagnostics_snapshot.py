@@ -73,10 +73,18 @@ def test_doctor_page_reads_share_one_expensive_operational_snapshot(monkeypatch)
     monkeypatch.setattr(api_maintenance, "get_db", lambda: database)
     monkeypatch.setattr(api_diagnostics, "system_snapshot", fake_system)
     monkeypatch.setattr(api_diagnostics, "_systemctl_state", fake_service)
-    monkeypatch.setattr(api_diagnostics, "validate_config", lambda snapshot: (snapshot, []))
-    monkeypatch.setattr(api_diagnostics, "_writable_dir", lambda path: {"name": path, "level": "ok", "ok": True, "message": "ok"})
+    monkeypatch.setattr(
+        api_diagnostics, "validate_config", lambda snapshot: (snapshot, [])
+    )
+    monkeypatch.setattr(
+        api_diagnostics,
+        "_writable_dir",
+        lambda path: {"name": path, "level": "ok", "ok": True, "message": "ok"},
+    )
     monkeypatch.setattr(api_diagnostics, "effective_job_definitions", lambda _cfg: [])
-    monkeypatch.setattr(api_diagnostics, "build_job_plan", lambda **_kwargs: {"warnings": []})
+    monkeypatch.setattr(
+        api_diagnostics, "build_job_plan", lambda **_kwargs: {"warnings": []}
+    )
     monkeypatch.setattr(api_diagnostics.subprocess, "run", fake_run)
 
     api_diagnostics.doctor()

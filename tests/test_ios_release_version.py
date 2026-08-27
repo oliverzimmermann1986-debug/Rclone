@@ -62,8 +62,8 @@ def test_codemagic_verifies_fetched_main_and_exact_signed_tag_before_release_cha
     provenance = config.index("ios_release_preflight.py")
     version_write = config.index("ios_release_version.py")
 
-    assert 'refs/heads/main:refs/remotes/origin/main' in config
-    assert 'refs/tags/$CM_TAG:refs/tags/$CM_TAG' in config
+    assert "refs/heads/main:refs/remotes/origin/main" in config
+    assert "refs/tags/$CM_TAG:refs/tags/$CM_TAG" in config
     assert "--unshallow --force --no-tags" in config
     assert "IOS_RELEASE_GPG_PUBLIC_KEY_B64" in config
     assert config.index("gpg --batch --quiet --import") < provenance

@@ -1419,7 +1419,9 @@ class Database:
                     "WHERE batch_id=? AND position=? AND state='running'",
                     (
                         item_state,
-                        None if item_state == "done" else f"Unterbrochener Lauf: {status}",
+                        None
+                        if item_state == "done"
+                        else f"Unterbrochener Lauf: {status}",
                         now,
                         batch_id,
                         int(row["position"]),
@@ -1767,8 +1769,7 @@ class Database:
         params.append(bounded_limit)
         with self.conn() as connection:
             cursor = connection.execute(
-                f"SELECT * FROM jobs{where} "
-                "ORDER BY started_at DESC, id DESC LIMIT ?",
+                f"SELECT * FROM jobs{where} ORDER BY started_at DESC, id DESC LIMIT ?",
                 tuple(params),
             )
             while rows := cursor.fetchmany(bounded_batch):
@@ -2389,9 +2390,7 @@ class Database:
         for history_key in requested:
             last_id, success_id = selected_ids.get(history_key, (None, None))
             last_row = rows_by_id.get(last_id) if last_id is not None else None
-            success_row = (
-                rows_by_id.get(success_id) if success_id is not None else None
-            )
+            success_row = rows_by_id.get(success_id) if success_id is not None else None
             last_success = (
                 self._pair_row_to_result(success_row) if success_row else None
             )
@@ -3183,9 +3182,7 @@ def check_database_readonly(path: Path | None = None) -> bool:
             }
             if "jobs" not in tables:
                 return False
-            quick_check = str(
-                connection.execute("PRAGMA quick_check(1)").fetchone()[0]
-            )
+            quick_check = str(connection.execute("PRAGMA quick_check(1)").fetchone()[0])
             if quick_check != "ok":
                 return False
         finally:

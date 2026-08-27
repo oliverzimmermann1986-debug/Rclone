@@ -1124,7 +1124,9 @@ def test_job_search_matches_summary_log_and_exact_id(tmp_path: Path):
     assert database.job_count(kind="backup", status="error", query="fotos") == 1
 
 
-def test_job_export_iterator_keeps_one_snapshot_during_concurrent_insert(tmp_path: Path):
+def test_job_export_iterator_keeps_one_snapshot_during_concurrent_insert(
+    tmp_path: Path,
+):
     database = Database(tmp_path / "export-snapshot.db")
     initial_ids = []
     for index in range(8):
