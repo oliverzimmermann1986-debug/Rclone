@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -561,6 +561,29 @@ class Database:
             cls._backfill_pair_history_state(connection)
             cls._backfill_job_definition_schedule_state(connection)
             connection.execute("PRAGMA user_version=11")
+            version = 11
+        if version < 12:
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pair_runs_history_activity "
+                "ON pair_runs(history_key, "
+                "COALESCE(ended_at, started_at) DESC, id DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pair_runs_history_success_activity "
+                "ON pair_runs(history_key, ok, dry_run, "
+                "COALESCE(ended_at, started_at) DESC, id DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pair_runs_name_activity "
+                "ON pair_runs(pair_name, "
+                "COALESCE(ended_at, started_at) DESC, id DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pair_runs_name_success_activity "
+                "ON pair_runs(pair_name, ok, dry_run, "
+                "COALESCE(ended_at, started_at) DESC, id DESC)"
+            )
+            connection.execute("PRAGMA user_version=12")
 
     @staticmethod
     def _record_job_definition_schedule_state(
@@ -2284,64 +2307,96 @@ class Database:
         if not requested:
             return {}
 
+        selected_ids: Dict[str, tuple[Optional[int], Optional[int]]] = {}
         rows_by_id: Dict[int, sqlite3.Row] = {}
         items = list(requested.items())
         with self.conn() as connection:
-            # Zwei Werte je Identität; 400 bleibt sicher unter SQLite's üblichem
-            # 999-Parameter-Limit und nutzt trotzdem nur eine DB-Verbindung.
-            for offset in range(0, len(items), 400):
-                chunk = items[offset : offset + 400]
-                keys = [item[0] for item in chunk]
-                names = [item[1] for item in chunk]
-                key_marks = ",".join("?" for _ in keys)
-                name_marks = ",".join("?" for _ in names)
-                rows = connection.execute(
-                    "SELECT * FROM pair_runs "
-                    f"WHERE history_key IN ({key_marks}) OR pair_name IN ({name_marks}) "
-                    "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC",
-                    (*keys, *names),
+            # Four correlated Top-1 probes per identity keep work proportional
+            # to the number of configured targets rather than all historical
+            # attempts. Expression indexes cover the activity ordering.
+            for offset in range(0, len(items), 300):
+                chunk = items[offset : offset + 300]
+                values = ",".join("(?, ?, ?)" for _ in chunk)
+                params: list[str] = []
+                for history_key, pair_name in chunk:
+                    params.extend(
+                        [
+                            history_key,
+                            pair_name,
+                            self._default_history_key("", pair_name),
+                        ]
+                    )
+                id_rows = connection.execute(
+                    "WITH requested(history_key, pair_name, legacy_key) AS ("
+                    f"VALUES {values}), stable AS MATERIALIZED ("
+                    "SELECT history_key, pair_name, legacy_key, "
+                    "(SELECT id FROM pair_runs WHERE history_key=requested.history_key "
+                    "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1) "
+                    "AS stable_last_id, "
+                    "(SELECT id FROM pair_runs WHERE history_key=requested.history_key "
+                    "AND ok=1 AND dry_run=0 "
+                    "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1) "
+                    "AS stable_success_id FROM requested) "
+                    "SELECT history_key, stable_last_id, stable_success_id, "
+                    "CASE WHEN stable_last_id IS NULL THEN "
+                    "(SELECT id FROM pair_runs WHERE pair_name=stable.pair_name "
+                    "AND history_key IN ('', stable.legacy_key) "
+                    "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1) "
+                    "END AS legacy_last_id, "
+                    "CASE WHEN stable_last_id IS NULL THEN "
+                    "(SELECT id FROM pair_runs WHERE pair_name=stable.pair_name "
+                    "AND history_key IN ('', stable.legacy_key) "
+                    "AND ok=1 AND dry_run=0 "
+                    "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1) "
+                    "END AS legacy_success_id FROM stable",
+                    tuple(params),
                 ).fetchall()
-                for row in rows:
+                row_ids: set[int] = set()
+                for row in id_rows:
+                    stable_last = row["stable_last_id"]
+                    if stable_last is not None:
+                        last_id = int(stable_last)
+                        success_id = (
+                            int(row["stable_success_id"])
+                            if row["stable_success_id"] is not None
+                            else None
+                        )
+                    else:
+                        last_id = (
+                            int(row["legacy_last_id"])
+                            if row["legacy_last_id"] is not None
+                            else None
+                        )
+                        success_id = (
+                            int(row["legacy_success_id"])
+                            if row["legacy_success_id"] is not None
+                            else None
+                        )
+                    selected_ids[str(row["history_key"])] = (last_id, success_id)
+                    if last_id is not None:
+                        row_ids.add(last_id)
+                    if success_id is not None:
+                        row_ids.add(success_id)
+                if not row_ids:
+                    continue
+                marks = ",".join("?" for _ in row_ids)
+                for row in connection.execute(
+                    f"SELECT * FROM pair_runs WHERE id IN ({marks})", tuple(row_ids)
+                ).fetchall():
                     rows_by_id[int(row["id"])] = row
 
-        ordered_rows = sorted(
-            rows_by_id.values(),
-            key=lambda row: (
-                float(row["ended_at"] or row["started_at"] or 0),
-                int(row["id"]),
-            ),
-            reverse=True,
-        )
-        by_key: Dict[str, List[sqlite3.Row]] = {}
-        by_name: Dict[str, List[sqlite3.Row]] = {}
-        for row in ordered_rows:
-            by_key.setdefault(str(row["history_key"] or ""), []).append(row)
-            by_name.setdefault(str(row["pair_name"]), []).append(row)
-
         result: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = {}
-        for history_key, pair_name in requested.items():
-            legacy_key = self._default_history_key("", pair_name)
-            candidates = by_key.get(history_key) or [
-                row
-                for row in by_name.get(pair_name, [])
-                if str(row["history_key"] or "") in {"", legacy_key}
-            ]
-            last_result = (
-                self._pair_row_to_result(candidates[0]) if candidates else None
-            )
-            success_row = next(
-                (
-                    row
-                    for row in candidates
-                    if bool(row["ok"]) and not bool(row["dry_run"])
-                ),
-                None,
+        for history_key in requested:
+            last_id, success_id = selected_ids.get(history_key, (None, None))
+            last_row = rows_by_id.get(last_id) if last_id is not None else None
+            success_row = (
+                rows_by_id.get(success_id) if success_id is not None else None
             )
             last_success = (
                 self._pair_row_to_result(success_row) if success_row else None
             )
             result[history_key] = {
-                "last_result": last_result,
+                "last_result": self._pair_row_to_result(last_row) if last_row else None,
                 "last_success": last_success,
             }
         return result
