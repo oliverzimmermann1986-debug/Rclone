@@ -1,5 +1,8 @@
 """Tests für Quelle/Ziel-Auflösung und Dateizahl/Größe in der Storage-Übersicht."""
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -11,9 +14,11 @@ from app.routes import api_storage
 def _clear_size_cache():
     with api_storage._size_cache_lock:
         api_storage._size_cache.clear()
+        api_storage._size_inflight.clear()
     yield
     with api_storage._size_cache_lock:
         api_storage._size_cache.clear()
+        api_storage._size_inflight.clear()
 
 
 def test_resolve_endpoints_by_direction():
@@ -234,6 +239,112 @@ def test_size_cache_is_bound_to_stable_pair_side_direction_and_path(monkeypatch)
     assert reversed_direction["measurement_status"] == "fresh"
     assert other_path["measurement_status"] == "fresh"
     assert calls == ["/mnt/photos", "/mnt/photos", "/mnt/photos-neu"]
+
+
+def test_concurrent_cold_cache_measurements_share_one_result(monkeypatch):
+    pair = {
+        "id": "photos",
+        "name": "Fotos",
+        "direction": "push",
+    }
+    callers = 12
+    ready = threading.Barrier(callers)
+    measurement_started = threading.Event()
+    release_measurement = threading.Event()
+    call_count = 0
+    call_lock = threading.Lock()
+
+    def measure(path):
+        nonlocal call_count
+        with call_lock:
+            call_count += 1
+        measurement_started.set()
+        assert release_measurement.wait(timeout=2)
+        return {"path": path, "count": 7, "bytes": 8}
+
+    def request_size():
+        ready.wait(timeout=2)
+        return api_storage._cached_rclone_size(pair, "source", "/mnt/photos")
+
+    monkeypatch.setattr(api_storage, "_rclone_size", measure)
+    with ThreadPoolExecutor(max_workers=callers) as executor:
+        futures = [executor.submit(request_size) for _ in range(callers)]
+        assert measurement_started.wait(timeout=2)
+        time.sleep(0.05)
+        release_measurement.set()
+        results = [future.result(timeout=2) for future in futures]
+
+    assert call_count == 1
+    assert all(result == results[0] for result in results)
+    assert results[0]["measurement_status"] == "fresh"
+    assert not api_storage._size_inflight
+
+
+def test_singleflight_propagates_same_measurement_exception(monkeypatch):
+    pair = {"id": "photos", "name": "Fotos", "direction": "push"}
+    callers = 6
+    ready = threading.Barrier(callers)
+    started = threading.Event()
+    release = threading.Event()
+    call_count = 0
+
+    def measure(_path):
+        nonlocal call_count
+        call_count += 1
+        started.set()
+        assert release.wait(timeout=2)
+        raise RuntimeError("measurement exploded")
+
+    def request_size():
+        ready.wait(timeout=2)
+        return api_storage._cached_rclone_size(pair, "source", "/mnt/photos")
+
+    monkeypatch.setattr(api_storage, "_rclone_size", measure)
+    with ThreadPoolExecutor(max_workers=callers) as executor:
+        futures = [executor.submit(request_size) for _ in range(callers)]
+        assert started.wait(timeout=2)
+        time.sleep(0.05)
+        release.set()
+        errors = []
+        for future in futures:
+            with pytest.raises(RuntimeError, match="measurement exploded") as exc:
+                future.result(timeout=2)
+            errors.append(exc.value)
+
+    assert call_count == 1
+    assert all(error is errors[0] for error in errors)
+    assert not api_storage._size_inflight
+
+
+def test_different_measurement_keys_run_in_parallel(monkeypatch):
+    barrier = threading.Barrier(2)
+    calls: list[str] = []
+    lock = threading.Lock()
+
+    def measure(path):
+        with lock:
+            calls.append(path)
+        barrier.wait(timeout=2)
+        return {"path": path, "count": 1, "bytes": 2}
+
+    monkeypatch.setattr(api_storage, "_rclone_size", measure)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            api_storage._cached_rclone_size,
+            {"id": "a", "name": "A", "direction": "push"},
+            "source",
+            "/mnt/a",
+        )
+        second = executor.submit(
+            api_storage._cached_rclone_size,
+            {"id": "b", "name": "B", "direction": "push"},
+            "source",
+            "/mnt/b",
+        )
+        assert first.result(timeout=2)["count"] == 1
+        assert second.result(timeout=2)["count"] == 1
+
+    assert sorted(calls) == ["/mnt/a", "/mnt/b"]
 
 
 def test_failed_measurement_is_not_cached_as_fresh_zero(monkeypatch):
