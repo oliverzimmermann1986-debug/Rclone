@@ -22,6 +22,20 @@ workflows:
         - pattern: "ios-v*"
           include: true
     scripts:
+      - name: Verify signed release provenance
+        script: |
+          test -n "${CM_TAG:-}" || { echo "TestFlight-Build benötigt einen ios-vX.Y.Z-Tag" >&2; exit 1; }
+          if test "$(git -C "$CM_BUILD_DIR" rev-parse --is-shallow-repository)" = "true"; then
+            git -C "$CM_BUILD_DIR" fetch --unshallow --force --no-tags origin \
+              "+refs/heads/main:refs/remotes/origin/main"
+          else
+            git -C "$CM_BUILD_DIR" fetch --force --no-tags origin \
+              "+refs/heads/main:refs/remotes/origin/main"
+          fi
+          git -C "$CM_BUILD_DIR" fetch --force --no-tags origin \
+            "+refs/tags/$CM_TAG:refs/tags/$CM_TAG"
+          python3 "$CM_BUILD_DIR/scripts/ios_release_preflight.py" \
+            "$CM_TAG" --repository "$CM_BUILD_DIR"
       - name: Validate release tag and set marketing version
         script: |
           test -n "${CM_TAG:-}" || { echo "TestFlight-Build benötigt einen ios-vX.Y.Z-Tag" >&2; exit 1; }
@@ -33,7 +47,7 @@ workflows:
       - name: Validate shared native API contracts and release version tooling
         script: |
           cd "$CM_BUILD_DIR"
-          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_version.py tests/test_ios_app_store_release.py
+          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_preflight.py tests/test_ios_release_version.py tests/test_ios_app_store_release.py
       - name: Install XcodeGen
         script: brew install xcodegen
       - name: Generate Xcode project

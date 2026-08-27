@@ -55,6 +55,19 @@ def test_codemagic_applies_tag_before_generation_and_keeps_monotonic_build_numbe
     assert "CFBundleVersion" in config
 
 
+def test_codemagic_verifies_fetched_main_and_exact_signed_tag_before_release_changes():
+    root = Path(__file__).parents[1]
+    config = (root / "codemagic.yaml").read_text(encoding="utf-8")
+    provenance = config.index("ios_release_preflight.py")
+    version_write = config.index("ios_release_version.py")
+
+    assert 'refs/heads/main:refs/remotes/origin/main' in config
+    assert 'refs/tags/$CM_TAG:refs/tags/$CM_TAG' in config
+    assert "--unshallow --force --no-tags" in config
+    assert provenance < version_write
+    assert "tests/test_ios_release_preflight.py" in config
+
+
 def test_codemagic_validates_live_backend_contracts_before_xcode_build():
     root = Path(__file__).parents[1]
     config = (root / "codemagic.yaml").read_text(encoding="utf-8")
@@ -64,7 +77,8 @@ def test_codemagic_validates_live_backend_contracts_before_xcode_build():
     )
     contract_test_run = (
         "python3 -m pytest tests/test_native_login_contract.py "
-        "tests/test_native_read_contract.py tests/test_ios_release_version.py"
+        "tests/test_native_read_contract.py tests/test_ios_release_preflight.py "
+        "tests/test_ios_release_version.py"
     )
 
     assert dependency_install in normalized
