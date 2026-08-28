@@ -109,7 +109,7 @@ struct RecoveryCenterView: View {
     @ViewBuilder
     private var calendarSection: some View {
         if let days = calendar?.days, !days.isEmpty {
-            Section("Schutzkalender") {
+            Section {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 9) {
                         ForEach(days.prefix(45).reversed()) { day in
@@ -132,6 +132,8 @@ struct RecoveryCenterView: View {
                     }
                     .padding(.vertical, 4)
                 }
+            } header: {
+                Text("Schutzkalender")
             } footer: {
                 Text("Grün: erfolgreich · Orange: abgebrochen · Rot: Fehler · Ring: Restore-Prüfung")
             }
@@ -141,7 +143,7 @@ struct RecoveryCenterView: View {
     @ViewBuilder
     private var policySection: some View {
         if !policies.isEmpty {
-            Section("Schutzprofile") {
+            Section {
                 ForEach(policies) { policy in
                     DisclosureGroup {
                         Text(policy.description).font(.subheadline).foregroundStyle(.secondary)
@@ -149,6 +151,8 @@ struct RecoveryCenterView: View {
                         Label(policy.name, systemImage: policySymbol(policy.id))
                     }
                 }
+            } header: {
+                Text("Schutzprofile")
             } footer: {
                 Text("Profile sind sichere Ausgangspunkte. Übernahme erfolgt bewusst im Job-Editor, nie automatisch.")
             }
@@ -156,7 +160,7 @@ struct RecoveryCenterView: View {
     }
 
     private func emergencySection(_ pass: RecoveryPassResponse) -> some View {
-        Section("Offline-Notfallkarte") {
+        Section {
             Label("Letzten Recovery-Pass auf diesem iPhone gesichert", systemImage: "iphone.and.arrow.forward")
                 .foregroundStyle(.green)
             LabeledContent("Stand", value: AppFormat.date(pass.generatedAt))
@@ -169,6 +173,8 @@ struct RecoveryCenterView: View {
                 }
                 .font(.subheadline)
             }
+        } header: {
+            Text("Offline-Notfallkarte")
         } footer: {
             Text("Die Karte enthält standardmäßig keine Serverpfade, Passwörter oder Cloud-Schlüssel.")
         }
@@ -339,7 +345,7 @@ private struct RecoveryPathRow: View {
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 3) {
                 Text(path.name).font(.headline)
-                Text(path.rpoSeconds.map { "RPO aktuell: \(AppFormat.elapsed($0))" } ?? "Noch kein erfolgreicher Lauf")
+                Text(path.rpoSeconds.map { "RPO aktuell: \(AppFormat.elapsed(Double($0)))" } ?? "Noch kein erfolgreicher Lauf")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -360,7 +366,7 @@ private struct RecoveryDataPathDetail: View {
         List {
             Section("Nachweis") {
                 LabeledContent("RPO") {
-                    Text(dataPath.rpoSeconds.map { AppFormat.elapsed($0) } ?? "Nicht belegt")
+                    Text(dataPath.rpoSeconds.map { AppFormat.elapsed(Double($0)) } ?? "Nicht belegt")
                         .foregroundStyle(dataPath.rpoSeconds == nil ? .orange : .primary)
                 }
                 LabeledContent("RTO-Stichprobe") {
@@ -376,7 +382,7 @@ private struct RecoveryDataPathDetail: View {
                         .font(.subheadline).foregroundStyle(.orange)
                 }
             }
-            Section("Geführte Notfallübung") {
+            Section {
                 VStack(alignment: .leading, spacing: 10) {
                     drillStep(1, "Stichprobe am Sicherungsziel auswählen")
                     drillStep(2, "Getrennt in einen privaten Temp-Ordner holen")
@@ -387,14 +393,18 @@ private struct RecoveryDataPathDetail: View {
                     if isStarting { ProgressView() } else { Label("Notfallübung starten", systemImage: "figure.run.circle") }
                 }
                 .disabled(isStarting || model.isDemoMode)
+            } header: {
+                Text("Geführte Notfallübung")
             } footer: {
                 Text("Die Übung verändert keine Produktivdaten. Cloud-Anbieter können für das Rückholen Egress berechnen.")
             }
-            Section("Gezielte Wiederherstellung") {
+            Section {
                 NavigationLink { SelectiveRecoveryBrowser(dataPath: dataPath) } label: {
                     Label("Dateien ins Recovery-Staging holen", systemImage: "folder.badge.plus")
                 }
                 .disabled(model.isDemoMode)
+            } header: {
+                Text("Gezielte Wiederherstellung")
             } footer: {
                 Text("Ausgewählte Dateien bleiben getrennt, bis du sie nach der Prüfung bewusst weiterverarbeitest.")
             }
@@ -441,11 +451,13 @@ private struct QuarantineDetailView: View {
                 Text("Der destruktive Lauf wurde vor dem Start gestoppt. Es wurden dadurch keine Zieldaten gelöscht.")
                     .font(.subheadline).foregroundStyle(.secondary)
             }
-            Section("Bewusste Freigabe") {
+            Section {
                 SecureField("Aktuelles Passwort", text: $password)
                     .textContentType(.password)
                 Button("Quarantäne nach Prüfung aufheben", role: .destructive) { confirm = true }
                     .disabled(password.isEmpty || isWorking)
+            } header: {
+                Text("Bewusste Freigabe")
             } footer: {
                 Text("Vorher Mount, Quellpfad und tatsächliche Dateimenge außerhalb der App prüfen.")
             }
@@ -589,11 +601,13 @@ private struct RecoveryHandoverView: View {
 
     var body: some View {
         Form {
-            Section("Autorisierung") {
+            Section {
                 SecureField("Aktuelles Server-Passwort", text: $password)
                 SecureField("Übergabe-Passphrase", text: $passphrase)
                 SecureField("Passphrase wiederholen", text: $confirmation)
                 Toggle("Serverpfade einschließen", isOn: $includePaths)
+            } header: {
+                Text("Autorisierung")
             } footer: {
                 Text("Das Paket wird mit AES-256-GCM verschlüsselt. Die Passphrase getrennt übermitteln; sie ist nicht wiederherstellbar.")
             }

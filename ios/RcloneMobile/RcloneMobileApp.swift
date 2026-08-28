@@ -73,11 +73,11 @@ private struct AppRootView: View {
             Task {
                 await model.pauseScheduler(minutes: 60)
                 model.actionMessage = "Zeitpläne wurden für eine Stunde pausiert."
-            }
-            if pendingRecoveryNavigation {
-                pendingRecoveryNavigation = false
-                await Task.yield()
-                NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
+                if pendingRecoveryNavigation {
+                    pendingRecoveryNavigation = false
+                    await Task.yield()
+                    NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
+                }
             }
         }
         .onOpenURL { url in
