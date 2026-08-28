@@ -46,9 +46,7 @@ def test_siri_intent_descriptions_avoid_reserved_device_names():
     ).read_text(encoding="utf-8")
 
     descriptions = [
-        line.lower()
-        for line in shortcuts.splitlines()
-        if "IntentDescription(" in line
+        line.lower() for line in shortcuts.splitlines() if "IntentDescription(" in line
     ]
     assert descriptions
     assert all("iphone" not in description for description in descriptions)
