@@ -2,6 +2,7 @@
 
 import threading
 import time
+from io import StringIO
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -15,10 +16,16 @@ def _clear_size_cache():
     with api_storage._size_cache_lock:
         api_storage._size_cache.clear()
         api_storage._size_inflight.clear()
+    with api_storage._composition_cache_lock:
+        api_storage._composition_cache.clear()
+        api_storage._composition_inflight.clear()
     yield
     with api_storage._size_cache_lock:
         api_storage._size_cache.clear()
         api_storage._size_inflight.clear()
+    with api_storage._composition_cache_lock:
+        api_storage._composition_cache.clear()
+        api_storage._composition_inflight.clear()
 
 
 def test_resolve_endpoints_by_direction():
@@ -32,6 +39,125 @@ def test_resolve_endpoints_by_direction():
 
 def test_blank_size_path_uses_the_same_response_contract():
     assert api_storage._rclone_size("") == {"path": "", "error": "Pfad fehlt"}
+
+
+class _FakeListingProcess:
+    def __init__(self, output: str, returncode: int = 0, error: str = ""):
+        self.stdout = StringIO(output)
+        self.stderr = StringIO(error)
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = -15
+
+    def kill(self):
+        self.returncode = -9
+
+
+def test_composition_aggregates_types_without_returning_file_names(monkeypatch):
+    commands = []
+
+    def popen(command, **_kwargs):
+        commands.append(command)
+        return _FakeListingProcess(
+            '2048,DCIM/photo.jpg\n1024,DCIM/clip.mov\n512,"docs/report, final.pdf"\n32,README\n'
+        )
+
+    monkeypatch.setattr(api_storage.subprocess, "Popen", popen)
+
+    result = api_storage._rclone_composition(
+        "pcloud:/Fotos", filter_args=("--exclude", "/.work/**")
+    )
+
+    assert result["count"] == 4
+    assert result["bytes"] == 3616
+    assert {item["label"] for item in result["categories"]} == {
+        "Bilder",
+        "Videos",
+        "Dokumente",
+        "Ohne Endung",
+    }
+    assert {item["label"] for item in result["extensions"]} == {
+        "JPG",
+        "MOV",
+        "PDF",
+        "Ohne Endung",
+    }
+    assert "photo.jpg" not in str(result)
+    assert commands[0][-4:] == ["--exclude", "/.work/**", "--", "pcloud:/Fotos"]
+
+
+def test_composition_endpoint_resolves_side_and_reuses_cache(monkeypatch):
+    pair = {
+        "id": "recipes",
+        "name": "Rezepte",
+        "local": "/mnt/data/rezepte",
+        "remote": "pcloud:/Rezepte",
+        "direction": "push",
+    }
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
+    calls = []
+
+    def measure(path, **kwargs):
+        calls.append((path, kwargs))
+        return {
+            "path": path,
+            "count": 2,
+            "bytes": 42,
+            "truncated": False,
+            "categories": [],
+            "extensions": [],
+        }
+
+    monkeypatch.setattr(api_storage, "_rclone_composition", measure)
+
+    first = api_storage.composition(pair="recipes", side="target")
+    cached = api_storage.composition(pair="Rezepte", side="target")
+    refreshed = api_storage.composition(pair="recipes", side="target", refresh=True)
+
+    assert first["path"] == "pcloud:/Rezepte"
+    assert first["side"] == "target"
+    assert first["status"] == "fresh"
+    assert cached["status"] == "cached"
+    assert refreshed["status"] == "fresh"
+    assert len(calls) == 2
+
+
+def test_composition_keeps_partial_aggregates_but_does_not_cache_them(monkeypatch):
+    pair = {"id": "photos", "name": "Fotos", "direction": "push"}
+    calls = 0
+
+    def measure(_path, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "path": "/mnt/photos",
+            "count": 3,
+            "bytes": 99,
+            "categories": [
+                {"key": "images", "label": "Bilder", "count": 3, "bytes": 99}
+            ],
+            "extensions": [],
+            "truncated": False,
+            "error": "Dateityp-Analyse fehlgeschlagen (rclone exit=6)",
+        }
+
+    monkeypatch.setattr(api_storage, "_rclone_composition", measure)
+
+    first = api_storage._cached_composition(pair, "source", "/mnt/photos")
+    second = api_storage._cached_composition(pair, "source", "/mnt/photos")
+
+    assert first["status"] == "partial"
+    assert first["categories"][0]["label"] == "Bilder"
+    assert second["status"] == "partial"
+    assert calls == 2
+    assert not api_storage._composition_cache
 
 
 def test_rclone_size_preserves_parseable_values_after_traversal_error(monkeypatch):
@@ -410,9 +536,110 @@ def test_overview_keeps_last_sync_across_pair_rename(monkeypatch):
 
     item = api_storage.overview()["pairs"][0]
 
-    assert database.identities == {key: "Fotos neu"}
+    assert database.identities == {
+        key: "Fotos neu",
+        "restore:Fotos neu": "Fotos neu",
+    }
     assert item["last_sync"] == 1234
     assert item["last_transferred"] == "2 GiB"
+
+
+def test_overview_exposes_typed_restore_proof_without_mixing_sync_history(
+    monkeypatch,
+):
+    pair = {
+        "id": "photos",
+        "name": "Fotos",
+        "local": "/mnt/photos",
+        "remote": "gd:photos",
+        "direction": "push",
+    }
+    database = _FakeDB(
+        {
+            "rclone:id:photos": {
+                "last_result": None,
+                "last_success": {"ended_at": 1200, "pair": {"transferred": "2 GiB"}},
+            },
+            "restore:Fotos": {
+                "last_result": {
+                    "ok": True,
+                    "ended_at": 1300,
+                    "job_id": 44,
+                    "pair": {
+                        "verified": 20,
+                        "sample_size": 20,
+                        "sample_status": "complete",
+                    },
+                },
+                "last_success": {
+                    "ok": True,
+                    "ended_at": 1300,
+                    "job_id": 44,
+                    "pair": {
+                        "verified": 20,
+                        "sample_size": 20,
+                        "sample_status": "complete",
+                    },
+                },
+            },
+        }
+    )
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
+    monkeypatch.setattr(api_storage, "get_db", lambda: database)
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+
+    item = api_storage.overview()["pairs"][0]
+
+    assert item["last_sync"] == 1200
+    assert item["restore_evidence"] == {
+        "state": "passed",
+        "last_attempt_at": 1300,
+        "last_success_at": 1300,
+        "job_id": 44,
+        "verified_files": 20,
+        "sample_size": 20,
+        "checksum_verified": True,
+        "error": None,
+    }
+
+
+def test_overview_marks_failed_restore_but_keeps_previous_proof(monkeypatch):
+    pair = {
+        "id": "photos",
+        "name": "Fotos",
+        "local": "/mnt/photos",
+        "remote": "gd:photos",
+        "direction": "push",
+    }
+    database = _FakeDB(
+        {
+            "restore:Fotos": {
+                "last_result": {
+                    "ok": False,
+                    "ended_at": 1400,
+                    "job_id": 45,
+                    "pair": {"error": "Prüfsummen weichen ab"},
+                },
+                "last_success": {
+                    "ok": True,
+                    "ended_at": 1300,
+                    "job_id": 44,
+                    "pair": {"verified": 20, "sample_size": 20},
+                },
+            }
+        }
+    )
+    monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
+    monkeypatch.setattr(api_storage, "get_db", lambda: database)
+    monkeypatch.setattr(api_storage, "_disk_usage", lambda _path: None)
+
+    evidence = api_storage.overview()["pairs"][0]["restore_evidence"]
+
+    assert evidence["state"] == "failed"
+    assert evidence["last_attempt_at"] == 1400
+    assert evidence["last_success_at"] == 1300
+    assert evidence["verified_files"] == 20
+    assert evidence["error"] == "Prüfsummen weichen ab"
 
 
 def test_overview_normalizes_numeric_transfer_from_historic_run(monkeypatch):

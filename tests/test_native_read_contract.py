@@ -109,13 +109,32 @@ class _DB:
             key: {
                 "last_result": {
                     "status": "ok",
+                    "ok": True,
                     "ended_at": 1_719_990_000,
                     "job_id": 41,
-                    "pair": {"error": None},
+                    "pair": (
+                        {
+                            "error": None,
+                            "verified": 20,
+                            "sample_size": 20,
+                            "sample_status": "complete",
+                        }
+                        if key.startswith("restore:")
+                        else {"error": None}
+                    ),
                 },
                 "last_success": {
                     "ended_at": 1_719_990_000,
-                    "pair": {"transferred": "2 KiB"},
+                    "job_id": 41,
+                    "pair": (
+                        {
+                            "verified": 20,
+                            "sample_size": 20,
+                            "sample_status": "complete",
+                        }
+                        if key.startswith("restore:")
+                        else {"transferred": "2 KiB"}
+                    ),
                 },
             }
             for key in identities

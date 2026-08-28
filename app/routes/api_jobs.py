@@ -44,7 +44,15 @@ router = APIRouter(
     dependencies=[Depends(require_auth), Depends(require_csrf)],
 )
 
-_ALLOWED_JOB_KINDS = {None, "backup", "check", "quicksync", "restoretest", "pbs"}
+_ALLOWED_JOB_KINDS = {
+    None,
+    "backup",
+    "check",
+    "quicksync",
+    "restoretest",
+    "recovery",
+    "pbs",
+}
 
 _locks: dict[str, threading.Lock] = {"backup": threading.Lock()}
 _SENSITIVE_RESULT_KEYS = {

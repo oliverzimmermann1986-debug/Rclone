@@ -50,6 +50,52 @@ def test_storage_measurements_support_cache_age_and_explicit_recalculation():
     assert 'case "stale"' in dashboard
 
 
+def test_storage_cards_drill_into_native_privacy_preserving_charts():
+    api = _swift("Core/APIClient.swift")
+    models = _swift("Core/Models.swift")
+    dashboard = _swift("Views/DashboardView.swift")
+    detail = _swift("Views/ProtectionPathView.swift")
+
+    assert '"/api/storage/composition?pair=' in api
+    assert "struct StorageCompositionResponse: Decodable, Equatable" in models
+    assert "Datenweg antippen, um Größenvergleich und Dateitypen zu sehen." in dashboard
+    assert "import Charts" in detail
+    assert "SectorMark(" in detail
+    assert "BarMark(" in detail
+    assert 'Picker("Speicherort"' in detail
+    assert "Dateinamen bleiben auf dem Server" in detail
+
+
+def test_dashboard_exposes_distinct_evidence_based_protection_score():
+    models = _swift("Core/Models.swift")
+    dashboard = _swift("Views/DashboardView.swift")
+    protection_path = _swift("Views/ProtectionPathView.swift")
+
+    assert 'Text("SCHUTZSTATUS")' in dashboard
+    assert 'case .ok: "Bereit"' in dashboard
+    assert 'case .warning: "Prüfen"' in dashboard
+    assert 'case .error: "Handeln"' in dashboard
+    assert "DataPathSignatureMark" in dashboard
+    assert "RestoreNodeMark" not in dashboard
+    assert "nextProtectionAction" in dashboard
+    assessment = _swift("Views/ProtectionAssessmentView.swift")
+    incidents = _swift("Views/IncidentCenterView.swift")
+    assert "ProtectionAssessment" in dashboard
+    assert 'Text("VERTRAUENSSCORE")' in assessment
+    assert "Restore-Nachweise" in assessment
+    assert "Frische erfolgreiche Läufe" in assessment
+    assert "Schutzschild" in assessment
+    assert "Incident Center" in incidents
+    assert "Empfohlener nächster Schritt" in incidents
+    assert "struct RestoreEvidence: Decodable, Equatable" in models
+    assert 'case restoreEvidence = "restore_evidence"' in models
+    assert "ProtectionPathDetailView" in dashboard
+    assert 'Text("RESTORE-NACHWEIS")' in protection_path
+    assert 'Section("Schutzpfad")' in protection_path
+    assert 'Section("Schutzschild")' in protection_path
+    assert "await model.runRestoreTest(pair: pair.name)" in protection_path
+
+
 def test_diagnostics_retry_and_app_build_are_visible():
     system = _swift("Views/SystemView.swift")
     settings = _swift("Views/RootTabView.swift")

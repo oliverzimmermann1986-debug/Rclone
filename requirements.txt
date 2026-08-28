@@ -4,6 +4,7 @@ annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.14.2
 bcrypt==5.0.0
+cbor2==6.1.4
 certifi==2026.7.22
 cffi==2.1.1
 click==8.4.2
@@ -23,6 +24,9 @@ idna==3.18
 itsdangerous==2.2.0
 pydantic==2.13.4
 pydantic_core==2.46.4
+pyasn1==0.6.4
+pyasn1-modules==0.4.2
+pyOpenSSL==26.4.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-multipart==0.0.32
@@ -36,4 +40,5 @@ typing_extensions==4.16.0
 uvicorn[standard]==0.51.0
 uvloop==0.22.1; sys_platform != "win32" and platform_python_implementation == "CPython"
 watchfiles==1.2.0
+webauthn==3.0.0
 websockets==16.1.1

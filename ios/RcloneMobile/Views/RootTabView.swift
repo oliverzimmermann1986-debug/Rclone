@@ -5,6 +5,7 @@ struct RootTabView: View {
     @StateObject private var configurationDraft = ConfigurationDraftStore()
     @State private var selectedTab: Int
     @State private var showingSettings = false
+    @State private var showingRecoveryCenter = false
 
     init(initialTab: Int = StorePreviewMode.initialTab) {
         _selectedTab = State(initialValue: initialTab)
@@ -43,6 +44,9 @@ struct RootTabView: View {
             }
         }
         .sheet(isPresented: $showingSettings) { SettingsView() }
+        .sheet(isPresented: $showingRecoveryCenter) {
+            NavigationStack { RecoveryCenterView() }
+        }
         .environmentObject(configurationDraft)
         .alert("Hinweis", isPresented: Binding(
             get: { model.actionMessage != nil },
@@ -54,6 +58,9 @@ struct RootTabView: View {
         }
         .onAppear { selectRequestedRunIfNeeded() }
         .onChange(of: model.requestedRunID) { _, _ in selectRequestedRunIfNeeded() }
+        .onReceive(NotificationCenter.default.publisher(for: .pushRecoveryNavigationRequested)) { _ in
+            showingRecoveryCenter = true
+        }
         .task { configurationDraft.load(from: model.config) }
         .onChange(of: model.config?.revision) { _, _ in
             configurationDraft.load(from: model.config)
@@ -91,6 +98,29 @@ private struct SettingsView: View {
                     }
                     if let version = model.overview?.app.version {
                         LabeledContent("Server-Version", value: version)
+                    }
+                }
+                if !model.savedServerProfiles.isEmpty {
+                    Section("Gespeicherte Server") {
+                        ForEach(model.savedServerProfiles) { profile in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(profile.name)
+                                    Text(profile.address).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if profile.address == model.serverAddress {
+                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                                }
+                            }
+                            .swipeActions {
+                                Button("Entfernen", role: .destructive) {
+                                    model.forgetServerProfile(profile)
+                                }
+                            }
+                        }
+                    } footer: {
+                        Text("Gespeichert werden nur Adresse und Benutzername, niemals Passwörter. Serverwechsel erfolgt auf der Anmeldeseite.")
                     }
                 }
                 Section("App") {

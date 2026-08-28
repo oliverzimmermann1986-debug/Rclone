@@ -19,6 +19,7 @@ private struct AppRootView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("pushPrimerDecision") private var pushPrimerDecision = "notAsked"
     @State private var showPushPrimer = false
+    @State private var pendingRecoveryNavigation = false
     let pushCoordinator: PushNotificationCoordinator
 
     var body: some View {
@@ -36,6 +37,9 @@ private struct AppRootView: View {
         .task(id: model.phase) {
             if let jobID = pushCoordinator.consumePendingNavigationJobID() {
                 model.requestRunNavigation(id: jobID)
+            }
+            if pushCoordinator.consumePendingRecoveryNavigation() {
+                pendingRecoveryNavigation = true
             }
             guard model.phase == .signedIn else {
                 if model.phase == .signedOut {
@@ -63,6 +67,30 @@ private struct AppRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .pushAuthorizationRequested)) { _ in
             guard model.phase == .signedIn else { return }
             showPushPrimer = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pushPauseRequested)) { _ in
+            guard model.phase == .signedIn, !model.isDemoMode else { return }
+            Task {
+                await model.pauseScheduler(minutes: 60)
+                model.actionMessage = "Zeitpläne wurden für eine Stunde pausiert."
+            }
+            if pendingRecoveryNavigation {
+                pendingRecoveryNavigation = false
+                await Task.yield()
+                NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
+            }
+        }
+        .onOpenURL { url in
+            if url.scheme == "rclonesync", url.host == "recovery" {
+                if model.phase == .signedIn {
+                    Task { @MainActor in
+                        await Task.yield()
+                        NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
+                    }
+                } else {
+                    pendingRecoveryNavigation = true
+                }
+            }
         }
         .alert("Bei Sicherungsfehlern informieren?", isPresented: $showPushPrimer) {
             Button("Später", role: .cancel) {

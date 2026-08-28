@@ -9,6 +9,10 @@
 - Frischeüberwachung pro Pair für zu alte oder fehlende erfolgreiche Läufe
 - Ausbleib-Alarm: meldet auch den Fall, dass ein Lauf gar nicht erst startet
 - Restore-Drill: holt Stichproben zurück und vergleicht sie per Prüfsumme mit der Quelle
+- Recovery Center mit exportierbarem Schutzpass, RPO/RTO-Nachweis, Schutzkalender und sicheren Profilen
+- Anomalie-Quarantäne stoppt destruktive Läufe bei unerwartet geschrumpften Quellen vor dem Start
+- Selektive Wiederherstellung schreibt ausschließlich in ein getrenntes, prüfsummengeprüftes Staging
+- AES-256-GCM-verschlüsselte Notfallübergabe ohne Passwörter oder Cloud-Schlüssel
 - Kopien-Matrix je Datenbestand für die 3-2-1-Frage statt nur Pair-Zeilen
 - `bisync`, `pull` und `push`; einseitig wahlweise `copy` oder `sync`
 - Prozessübergreifende Locks, Laufzeitstatus und Abbruch für Web, CLI und Scheduler
@@ -56,7 +60,7 @@ Tastaturkürzel: `Strg/Cmd + S` speichert offene Konfigurations- bzw. Filteränd
 
 ## Native iPhone-App
 
-Unter [`ios/`](ios/) liegt eine dependency-freie SwiftUI-App ab iOS 17. Sie bietet das verdichtete Lagebild, lokale/cloudseitige Kopien mit Dateizahl und Größe, Jobs, Live-Fortschritt samt Watchdog-Status und Abbruch, Laufhistorie mit Logs und sicherem Retry, getrennte Datenwege, Push-Diagnose, Scheduler-Wartungsfenster, Systemdiagnose und PBS-Starts. Fehler-Pushs öffnen direkt den betroffenen Lauf. Seltene oder riskante Aktionen öffnen in nativen Detailansichten und Bestätigungsdialogen.
+Unter [`ios/`](ios/) liegt eine dependency-freie SwiftUI-App ab iOS 17. Sie bietet das verdichtete Lagebild, lokale/cloudseitige Kopien mit Dateizahl und Größe, Jobs, Live-Fortschritt samt Watchdog-Status und Abbruch, Laufhistorie mit Logs und sicherem Retry, getrennte Datenwege, Push-Diagnose, Scheduler-Wartungsfenster, Systemdiagnose und PBS-Starts. Das native Recovery Center ergänzt Offline-Notfallkarte, selektive Staging-Restores, verschlüsselte Übergabe, Schutzkalender und Serverprofile ohne Passwortspeicherung. Widget, Live Activity, Siri-Kurzbefehle und interaktive Fehler-Pushs bilden eigene iOS-Systemoberflächen. Seltene oder riskante Aktionen öffnen in nativen Detailansichten und Bestätigungsdialogen.
 
 Das Xcode-Projekt wird mit XcodeGen erzeugt. Ohne eigenen Mac übernimmt Codemagic Build, Signierung, native App-Store-Screenshots und den Upload zu App Store Connect; GitHub Actions kompiliert und testet jede iOS-Änderung mit Xcode 26. Einrichtung, Sicherheitsmodell und den nativen Funktionsumfang beschreibt [`ios/README.md`](ios/README.md). [Support](https://oliverzimmermann1986-debug.github.io/Rclone/) und [Datenschutz](https://oliverzimmermann1986-debug.github.io/Rclone/datenschutz.html) werden ohne Tracking über GitHub Pages bereitgestellt.
 
@@ -108,6 +112,7 @@ Eine Expertenausnahme ist mit `backup.allow_unsafe_rclone_args: true` möglich, 
 
 - bcrypt-Passwörter mit mindestens 12 Zeichen
 - persistente, IP-basierte Login-Sperre in SQLite
+- optionale WebAuthn-Anmeldung mit getrennt registrierten Passkeys und physischen FIDO2-Sicherheitsschlüsseln; Challenges und native Übergabecodes sind kurzlebig und nur einmal verwendbar
 - Session-Versionierung; Passwort-, Benutzer- oder Secret-Wechsel invalidiert bestehende Sessions
 - Login-CSRF und Double-Submit-CSRF für alle schreibenden APIs
 - Same-Origin-Prüfung, Host-Allowlist und begrenzte reale Request-Größe, auch bei Chunked Requests
@@ -261,6 +266,13 @@ Wichtige Pair-Werte:
 Sicherheitsrelevante Änderungen – etwa Benutzername, PBS-Ziel/Secret,
 lokale Browser-Wurzeln oder das Abschalten von Schutzschaltern –
 verlangen beim Speichern zusätzlich das aktuelle Webpasswort.
+
+Passkeys werden unter **Einstellungen → Sicherheit** aktiviert. Dafür müssen
+`web.webauthn_rp_id` (DNS-Name) und `web.webauthn_origin` (exakte öffentliche
+HTTPS-Origin) zusammen gesetzt sowie `web.secure_cookie: true` aktiviert sein.
+Danach registriert oder widerruft **Einstellungen → Konto → Sichere Anmeldung**
+Passkeys und USB-/NFC-Sicherheitsschlüssel. Private Schlüssel verlassen das
+jeweilige Gerät beziehungsweise den Hardware-Schlüssel nicht.
 
 ### Richtungslogik
 

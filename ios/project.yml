@@ -17,6 +17,7 @@ targets:
     platform: iOS
     sources:
       - path: RcloneMobile
+      - path: Shared
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.oliverzimmermann.rclonesync
@@ -35,6 +36,24 @@ targets:
     scheme:
       testTargets:
         - RcloneMobileTests
+    dependencies:
+      - target: RcloneProtectionWidget
+        embed: true
+  RcloneProtectionWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: RcloneProtectionWidget
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.oliverzimmermann.rclonesync.widget
+        INFOPLIST_FILE: RcloneProtectionWidget/Info.plist
+        CODE_SIGN_ENTITLEMENTS: RcloneProtectionWidget/RcloneProtectionWidget.entitlements
+        GENERATE_INFOPLIST_FILE: false
+        SKIP_INSTALL: true
+        CODE_SIGN_STYLE: Automatic
+        APPLICATION_EXTENSION_API_ONLY: YES
   RcloneMobileTests:
     type: bundle.unit-test
     platform: iOS

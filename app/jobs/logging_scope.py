@@ -10,6 +10,7 @@ _LOGGER_PREFIXES: dict[str, tuple[str, ...]] = {
     "quicksync": ("app.jobs.rclone_sync",),
     "pbs": ("app.jobs.pbs_backup",),
     "restoretest": ("app.jobs.restore_test",),
+    "recovery": ("app.jobs.selective_restore",),
 }
 
 

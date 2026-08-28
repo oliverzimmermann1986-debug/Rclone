@@ -23,6 +23,12 @@ web:
   login_max_failures: 10
   login_lock_seconds: 900
 
+  # Optional: Passkeys und physische FIDO2-Sicherheitsschlüssel. Beide Werte
+  # müssen zur öffentlichen HTTPS-Adresse des Reverse-Proxys passen. Leer = aus.
+  # Bei https://backup.example.de wäre die RP-ID backup.example.de.
+  webauthn_rp_id: ""
+  webauthn_origin: ""
+
   # Bei direktem HTTP false. Hinter HTTPS-Reverse-Proxy true setzen.
   # "auto" funktioniert nur mit korrekt vertrautem Proxy.
   secure_cookie: false
@@ -46,6 +52,8 @@ paths:
   data_dir: /opt/rclone-sync/data
   logs_dir: /opt/rclone-sync/logs
   temp_dir: /opt/rclone-sync/temp
+  # Getrennte, private Ablage für ausdrücklich ausgewählte Wiederherstellungen.
+  recovery_dir: /opt/rclone-sync/recovery
 
 backup:
   enabled: true
@@ -75,6 +83,16 @@ backup:
   overdue_alerts:
     enabled: true
     repeat_hours: 24   # Wiederholung je Pair, damit der Kanal nicht flutet
+
+  # Vor einem destruktiven sync/bisync wird die Quelle erneut gemessen. Fällt
+  # Datei- oder Datenmenge gegenüber dem letzten erfolgreichen Lauf unerwartet
+  # stark ab, bleibt der Datenweg in Quarantäne, bis ein Mensch ihn freigibt.
+  anomaly_guard:
+    enabled: true
+    file_drop_percent: 35
+    size_drop_percent: 35
+    min_baseline_files: 100
+    measurement_timeout_seconds: 180
 
   # Restore-Drill: holt eine Zufallsstichprobe aus dem Ziel zurück und
   # vergleicht sie per Prüfsumme mit der Quelle. Beantwortet die Frage, die ein
@@ -236,7 +254,7 @@ notifications:
     # Die App erneuert diese Lease bei jeder Anmeldung/jedem Start. Nach einem
     # Offline-Logout verschwindet ein altes Gerät spätestens nach dieser Frist.
     device_lease_days: 7
-    events: [sync_error, mount_check_failed, pair_overdue, restore_test_error]
+    events: [sync_error, mount_check_failed, pair_overdue, restore_test_error, anomaly_blocked, recovery_error]
 
 maintenance:
   auto_prune: true

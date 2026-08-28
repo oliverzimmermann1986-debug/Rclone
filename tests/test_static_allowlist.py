@@ -30,6 +30,7 @@ def test_production_static_mount_has_an_explicit_complete_allowlist():
         "app-icon-192.png",
         "app-icon-512.png",
         "app-icon-1024.png",
+        "webauthn.js",
     }
     assert all((main.STATIC_DIR / name).is_file() for name in mounted.allowed_files)
     assert "index.html" not in mounted.allowed_files

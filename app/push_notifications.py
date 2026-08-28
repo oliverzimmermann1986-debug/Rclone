@@ -27,6 +27,8 @@ DEFAULT_ERROR_EVENTS = (
     "mount_check_failed",
     "pair_overdue",
     "restore_test_error",
+    "anomaly_blocked",
+    "recovery_error",
 )
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: tuple[tuple[str, str, str, int], str, float] | None = None
@@ -268,6 +270,14 @@ def notification_dedupe_key(
 
 def _payload(row: Mapping[str, Any]) -> bytes:
     context = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+    event = str(row.get("event") or "")
+    incident_events = {
+        "sync_error",
+        "mount_check_failed",
+        "restore_test_error",
+        "anomaly_blocked",
+        "recovery_error",
+    }
     payload = {
         "aps": {
             "alert": {
@@ -276,8 +286,9 @@ def _payload(row: Mapping[str, Any]) -> bytes:
             },
             "sound": "default",
             "thread-id": "rclone-errors",
+            **({"category": "RCLONE_INCIDENT"} if event in incident_events else {}),
         },
-        "event": str(row.get("event") or ""),
+        "event": event,
         **dict(context),
     }
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(

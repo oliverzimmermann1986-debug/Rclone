@@ -253,6 +253,41 @@ def test_known_example_config_has_no_unknown_key_warnings(tmp_path: Path):
     assert not [w for w in warnings if "Unbekannt" in w]
 
 
+def test_webauthn_requires_matching_https_origin_and_secure_cookie(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["web"].update(
+        {
+            "secure_cookie": True,
+            "webauthn_rp_id": "backup.example.de",
+            "webauthn_origin": "https://backup.example.de",
+        }
+    )
+    validated, _warnings = validate_config(cfg)
+    assert validated["web"]["webauthn_rp_id"] == "backup.example.de"
+    assert validated["web"]["webauthn_origin"] == "https://backup.example.de"
+
+    cfg["web"]["secure_cookie"] = False
+    with pytest.raises(ConfigValidationError, match="secure_cookie"):
+        validate_config(cfg)
+
+
+def test_webauthn_rejects_cross_domain_or_partial_configuration(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["web"].update(
+        {
+            "secure_cookie": True,
+            "webauthn_rp_id": "example.de",
+            "webauthn_origin": "https://attacker.invalid",
+        }
+    )
+    with pytest.raises(ConfigValidationError, match="Domain der WebAuthn-Origin"):
+        validate_config(cfg)
+
+    cfg["web"]["webauthn_origin"] = ""
+    with pytest.raises(ConfigValidationError, match="gemeinsam gesetzt"):
+        validate_config(cfg)
+
+
 def _pair(tmp_path: Path, **overrides) -> dict:
     pair = {
         "name": "Spiegel",
@@ -334,3 +369,45 @@ def test_bisync_backup_dirs_are_checked_per_side(tmp_path: Path):
     with pytest.raises(ConfigValidationError) as excinfo:
         validate_config(cfg)
     assert any("backup_dir1" in error for error in excinfo.value.errors)
+
+
+def test_anomaly_guard_is_bounded_globally_and_per_pair(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["anomaly_guard"] = {
+        "file_drop_percent": 1,
+        "size_drop_percent": 500,
+        "min_baseline_files": 0,
+        "measurement_timeout_seconds": 5000,
+    }
+    cfg["backup"]["pairs"] = [
+        _pair(
+            tmp_path,
+            anomaly_guard={
+                "enabled": False,
+                "file_drop_percent": 40,
+                "measurement_timeout_seconds": 45,
+            },
+        )
+    ]
+    clean, _warnings = validate_config(cfg)
+    assert clean["backup"]["anomaly_guard"] == {
+        "enabled": True,
+        "file_drop_percent": 5.0,
+        "size_drop_percent": 100.0,
+        "min_baseline_files": 1,
+        "measurement_timeout_seconds": 900,
+    }
+    assert clean["backup"]["pairs"][0]["anomaly_guard"] == {
+        "enabled": False,
+        "file_drop_percent": 40.0,
+        "size_drop_percent": 100.0,
+        "min_baseline_files": 1,
+        "measurement_timeout_seconds": 45,
+    }
+
+
+def test_pair_anomaly_guard_must_be_mapping(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [_pair(tmp_path, anomaly_guard="unsafe")]
+    with pytest.raises(ConfigValidationError, match="anomaly_guard"):
+        validate_config(cfg)

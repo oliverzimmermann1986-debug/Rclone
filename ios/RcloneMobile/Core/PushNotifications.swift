@@ -4,6 +4,8 @@ import UserNotifications
 extension Notification.Name {
     static let pushDeviceTokenReady = Notification.Name("pushDeviceTokenReady")
     static let pushNavigationRequested = Notification.Name("pushNavigationRequested")
+    static let pushRecoveryNavigationRequested = Notification.Name("pushRecoveryNavigationRequested")
+    static let pushPauseRequested = Notification.Name("pushPauseRequested")
     static let pushAuthorizationRequested = Notification.Name("pushAuthorizationRequested")
 }
 
@@ -11,12 +13,30 @@ extension Notification.Name {
 final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     private(set) var registration: (token: String, environment: String)?
     private var pendingNavigationJobID: Int?
+    private var pendingRecoveryNavigation = false
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        let openIncident = UNNotificationAction(
+            identifier: "OPEN_INCIDENT",
+            title: "Vorfall prüfen",
+            options: [.foreground]
+        )
+        let pauseSchedules = UNNotificationAction(
+            identifier: "PAUSE_SCHEDULES",
+            title: "Zeitpläne 1 Stunde pausieren",
+            options: [.foreground, .authenticationRequired]
+        )
+        let incidentCategory = UNNotificationCategory(
+            identifier: "RCLONE_INCIDENT",
+            actions: [openIncident, pauseSchedules],
+            intentIdentifiers: [],
+            options: []
+        )
+        UNUserNotificationCenter.current().setNotificationCategories([incidentCategory])
         return true
     }
 
@@ -58,6 +78,11 @@ final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUser
         return pendingNavigationJobID
     }
 
+    func consumePendingRecoveryNavigation() -> Bool {
+        defer { pendingRecoveryNavigation = false }
+        return pendingRecoveryNavigation
+    }
+
     func application(
         _ application: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
@@ -88,13 +113,23 @@ final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUser
         didReceive response: UNNotificationResponse
     ) async {
         let userInfo = response.notification.request.content.userInfo
-        guard let jobID = Self.jobID(from: userInfo) else { return }
-        pendingNavigationJobID = jobID
-        NotificationCenter.default.post(
-            name: .pushNavigationRequested,
-            object: nil,
-            userInfo: ["job_id": jobID]
-        )
+        if response.actionIdentifier == "PAUSE_SCHEDULES" {
+            NotificationCenter.default.post(name: .pushPauseRequested, object: nil)
+            return
+        }
+        let event = userInfo["event"] as? String ?? ""
+        if ["anomaly_blocked", "recovery_error", "restore_test_error"].contains(event) {
+            pendingRecoveryNavigation = true
+            NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
+        }
+        if let jobID = Self.jobID(from: userInfo) {
+            pendingNavigationJobID = jobID
+            NotificationCenter.default.post(
+                name: .pushNavigationRequested,
+                object: nil,
+                userInfo: ["job_id": jobID]
+            )
+        }
     }
 
     private static func jobID(from userInfo: [AnyHashable: Any]) -> Int? {

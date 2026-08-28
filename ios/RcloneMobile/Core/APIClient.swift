@@ -54,8 +54,10 @@ enum APIError: LocalizedError, Equatable {
 
 protocol APIClientProtocol: AnyObject {
     func login(username: String, password: String) async throws
+    func exchangeWebAuthnToken(_ token: String, verifier: String) async throws
     func getOverview() async throws -> OverviewResponse
     func getStorage(includeSizes: Bool, forceRefresh: Bool) async throws -> StorageOverview
+    func getStorageComposition(pair: String, side: String, forceRefresh: Bool) async throws -> StorageCompositionResponse
     func getConfig() async throws -> ConfigSnapshot
     func getJobDefinitions() async throws -> [JobDefinition]
     func updateConfig(_ config: ConfigSnapshot, currentPassword: String?) async throws -> ConfigSaveResponse
@@ -99,11 +101,28 @@ protocol APIClientProtocol: AnyObject {
     func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse
     func getPushStatus() async throws -> PushStatus
     func testPushNotification() async throws -> ActionResponse
+    func getRecoveryPass(includePaths: Bool) async throws -> RecoveryPassResponse
+    func getRecoveryCalendar(days: Int) async throws -> RecoveryCalendarResponse
+    func getRecoveryPolicies() async throws -> RecoveryPoliciesResponse
+    func getRecoveryQuarantine() async throws -> RecoveryQuarantineResponse
+    func browseRecovery(identity: String, path: String) async throws -> RecoveryBrowseResponse
+    func startSelectiveRestore(_ request: SelectiveRestoreRequest) async throws -> SelectiveRestoreResponse
+    func acknowledgeRecoveryQuarantine(identity: String, currentPassword: String) async throws -> ActionResponse
+    func downloadRecoveryPass(includePaths: Bool) async throws -> URL
+    func downloadRecoveryHandover(_ request: RecoveryHandoverRequest) async throws -> URL
     func logout() async throws -> LogoutResult
     func clearLocalSession()
 }
 
 extension APIClientProtocol {
+    func exchangeWebAuthnToken(_ token: String, verifier: String) async throws {
+        throw APIError.loginSecurityFailed
+    }
+
+    func getStorageComposition(pair: String, side: String, forceRefresh: Bool) async throws -> StorageCompositionResponse {
+        throw APIError.invalidResponse
+    }
+
     func createDirectory(kind: String, parent: String, name: String) async throws -> CreateDirectoryResponse {
         throw APIError.invalidResponse
     }
@@ -123,6 +142,16 @@ extension APIClientProtocol {
     func testPushNotification() async throws -> ActionResponse {
         throw APIError.invalidResponse
     }
+
+    func getRecoveryPass(includePaths: Bool) async throws -> RecoveryPassResponse { throw APIError.invalidResponse }
+    func getRecoveryCalendar(days: Int) async throws -> RecoveryCalendarResponse { throw APIError.invalidResponse }
+    func getRecoveryPolicies() async throws -> RecoveryPoliciesResponse { throw APIError.invalidResponse }
+    func getRecoveryQuarantine() async throws -> RecoveryQuarantineResponse { throw APIError.invalidResponse }
+    func browseRecovery(identity: String, path: String) async throws -> RecoveryBrowseResponse { throw APIError.invalidResponse }
+    func startSelectiveRestore(_ request: SelectiveRestoreRequest) async throws -> SelectiveRestoreResponse { throw APIError.invalidResponse }
+    func acknowledgeRecoveryQuarantine(identity: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
+    func downloadRecoveryPass(includePaths: Bool) async throws -> URL { throw APIError.invalidResponse }
+    func downloadRecoveryHandover(_ request: RecoveryHandoverRequest) async throws -> URL { throw APIError.invalidResponse }
 }
 
 struct NativeLoginChallenge: Decodable, Equatable {
@@ -154,6 +183,11 @@ private struct NativeLoginRequest: Encodable {
         case username, password
         case loginCSRF = "login_csrf"
     }
+}
+
+private struct NativeWebAuthnExchangeRequest: Encodable {
+    let token: String
+    let verifier: String
 }
 
 final class APIClient: APIClientProtocol {
@@ -328,6 +362,27 @@ final class APIClient: APIClientProtocol {
         guard cookie(named: Self.sessionCookie) != nil else { throw APIError.loginFailed }
     }
 
+    func exchangeWebAuthnToken(_ token: String, verifier: String) async throws {
+        clearCookies()
+        var request = URLRequest(url: url(for: "/api/webauthn/native/exchange"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(origin, forHTTPHeaderField: "Origin")
+        request.timeoutInterval = 8
+        request.httpBody = try JSONEncoder().encode(
+            NativeWebAuthnExchangeRequest(token: token, verifier: verifier)
+        )
+        let (data, response) = try await loginSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        guard let result = try? decoder.decode(NativeLoginResponse.self, from: data),
+              result.status == "success",
+              (200..<300).contains(http.statusCode),
+              cookie(named: Self.sessionCookie) != nil else {
+            throw APIError.loginSecurityFailed
+        }
+    }
+
     private func loginLegacy(username: String, password: String) async throws {
         var challengeRequest = URLRequest(url: url(for: "/login"))
         challengeRequest.httpMethod = "GET"
@@ -402,6 +457,65 @@ final class APIClient: APIClientProtocol {
 
     func testPushNotification() async throws -> ActionResponse {
         try await post("/api/push/test")
+    }
+
+    func getStorageComposition(
+        pair: String,
+        side: String,
+        forceRefresh: Bool = false
+    ) async throws -> StorageCompositionResponse {
+        try await get(
+            "/api/storage/composition?pair=\(Self.queryEncode(pair))&side=\(Self.queryEncode(side))&refresh=\(forceRefresh ? "true" : "false")",
+            timeout: 75
+        )
+    }
+
+    func getRecoveryPass(includePaths: Bool = false) async throws -> RecoveryPassResponse {
+        try await get("/api/recovery/pass?include_paths=\(includePaths ? "true" : "false")")
+    }
+
+    func getRecoveryCalendar(days: Int = 90) async throws -> RecoveryCalendarResponse {
+        try await get("/api/recovery/calendar?days=\(max(7, min(days, 366)))")
+    }
+
+    func getRecoveryPolicies() async throws -> RecoveryPoliciesResponse {
+        try await get("/api/recovery/policies")
+    }
+
+    func getRecoveryQuarantine() async throws -> RecoveryQuarantineResponse {
+        try await get("/api/recovery/quarantine")
+    }
+
+    func browseRecovery(identity: String, path: String = "") async throws -> RecoveryBrowseResponse {
+        try await get(
+            "/api/recovery/browse?identity=\(Self.queryEncode(identity))&path=\(Self.queryEncode(path))"
+        )
+    }
+
+    func startSelectiveRestore(_ request: SelectiveRestoreRequest) async throws -> SelectiveRestoreResponse {
+        try await post("/api/recovery/restore", body: request)
+    }
+
+    func acknowledgeRecoveryQuarantine(identity: String, currentPassword: String) async throws -> ActionResponse {
+        try await post(
+            "/api/recovery/quarantine/\(Self.pathEncode(identity))/acknowledge",
+            body: RecoveryReauthenticationRequest(currentPassword: currentPassword)
+        )
+    }
+
+    func downloadRecoveryPass(includePaths: Bool = false) async throws -> URL {
+        try await download(
+            "/api/recovery/pass/export?include_paths=\(includePaths ? "true" : "false")",
+            filename: "recovery-pass-\(UUID().uuidString).json"
+        )
+    }
+
+    func downloadRecoveryHandover(_ request: RecoveryHandoverRequest) async throws -> URL {
+        try await postDownload(
+            "/api/recovery/handover",
+            body: request,
+            filename: "recovery-handover-\(UUID().uuidString).encrypted.json"
+        )
     }
 
     func getJobDefinitions() async throws -> [JobDefinition] {
@@ -672,6 +786,25 @@ final class APIClient: APIClientProtocol {
         }
         let target = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         try FileManager.default.moveItem(at: temporary, to: target)
+        return target
+    }
+
+    private func postDownload<Body: Encodable>(
+        _ path: String,
+        body: Body,
+        filename: String
+    ) async throws -> URL {
+        var request = URLRequest(url: url(for: path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(origin, forHTTPHeaderField: "Origin")
+        try addCSRF(to: &request)
+        request.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data, allowed: 200..<300)
+        let target = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        try? FileManager.default.removeItem(at: target)
+        try data.write(to: target, options: [.atomic, .completeFileProtection])
         return target
     }
 

@@ -867,6 +867,8 @@
                   <label class="field"><span>Secure-Cookie</span><select x-model="config.web.secure_cookie"><option :value="false">Aus · direktes HTTP</option><option value="auto">Automatisch · vertrauenswürdiger Proxy</option><option :value="true">Erzwingen · ausschließlich HTTPS</option></select><small>„Automatisch“ nur mit korrekt konfiguriertem Reverse-Proxy verwenden.</small></label>
                 </div>
                 <div class="form-grid two"><label class="field"><span>HSTS-Sekunden</span><input type="number" min="0" max="63072000" x-model.number="config.web.hsts_seconds"><small>Bei direktem HTTP auf 0 belassen.</small></label><label class="field"><span>Session-Laufzeit (Sekunden)</span><input type="number" min="300" x-model.number="config.web.session_max_age_seconds"></label></div>
+                <div class="panel-head"><div><span class="section-kicker">WebAuthn</span><h3>Passkeys und physische Sicherheitsschlüssel</h3><p>Trage die öffentliche HTTPS-Adresse deines Reverse-Proxys ein. Secure-Cookie muss dabei auf „Erzwingen“ stehen.</p></div><a class="button secondary" href="/security">Schlüssel verwalten</a></div>
+                <div class="form-grid two"><label class="field"><span>RP-ID</span><input class="mono" x-model.trim="config.web.webauthn_rp_id" placeholder="backup.example.de"><small>Nur DNS-Name, ohne Schema oder Port.</small></label><label class="field"><span>Öffentliche Origin</span><input class="mono" x-model.trim="config.web.webauthn_origin" placeholder="https://backup.example.de"><small>Exakte HTTPS-Origin, optional mit Port, ohne Pfad.</small></label></div>
               </article>
 
               <article class="panel" id="settings-panel-filters" role="tabpanel" aria-labelledby="settings-tab-filters" x-show="settingsTab==='filters'">
@@ -897,6 +899,7 @@
               </article>
 
               <article class="panel" id="settings-panel-account" role="tabpanel" aria-labelledby="settings-tab-account" x-show="settingsTab==='account'">
+                <div class="panel-head"><div><span class="section-kicker">Passwortlos</span><h3>Passkeys und Sicherheitsschlüssel</h3><p>Registriere iCloud-Schlüsselbund, Windows Hello oder einen physischen FIDO2-Schlüssel.</p></div><a class="button secondary" href="/security">Sichere Anmeldung verwalten</a></div>
                 <div class="panel-head"><div><span class="section-kicker">Zugang</span><h3>Passwort ändern</h3></div></div>
                 <div class="form-grid one narrow"><label class="field"><span>Aktuelles Passwort</span><input type="password" x-model="pwChange.current" autocomplete="current-password"></label><label class="field"><span>Neues Passwort</span><input type="password" x-model="pwChange.new" autocomplete="new-password"><small>Mindestens 12 Zeichen.</small></label><label class="field"><span>Neues Passwort wiederholen</span><input type="password" x-model="pwChange.confirm" autocomplete="new-password"></label><button class="button primary" @click="changePassword()" :disabled="pending.password || !pwChange.current || pwChange.new.length<12 || pwChange.new!==pwChange.confirm" x-text="pending.password ? 'Ändert…' : 'Passwort ändern'"></button></div>
               </article>

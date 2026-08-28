@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from ..config_store import get_config
+from ..db import get_db
+from .. import protection
 from ..rclone_args import (
     redact_command_text,
     rclone_subprocess_env,
@@ -1388,6 +1390,45 @@ def _sync_pair(
         )
         logger.info("[%s] [%s/%s] %s", name, direction, mode, summary["command"])
 
+        anomaly_finding: dict[str, Any] | None = None
+        if not dry_run:
+            snapshot_config = _SnapshotConfig(config_snapshot)
+            anomaly_finding = protection.preflight_anomaly_guard(
+                get_db(),
+                pair=pair,
+                backup=backup,
+                source=str(cmd[-2]),
+                filter_args=_filter_args(snapshot_config, pair, "sync"),
+            )
+            if anomaly_finding.get("blocked"):
+                file_drop = float(anomaly_finding.get("file_drop_percent") or 0)
+                size_drop = float(anomaly_finding.get("size_drop_percent") or 0)
+                message = (
+                    "Unerwarteter Rückgang der Quelle: "
+                    f"Dateien {file_drop:.1f} %, Größe {size_drop:.1f} %. "
+                    "Destruktiver Lauf wurde quarantänisiert."
+                )
+                logger.error("[%s] %s", name, message)
+                summary.update(
+                    {
+                        "error": message,
+                        "skipped": True,
+                        "quarantined": True,
+                        "anomaly": anomaly_finding,
+                    }
+                )
+                runtime_state.update_pair(run_id, name, "error", error=message)
+                from ..notifications import notify
+
+                notify(
+                    "anomaly_blocked",
+                    f"{name}: Sicherheitsstopp",
+                    message,
+                    run_id=run_id,
+                    pair=name,
+                )
+                return summary
+
         if is_cancelled():
             summary["error"] = "Vor Start abgebrochen"
             summary["cancelled"] = True
@@ -1454,6 +1495,12 @@ def _sync_pair(
         summary.update(parse_final_stats(log_tail))
         summary["cancelled"] = is_cancelled() or rc == 130
         summary["ok"] = rc == 0 and not summary["cancelled"]
+        if summary["ok"] and anomaly_finding is not None:
+            protection.record_anomaly_baseline(
+                get_db(),
+                pair=pair,
+                measurement=anomaly_finding.get("measurement"),
+            )
         if not summary["ok"]:
             if summary["cancelled"]:
                 summary["error"] = "Abgebrochen"

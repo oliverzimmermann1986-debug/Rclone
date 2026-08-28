@@ -158,6 +158,7 @@ private struct RunsListView: View {
                     Text("Prüfung").tag("check")
                     Text("Quick Sync").tag("quicksync")
                     Text("Restore-Test").tag("restoretest")
+                    Text("Recovery").tag("recovery")
                     Text("PBS").tag("pbs")
                 }
                 Picker("Status", selection: $status) {
@@ -320,11 +321,22 @@ private struct RunRow: View {
             return "Prüfung #\(job.id)"
         case "pbs":
             return "PBS #\(job.id)"
+        case "restoretest":
+            return "Restore-Test #\(job.id)"
+        case "recovery":
+            return "Recovery #\(job.id)"
         default:
             return "Lauf #\(job.id)"
         }
     }
-    private var symbol: String { job.kind == "check" ? "checkmark.shield" : "arrow.triangle.2.circlepath" }
+    private var symbol: String {
+        switch job.kind {
+        case "check": "checkmark.shield"
+        case "restoretest": "arrow.counterclockwise.circle"
+        case "recovery": "lifepreserver"
+        default: "arrow.triangle.2.circlepath"
+        }
+    }
 }
 
 struct RunDetailView: View {

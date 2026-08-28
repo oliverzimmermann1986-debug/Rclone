@@ -59,7 +59,7 @@
     "storage_without_sizes": {
       "method": "GET",
       "path": "/api/storage/overview?include_remote=false&refresh_sizes=false",
-      "body": {"pairs": [{"name": "Fotos", "local": "/mnt/fotos", "remote": "cloud:Fotos", "direction": "push", "source": "/mnt/fotos", "target": "cloud:Fotos", "schedule": "", "local_disk": {"path": "/mnt/fotos", "exists": true, "total_bytes": 1000000, "used_bytes": 250000, "free_bytes": 750000, "percent_used": 25.0}, "last_sync": 1719990000, "last_transferred": "2 KiB"}]}
+      "body": {"pairs": [{"name": "Fotos", "local": "/mnt/fotos", "remote": "cloud:Fotos", "direction": "push", "source": "/mnt/fotos", "target": "cloud:Fotos", "schedule": "", "local_disk": {"path": "/mnt/fotos", "exists": true, "total_bytes": 1000000, "used_bytes": 250000, "free_bytes": 750000, "percent_used": 25.0}, "last_sync": 1719990000, "last_transferred": "2 KiB", "restore_evidence": {"state": "passed", "last_attempt_at": 1719990000, "last_success_at": 1719990000, "job_id": 41, "verified_files": 20, "sample_size": 20, "checksum_verified": true, "error": null}}]}
     },
     "storage_with_sizes": {
       "method": "GET",
