@@ -10,7 +10,7 @@ workflows:
         - ios-release
       ios_signing:
         provisioning_profiles:
-          - rclone-sync-app-store-shared
+          - rclone-sync-app-store-shared-v2
           - rclone-sync-widget-app-store
         certificates:
           - rclone-sync-distribution
