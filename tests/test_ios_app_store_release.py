@@ -38,3 +38,17 @@ def test_support_and_privacy_pages_are_publishable_without_tracking():
     assert "keine personenbezogenen Daten" in privacy
     assert "analytics" not in (support + privacy).lower()
     assert "<script" not in (support + privacy).lower()
+
+
+def test_siri_intent_descriptions_avoid_reserved_device_names():
+    shortcuts = (
+        ROOT / "ios" / "RcloneMobile" / "Core" / "ProtectionShortcuts.swift"
+    ).read_text(encoding="utf-8")
+
+    descriptions = [
+        line.lower()
+        for line in shortcuts.splitlines()
+        if "IntentDescription(" in line
+    ]
+    assert descriptions
+    assert all("iphone" not in description for description in descriptions)

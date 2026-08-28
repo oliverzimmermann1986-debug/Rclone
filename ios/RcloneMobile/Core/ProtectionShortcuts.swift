@@ -14,7 +14,7 @@ struct OpenRecoveryCenterIntent: AppIntent {
 
 struct ProtectionStatusIntent: AppIntent {
     static var title: LocalizedStringResource = "Schutzstatus anzeigen"
-    static var description = IntentDescription("Liest den zuletzt auf diesem iPhone gespeicherten Schutzstatus vor.")
+    static var description = IntentDescription("Liest den zuletzt auf diesem Gerät gespeicherten Schutzstatus vor.")
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         guard let snapshot = ProtectionWidgetSnapshot.load() else {
