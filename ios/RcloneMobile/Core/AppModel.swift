@@ -481,7 +481,7 @@ final class AppModel: ObservableObject {
         ]
         let categories = shares.map { share in
             let (key, label, countShare, byteShare) = share
-            StorageCompositionBucket(
+            return StorageCompositionBucket(
                 key: key,
                 label: label,
                 count: max(1, count * countShare / 100),
