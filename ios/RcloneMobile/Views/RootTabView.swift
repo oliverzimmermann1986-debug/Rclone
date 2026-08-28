@@ -101,7 +101,7 @@ private struct SettingsView: View {
                     }
                 }
                 if !model.savedServerProfiles.isEmpty {
-                    Section("Gespeicherte Server") {
+                    Section {
                         ForEach(model.savedServerProfiles) { profile in
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -119,6 +119,8 @@ private struct SettingsView: View {
                                 }
                             }
                         }
+                    } header: {
+                        Text("Gespeicherte Server")
                     } footer: {
                         Text("Gespeichert werden nur Adresse und Benutzername, niemals Passwörter. Serverwechsel erfolgt auf der Anmeldeseite.")
                     }
