@@ -8,6 +8,8 @@ final class FixtureDecodingTests: XCTestCase {
 
         XCTAssertTrue(fixture.overview.alerts.isEmpty)
         XCTAssertEqual(fixture.storage.pairs.count, 2)
+        XCTAssertEqual(fixture.storage.pairs.first?.restoreEvidence?.state, "passed")
+        XCTAssertEqual(fixture.storage.pairs.first?.restoreEvidence?.verifiedFiles, 20)
         XCTAssertEqual(fixture.config.backup.jobs.count, 2)
         XCTAssertGreaterThanOrEqual(fixture.jobs.count, 3)
         XCTAssertTrue(fixture.doctor.ok)
@@ -28,6 +30,8 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertNil(base.pairs.first?.sourceSize)
         XCTAssertNil(base.pairs.first?.targetSize)
         XCTAssertEqual(base.pairs.first?.lastTransferred, "2 KiB")
+        XCTAssertEqual(base.pairs.first?.restoreEvidence?.state, "passed")
+        XCTAssertTrue(base.pairs.first?.restoreEvidence?.checksumVerified == true)
 
         let detailed: StorageOverview = try decode("storage_with_sizes")
         XCTAssertEqual(detailed.pairs.count, 4)
@@ -67,6 +71,7 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertEqual(pair.targetSize?.path, "cloud:Fotos")
         XCTAssertEqual(pair.targetSize?.count, 12)
         XCTAssertEqual(pair.targetSize?.bytes, 4096)
+        XCTAssertNil(pair.restoreEvidence, "Alte Serverantworten müssen kompatibel bleiben")
     }
 
     func testConfigAndJobReadModelsDecodeSharedContract() throws {

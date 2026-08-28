@@ -252,6 +252,7 @@ struct StoragePair: Decodable, Identifiable {
     let lastTransferred: String?
     let sourceSize: PathSize?
     let targetSize: PathSize?
+    let restoreEvidence: RestoreEvidence?
 
     enum CodingKeys: String, CodingKey {
         case name, local, remote, direction, source, target
@@ -261,6 +262,7 @@ struct StoragePair: Decodable, Identifiable {
         case sourceSize = "source_size"
         case targetSize = "target_size"
         case remoteSize = "remote_size"
+        case restoreEvidence = "restore_evidence"
     }
 }
 
@@ -282,6 +284,7 @@ extension StoragePair {
         target = try values.decodeIfPresent(String.self, forKey: .target) ?? fallbackTarget
         localDisk = try values.decodeIfPresent(LocalDisk.self, forKey: .localDisk)
         lastSync = try values.decodeIfPresent(Double.self, forKey: .lastSync)
+        restoreEvidence = try values.decodeIfPresent(RestoreEvidence.self, forKey: .restoreEvidence)
 
         let transferIsMissing = !values.contains(.lastTransferred)
         let transferIsNull: Bool
@@ -318,6 +321,27 @@ extension StoragePair {
     }
 }
 
+struct RestoreEvidence: Decodable, Equatable {
+    let state: String
+    let lastAttemptAt: Double?
+    let lastSuccessAt: Double?
+    let jobID: Int?
+    let verifiedFiles: Int?
+    let sampleSize: Int?
+    let checksumVerified: Bool
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case state, error
+        case lastAttemptAt = "last_attempt_at"
+        case lastSuccessAt = "last_success_at"
+        case jobID = "job_id"
+        case verifiedFiles = "verified_files"
+        case sampleSize = "sample_size"
+        case checksumVerified = "checksum_verified"
+    }
+}
+
 struct LocalDisk: Decodable {
     let path: String?
     let exists: Bool?
@@ -348,6 +372,34 @@ struct PathSize: Decodable {
         case measuredAt = "measured_at"
         case measurementStatus = "measurement_status"
         case measurementError = "measurement_error"
+    }
+}
+
+struct StorageCompositionBucket: Decodable, Identifiable, Equatable {
+    let key: String
+    let label: String
+    let count: Int
+    let bytes: Int64
+
+    var id: String { key }
+}
+
+struct StorageCompositionResponse: Decodable, Equatable {
+    let pair: String
+    let side: String
+    let path: String
+    let count: Int?
+    let bytes: Int64?
+    let truncated: Bool?
+    let categories: [StorageCompositionBucket]?
+    let extensions: [StorageCompositionBucket]?
+    let status: String
+    let measuredAt: Double?
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case pair, side, path, count, bytes, truncated, categories, extensions, status, error
+        case measuredAt = "measured_at"
     }
 }
 
@@ -1476,4 +1528,211 @@ struct PBSTarget: Decodable, Identifiable {
 
 struct PBSRunRequest: Encodable {
     let target: String?
+}
+
+// MARK: - Recovery Center
+
+struct RecoveryPassResponse: Codable {
+    let schema: String
+    let generatedAt: Double
+    let appVersion: String
+    let hostname: String
+    let protection: RecoveryProtectionScore
+    let dataPaths: [RecoveryDataPath]
+    let quarantine: RecoveryQuarantineResponse
+    let pathsIncluded: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case schema, hostname, protection, quarantine
+        case generatedAt = "generated_at"
+        case appVersion = "app_version"
+        case dataPaths = "data_paths"
+        case pathsIncluded = "paths_included"
+    }
+}
+
+struct RecoveryProtectionScore: Codable {
+    let score: Int
+    let state: String
+    let components: [RecoveryScoreComponent]
+}
+
+struct RecoveryScoreComponent: Codable, Identifiable {
+    var id: String { key }
+    let key: String
+    let points: Int
+    let maximum: Int
+
+    enum CodingKeys: String, CodingKey {
+        case key = "id"
+        case points, maximum
+    }
+}
+
+struct RecoveryDataPath: Codable, Identifiable {
+    var id: String { name }
+    let name: String
+    let direction: String
+    let enabled: Bool
+    let source: String
+    let target: String
+    let lastSyncAt: Double?
+    let rpoSeconds: Int?
+    let restore: RecoveryRestoreProof
+
+    enum CodingKeys: String, CodingKey {
+        case name, direction, enabled, source, target, restore
+        case lastSyncAt = "last_sync_at"
+        case rpoSeconds = "rpo_seconds"
+    }
+}
+
+struct RecoveryRestoreProof: Codable {
+    let state: String
+    let lastAttemptAt: Double?
+    let lastSuccessAt: Double?
+    let jobID: Int?
+    let verifiedFiles: Int?
+    let sampleSize: Int?
+    let checksumVerified: Bool
+    let error: String?
+    let durationSeconds: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case state, error
+        case lastAttemptAt = "last_attempt_at"
+        case lastSuccessAt = "last_success_at"
+        case jobID = "job_id"
+        case verifiedFiles = "verified_files"
+        case sampleSize = "sample_size"
+        case checksumVerified = "checksum_verified"
+        case durationSeconds = "duration_sec"
+    }
+}
+
+struct RecoveryQuarantineResponse: Codable {
+    let active: Int
+    let items: [RecoveryQuarantineItem]
+}
+
+struct RecoveryQuarantineItem: Codable, Identifiable {
+    var id: String { historyKey + String(detectedAt) }
+    let pair: String
+    let historyKey: String
+    let detectedAt: Double
+    let previousCount: Int?
+    let currentCount: Int?
+    let previousBytes: Int64?
+    let currentBytes: Int64?
+    let fileDropPercent: Double?
+    let sizeDropPercent: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case pair
+        case historyKey = "history_key"
+        case detectedAt = "detected_at"
+        case previousCount = "previous_count"
+        case currentCount = "current_count"
+        case previousBytes = "previous_bytes"
+        case currentBytes = "current_bytes"
+        case fileDropPercent = "file_drop_percent"
+        case sizeDropPercent = "size_drop_percent"
+    }
+}
+
+struct RecoveryCalendarResponse: Decodable {
+    let days: [RecoveryCalendarDay]
+    let timezone: String
+}
+
+struct RecoveryCalendarDay: Decodable, Identifiable {
+    var id: String { date }
+    let date: String
+    let total: Int
+    let successful: Int
+    let failed: Int
+    let cancelled: Int
+    let restoreTests: Int
+    let state: String
+
+    enum CodingKeys: String, CodingKey {
+        case date, total, successful, failed, cancelled, state
+        case restoreTests = "restore_tests"
+    }
+}
+
+struct RecoveryPoliciesResponse: Decodable {
+    let profiles: [RecoveryPolicyProfile]
+}
+
+struct RecoveryPolicyProfile: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let description: String
+    let pair: [String: JSONValue]
+    let job: [String: JSONValue]
+    let restore: [String: JSONValue]
+}
+
+struct RecoveryBrowseResponse: Decodable {
+    let pair: String
+    let path: String
+    let items: [RecoveryBrowseItem]
+}
+
+struct RecoveryBrowseItem: Decodable, Identifiable {
+    var id: String { path }
+    let name: String
+    let path: String
+    let isDirectory: Bool
+    let size: Int64?
+    let modifiedAt: JSONValue?
+
+    enum CodingKeys: String, CodingKey {
+        case name, path, size
+        case isDirectory = "is_dir"
+        case modifiedAt = "modified_at"
+    }
+}
+
+struct SelectiveRestoreRequest: Encodable {
+    let identity: String
+    let paths: [String]
+    let maxTotalMB: Int
+
+    enum CodingKeys: String, CodingKey {
+        case identity, paths
+        case maxTotalMB = "max_total_mb"
+    }
+}
+
+struct SelectiveRestoreResponse: Decodable {
+    let ok: Bool
+    let jobID: Int
+    let status: String
+
+    enum CodingKeys: String, CodingKey {
+        case ok, status
+        case jobID = "job_id"
+    }
+}
+
+struct RecoveryReauthenticationRequest: Encodable {
+    let currentPassword: String
+
+    enum CodingKeys: String, CodingKey {
+        case currentPassword = "current_password"
+    }
+}
+
+struct RecoveryHandoverRequest: Encodable {
+    let currentPassword: String
+    let passphrase: String
+    let includePaths: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case passphrase
+        case currentPassword = "current_password"
+        case includePaths = "include_paths"
+    }
 }

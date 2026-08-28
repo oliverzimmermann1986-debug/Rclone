@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AuthenticationServices
 
 private enum RefreshPayload {
     case overview(Result<OverviewResponse, Error>)
@@ -46,6 +47,14 @@ private struct PendingPushRevocation: Codable, Equatable {
     let token: String
 }
 
+struct SavedServerProfile: Codable, Identifiable, Equatable {
+    var id: String { address }
+    let name: String
+    let address: String
+    let username: String
+    let lastUsedAt: Double
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     enum Phase: Equatable {
@@ -84,6 +93,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var batchDefinitions: [BatchDefinitionState] = []
     @Published private(set) var batchIsRunning = false
     @Published private(set) var isDemoMode = false
+    @Published private(set) var savedServerProfiles: [SavedServerProfile] = []
 
     private(set) var client: (any APIClientProtocol)?
     private var registeredPushToken: String?
@@ -102,6 +112,7 @@ final class AppModel: ObservableObject {
     private var desiredPushToken: String?
     private var desiredPushEnvironment: String?
     private var knownPushTokens: Set<String> = []
+    private let liveActivityCoordinator = ProtectionLiveActivityCoordinator()
 
     var serverAddress: String {
         if isDemoMode { return "Sichere Demo · keine Serververbindung" }
@@ -128,6 +139,10 @@ final class AppModel: ObservableObject {
         self.defaults = defaults
         self.runPollInterval = runPollInterval
         self.clientFactory = clientFactory
+        if let data = defaults.data(forKey: "savedServerProfiles"),
+           let profiles = try? JSONDecoder().decode([SavedServerProfile].self, from: data) {
+            savedServerProfiles = profiles.sorted { $0.lastUsedAt > $1.lastUsedAt }
+        }
     }
 
     func restoreSession() async {
@@ -215,6 +230,7 @@ final class AppModel: ObservableObject {
             }
             defaults.set(url.absoluteString, forKey: "serverAddress")
             defaults.set(username, forKey: "username")
+            rememberServerProfile(url: url, username: username)
             client = newClient
             await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
             phase = .signedIn
@@ -432,6 +448,66 @@ final class AppModel: ObservableObject {
             markStorageMeasurementFailure(error)
             errorMessage = userMessage(for: error)
         }
+    }
+
+    func storageComposition(
+        for pair: StoragePair,
+        side: String,
+        forceRefresh: Bool = false
+    ) async throws -> StorageCompositionResponse {
+        if isDemoMode {
+            return Self.demoComposition(for: pair, side: side)
+        }
+        guard let currentClient = client else { throw APIError.unauthenticated }
+        return try await currentClient.getStorageComposition(
+            pair: pair.name,
+            side: side,
+            forceRefresh: forceRefresh
+        )
+    }
+
+    private static func demoComposition(
+        for pair: StoragePair,
+        side: String
+    ) -> StorageCompositionResponse {
+        let size = side == "target" ? pair.targetSize : pair.sourceSize
+        let count = max(size?.count ?? 1_240, 1)
+        let bytes = max(size?.bytes ?? 8_400_000_000, 1)
+        let shares: [(String, String, Int, Int64)] = [
+            ("images", "Bilder", 62, 58),
+            ("videos", "Videos", 8, 34),
+            ("documents", "Dokumente", 24, 6),
+            ("other", "Sonstige", 6, 2)
+        ]
+        let categories = shares.map { share in
+            let (key, label, countShare, byteShare) = share
+            StorageCompositionBucket(
+                key: key,
+                label: label,
+                count: max(1, count * countShare / 100),
+                bytes: max(1, bytes * byteShare / 100)
+            )
+        }
+        let extensions = [
+            StorageCompositionBucket(key: "jpg", label: "JPG", count: count * 52 / 100, bytes: bytes * 42 / 100),
+            StorageCompositionBucket(key: "mov", label: "MOV", count: count * 7 / 100, bytes: bytes * 31 / 100),
+            StorageCompositionBucket(key: "heic", label: "HEIC", count: count * 10 / 100, bytes: bytes * 16 / 100),
+            StorageCompositionBucket(key: "pdf", label: "PDF", count: count * 18 / 100, bytes: bytes * 5 / 100),
+            StorageCompositionBucket(key: "remaining", label: "Weitere", count: count * 13 / 100, bytes: bytes * 6 / 100)
+        ]
+        return StorageCompositionResponse(
+            pair: pair.name,
+            side: side,
+            path: side == "target" ? pair.target : pair.source,
+            count: count,
+            bytes: bytes,
+            truncated: false,
+            categories: categories,
+            extensions: extensions,
+            status: "demo",
+            measuredAt: Date().timeIntervalSince1970,
+            error: nil
+        )
     }
 
     func refreshDoctor() async {
@@ -1162,6 +1238,45 @@ final class AppModel: ObservableObject {
         savePendingPushRevocations(remaining)
     }
 
+    func loginWithWebAuthn(server: String, method: String) async {
+        let generation = beginSessionTransition()
+        let activity = beginActivity()
+        errorMessage = nil
+        defer { endActivity(activity) }
+
+        var candidate: (any APIClientProtocol)?
+        do {
+            let url = try APIClient.normalizedServerURL(server)
+            let newClient = clientFactory(url)
+            candidate = newClient
+            let browser = WebAuthnBrowserSession()
+            let exchange = try await browser.authenticate(baseURL: url, method: method)
+            try await newClient.exchangeWebAuthnToken(
+                exchange.token,
+                verifier: exchange.verifier
+            )
+            try Task.checkCancellation()
+            guard isCurrentSession(generation) else {
+                newClient.clearLocalSession()
+                return
+            }
+            defaults.set(url.absoluteString, forKey: "serverAddress")
+            rememberServerProfile(url: url, username: savedUsername)
+            client = newClient
+            await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
+            phase = .signedIn
+            await refresh()
+        } catch is CancellationError {
+            candidate?.clearLocalSession()
+        } catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {
+            candidate?.clearLocalSession()
+        } catch {
+            candidate?.clearLocalSession()
+            guard isCurrentSession(generation) else { return }
+            errorMessage = userMessage(for: error)
+        }
+    }
+
     /// A stored cookie must not become an active app session while revocations
     /// from an earlier logout are still outstanding. Unlike an explicit login,
     /// startup restore has no fresh user confirmation, so any cleanup failure is
@@ -1197,6 +1312,33 @@ final class AppModel: ObservableObject {
     func dismissMessages() {
         errorMessage = nil
         actionMessage = nil
+    }
+
+    func forgetServerProfile(_ profile: SavedServerProfile) {
+        savedServerProfiles.removeAll { $0.id == profile.id }
+        persistServerProfiles()
+    }
+
+    private func rememberServerProfile(url: URL, username: String) {
+        let address = url.absoluteString
+        let profile = SavedServerProfile(
+            name: url.host ?? address,
+            address: address,
+            username: username,
+            lastUsedAt: Date().timeIntervalSince1970
+        )
+        savedServerProfiles.removeAll { $0.address == address }
+        savedServerProfiles.insert(profile, at: 0)
+        savedServerProfiles = Array(savedServerProfiles.prefix(8))
+        persistServerProfiles()
+    }
+
+    private func persistServerProfiles() {
+        if savedServerProfiles.isEmpty {
+            defaults.removeObject(forKey: "savedServerProfiles")
+        } else if let data = try? JSONEncoder().encode(savedServerProfiles) {
+            defaults.set(data, forKey: "savedServerProfiles")
+        }
     }
 
     @discardableResult
@@ -1249,6 +1391,7 @@ final class AppModel: ObservableObject {
         progress = value
         progressLastSuccessAt = Date()
         progressConsecutiveFailures = 0
+        liveActivityCoordinator.accept(value, hostname: overview?.system.hostname ?? "Rclone Sync")
     }
 
     private func acceptStorageMeasurement(_ value: StorageOverview) {
@@ -1308,6 +1451,7 @@ final class AppModel: ObservableObject {
     }
 
     private func clearSessionState() {
+        liveActivityCoordinator.endAll()
         client = nil
         overview = nil
         storage = nil
@@ -1381,7 +1525,8 @@ private extension StorageOverview {
                 lastSync: pair.lastSync,
                 lastTransferred: pair.lastTransferred,
                 sourceSize: preservingMeasurement(pair.sourceSize, previous: old.sourceSize),
-                targetSize: preservingMeasurement(pair.targetSize, previous: old.targetSize)
+                targetSize: preservingMeasurement(pair.targetSize, previous: old.targetSize),
+                restoreEvidence: pair.restoreEvidence ?? old.restoreEvidence
             )
         }, measurement: incomingMeasurement ?? previous.measurement)
     }

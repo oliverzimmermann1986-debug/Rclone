@@ -52,8 +52,10 @@ from .routes import (
     api_jobs,
     api_maintenance,
     api_push,
+    api_recovery,
     api_storage,
     api_test,
+    api_webauthn,
 )
 from .maintenance import run_automatic_maintenance
 from .jobs import runtime_state
@@ -536,6 +538,8 @@ app.include_router(api_maintenance.router)
 app.include_router(api_browse.router)
 app.include_router(api_pbs.router)
 app.include_router(api_push.router)
+app.include_router(api_webauthn.router)
+app.include_router(api_recovery.router)
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_ASSET_ALLOWLIST = frozenset(
@@ -549,6 +553,7 @@ STATIC_ASSET_ALLOWLIST = frozenset(
         "app-icon-192.png",
         "app-icon-512.png",
         "app-icon-1024.png",
+        "webauthn.js",
     }
 )
 app.mount(
@@ -570,7 +575,12 @@ def login_form(request: Request):
         else ""
     )
     nonce = secrets.token_urlsafe(32)
-    html = html.replace("<!--LOGIN_ERROR-->", error).replace("<!--LOGIN_CSRF-->", nonce)
+    next_path = "/security" if request.query_params.get("next") == "/security" else ""
+    html = (
+        html.replace("<!--LOGIN_ERROR-->", error)
+        .replace("<!--LOGIN_CSRF-->", nonce)
+        .replace("<!--LOGIN_NEXT-->", next_path)
+    )
     response = HTMLResponse(html)
     response.set_cookie(
         LOGIN_CSRF_COOKIE,
@@ -590,18 +600,21 @@ def login_submit(
     username: str = Form(..., min_length=1, max_length=128),
     password: str = Form(..., min_length=1, max_length=1024),
     login_csrf: str = Form(..., min_length=20, max_length=256),
+    next: str = Form(default="", max_length=128),
 ):
+    target = "/security" if next == "/security" else "/"
+    retry_url = "/login?next=/security&" if target == "/security" else "/login?"
     cookie_nonce = request.cookies.get(LOGIN_CSRF_COOKIE, "")
     if not cookie_nonce or not secrets.compare_digest(cookie_nonce, login_csrf):
-        return RedirectResponse(url="/login?error=csrf", status_code=303)
+        return RedirectResponse(url=retry_url + "error=csrf", status_code=303)
     status, retry_after = _authenticate_login(request, username, password)
     if status == "rate_limited":
-        response = RedirectResponse(url="/login?error=rate", status_code=303)
+        response = RedirectResponse(url=retry_url + "error=rate", status_code=303)
         response.headers["Retry-After"] = str(retry_after)
         return response
     if status != "success":
-        return RedirectResponse(url="/login?error=1", status_code=303)
-    response = RedirectResponse(url="/", status_code=303)
+        return RedirectResponse(url=retry_url + "error=1", status_code=303)
+    response = RedirectResponse(url=target, status_code=303)
     _set_authenticated_session(response, request, username)
     response.delete_cookie(LOGIN_CSRF_COOKIE, path="/login")
     return response

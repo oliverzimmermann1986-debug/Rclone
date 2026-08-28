@@ -8,6 +8,7 @@ import os
 import ipaddress
 import re
 import uuid
+from urllib.parse import urlsplit
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,8 @@ _KNOWN_WEB_KEYS = frozenset(
         "login_window_seconds",
         "login_max_failures",
         "login_lock_seconds",
+        "webauthn_rp_id",
+        "webauthn_origin",
     }
 )
 
@@ -72,6 +75,9 @@ _NOTIFICATION_EVENTS = {
     "pair_overdue",
     "restore_test_ok",
     "restore_test_error",
+    "anomaly_blocked",
+    "recovery_ready",
+    "recovery_error",
 }
 
 
@@ -293,6 +299,54 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         else:
             clean_hosts.append(host.casefold())
     web["allowed_hosts"] = list(dict.fromkeys(clean_hosts or ["*"]))
+    webauthn_rp_id = str(web.get("webauthn_rp_id") or "").strip().casefold()
+    webauthn_origin = str(web.get("webauthn_origin") or "").strip().rstrip("/")
+    if bool(webauthn_rp_id) != bool(webauthn_origin):
+        errors.append(
+            "web.webauthn_rp_id und web.webauthn_origin müssen gemeinsam gesetzt werden"
+        )
+    if webauthn_rp_id:
+        if web["secure_cookie"] is not True:
+            errors.append(
+                "web.secure_cookie muss für Passkeys und Sicherheitsschlüssel true sein"
+            )
+        if (
+            len(webauthn_rp_id) > 253
+            or ":" in webauthn_rp_id
+            or "/" in webauthn_rp_id
+            or not re.fullmatch(r"[a-z0-9.-]+", webauthn_rp_id)
+        ):
+            errors.append(
+                "web.webauthn_rp_id muss ein DNS-Name ohne Schema oder Port sein"
+            )
+        try:
+            parsed_origin = urlsplit(webauthn_origin)
+        except ValueError:
+            parsed_origin = None
+        origin_host = (
+            str(parsed_origin.hostname or "").casefold() if parsed_origin else ""
+        )
+        if (
+            parsed_origin is None
+            or not origin_host
+            or parsed_origin.username is not None
+            or parsed_origin.password is not None
+            or parsed_origin.path not in {"", "/"}
+            or parsed_origin.query
+            or parsed_origin.fragment
+            or parsed_origin.scheme
+            not in ({"http", "https"} if origin_host == "localhost" else {"https"})
+        ):
+            errors.append(
+                "web.webauthn_origin muss eine HTTPS-Origin ohne Pfad sein "
+                "(HTTP ist nur für localhost erlaubt)"
+            )
+        elif not (
+            origin_host == webauthn_rp_id or origin_host.endswith("." + webauthn_rp_id)
+        ):
+            errors.append("web.webauthn_rp_id muss die Domain der WebAuthn-Origin sein")
+    web["webauthn_rp_id"] = webauthn_rp_id
+    web["webauthn_origin"] = webauthn_origin
     try:
         trusted_proxy_ips = _normalize_string_list(web.get("trusted_proxy_ips", []))
     except ValueError:
@@ -350,6 +404,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         ("data_dir", "/opt/rclone-sync/data"),
         ("logs_dir", "/opt/rclone-sync/logs"),
         ("temp_dir", "/opt/rclone-sync/temp"),
+        ("recovery_dir", "/opt/rclone-sync/recovery"),
     ):
         try:
             value = _clean_path(paths.get(key, default)) or default
@@ -454,6 +509,46 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
                 default=24,
                 minimum=1,
                 maximum=720,
+                integer=True,
+            )
+        ),
+    }
+    anomaly_guard = backup.get("anomaly_guard")
+    if not isinstance(anomaly_guard, dict):
+        anomaly_guard = {}
+    backup["anomaly_guard"] = {
+        "enabled": _boolean(anomaly_guard.get("enabled", True), default=True),
+        "file_drop_percent": float(
+            _number(
+                anomaly_guard.get("file_drop_percent", 35),
+                default=35,
+                minimum=5,
+                maximum=100,
+            )
+        ),
+        "size_drop_percent": float(
+            _number(
+                anomaly_guard.get("size_drop_percent", 35),
+                default=35,
+                minimum=5,
+                maximum=100,
+            )
+        ),
+        "min_baseline_files": int(
+            _number(
+                anomaly_guard.get("min_baseline_files", 100),
+                default=100,
+                minimum=1,
+                maximum=10_000_000,
+                integer=True,
+            )
+        ),
+        "measurement_timeout_seconds": int(
+            _number(
+                anomaly_guard.get("measurement_timeout_seconds", 180),
+                default=180,
+                minimum=10,
+                maximum=900,
                 integer=True,
             )
         ),
@@ -846,6 +941,60 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
                 errors.append(f"{label}.mountpoint {exc}")
         pair["mountpoint"] = mountpoint
         pair["allow_delete"] = _boolean(pair.get("allow_delete", False))
+        pair_guard = pair.get("anomaly_guard")
+        if pair_guard is not None:
+            if not isinstance(pair_guard, dict):
+                errors.append(f"{label}.anomaly_guard muss ein Mapping sein")
+                pair_guard = {}
+            pair["anomaly_guard"] = {
+                "enabled": _boolean(pair_guard.get("enabled", True), default=True),
+                "file_drop_percent": float(
+                    _number(
+                        pair_guard.get(
+                            "file_drop_percent",
+                            backup["anomaly_guard"]["file_drop_percent"],
+                        ),
+                        default=backup["anomaly_guard"]["file_drop_percent"],
+                        minimum=5,
+                        maximum=100,
+                    )
+                ),
+                "size_drop_percent": float(
+                    _number(
+                        pair_guard.get(
+                            "size_drop_percent",
+                            backup["anomaly_guard"]["size_drop_percent"],
+                        ),
+                        default=backup["anomaly_guard"]["size_drop_percent"],
+                        minimum=5,
+                        maximum=100,
+                    )
+                ),
+                "min_baseline_files": int(
+                    _number(
+                        pair_guard.get(
+                            "min_baseline_files",
+                            backup["anomaly_guard"]["min_baseline_files"],
+                        ),
+                        default=backup["anomaly_guard"]["min_baseline_files"],
+                        minimum=1,
+                        maximum=10_000_000,
+                        integer=True,
+                    )
+                ),
+                "measurement_timeout_seconds": int(
+                    _number(
+                        pair_guard.get(
+                            "measurement_timeout_seconds",
+                            backup["anomaly_guard"]["measurement_timeout_seconds"],
+                        ),
+                        default=backup["anomaly_guard"]["measurement_timeout_seconds"],
+                        minimum=10,
+                        maximum=900,
+                        integer=True,
+                    )
+                ),
+            }
         sentinel = str(pair.get("sentinel_file") or "").strip()
         if sentinel:
             sentinel_path = Path(sentinel)

@@ -30,6 +30,11 @@ struct LoginView: View {
                         .padding(.top, 6)
                         .padding(.bottom, 16)
 
+                    if !model.savedServerProfiles.isEmpty {
+                        savedServers
+                            .padding(.bottom, 16)
+                    }
+
                     connectionForm
 
                     if let error = model.errorMessage {
@@ -40,6 +45,9 @@ struct LoginView: View {
 
                     loginButton
                         .padding(.top, 22)
+
+                    secureLoginButtons
+                        .padding(.top, 14)
 
                     Button {
                         focusedField = nil
@@ -201,6 +209,58 @@ struct LoginView: View {
             : "Meldet dich mit der eingegebenen Serveradresse und den Zugangsdaten an.")
     }
 
+    private var savedServers: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 9) {
+                ForEach(model.savedServerProfiles) { profile in
+                    Button {
+                        server = profile.address
+                        username = profile.username
+                        password = ""
+                        focusedField = .password
+                    } label: {
+                        Label(profile.name, systemImage: "server.rack")
+                            .font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 40)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityHint("Übernimmt Serveradresse und Benutzername. Das Passwort wird nicht gespeichert.")
+                }
+            }
+        }
+    }
+
+    private var secureLoginButtons: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Rectangle().fill(.secondary.opacity(0.25)).frame(height: 1)
+                Text("ODER SICHER")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Rectangle().fill(.secondary.opacity(0.25)).frame(height: 1)
+            }
+
+            Button { performWebAuthn(method: "passkey") } label: {
+                Label("Mit Passkey anmelden", systemImage: "person.badge.key.fill")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            Button { performWebAuthn(method: "security_key") } label: {
+                Label("Mit Sicherheitsschlüssel", systemImage: "key.horizontal.fill")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+        }
+        .disabled(model.isRefreshing || server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .accessibilityHint("Öffnet die sichere Anmeldeseite deiner Rclone-Installation.")
+    }
+
     private func login() {
         focusedField = nil
         guard let url = try? APIClient.normalizedServerURL(server) else {
@@ -218,6 +278,15 @@ struct LoginView: View {
         loginTask?.cancel()
         loginTask = Task {
             await model.login(server: server, username: username, password: password)
+            loginTask = nil
+        }
+    }
+
+    private func performWebAuthn(method: String) {
+        focusedField = nil
+        loginTask?.cancel()
+        loginTask = Task {
+            await model.loginWithWebAuthn(server: server, method: method)
             loginTask = nil
         }
     }

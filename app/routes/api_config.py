@@ -177,6 +177,8 @@ _SENSITIVE_WEB_SCALARS = {
     "hsts_seconds": 0,
     "login_max_failures": 10,
     "login_lock_seconds": 900,
+    "webauthn_rp_id": "",
+    "webauthn_origin": "",
 }
 
 

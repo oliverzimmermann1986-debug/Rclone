@@ -41,7 +41,7 @@ def test_database_backfills_and_indexes_pair_history(tmp_path: Path):
     assert db.stats()["pair_runs"] == 1
     assert db.integrity_check()["ok"] is True
     with db.conn() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 13
         indexes = {
             row["name"]
             for row in connection.execute("PRAGMA index_list(jobs)").fetchall()
@@ -199,7 +199,7 @@ def test_database_upgrades_old_pair_schema_without_data_loss(tmp_path: Path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(pair_runs)").fetchall()
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 13
     assert {"history_key", "dry_run", "scheduled_slot"} <= columns
 
 
@@ -412,7 +412,7 @@ def test_schema_7_push_claim_is_migrated_without_ambiguous_owner(tmp_path: Path)
         row = connection.execute(
             "SELECT status, lease_until, claim_owner FROM push_outbox"
         ).fetchone()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 13
 
     assert "claim_owner" in columns
     assert dict(row) == {

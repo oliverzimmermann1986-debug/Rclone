@@ -22,6 +22,9 @@ struct SystemView: View {
                 }
                 schedulerSection
                 Section("Spezialwerkzeuge") {
+                    NavigationLink { RecoveryCenterView() } label: {
+                        Label("Recovery Center", systemImage: "lifepreserver")
+                    }
                     NavigationLink { PBSToolsView() } label: {
                         HStack {
                             Label("Proxmox Backup Server", systemImage: "shippingbox.and.arrow.backward")
@@ -31,6 +34,11 @@ struct SystemView: View {
                     }
                     NavigationLink { PushStatusView() } label: {
                         Label("Push-Mitteilungen", systemImage: "bell.badge")
+                    }
+                    if let securityURL = securityManagementURL {
+                        Link(destination: securityURL) {
+                            Label("Passkeys & Sicherheitsschlüssel", systemImage: "person.badge.key")
+                        }
                     }
                 }
                 diagnosticsSection
@@ -71,6 +79,14 @@ struct SystemView: View {
             Button("Fortsetzen") { Task { await model.resumeScheduler() } }
             Button("Abbrechen", role: .cancel) {}
         }
+    }
+
+    private var securityManagementURL: URL? {
+        guard !model.serverAddress.isEmpty,
+              let baseURL = try? APIClient.normalizedServerURL(model.serverAddress) else {
+            return nil
+        }
+        return URL(string: baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/security")
     }
 
     private var schedulerSection: some View {

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Sichere Anmeldung · Rclone Sync</title>
+  <style>
+    :root{font:15px/1.45 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:light dark;--bg:#f6f7f9;--panel:#fff;--text:#171a1f;--soft:#66707c;--border:#d3d8de;--green:#147d58;--red:#b42336}@media(prefers-color-scheme:dark){:root{--bg:#16181d;--panel:#1d2026;--text:#eceef1;--soft:#a8b0bb;--border:#3c424c;--green:#39ad7a;--red:#ff8585}}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}main{width:min(720px,100%);margin:auto;padding:40px 22px 80px}a{color:var(--green)}h1{font-size:31px;letter-spacing:-.04em;margin:24px 0 6px}p{color:var(--soft)}section{margin-top:24px;padding:22px;border:1px solid var(--border);border-radius:16px;background:var(--panel)}h2{margin:0 0 6px;font-size:19px}label{display:block;margin-top:14px;color:var(--soft);font-weight:600}input{width:100%;min-height:44px;margin-top:5px;padding:0 11px;border:1px solid var(--border);border-radius:10px;background:var(--bg);color:var(--text);font:inherit}button{min-height:42px;margin-top:14px;padding:0 15px;border:0;border-radius:10px;background:var(--green);color:#fff;font-weight:700}button.danger{margin:0;background:transparent;color:var(--red);border:1px solid var(--border)}.credential{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-top:1px solid var(--border)}.credential:first-child{border:0}.credential strong,.credential small{display:block}.credential small{color:var(--soft)}.message{margin-top:16px;color:var(--soft)}.message.error{color:var(--red)}[hidden]{display:none}
+  </style>
+</head>
+<body data-webauthn-security>
+  <main>
+    <a href="/">← Zurück zur Übersicht</a>
+    <h1>Sichere Anmeldung</h1>
+    <p>Registriere einen Passkey für dieses Gerät oder einen physischen FIDO2-Schlüssel. Dein Passwort bleibt als Rückfallweg aktiv.</p>
+    <section>
+      <h2>Neuen Schlüssel registrieren</h2>
+      <label>Name<input data-webauthn-label maxlength="80" placeholder="z. B. iPhone oder YubiKey"></label>
+      <label>Aktuelles Passwort<input data-webauthn-password type="password" autocomplete="current-password" required></label>
+      <button type="button" data-webauthn-action="register" data-method="passkey">Passkey hinzufügen</button>
+      <button type="button" data-webauthn-action="register" data-method="security_key">Sicherheitsschlüssel hinzufügen</button>
+      <div class="message" data-webauthn-error hidden></div>
+    </section>
+    <section>
+      <h2>Registrierte Anmeldearten</h2>
+      <div data-webauthn-credentials><p>Noch keine Schlüssel geladen.</p></div>
+    </section>
+  </main>
+  <script src="/static/webauthn.js" defer></script>
+</body>
+</html>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sqlite3
 import stat
 import threading
@@ -15,18 +16,19 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 12
+_SCHEMA_VERSION = 13
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
 # sich aber bewusst den Backup-Scope: Ein Drill während eines laufenden Syncs
 # würde einen inkonsistenten Zwischenstand prüfen und Bandbreite streitig machen.
-_BACKUP_SCOPE_KINDS = ("backup", "check", "quicksync", "restoretest")
+_BACKUP_SCOPE_KINDS = ("backup", "check", "quicksync", "restoretest", "recovery")
 _JOB_SCOPE_KINDS = {
     "backup": _BACKUP_SCOPE_KINDS,
     "check": _BACKUP_SCOPE_KINDS,
     "quicksync": _BACKUP_SCOPE_KINDS,
     "restoretest": _BACKUP_SCOPE_KINDS,
+    "recovery": _BACKUP_SCOPE_KINDS,
     "pbs": ("pbs",),
 }
 
@@ -202,6 +204,45 @@ CREATE TABLE IF NOT EXISTS job_terminal_intents (
 );
 CREATE INDEX IF NOT EXISTS idx_job_terminal_intents_pending
 ON job_terminal_intents(applied_at, updated_at);
+
+CREATE TABLE IF NOT EXISTS webauthn_credentials (
+    credential_id TEXT PRIMARY KEY,
+    method TEXT NOT NULL CHECK(method IN ('passkey', 'security_key')),
+    public_key BLOB NOT NULL,
+    sign_count INTEGER NOT NULL DEFAULT 0,
+    transports_json TEXT NOT NULL DEFAULT '[]',
+    device_type TEXT NOT NULL DEFAULT '',
+    backed_up INTEGER NOT NULL DEFAULT 0,
+    label TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    last_used_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_method
+ON webauthn_credentials(method, created_at);
+
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
+    id TEXT PRIMARY KEY,
+    challenge BLOB NOT NULL,
+    purpose TEXT NOT NULL CHECK(purpose IN ('register', 'authenticate')),
+    method TEXT NOT NULL CHECK(method IN ('passkey', 'security_key')),
+    label TEXT NOT NULL DEFAULT '',
+    native INTEGER NOT NULL DEFAULT 0,
+    app_binding TEXT NOT NULL DEFAULT '',
+    expires_at REAL NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expiry
+ON webauthn_challenges(expires_at);
+
+CREATE TABLE IF NOT EXISTS native_auth_exchanges (
+    token_hash TEXT PRIMARY KEY,
+    verifier_hash TEXT NOT NULL,
+    username TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_native_auth_exchanges_expiry
+ON native_auth_exchanges(expires_at);
 """
 
 
@@ -584,6 +625,37 @@ class Database:
                 "COALESCE(ended_at, started_at) DESC, id DESC)"
             )
             connection.execute("PRAGMA user_version=12")
+            version = 12
+        if version < 13:
+            for statement in (
+                "CREATE TABLE IF NOT EXISTS webauthn_credentials ("
+                "credential_id TEXT PRIMARY KEY, "
+                "method TEXT NOT NULL CHECK(method IN ('passkey', 'security_key')), "
+                "public_key BLOB NOT NULL, sign_count INTEGER NOT NULL DEFAULT 0, "
+                "transports_json TEXT NOT NULL DEFAULT '[]', "
+                "device_type TEXT NOT NULL DEFAULT '', backed_up INTEGER NOT NULL DEFAULT 0, "
+                "label TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, last_used_at REAL)",
+                "CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_method "
+                "ON webauthn_credentials(method, created_at)",
+                "CREATE TABLE IF NOT EXISTS webauthn_challenges ("
+                "id TEXT PRIMARY KEY, challenge BLOB NOT NULL, "
+                "purpose TEXT NOT NULL CHECK(purpose IN ('register', 'authenticate')), "
+                "method TEXT NOT NULL CHECK(method IN ('passkey', 'security_key')), "
+                "label TEXT NOT NULL DEFAULT '', native INTEGER NOT NULL DEFAULT 0, "
+                "app_binding TEXT NOT NULL DEFAULT '', "
+                "expires_at REAL NOT NULL, created_at REAL NOT NULL)",
+                "CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expiry "
+                "ON webauthn_challenges(expires_at)",
+                "CREATE TABLE IF NOT EXISTS native_auth_exchanges ("
+                "token_hash TEXT PRIMARY KEY, verifier_hash TEXT NOT NULL, "
+                "username TEXT NOT NULL, "
+                "expires_at REAL NOT NULL, created_at REAL NOT NULL)",
+                "CREATE INDEX IF NOT EXISTS idx_native_auth_exchanges_expiry "
+                "ON native_auth_exchanges(expires_at)",
+            ):
+                connection.execute(statement)
+            connection.execute("PRAGMA user_version=13")
+            version = 13
 
     @staticmethod
     def _record_job_definition_schedule_state(
@@ -3000,6 +3072,220 @@ class Database:
                 "DELETE FROM auth_failures WHERE updated_at < ?", (cutoff,)
             )
             return int(cursor.rowcount or 0)
+
+    def webauthn_credentials(
+        self, method: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        params: tuple[Any, ...] = ()
+        where = ""
+        if method is not None:
+            if method not in {"passkey", "security_key"}:
+                raise ValueError("Ungültige WebAuthn-Methode")
+            where = " WHERE method=?"
+            params = (method,)
+        with self.conn() as connection:
+            rows = connection.execute(
+                "SELECT credential_id, method, public_key, sign_count, transports_json, "
+                "device_type, backed_up, label, created_at, last_used_at "
+                f"FROM webauthn_credentials{where} ORDER BY created_at, credential_id",
+                params,
+            ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["transports"] = json.loads(item.pop("transports_json") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                item["transports"] = []
+            item["backed_up"] = bool(item["backed_up"])
+            result.append(item)
+        return result
+
+    def webauthn_credential_get(self, credential_id: str) -> Optional[Dict[str, Any]]:
+        with self.conn() as connection:
+            row = connection.execute(
+                "SELECT credential_id, method, public_key, sign_count, transports_json, "
+                "device_type, backed_up, label, created_at, last_used_at "
+                "FROM webauthn_credentials WHERE credential_id=?",
+                (credential_id,),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        try:
+            item["transports"] = json.loads(item.pop("transports_json") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            item["transports"] = []
+        item["backed_up"] = bool(item["backed_up"])
+        return item
+
+    def webauthn_credential_add(
+        self,
+        *,
+        credential_id: str,
+        method: str,
+        public_key: bytes,
+        sign_count: int,
+        transports: Iterable[str],
+        device_type: str,
+        backed_up: bool,
+        label: str,
+    ) -> None:
+        if method not in {"passkey", "security_key"}:
+            raise ValueError("Ungültige WebAuthn-Methode")
+        transport_values = list(dict.fromkeys(str(value) for value in transports))
+        with self.conn() as connection:
+            connection.execute(
+                "INSERT INTO webauthn_credentials(credential_id, method, public_key, "
+                "sign_count, transports_json, device_type, backed_up, label, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    credential_id,
+                    method,
+                    sqlite3.Binary(public_key),
+                    max(0, int(sign_count)),
+                    json.dumps(transport_values),
+                    str(device_type or "")[:40],
+                    1 if backed_up else 0,
+                    str(label or "")[:80],
+                    time.time(),
+                ),
+            )
+
+    def webauthn_credential_used(
+        self, credential_id: str, *, sign_count: int, device_type: str, backed_up: bool
+    ) -> None:
+        with self.conn() as connection:
+            connection.execute(
+                "UPDATE webauthn_credentials SET sign_count=?, device_type=?, "
+                "backed_up=?, last_used_at=? WHERE credential_id=?",
+                (
+                    max(0, int(sign_count)),
+                    str(device_type or "")[:40],
+                    1 if backed_up else 0,
+                    time.time(),
+                    credential_id,
+                ),
+            )
+
+    def webauthn_credential_delete(self, credential_id: str) -> bool:
+        with self.conn() as connection:
+            cursor = connection.execute(
+                "DELETE FROM webauthn_credentials WHERE credential_id=?",
+                (credential_id,),
+            )
+            return bool(cursor.rowcount)
+
+    def webauthn_challenge_create(
+        self,
+        *,
+        challenge_id: str,
+        challenge: bytes,
+        purpose: str,
+        method: str,
+        label: str = "",
+        native: bool = False,
+        app_binding: str = "",
+        ttl_seconds: int = 300,
+    ) -> None:
+        now = time.time()
+        with self.conn() as connection:
+            connection.execute(
+                "DELETE FROM webauthn_challenges WHERE expires_at < ?", (now,)
+            )
+            connection.execute(
+                "DELETE FROM webauthn_challenges WHERE id IN ("
+                "SELECT id FROM webauthn_challenges ORDER BY created_at DESC LIMIT -1 OFFSET 1023)"
+            )
+            connection.execute(
+                "INSERT INTO webauthn_challenges(id, challenge, purpose, method, label, "
+                "native, app_binding, expires_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    challenge_id,
+                    sqlite3.Binary(challenge),
+                    purpose,
+                    method,
+                    str(label or "")[:80],
+                    1 if native else 0,
+                    str(app_binding or "")[:128],
+                    now + max(30, min(int(ttl_seconds), 600)),
+                    now,
+                ),
+            )
+
+    def webauthn_challenge_consume(
+        self, challenge_id: str, *, purpose: str
+    ) -> Optional[Dict[str, Any]]:
+        now = time.time()
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM webauthn_challenges WHERE id=?", (challenge_id,)
+            ).fetchone()
+            connection.execute(
+                "DELETE FROM webauthn_challenges WHERE id=?", (challenge_id,)
+            )
+        if not row or str(row["purpose"]) != purpose or float(row["expires_at"]) < now:
+            return None
+        item = dict(row)
+        item["native"] = bool(item["native"])
+        return item
+
+    def native_auth_exchange_create(
+        self,
+        token_hash: str,
+        verifier_hash: str,
+        username: str,
+        *,
+        ttl_seconds: int = 60,
+    ) -> None:
+        now = time.time()
+        with self.conn() as connection:
+            connection.execute(
+                "DELETE FROM native_auth_exchanges WHERE expires_at < ?", (now,)
+            )
+            connection.execute(
+                "DELETE FROM native_auth_exchanges WHERE token_hash IN ("
+                "SELECT token_hash FROM native_auth_exchanges "
+                "ORDER BY created_at DESC LIMIT -1 OFFSET 1023)"
+            )
+            connection.execute(
+                "INSERT INTO native_auth_exchanges(token_hash, verifier_hash, username, "
+                "expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    token_hash,
+                    verifier_hash,
+                    username,
+                    now + max(15, min(int(ttl_seconds), 120)),
+                    now,
+                ),
+            )
+
+    def native_auth_exchange_consume(
+        self, token_hash: str, verifier_hash: str
+    ) -> Optional[str]:
+        now = time.time()
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT username, verifier_hash, expires_at FROM native_auth_exchanges "
+                "WHERE token_hash=?",
+                (token_hash,),
+            ).fetchone()
+            valid = bool(
+                row
+                and float(row["expires_at"]) >= now
+                and secrets.compare_digest(str(row["verifier_hash"]), verifier_hash)
+            )
+            if valid or (row and float(row["expires_at"]) < now):
+                connection.execute(
+                    "DELETE FROM native_auth_exchanges WHERE token_hash=?",
+                    (token_hash,),
+                )
+        if not row or not valid:
+            return None
+        return str(row["username"])
 
     def runtime_get(self, key: str, default: Any = None) -> Any:
         if not key or len(key) > 128:

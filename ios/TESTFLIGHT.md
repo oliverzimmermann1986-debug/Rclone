@@ -10,6 +10,7 @@ de.oliverzimmermann.rclonesync
 
 1. Dem [Apple Developer Program](https://developer.apple.com/programs/) beitreten. Eine kostenlose Apple-ID reicht für signierte TestFlight-Builds nicht aus.
 2. In [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/identifiers/list) eine explizite App-ID mit dem Bundle Identifier `de.oliverzimmermann.rclonesync` anlegen.
+   Zusätzlich eine explizite App-ID `de.oliverzimmermann.rclonesync.widget` anlegen. Für beide IDs die App Group `group.de.oliverzimmermann.rclonesync` aktivieren; bei der Haupt-App bleiben außerdem Push Notifications aktiv.
 3. In [App Store Connect](https://appstoreconnect.apple.com/) unter **Apps → + → Neue App** einen App-Datensatz anlegen:
    - Plattform: iOS
    - Name: `Rclone Sync` oder ein noch verfügbarer Name
@@ -24,6 +25,7 @@ de.oliverzimmermann.rclonesync
    ```
 
    Benötigt werden Issuer ID, Key ID und die `.p8`-Datei. Codemagic erzeugt beziehungsweise lädt damit Distribution-Zertifikat und Provisioning Profile automatisch.
+   In Codemagic müssen zwei App-Store-Profile mit den Namen `rclone-sync-app-store-push` und `rclone-sync-widget-app-store` hinterlegt sein. Nach Aktivierung der App Group beide Profile neu erzeugen, damit Haupt-App und Widget dieselbe Group-Entitlement enthalten.
 7. Den öffentlichen GPG-Schlüssel, der die iOS-Release-Tags prüft, ASCII-armored exportieren, Base64-kodieren und in Codemagic in der Variablengruppe `ios-release` als geschützte Variable `IOS_RELEASE_GPG_PUBLIC_KEY_B64` hinterlegen. Der private Schlüssel bleibt ausschließlich beim Release-Verantwortlichen. Die Pipeline importiert nur den öffentlichen Schlüssel in einen isolierten, leeren GPG-Schlüsselbund und akzeptiert deshalb keine Signaturen anderer Schlüssel. Der aktuell eingerichtete Release-Schlüssel hat den Fingerprint `47F8 4407 A9D8 76BC C960 973F 7E69 CA72 01C4 C7B3` und läuft am 26. August 2028 ab.
 
 ## Erster Build
@@ -44,7 +46,7 @@ Die Pipeline:
 
 1. verwendet die aktuelle stabile Xcode-26-Version,
 2. lädt ausschließlich XcodeGen 2.46.0 aus dem offiziellen Releasearchiv, prüft dessen fest hinterlegte SHA-256-Prüfsumme und die ausgeführte Version und generiert damit `RcloneMobile.xcodeproj`,
-3. installiert das App-Store-Profil,
+3. installiert die App-Store-Profile für Haupt-App und Widget,
 4. setzt eine eindeutige Buildnummer,
 5. führt die iOS-Unit-Tests auf einem iPhone-17-Simulator aus,
 6. erstellt die signierte IPA und

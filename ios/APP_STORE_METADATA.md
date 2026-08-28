@@ -1,9 +1,9 @@
-# App Store-Metadaten – Rclone Sync 1.0.16
+# App Store-Metadaten – Rclone Sync
 
 ## Produktseite (Deutsch)
 
 - Name: `Rclone Sync`
-- Untertitel: `Rclone-Backups im Blick`
+- Untertitel: `Schutzstatus für dein Backup`
 - Kategorie: `Dienstprogramme`
 - Preis: `Kostenlos`
 - Verteilung: `Öffentlich`, alle Länder und Regionen
@@ -14,23 +14,31 @@
 
 ### Werbetext
 
-Deine selbst gehosteten Rclone-Sicherungen – übersichtlich, nativ und sicher auf dem iPhone.
+Der Schutzstatus deiner selbst gehosteten Backups – mit Datenwegen, Läufen und Restore-Prüfungen in einer nativen iPhone-App.
 
 ### Beschreibung
 
-Rclone Sync ist die native iPhone-Begleitung für deine selbst gehostete Rclone-Sync-Installation.
+Rclone Sync ist eine native Leitstelle für deine selbst gehostete Rclone-Sync-Installation. Sie verbindet nicht nur einzelne Statusanzeigen, sondern bildet deinen Sicherungsablauf als zusammenhängenden Schutzpfad ab: vom lokalen oder entfernten Datenweg über den geplanten Job bis zum überprüfbaren Lauf.
 
-Behalte den Zustand deiner Sicherungen im Blick, verwalte Datenwege und Zeitpläne und reagiere schnell, wenn ein Lauf Aufmerksamkeit benötigt.
+Der eigens entwickelte Schutzstatus verdichtet aktive Datenwege, Zeitplanung, letzte erfolgreiche Läufe und Serverhinweise zu einer sofort verständlichen Lage: Bereit, Prüfen oder Handeln. Bei Problemen zeigt die App den nächsten sinnvollen Schritt, statt nur technische Rohdaten aufzulisten.
 
 Funktionen:
 
-- Übersicht über Serverzustand, Sicherungen und letzte Läufe
+- Eigenständiger Schutzstatus mit konkretem nächsten Schritt
 - Lokale und Cloud-Datenwege mit Dateianzahl und Größe
-- Jobs mit Zeitplan und zugewiesenen Datenwegen
-- Laufhistorie mit Status, Dauer und Protokoll
+- Eigene Schutzpfad-Ansicht von der Quelle über zugewiesene Jobs zum Ziel
+- Jobs mit Zeitplan, Reihenfolge und zugewiesenen Datenwegen
+- Laufhistorie mit Status, Dauer, Protokoll und sicherem Neustart
 - Sicheres Anlegen lokaler und entfernter Zielordner
-- Restore-Tests und Systemdiagnose
-- Optionale Push-Mitteilungen bei Sicherungsfehlern
+- Dokumentierter Restore-Nachweis pro Datenweg mit Prüfsummenstatus und Stichprobengröße
+- Recovery-Pass mit nachvollziehbarem Score, RPO/RTO und Schutzkalender
+- Gezielte Wiederherstellung ausschließlich in ein getrenntes, prüfsummengeprüftes Staging
+- Sicherheitsstopp vor destruktiven Läufen bei unerwartet geschrumpften Quellen
+- Verschlüsseltes Notfall-Übergabepaket ohne Passwörter oder Cloud-Schlüssel
+- Schutzstatus-Widget, Live Activity und Siri-Kurzbefehle
+- Passkey, physischer Sicherheitsschlüssel und mehrere Serverprofile ohne Passwortspeicherung
+- Native Push-Mitteilungen bei Sicherungsfehlern mit Vorfallansicht und authentifizierter Pausenaktion
+- Stillstands-Watchdog, Laufzeitgrenzen und kontrollierter Abbruch
 - Integrierte lokale Demo ohne Server oder echte Daten
 
 Rclone Sync stellt keinen Cloudspeicher bereit. Für den produktiven Einsatz benötigst du eine eigene kompatible Rclone-Sync-Serverinstallation. Passwörter werden nicht dauerhaft in der App gespeichert.
@@ -39,7 +47,7 @@ Rclone Sync stellt keinen Cloudspeicher bereit. Für den produktiven Einsatz ben
 
 - Anmeldung erforderlich: `Nein`
 - Prüfweg: Auf der Anmeldeseite `App mit Beispieldaten ansehen` wählen.
-- Anmerkung: Die lokale Demo enthält ausschließlich unveränderliche Beispieldaten, stellt keine Netzwerkverbindung her und macht Lage, Datenwege, Jobs, Läufe sowie Systemdiagnose ohne privaten Server zugänglich. Produktive Aktionen benötigen eine eigene Serverinstallation.
+- Anmerkung: Die lokale Demo enthält ausschließlich unveränderliche Beispieldaten, stellt keine Netzwerkverbindung her und macht Lage, Datenwege, Jobs, Läufe, Systemdiagnose sowie das Recovery Center mit Recovery-Pass, RPO/RTO, Schutzkalender, Notfallablauf und Profilen ohne privaten Server zugänglich. Produktive Restore-, Übergabe- und Freigabeaktionen sind in der Demo erkennbar deaktiviert und benötigen bewusst eine eigene Serverinstallation.
 - Veröffentlichung: `Manuell`, damit die Freigabe nach Apples Genehmigung kontrolliert erfolgt.
 
 ## Datenschutzangaben
