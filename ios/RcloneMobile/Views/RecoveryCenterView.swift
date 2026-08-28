@@ -370,7 +370,7 @@ private struct RecoveryDataPathDetail: View {
                         .foregroundStyle(dataPath.rpoSeconds == nil ? .orange : .primary)
                 }
                 LabeledContent("RTO-Stichprobe") {
-                    Text(dataPath.restore.durationSeconds.map { AppFormat.elapsed(Int($0)) } ?? "Noch nicht gemessen")
+                    Text(dataPath.restore.durationSeconds.map { AppFormat.elapsed($0) } ?? "Noch nicht gemessen")
                         .foregroundStyle(dataPath.restore.durationSeconds == nil ? .orange : .primary)
                 }
                 LabeledContent("Prüfsumme", value: dataPath.restore.checksumVerified ? "Bestätigt" : "Offen")
