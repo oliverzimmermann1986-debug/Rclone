@@ -1699,10 +1699,19 @@ struct SelectiveRestoreRequest: Encodable {
     let identity: String
     let paths: [String]
     let maxTotalMB: Int
+    let pointID: String
+
+    init(identity: String, paths: [String], maxTotalMB: Int, pointID: String = "current") {
+        self.identity = identity
+        self.paths = paths
+        self.maxTotalMB = maxTotalMB
+        self.pointID = pointID
+    }
 
     enum CodingKeys: String, CodingKey {
         case identity, paths
         case maxTotalMB = "max_total_mb"
+        case pointID = "point_id"
     }
 }
 
@@ -1735,4 +1744,129 @@ struct RecoveryHandoverRequest: Encodable {
         case currentPassword = "current_password"
         case includePaths = "include_paths"
     }
+}
+
+struct RecoveryPointsResponse: Decodable {
+    let pair: String
+    let points: [RecoveryPoint]
+}
+
+struct RecoveryPoint: Decodable, Identifiable, Hashable {
+    let id: String
+    let label: String
+    let createdAt: Double?
+    let kind: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, kind
+        case createdAt = "created_at"
+    }
+}
+
+struct RecoveryPointBrowseResponse: Decodable {
+    let pair: String
+    let pointID: String
+    let path: String
+    let items: [RecoveryBrowseItem]
+
+    enum CodingKeys: String, CodingKey {
+        case pair, path, items
+        case pointID = "point_id"
+    }
+}
+
+struct RecoveryDiffResponse: Decodable {
+    let pair: String
+    let fromPoint: String
+    let toPoint: String
+    let added: [RecoveryDiffItem]
+    let removed: [RecoveryDiffItem]
+    let changed: [RecoveryChangedItem]
+    let counts: RecoveryDiffCounts
+    let truncated: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case pair, added, removed, changed, counts, truncated
+        case fromPoint = "from_point"
+        case toPoint = "to_point"
+    }
+}
+
+struct RecoveryDiffCounts: Decodable {
+    let added: Int
+    let removed: Int
+    let changed: Int
+}
+
+struct RecoveryDiffItem: Decodable, Identifiable {
+    var id: String { path }
+    let path: String
+    let size: Int64
+}
+
+struct RecoveryChangedItem: Decodable, Identifiable {
+    var id: String { path }
+    let path: String
+    let fromSize: Int64
+    let toSize: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case fromSize = "from_size"
+        case toSize = "to_size"
+    }
+}
+
+struct VaultUploadRequest: Encodable {
+    let identity: String
+    let filename: String
+    let size: Int64
+    let sha256: String
+    let sourceType: String
+    let deviceName: String
+
+    enum CodingKeys: String, CodingKey {
+        case identity, filename, size, sha256
+        case sourceType = "source_type"
+        case deviceName = "device_name"
+    }
+}
+
+struct VaultUploadStatus: Decodable, Identifiable {
+    let id: String
+    let pair: String
+    let identity: String
+    let filename: String
+    let sourceType: String
+    let deviceName: String
+    let size: Int64
+    let sha256: String
+    let received: Int64
+    let status: String
+    let deduplicated: Bool
+    let verified: Bool
+    let targetRelative: String
+    let createdAt: Double
+    let updatedAt: Double
+    let completedAt: Double?
+    let error: String?
+
+    var fractionCompleted: Double {
+        guard size > 0 else { return 0 }
+        return min(1, max(0, Double(received) / Double(size)))
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, pair, identity, filename, size, sha256, received, status, deduplicated, verified, error
+        case sourceType = "source_type"
+        case deviceName = "device_name"
+        case targetRelative = "target_relative"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case completedAt = "completed_at"
+    }
+}
+
+struct VaultLibraryResponse: Decodable {
+    let items: [VaultUploadStatus]
 }

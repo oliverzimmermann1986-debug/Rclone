@@ -6,7 +6,7 @@ final class APIClientSessionTests: XCTestCase {
     func testUserFacingConnectionErrorsAreRecoveryOriented() {
         XCTAssertEqual(
             APIError.invalidResponse.errorDescription,
-            "Die Serverantwort konnte nicht geprüft werden. Prüfe, ob die Adresse zu Rclone Sync gehört, und versuche es erneut."
+            "Die Serverantwort konnte nicht geprüft werden. Prüfe, ob die Adresse zu deinem Sicherpfad-Server gehört, und versuche es erneut."
         )
         XCTAssertEqual(
             APIError.incompatibleResponse(resource: "Anmeldung").errorDescription,
@@ -14,7 +14,7 @@ final class APIClientSessionTests: XCTestCase {
         )
         XCTAssertEqual(
             APIError.serverFeatureUnavailable(feature: "Neue Ordner").errorDescription,
-            "Diese Serverversion unterstützt „Neue Ordner“ noch nicht. Aktualisiere Rclone Sync auf dem Server und versuche es erneut."
+            "Diese Serverversion unterstützt „Neue Ordner“ noch nicht. Aktualisiere den Sicherpfad-Server und versuche es erneut."
         )
         XCTAssertFalse(APIError.invalidResponse.errorDescription?.contains("HTTP") == true)
     }

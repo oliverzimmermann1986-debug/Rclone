@@ -11,6 +11,7 @@ final class ProtectionLiveActivityCoordinator {
         let pair = progress.pairs?.first(where: { !["done", "ok"].contains($0.status.lowercased()) })
             ?? progress.pairs?.last
         let state = ProtectionActivityAttributes.ContentState(
+            kind: "backup",
             pair: pair?.name ?? "Sicherung",
             status: pair?.status ?? (progress.running ? "running" : "done"),
             percent: pair?.percent,
@@ -38,7 +39,7 @@ final class ProtectionLiveActivityCoordinator {
 
     func endAll() {
         let state = ProtectionActivityAttributes.ContentState(
-            pair: "Sicherung", status: "ended", percent: nil, transferred: nil, error: nil
+            kind: "backup", pair: "Sicherung", status: "ended", percent: nil, transferred: nil, error: nil
         )
         end(state)
     }

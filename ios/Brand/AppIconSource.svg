@@ -1,11 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
-  <title id="title">Datenweg-Signatur</title>
-  <desc id="desc">Drei offene, parallele Datenwege mit einem grünen Prüfpunkt.</desc>
-  <rect width="1024" height="1024" fill="#1c1e21"/>
-  <g fill="none" stroke="#f5f1e8" stroke-width="62" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M800 180H485C300 180 180 326 180 512S300 844 485 844H710"/>
-    <path d="M800 326H515C395 326 318 405 318 512S395 698 515 698H682"/>
-    <path d="M760 454H566C522 454 486 480 486 512S522 570 566 570H630"/>
-  </g>
-  <circle cx="630" cy="570" r="39" fill="#b8f232"/>
+  <title id="title">Sicherpfad-Verifikationstor</title>
+  <desc id="desc">Ein grüner Datenpfad führt durch ein helles Verifikationstor in einen geschützten Tresor.</desc>
+  <rect width="1024" height="1024" fill="#111316"/>
+  <path fill="#f5f1e8" fill-rule="evenodd" d="M356 270 770 122v182h58v67h-58v62h58v67h-58v62h58v67h-58v184L690 780V306L430 399v250l-74 78V270Zm334 36-260 93v250l74-77V445l186-66V306Z"/>
+  <path fill="#25282c" d="M430 399 504 445v127l-74 77V399Zm74 46 186-66v228l-75-31V445H504Z"/>
+  <path fill="#b8f232" d="m194 846 269-208h126l-110 208H194Zm284-234 74-72h92l-39 72H478Zm92-98 45-44h58l-18 44h-85Z"/>
 </svg>

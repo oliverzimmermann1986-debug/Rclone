@@ -82,7 +82,7 @@ struct RcloneProtectionLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: ProtectionActivityAttributes.self) { context in
             HStack(spacing: 12) {
-                Image(systemName: context.state.error == nil ? "arrow.triangle.2.circlepath" : "exclamationmark.triangle.fill")
+                Image(systemName: context.state.error == nil ? activitySymbol(context.state.kind) : "exclamationmark.triangle.fill")
                     .foregroundStyle(context.state.error == nil ? .green : .red)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(context.state.pair).font(.headline)
@@ -99,20 +99,24 @@ struct RcloneProtectionLiveActivity: Widget {
             .activitySystemActionForegroundColor(.green)
         } dynamicIsland: { context in
             DynamicIsland {
-                DynamicIslandExpandedRegion(.leading) { Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.green) }
+                DynamicIslandExpandedRegion(.leading) { Image(systemName: activitySymbol(context.state.kind)).foregroundStyle(.green) }
                 DynamicIslandExpandedRegion(.center) { Text(context.state.pair).lineLimit(1) }
                 DynamicIslandExpandedRegion(.trailing) {
                     if let percent = context.state.percent { Text("\(Int(percent)) %").monospacedDigit() }
                 }
                 DynamicIslandExpandedRegion(.bottom) { Text(context.state.transferred ?? context.state.status).font(.caption) }
             } compactLeading: {
-                Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.green)
+                Image(systemName: activitySymbol(context.state.kind)).foregroundStyle(.green)
             } compactTrailing: {
                 if let percent = context.state.percent { Text("\(Int(percent))").monospacedDigit() }
             } minimal: {
-                Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.green)
+                Image(systemName: activitySymbol(context.state.kind)).foregroundStyle(.green)
             }
         }
+    }
+
+    private func activitySymbol(_ kind: String) -> String {
+        kind == "vault" ? "iphone.and.arrow.forward" : "arrow.triangle.2.circlepath"
     }
 }
 

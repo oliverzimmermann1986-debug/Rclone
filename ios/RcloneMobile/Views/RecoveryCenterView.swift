@@ -399,14 +399,16 @@ private struct RecoveryDataPathDetail: View {
                 Text("Die Übung verändert keine Produktivdaten. Cloud-Anbieter können für das Rückholen Egress berechnen.")
             }
             Section {
+                NavigationLink { RecoveryTimelineView(dataPath: dataPath) } label: {
+                    Label("Recovery-Zeitreise", systemImage: "clock.arrow.circlepath")
+                }
                 NavigationLink { SelectiveRecoveryBrowser(dataPath: dataPath) } label: {
                     Label("Dateien ins Recovery-Staging holen", systemImage: "folder.badge.plus")
                 }
-                .disabled(model.isDemoMode)
             } header: {
                 Text("Gezielte Wiederherstellung")
             } footer: {
-                Text("Ausgewählte Dateien bleiben getrennt, bis du sie nach der Prüfung bewusst weiterverarbeitest.")
+                Text("Vergleiche historische Versionsstände und hole ausgewählte Dateien getrennt ins Recovery-Staging.")
             }
         }
         .navigationTitle(dataPath.name)
@@ -489,6 +491,8 @@ private struct QuarantineDetailView: View {
 private struct SelectiveRecoveryBrowser: View {
     @EnvironmentObject private var model: AppModel
     let dataPath: RecoveryDataPath
+    let pointID: String
+    let pointLabel: String
     @State private var path = ""
     @State private var items: [RecoveryBrowseItem] = []
     @State private var selection: Set<String> = []
@@ -496,11 +500,22 @@ private struct SelectiveRecoveryBrowser: View {
     @State private var confirmRestore = false
     @State private var errorMessage: String?
 
+    init(
+        dataPath: RecoveryDataPath,
+        pointID: String = "current",
+        pointLabel: String = "Aktueller Sicherungsstand"
+    ) {
+        self.dataPath = dataPath
+        self.pointID = pointID
+        self.pointLabel = pointLabel
+    }
+
     var body: some View {
         List {
             Section {
                 Label("Wiederherstellung erfolgt nur in ein getrenntes Staging.", systemImage: "shield.lefthalf.filled")
                     .font(.subheadline).foregroundStyle(.green)
+                LabeledContent("Stand", value: pointLabel)
                 if !path.isEmpty {
                     Button { navigateUp() } label: { Label("Übergeordnet", systemImage: "arrow.up") }
                 }
@@ -532,7 +547,7 @@ private struct SelectiveRecoveryBrowser: View {
             }
             if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
         }
-        .navigationTitle(dataPath.name)
+        .navigationTitle(pointID == "current" ? dataPath.name : "Zeitreise")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
@@ -560,7 +575,19 @@ private struct SelectiveRecoveryBrowser: View {
         isLoading = true
         defer { isLoading = false }
         do {
-            items = try await model.withCurrentClient { try await $0.browseRecovery(identity: dataPath.name, path: path) }.items
+            if pointID == "current" {
+                items = try await model.withCurrentClient {
+                    try await $0.browseRecovery(identity: dataPath.name, path: path)
+                }.items
+            } else {
+                items = try await model.withCurrentClient {
+                    try await $0.browseRecoveryPoint(
+                        identity: dataPath.name,
+                        pointID: pointID,
+                        path: path
+                    )
+                }.items
+            }
             errorMessage = nil
         } catch { errorMessage = error.localizedDescription }
     }
@@ -579,12 +606,183 @@ private struct SelectiveRecoveryBrowser: View {
         do {
             let response = try await model.withCurrentClient {
                 try await $0.startSelectiveRestore(
-                    SelectiveRestoreRequest(identity: dataPath.name, paths: selection.sorted(), maxTotalMB: 512)
+                    SelectiveRestoreRequest(
+                        identity: dataPath.name,
+                        paths: selection.sorted(),
+                        maxTotalMB: 512,
+                        pointID: pointID
+                    )
                 )
             }
             model.actionMessage = "Recovery #\(response.jobID) läuft. Das geprüfte Ergebnis erscheint unter Läufe."
             selection.removeAll()
         } catch { errorMessage = error.localizedDescription }
+    }
+}
+
+private struct RecoveryTimelineView: View {
+    @EnvironmentObject private var model: AppModel
+    let dataPath: RecoveryDataPath
+    @State private var points: [RecoveryPoint] = []
+    @State private var selectedPoint: RecoveryPoint?
+    @State private var diff: RecoveryDiffResponse?
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        List {
+            Section {
+                Text("Wähle einen Versionsstand, prüfe die Änderungen zum aktuellen Backup und stelle nur die benötigten Dateien wieder her.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Versionsstände") {
+                if isLoading && points.isEmpty {
+                    ProgressView()
+                } else {
+                    ForEach(points) { point in
+                        Button { select(point) } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: point.kind == "current" ? "checkmark.circle.fill" : "clock.fill")
+                                    .foregroundStyle(point.kind == "current" ? .green : .blue)
+                                    .frame(width: 28)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(point.label).foregroundStyle(.primary)
+                                    if let createdAt = point.createdAt {
+                                        Text(AppFormat.relative(createdAt))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                if selectedPoint?.id == point.id {
+                                    Image(systemName: "checkmark").foregroundStyle(.green)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let point = selectedPoint, point.id != "current" {
+                Section("Änderungen bis heute") {
+                    if isLoading && diff == nil {
+                        ProgressView()
+                    } else if let diff {
+                        HStack(spacing: 0) {
+                            diffMetric("Neu", diff.counts.added, .green)
+                            Divider().frame(height: 42)
+                            diffMetric("Entfernt", diff.counts.removed, .red)
+                            Divider().frame(height: 42)
+                            diffMetric("Geändert", diff.counts.changed, .orange)
+                        }
+                        if diff.truncated {
+                            Label("Großer Bestand: Die Anzeige ist begrenzt.", systemImage: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                        ForEach(diff.changed.prefix(6)) { item in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.path).font(.subheadline).lineLimit(2)
+                                Text("\(AppFormat.bytes(item.fromSize)) → \(AppFormat.bytes(item.toSize))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+
+                Section {
+                    NavigationLink {
+                        SelectiveRecoveryBrowser(
+                            dataPath: dataPath,
+                            pointID: point.id,
+                            pointLabel: point.label
+                        )
+                    } label: {
+                        Label("Diesen Stand durchsuchen", systemImage: "folder.badge.questionmark")
+                    }
+                } footer: {
+                    Text("Die Wiederherstellung schreibt ausschließlich in das isolierte Recovery-Staging.")
+                }
+            }
+
+            if let errorMessage {
+                Section { Text(errorMessage).foregroundStyle(.red) }
+            }
+        }
+        .navigationTitle("Recovery-Zeitreise")
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await loadPoints() }
+        .refreshable { await loadPoints() }
+    }
+
+    private func diffMetric(_ label: String, _ value: Int, _ color: Color) -> some View {
+        VStack(spacing: 3) {
+            Text("\(value)").font(.headline.monospacedDigit()).foregroundStyle(color)
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func select(_ point: RecoveryPoint) {
+        selectedPoint = point
+        diff = nil
+        guard point.id != "current" else { return }
+        Task { await loadDiff(point) }
+    }
+
+    private func loadPoints() async {
+        if model.isDemoMode {
+            points = [
+                RecoveryPoint(id: "current", label: "Aktueller Sicherungsstand", createdAt: nil, kind: "current"),
+                RecoveryPoint(id: "2026-08-27T03-00-00", label: "27.08.2026 · 03:00", createdAt: 1_777_258_800, kind: "version"),
+                RecoveryPoint(id: "2026-08-20T03-00-00", label: "20.08.2026 · 03:00", createdAt: 1_776_654_000, kind: "version")
+            ]
+            select(points[1])
+            return
+        }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            points = try await model.withCurrentClient {
+                try await $0.getRecoveryPoints(identity: dataPath.name)
+            }.points
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadDiff(_ point: RecoveryPoint) async {
+        if model.isDemoMode {
+            diff = RecoveryDiffResponse(
+                pair: dataPath.name,
+                fromPoint: point.id,
+                toPoint: "current",
+                added: [RecoveryDiffItem(path: "Sommerurlaub/IMG_1042.HEIC", size: 3_800_000)],
+                removed: [],
+                changed: [RecoveryChangedItem(path: "Dokumente/Notfallplan.pdf", fromSize: 245_760, toSize: 262_144)],
+                counts: RecoveryDiffCounts(added: 14, removed: 1, changed: 3),
+                truncated: false
+            )
+            return
+        }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            diff = try await model.withCurrentClient {
+                try await $0.getRecoveryDiff(
+                    identity: dataPath.name,
+                    fromPoint: point.id,
+                    toPoint: "current"
+                )
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 

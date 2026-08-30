@@ -30,6 +30,7 @@ struct ProtectionWidgetSnapshot: Codable {
 #if canImport(ActivityKit)
 struct ProtectionActivityAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
+        let kind: String
         let pair: String
         let status: String
         let percent: Double?

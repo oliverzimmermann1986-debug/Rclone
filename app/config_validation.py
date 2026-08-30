@@ -405,6 +405,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         ("logs_dir", "/opt/rclone-sync/logs"),
         ("temp_dir", "/opt/rclone-sync/temp"),
         ("recovery_dir", "/opt/rclone-sync/recovery"),
+        ("device_vault_dir", "/opt/rclone-sync/data/device-vault"),
     ):
         try:
             value = _clean_path(paths.get(key, default)) or default

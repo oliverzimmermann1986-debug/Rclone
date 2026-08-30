@@ -1,6 +1,6 @@
 {
   "overview": {
-    "app": {"version": "2.2.1", "timezone": "Europe/Berlin"},
+    "app": {"version": "2.3.0", "timezone": "Europe/Berlin"},
     "system": {
       "hostname": "backup-home",
       "platform": "Linux",

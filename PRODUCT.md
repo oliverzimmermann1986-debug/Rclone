@@ -12,7 +12,7 @@ The primary user is a single self-hosting administrator operating an rclone-base
 
 ## Product Purpose
 
-rclone-sync makes scheduled and manual copy, sync, bisync, restore, verification, and Proxmox Backup Server workflows observable and safely operable from one web console. Success means the administrator can quickly understand whether data is protected, identify required action, and execute risky operations without bypassing safety checks.
+Sicherpfad makes scheduled and manual copy, sync, bisync, restore, verification, and Proxmox Backup Server workflows observable and safely operable from one web console. Success means the administrator can quickly understand whether data is protected, identify required action, and execute risky operations without bypassing safety checks.
 
 ## Positioning
 

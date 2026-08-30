@@ -1391,7 +1391,7 @@ final class AppModel: ObservableObject {
         progress = value
         progressLastSuccessAt = Date()
         progressConsecutiveFailures = 0
-        liveActivityCoordinator.accept(value, hostname: overview?.system.hostname ?? "Rclone Sync")
+        liveActivityCoordinator.accept(value, hostname: overview?.system.hostname ?? "Sicherpfad")
     }
 
     private func acceptStorageMeasurement(_ value: StorageOverview) {
@@ -1487,11 +1487,11 @@ final class AppModel: ObservableObject {
         if let urlError = error as? URLError {
             switch urlError.code {
             case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
-                return "Server nicht erreichbar. Prüfe die vollständige Adresse und unter Einstellungen → Datenschutz & Sicherheit → Lokales Netzwerk die Freigabe für Rclone Sync."
+                return "Server nicht erreichbar. Prüfe die vollständige Adresse und unter Einstellungen → Datenschutz & Sicherheit → Lokales Netzwerk die Freigabe für Sicherpfad."
             case .notConnectedToInternet, .networkConnectionLost:
-                return "Das lokale Netzwerk ist nicht verfügbar. Prüfe WLAN und erlaube Rclone Sync unter Einstellungen → Datenschutz & Sicherheit → Lokales Netzwerk."
+                return "Das lokale Netzwerk ist nicht verfügbar. Prüfe WLAN und erlaube Sicherpfad unter Einstellungen → Datenschutz & Sicherheit → Lokales Netzwerk."
             case .timedOut:
-                return "Der Server hat nicht innerhalb des Zeitlimits geantwortet. Prüfe Adresse, WLAN und die lokale Netzwerkfreigabe für Rclone Sync."
+                return "Der Server hat nicht innerhalb des Zeitlimits geantwortet. Prüfe Adresse, WLAN und die lokale Netzwerkfreigabe für Sicherpfad."
             case .appTransportSecurityRequiresSecureConnection:
                 return "iOS blockiert diese HTTP-Adresse. Verwende eine lokale IP-Adresse oder eine HTTPS-Adresse."
             case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot:

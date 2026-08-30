@@ -81,7 +81,14 @@ private struct AppRootView: View {
             }
         }
         .onOpenURL { url in
-            if url.scheme == "rclonesync", url.host == "recovery" {
+            if ["rclonesync", "sicherpfad"].contains(url.scheme ?? ""), url.host == "vault" {
+                if model.phase == .signedIn {
+                    Task { @MainActor in
+                        await Task.yield()
+                        NotificationCenter.default.post(name: .deviceVaultNavigationRequested, object: nil)
+                    }
+                }
+            } else if ["rclonesync", "sicherpfad"].contains(url.scheme ?? ""), url.host == "recovery" {
                 if model.phase == .signedIn {
                     Task { @MainActor in
                         await Task.yield()
@@ -103,12 +110,12 @@ private struct AppRootView: View {
                     if granted {
                         await registerCurrentPushToken()
                     } else {
-                        model.actionMessage = "Mitteilungen sind nicht erlaubt. Du kannst sie später in iOS unter Einstellungen → Rclone Sync → Mitteilungen aktivieren."
+                        model.actionMessage = "Mitteilungen sind nicht erlaubt. Du kannst sie später in iOS unter Einstellungen → Sicherpfad → Mitteilungen aktivieren."
                     }
                 }
             }
         } message: {
-            Text("Rclone Sync meldet nur Sicherungs- und Prüfprobleme. Erfolgreiche Läufe erzeugen keine Mitteilung. Die App funktioniert auch ohne Push vollständig.")
+            Text("Sicherpfad meldet nur Sicherungs- und Prüfprobleme. Erfolgreiche Läufe erzeugen keine Mitteilung. Die App funktioniert auch ohne Push vollständig.")
         }
     }
 

@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
-    <string>Rclone Sync</string>
+    <string>Sicherpfad</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -22,6 +22,7 @@
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>rclonesync</string>
+                <string>sicherpfad</string>
             </array>
         </dict>
     </array>
@@ -43,7 +44,7 @@
         <string>LaunchBackground</string>
     </dict>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Rclone Sync verbindet sich mit deinem Sicherungsserver im lokalen Netzwerk.</string>
+    <string>Sicherpfad verbindet sich mit deinem selbst gehosteten Sicherungsserver im lokalen Netzwerk.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>
