@@ -135,11 +135,14 @@ def run_selective_restore(
     *,
     max_total_mb: int,
     job_id: int,
+    source_override: str | None = None,
+    recovery_point: str = "current",
 ) -> dict[str, Any]:
     started = time.monotonic()
     selection = normalize_selection(paths)
     limit_bytes = max(1, min(int(max_total_mb), 51_200)) * 1024 * 1024
-    _live_source, backup_target = _endpoints(pair)
+    _live_source, configured_target = _endpoints(pair)
+    backup_target = str(source_override or configured_target)
     recovery_id = f"recovery-{job_id}"
     work = staging_root(config) / recovery_id
     data = work / "data"
@@ -151,6 +154,7 @@ def run_selective_restore(
         "created_at": time.time(),
         "requested_items": len(selection),
         "limit_bytes": limit_bytes,
+        "recovery_point": recovery_point,
     }
     try:
         work.mkdir(mode=0o700)

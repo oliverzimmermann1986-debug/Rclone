@@ -6,9 +6,11 @@ struct RootTabView: View {
     @State private var selectedTab: Int
     @State private var showingSettings = false
     @State private var showingRecoveryCenter = false
+    @State private var showingDeviceVault: Bool
 
     init(initialTab: Int = StorePreviewMode.initialTab) {
         _selectedTab = State(initialValue: initialTab)
+        _showingDeviceVault = State(initialValue: StorePreviewMode.opensDeviceVault)
     }
 
     var body: some View {
@@ -47,6 +49,9 @@ struct RootTabView: View {
         .sheet(isPresented: $showingRecoveryCenter) {
             NavigationStack { RecoveryCenterView() }
         }
+        .sheet(isPresented: $showingDeviceVault) {
+            NavigationStack { DeviceVaultView() }
+        }
         .environmentObject(configurationDraft)
         .alert("Hinweis", isPresented: Binding(
             get: { model.actionMessage != nil },
@@ -60,6 +65,9 @@ struct RootTabView: View {
         .onChange(of: model.requestedRunID) { _, _ in selectRequestedRunIfNeeded() }
         .onReceive(NotificationCenter.default.publisher(for: .pushRecoveryNavigationRequested)) { _ in
             showingRecoveryCenter = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .deviceVaultNavigationRequested)) { _ in
+            showingDeviceVault = true
         }
         .task { configurationDraft.load(from: model.config) }
         .onChange(of: model.config?.revision) { _, _ in

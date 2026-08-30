@@ -1,4 +1,4 @@
-"""FastAPI-App für rclone-sync-container."""
+"""FastAPI-App für den Sicherpfad Server."""
 
 from __future__ import annotations
 
@@ -55,6 +55,7 @@ from .routes import (
     api_recovery,
     api_storage,
     api_test,
+    api_vault,
     api_webauthn,
 )
 from .maintenance import run_automatic_maintenance
@@ -274,7 +275,7 @@ async def _lifespan(_app):
             "; ".join(security_warnings),
         )
     _sd_notify("READY=1")
-    logger.info("rclone-sync app ready")
+    logger.info("Sicherpfad Server ready")
     maintenance_stop = threading.Event()
     maintenance_thread = threading.Thread(
         target=_run_maintenance_loop,
@@ -303,7 +304,7 @@ async def _lifespan(_app):
 
 
 app = FastAPI(
-    title="rclone-sync Container",
+    title="Sicherpfad Server",
     version=__version__,
     docs_url=None,
     redoc_url=None,
@@ -540,6 +541,7 @@ app.include_router(api_pbs.router)
 app.include_router(api_push.router)
 app.include_router(api_webauthn.router)
 app.include_router(api_recovery.router)
+app.include_router(api_vault.router)
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_ASSET_ALLOWLIST = frozenset(

@@ -26,6 +26,18 @@ struct ProtectionStatusIntent: AppIntent {
     }
 }
 
+struct OpenDeviceVaultIntent: AppIntent {
+    static var title: LocalizedStringResource = "Geräte-Vault öffnen"
+    static var description = IntentDescription("Öffnet den verifizierten Import für Fotos und Dateien.")
+    static var openAppWhenRun = true
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        NotificationCenter.default.post(name: .deviceVaultNavigationRequested, object: nil)
+        return .result(dialog: "Geräte-Vault wird geöffnet.")
+    }
+}
+
 struct RcloneProtectionShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
@@ -39,6 +51,12 @@ struct RcloneProtectionShortcuts: AppShortcutsProvider {
             phrases: ["Wie ist mein Schutzstatus in \(.applicationName)"],
             shortTitle: "Schutzstatus",
             systemImageName: "checkmark.shield"
+        )
+        AppShortcut(
+            intent: OpenDeviceVaultIntent(),
+            phrases: ["Öffne den Geräte-Vault in \(.applicationName)", "Sichere eine Datei mit \(.applicationName)"],
+            shortTitle: "Geräte-Vault",
+            systemImageName: "iphone.and.arrow.forward"
         )
     }
 }

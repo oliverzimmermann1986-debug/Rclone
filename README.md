@@ -1,4 +1,4 @@
-# rclone-sync-container
+# Sicherpfad Server
 
 **Version 2.0.0** – Web- und Scheduler-Dienst für sichere `rclone bisync`, `copy`- und `sync`-Läufe zwischen Cloud-Remotes und lokalen NAS-/Storage-Pfaden. Ausgelegt für einen Debian-/Ubuntu-LXC mit systemd.
 

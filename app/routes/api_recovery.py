@@ -38,6 +38,13 @@ from ..jobs.selective_restore import (
     run_selective_restore,
 )
 from ..rclone_args import rclone_subprocess_env
+from ..recovery_points import (
+    RecoveryPointError,
+    browse_point,
+    compare_points,
+    list_points,
+    point_target,
+)
 from ..secret_redaction import REDACTED, redact_secrets
 from ..security import require_csrf
 from . import api_diagnostics, api_storage
@@ -336,10 +343,58 @@ def browse_backup(
     return {"pair": str(pair.get("name") or ""), "path": relative, "items": items}
 
 
+@router.get("/points")
+def recovery_points(
+    identity: str = Query(min_length=1, max_length=128),
+) -> dict[str, Any]:
+    config = get_config().snapshot()
+    pair = _find_pair(config, identity)
+    try:
+        points = list_points(config, pair)
+    except RecoveryPointError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"pair": str(pair.get("name") or ""), "points": points}
+
+
+@router.get("/points/{point_id}/browse")
+def browse_recovery_point(
+    point_id: str,
+    identity: str = Query(min_length=1, max_length=128),
+    path: str = Query(default="", max_length=1024),
+) -> dict[str, Any]:
+    config = get_config().snapshot()
+    pair = _find_pair(config, identity)
+    try:
+        result = browse_point(config, pair, point_id, path)
+    except RecoveryPointError as exc:
+        message = str(exc)
+        status = 404 if "nicht gefunden" in message.lower() else 502
+        raise HTTPException(status, message) from exc
+    return {"pair": str(pair.get("name") or ""), **result}
+
+
+@router.get("/diff")
+def recovery_diff(
+    identity: str = Query(min_length=1, max_length=128),
+    from_point: str = Query(min_length=1, max_length=128),
+    to_point: str = Query(default="current", min_length=1, max_length=128),
+) -> dict[str, Any]:
+    config = get_config().snapshot()
+    pair = _find_pair(config, identity)
+    try:
+        result = compare_points(config, pair, from_point, to_point)
+    except RecoveryPointError as exc:
+        message = str(exc)
+        status = 404 if "nicht gefunden" in message.lower() else 502
+        raise HTTPException(status, message) from exc
+    return {"pair": str(pair.get("name") or ""), **result}
+
+
 class SelectiveRestoreRequest(BaseModel):
     identity: str = Field(min_length=1, max_length=128)
     paths: list[str] = Field(min_length=1, max_length=100)
     max_total_mb: int = Field(default=512, ge=1, le=51_200)
+    point_id: str = Field(default="current", min_length=1, max_length=128)
 
 
 @router.post("/restore", status_code=202)
@@ -349,6 +404,10 @@ def start_selective_restore(
     selection = normalize_selection(body.paths)
     config = get_config().snapshot()
     pair = _find_pair(config, body.identity)
+    try:
+        recovery_source = point_target(config, pair, body.point_id)
+    except RecoveryPointError as exc:
+        raise HTTPException(404, str(exc)) from exc
     database = get_db()
     try:
         job_id = database.job_start(JOB_KIND, trigger="manual", exclusive_scope=True)
@@ -365,6 +424,7 @@ def start_selective_restore(
             "job_id": job_id,
             "pair": str(pair.get("name") or ""),
             "items": len(selection),
+            "recovery_point": body.point_id,
         },
     )
     background.add_task(
@@ -375,6 +435,8 @@ def start_selective_restore(
         selection,
         max_total_mb=body.max_total_mb,
         job_id=job_id,
+        source_override=recovery_source,
+        recovery_point=body.point_id,
     )
     return {"ok": True, "job_id": job_id, "status": "running"}
 

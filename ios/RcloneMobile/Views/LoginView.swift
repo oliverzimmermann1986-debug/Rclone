@@ -112,7 +112,7 @@ struct LoginView: View {
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Rclone Sync")
+                Text("Sicherpfad")
                     .font(.headline)
                 Text("Sicherungen auf deinem Server")
                     .font(.caption)
@@ -126,7 +126,7 @@ struct LoginView: View {
             LoginField(
                 title: "Server",
                 placeholder: "192.168.1.67 oder backup.example.de",
-                accessibilityHint: "Gib die vollständige Adresse deiner Rclone-Sync-Installation ein. Einen abweichenden Port direkt anhängen.",
+                accessibilityHint: "Gib die vollständige Adresse deines Sicherpfad-Servers ein. Einen abweichenden Port direkt anhängen.",
                 symbol: "server.rack",
                 text: $server,
                 contentType: .URL,

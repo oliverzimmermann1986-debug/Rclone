@@ -109,7 +109,7 @@ def test_push_notification() -> dict[str, object]:
     try:
         result = send_push_notifications(
             "sync_error",
-            "Rclone Sync Test",
+            "Sicherpfad Test",
             "Fehler-Pushs sind auf diesem iPhone eingerichtet.",
             dedupe_key=f"push-test:{uuid.uuid4().hex}",
         )

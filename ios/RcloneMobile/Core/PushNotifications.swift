@@ -5,6 +5,7 @@ extension Notification.Name {
     static let pushDeviceTokenReady = Notification.Name("pushDeviceTokenReady")
     static let pushNavigationRequested = Notification.Name("pushNavigationRequested")
     static let pushRecoveryNavigationRequested = Notification.Name("pushRecoveryNavigationRequested")
+    static let deviceVaultNavigationRequested = Notification.Name("deviceVaultNavigationRequested")
     static let pushPauseRequested = Notification.Name("pushPauseRequested")
     static let pushAuthorizationRequested = Notification.Name("pushAuthorizationRequested")
 }

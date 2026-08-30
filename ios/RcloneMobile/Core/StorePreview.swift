@@ -19,6 +19,13 @@ enum StorePreviewMode {
         default: return 0
         }
     }
+
+    static var opensDeviceVault: Bool {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let flagIndex = arguments.firstIndex(of: launchFlag),
+              arguments.indices.contains(flagIndex + 1) else { return false }
+        return arguments[flagIndex + 1].lowercased() == "vault"
+    }
 }
 
 struct StorePreviewFixture: Decodable {

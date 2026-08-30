@@ -24,6 +24,8 @@ def test_native_recovery_center_uses_real_server_endpoints_and_safe_staging():
         "/api/recovery/browse",
         "/api/recovery/restore",
         "/api/recovery/handover",
+        "/api/recovery/points",
+        "/api/recovery/diff",
     ):
         assert endpoint in api
     assert "RecoveryCenterView()" in system
@@ -33,6 +35,24 @@ def test_native_recovery_center_uses_real_server_endpoints_and_safe_staging():
     assert "RPO" in view and "RTO-Stichprobe" in view
     assert "func loadDemo()" in view
     assert "model.isDemoMode" in view
+    assert "Recovery-Zeitreise" in view
+    assert "getRecoveryDiff" in api
+
+
+def test_device_vault_is_native_resumable_and_visible_in_demo():
+    api = _read("RcloneMobile/Core/APIClient.swift")
+    vault = _read("RcloneMobile/Views/DeviceVaultView.swift")
+    transfer = _read("RcloneMobile/Core/VaultTransfer.swift")
+    dashboard = _read("RcloneMobile/Views/DashboardView.swift")
+
+    for endpoint in ("/api/vault/uploads", "/api/vault/library"):
+        assert endpoint in api
+    assert "PhotosPicker" in vault
+    assert ".fileImporter" in vault
+    assert "Demo-Sicherung abspielen" in vault
+    assert "Geräte-Vault" in dashboard
+    assert "1024 * 1024" in transfer
+    assert "SHA256" in transfer
 
 
 def test_offline_card_multi_server_and_encrypted_handover_are_explicit():

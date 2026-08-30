@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "rclone-sync Backup-Konsole",
-  "short_name": "rclone-sync",
-  "description": "Backup-, Sync- und Scheduler-Konsole für rclone auf Proxmox",
+  "name": "Sicherpfad Backup-Leitstelle",
+  "short_name": "Sicherpfad",
+  "description": "Verifizierte Backup-, Recovery- und Scheduler-Leitstelle für selbst gehostete Datenwege",
   "lang": "de-DE",
   "start_url": "/#dashboard",
   "scope": "/",

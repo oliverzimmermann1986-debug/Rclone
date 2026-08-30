@@ -52,6 +52,24 @@ struct DashboardView: View {
                     }
                 }
 
+                Section("Direkt vom iPhone") {
+                    NavigationLink { DeviceVaultView() } label: {
+                        HStack(spacing: 13) {
+                            Image(systemName: "iphone.and.arrow.forward")
+                                .font(.title3)
+                                .foregroundStyle(.green)
+                                .frame(width: 34, height: 34)
+                                .background(.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Geräte-Vault").font(.body.weight(.semibold))
+                                Text("Fotos und Dateien verifiziert in deinen Schutzpfad legen")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+
                 Section {
                     if let pairs = model.storage?.pairs, !pairs.isEmpty {
                         ForEach(pairs) { pair in

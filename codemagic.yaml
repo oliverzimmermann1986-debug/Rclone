@@ -1,6 +1,6 @@
 workflows:
   ios-testflight:
-    name: Rclone Sync · TestFlight
+    name: Sicherpfad · TestFlight
     instance_type: mac_mini_m2
     max_build_duration: 60
     integrations:
@@ -131,7 +131,7 @@ workflows:
           xcrun simctl install "$SCREENSHOT_DEVICE" "$SCREENSHOT_APP"
           SCREENSHOT_DIR="$CM_BUILD_DIR/build/app-store-screenshots"
           mkdir -p "$SCREENSHOT_DIR/raw"
-          for screen in dashboard paths jobs system; do
+          for screen in dashboard vault paths jobs system; do
             xcrun simctl terminate "$SCREENSHOT_DEVICE" de.oliverzimmermann.rclonesync 2>/dev/null || true
             xcrun simctl launch "$SCREENSHOT_DEVICE" de.oliverzimmermann.rclonesync \
               --args -AppleLanguages '(de)' -AppleLocale de_DE --store-preview "$screen" >/dev/null

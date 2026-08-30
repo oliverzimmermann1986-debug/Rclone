@@ -13,7 +13,7 @@ de.oliverzimmermann.rclonesync
    Zusätzlich eine explizite App-ID `de.oliverzimmermann.rclonesync.widget` anlegen. Für beide IDs die App Group `group.de.oliverzimmermann.rclonesync` aktivieren; bei der Haupt-App bleiben außerdem Push Notifications aktiv.
 3. In [App Store Connect](https://appstoreconnect.apple.com/) unter **Apps → + → Neue App** einen App-Datensatz anlegen:
    - Plattform: iOS
-   - Name: `Rclone Sync` oder ein noch verfügbarer Name
+   - Name: `Sicherpfad` oder ein noch verfügbarer Name
    - Bundle-ID: `de.oliverzimmermann.rclonesync`
    - SKU: `rclone-sync-ios`
 4. Unter **Benutzer und Zugriff → Integrationen → App Store Connect API** einen Team-Schlüssel mit Rolle **App Manager** erzeugen. Die `.p8`-Datei sofort sicher speichern; Apple bietet sie nur einmal zum Download an.
@@ -30,12 +30,12 @@ de.oliverzimmermann.rclonesync
 
 ## Erster Build
 
-Nach der Einrichtung kann der Workflow **Rclone Sync · TestFlight** in Codemagic durch einen Release-Tag gestartet werden. Der Tag muss annotiert und kryptografisch signiert sein und exakt auf einem Commit liegen, der bereits in `origin/main` enthalten ist:
+Nach der Einrichtung kann der Workflow **Sicherpfad · TestFlight** in Codemagic durch einen Release-Tag gestartet werden. Der Tag muss annotiert und kryptografisch signiert sein und exakt auf einem Commit liegen, der bereits in `origin/main` enthalten ist:
 
 ```bash
 git switch main
 git pull --ff-only origin main
-git tag -s ios-v1.0.0 -m "Rclone Sync iOS 1.0.0"
+git tag -s ios-v1.0.0 -m "Sicherpfad iOS 1.0.0"
 git tag -v ios-v1.0.0
 git push origin ios-v1.0.0
 ```

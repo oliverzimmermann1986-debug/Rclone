@@ -1,4 +1,4 @@
-"""WebAuthn ceremonies for the single-admin Rclone Sync installation."""
+"""WebAuthn ceremonies for the single-admin Sicherpfad installation."""
 
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ def registration_options(
     is_passkey = method == "passkey"
     options = generate_registration_options(
         rp_id=rp_id,
-        rp_name="Rclone Sync",
+        rp_name="Sicherpfad",
         user_id=_user_handle(),
         user_name=username,
         user_display_name=username,

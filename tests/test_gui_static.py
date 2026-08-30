@@ -99,7 +99,10 @@ def test_gui_assets_reference_current_cache_version():
     assert (
         'html = html.replace("?v=__APP_VERSION__", f"?v={__version__}")' in main_source
     )
-    assert "Proxmox Backup Console" in login
+    assert "Verifizierte Backup-Leitstelle" in login
+    assert "Sicherpfad" in html
+    assert "rclone-sync</strong>" not in html
+    assert "rclone-sync</strong>" not in login
     assert 'class="shell"' in login
 
 
@@ -362,6 +365,9 @@ def test_pwa_caches_only_versioned_static_allowlist_and_has_install_icon():
     manifest = (STATIC / "manifest.json").read_text(encoding="utf-8")
     service_worker = (STATIC / "sw.js").read_text(encoding="utf-8")
 
+    assert '"name": "Sicherpfad Backup-Leitstelle"' in manifest
+    assert '"short_name": "Sicherpfad"' in manifest
+
     for size in (192, 512, 1024):
         icon = STATIC / f"app-icon-{size}.png"
         assert icon.is_file()
@@ -372,7 +378,7 @@ def test_pwa_caches_only_versioned_static_allowlist_and_has_install_icon():
     assert '"sizes": "1024x1024"' in manifest
     assert '"purpose": "any"' in manifest
     assert "const CACHE_PREFIX = 'rclone-sync-static-'" in service_worker
-    assert "const CACHE_NAME = `${CACHE_PREFIX}v2`" in service_worker
+    assert "const CACHE_NAME = `${CACHE_PREFIX}v3`" in service_worker
     assert "const STATIC_ASSETS = new Set([" in service_worker
     assert "new Request(path, { cache: 'reload' })" in service_worker
     for forbidden in ("'/api/", "'/login", "'/logout", "'/'"):

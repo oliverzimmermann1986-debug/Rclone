@@ -1,14 +1,15 @@
-# Rclone Sync für iPhone
+# Sicherpfad für iPhone
 
-Native SwiftUI-App für das vorhandene rclone-sync-Backend. Sie verwendet dieselbe gehärtete Cookie-Sitzung wie das Web-Frontend, bezieht den Login-CSRF-Nonce über den strukturierten JSON-Vertrag `/api/auth/login` und sendet bei schreibenden Aufrufen den Double-Submit-CSRF-Header. Optional meldet sie sich über die WebAuthn-Origin des selbst gehosteten Servers mit Passkey oder physischem Sicherheitsschlüssel an und tauscht das Ergebnis über einen kurzlebigen Einmalcode gegen die App-Sitzung.
+Native SwiftUI-App für den Sicherpfad Server auf Basis von rclone. Sie verwendet dieselbe gehärtete Cookie-Sitzung wie das Web-Frontend, bezieht den Login-CSRF-Nonce über den strukturierten JSON-Vertrag `/api/auth/login` und sendet bei schreibenden Aufrufen den Double-Submit-CSRF-Header. Optional meldet sie sich über die WebAuthn-Origin des selbst gehosteten Servers mit Passkey oder physischem Sicherheitsschlüssel an und tauscht das Ergebnis über einen kurzlebigen Einmalcode gegen die App-Sitzung.
 
-Die eigenständige App-Icon-Geometrie liegt reproduzierbar unter [`Brand/AppIconSource.svg`](Brand/AppIconSource.svg); das Asset-Catalog-PNG wird aus denselben Pfaden gerendert.
+Das eigenständige App-Icon zeigt einen markanten Schutzpfad durch ein Verifikationstor und vermeidet bewusst Sync-Pfeile, Cloud- und rclone-Symbole.
 
 ## Enthalten
 
 - **Lagebild:** Eigener Schutzstatus, Systemzustand, Warnungen, Live-Fortschritt und kontrollierter Abbruch, Datenwege, letzter Lauf und Kopienübersicht mit lokalem/cloudseitigem Ordner, Dateizahl und Größe.
+- **Geräte-Vault:** Fotos und Dateien direkt auswählen, in wiederaufnehmbaren 1-MiB-Blöcken übertragen, per SHA-256 deduplizieren, am Ziel zurücklesen und anschließend wieder in Dateien exportieren.
 - **Restore-Nachweis:** Pro Datenweg sichtbarer Prüfsummenbeleg mit letzter Prüfung, letztem Erfolg, Stichprobengröße und direktem erneuten Restore-Test.
-- **Recovery Center:** Recovery-Pass mit nachvollziehbarem Score, RPO/RTO, Schutzkalender, geführter Notfallübung, Anomalie-Quarantäne und selektivem Restore in ein getrenntes Server-Staging.
+- **Recovery Center:** Recovery-Pass mit nachvollziehbarem Score, RPO/RTO, Schutzkalender, geführter Notfallübung, Anomalie-Quarantäne, Recovery-Zeitreise mit Änderungsvergleich und selektivem Restore in ein getrenntes Server-Staging.
 - **Notfallübergabe:** lokal teilbares AES-256-GCM-Paket mit redigierter Konfiguration und Nachweisen; Passphrase und Paket werden bewusst getrennt übermittelt.
 - **Offline und mehrere Server:** letzter pfadloser Recovery-Pass bleibt auf dem Gerät; bis zu acht Serverprofile speichern ausschließlich Adresse und Benutzername.
 - **Schutzpfad:** Native Topologie von Quelle über zugewiesene Jobs zum Ziel in einem schlanken Detailfenster.
@@ -41,7 +42,7 @@ Jeder Tag im Format `ios-vX.Y.Z`, beispielsweise `ios-v1.0.0`, startet danach au
 
 ## Verbindung
 
-Die Serveradresse muss auf den von außen erreichbaren Reverse Proxy der rclone-sync-Webanwendung zeigen, zum Beispiel `https://backup.example.de`. Eine lokale IP-Adresse ohne Schema, etwa `192.168.1.67`, wird automatisch als `http://192.168.1.67` über den HTTP-Standardport 80 verwendet. Abweichende Ports können explizit angegeben werden. Der interne Uvicorn-Port 8001 ist bei der Standardinstallation nur an `127.0.0.1` gebunden und vom iPhone nicht direkt erreichbar. HTTPS ist für produktive Installationen vorgesehen. Lokale Netzwerkverbindungen sind erlaubt; unsichere beliebige HTTP-Verbindungen werden durch App Transport Security nicht global freigegeben.
+Die Serveradresse muss auf den von außen erreichbaren Reverse Proxy des Sicherpfad-Servers zeigen, zum Beispiel `https://backup.example.de`. Eine lokale IP-Adresse ohne Schema, etwa `192.168.1.67`, wird automatisch als `http://192.168.1.67` über den HTTP-Standardport 80 verwendet. Abweichende Ports können explizit angegeben werden. Der interne Uvicorn-Port 8001 ist bei der Standardinstallation nur an `127.0.0.1` gebunden und vom iPhone nicht direkt erreichbar. HTTPS ist für produktive Installationen vorgesehen. Lokale Netzwerkverbindungen sind erlaubt; unsichere beliebige HTTP-Verbindungen werden durch App Transport Security nicht global freigegeben.
 
 Das Passwort wird nur für den Login übertragen und nicht gespeichert. Bei WebAuthn verbleibt der private Schlüssel im iCloud-Schlüsselbund, System-Authenticator oder physischen FIDO2-Schlüssel; die App erhält nur einen einmal verwendbaren Sitzungscode. Serveradresse und Benutzername liegen in `UserDefaults`; die Sitzung bleibt in Apples Cookie-Speicher. Der Privacy-Manifest deklariert diesen ausschließlich app-internen `UserDefaults`-Zugriff mit Apples Grund `CA92.1`; Tracking und Datensammlung sind deaktiviert.
 

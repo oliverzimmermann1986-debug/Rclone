@@ -338,7 +338,7 @@ function app() {
     },
 
     pageTitle() {
-      return ({ dashboard: 'Lagebild', pairs: 'Datenwege', definitions: 'Jobs', runs: 'Läufe', doctor: 'System', settings: 'Einstellungen' })[this.page] || 'rclone-sync';
+      return ({ dashboard: 'Lagebild', pairs: 'Datenwege', definitions: 'Jobs', runs: 'Läufe', doctor: 'System', settings: 'Einstellungen' })[this.page] || 'Sicherpfad';
     },
 
     cookie(name) {

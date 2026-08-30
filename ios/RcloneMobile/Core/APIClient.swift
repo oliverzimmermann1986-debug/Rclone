@@ -25,11 +25,11 @@ enum APIError: LocalizedError, Equatable {
         case .unauthenticated:
             "Die Sitzung ist abgelaufen. Bitte erneut anmelden."
         case .invalidResponse:
-            "Die Serverantwort konnte nicht geprüft werden. Prüfe, ob die Adresse zu Rclone Sync gehört, und versuche es erneut."
+            "Die Serverantwort konnte nicht geprüft werden. Prüfe, ob die Adresse zu deinem Sicherpfad-Server gehört, und versuche es erneut."
         case let .incompatibleResponse(resource):
             "\(resource) konnte nicht gelesen werden. Aktualisiere Server oder App und versuche es erneut."
         case let .serverFeatureUnavailable(feature):
-            "Diese Serverversion unterstützt „\(feature)“ noch nicht. Aktualisiere Rclone Sync auf dem Server und versuche es erneut."
+            "Diese Serverversion unterstützt „\(feature)“ noch nicht. Aktualisiere den Sicherpfad-Server und versuche es erneut."
         case let .server(_, message):
             message
         case .loginFailed:
@@ -110,6 +110,15 @@ protocol APIClientProtocol: AnyObject {
     func acknowledgeRecoveryQuarantine(identity: String, currentPassword: String) async throws -> ActionResponse
     func downloadRecoveryPass(includePaths: Bool) async throws -> URL
     func downloadRecoveryHandover(_ request: RecoveryHandoverRequest) async throws -> URL
+    func getRecoveryPoints(identity: String) async throws -> RecoveryPointsResponse
+    func browseRecoveryPoint(identity: String, pointID: String, path: String) async throws -> RecoveryPointBrowseResponse
+    func getRecoveryDiff(identity: String, fromPoint: String, toPoint: String) async throws -> RecoveryDiffResponse
+    func createVaultUpload(_ request: VaultUploadRequest) async throws -> VaultUploadStatus
+    func uploadVaultChunk(uploadID: String, offset: Int64, data: Data) async throws -> VaultUploadStatus
+    func completeVaultUpload(uploadID: String) async throws -> VaultUploadStatus
+    func getVaultUpload(uploadID: String) async throws -> VaultUploadStatus
+    func getVaultLibrary(identity: String?) async throws -> VaultLibraryResponse
+    func downloadVaultItem(id: String, filename: String) async throws -> URL
     func logout() async throws -> LogoutResult
     func clearLocalSession()
 }
@@ -152,6 +161,15 @@ extension APIClientProtocol {
     func acknowledgeRecoveryQuarantine(identity: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
     func downloadRecoveryPass(includePaths: Bool) async throws -> URL { throw APIError.invalidResponse }
     func downloadRecoveryHandover(_ request: RecoveryHandoverRequest) async throws -> URL { throw APIError.invalidResponse }
+    func getRecoveryPoints(identity: String) async throws -> RecoveryPointsResponse { throw APIError.invalidResponse }
+    func browseRecoveryPoint(identity: String, pointID: String, path: String) async throws -> RecoveryPointBrowseResponse { throw APIError.invalidResponse }
+    func getRecoveryDiff(identity: String, fromPoint: String, toPoint: String) async throws -> RecoveryDiffResponse { throw APIError.invalidResponse }
+    func createVaultUpload(_ request: VaultUploadRequest) async throws -> VaultUploadStatus { throw APIError.invalidResponse }
+    func uploadVaultChunk(uploadID: String, offset: Int64, data: Data) async throws -> VaultUploadStatus { throw APIError.invalidResponse }
+    func completeVaultUpload(uploadID: String) async throws -> VaultUploadStatus { throw APIError.invalidResponse }
+    func getVaultUpload(uploadID: String) async throws -> VaultUploadStatus { throw APIError.invalidResponse }
+    func getVaultLibrary(identity: String?) async throws -> VaultLibraryResponse { throw APIError.invalidResponse }
+    func downloadVaultItem(id: String, filename: String) async throws -> URL { throw APIError.invalidResponse }
 }
 
 struct NativeLoginChallenge: Decodable, Equatable {
@@ -518,6 +536,86 @@ final class APIClient: APIClientProtocol {
         )
     }
 
+    func getRecoveryPoints(identity: String) async throws -> RecoveryPointsResponse {
+        do {
+            return try await get("/api/recovery/points?identity=\(Self.queryEncode(identity))", timeout: 75)
+        } catch APIError.server(let status, let message)
+            where Self.isMissingCreateDirectoryEndpoint(status: status, message: message) {
+            throw APIError.serverFeatureUnavailable(feature: "Recovery-Zeitreise")
+        }
+    }
+
+    func browseRecoveryPoint(
+        identity: String,
+        pointID: String,
+        path: String = ""
+    ) async throws -> RecoveryPointBrowseResponse {
+        try await get(
+            "/api/recovery/points/\(Self.pathEncode(pointID))/browse?identity=\(Self.queryEncode(identity))&path=\(Self.queryEncode(path))",
+            timeout: 75
+        )
+    }
+
+    func getRecoveryDiff(
+        identity: String,
+        fromPoint: String,
+        toPoint: String = "current"
+    ) async throws -> RecoveryDiffResponse {
+        try await get(
+            "/api/recovery/diff?identity=\(Self.queryEncode(identity))&from_point=\(Self.queryEncode(fromPoint))&to_point=\(Self.queryEncode(toPoint))",
+            timeout: 180
+        )
+    }
+
+    func createVaultUpload(_ request: VaultUploadRequest) async throws -> VaultUploadStatus {
+        do {
+            return try await post("/api/vault/uploads", body: request, timeout: 30)
+        } catch APIError.server(let status, let message)
+            where Self.isMissingCreateDirectoryEndpoint(status: status, message: message) {
+            throw APIError.serverFeatureUnavailable(feature: "Geräte-Vault")
+        }
+    }
+
+    func uploadVaultChunk(
+        uploadID: String,
+        offset: Int64,
+        data: Data
+    ) async throws -> VaultUploadStatus {
+        var request = URLRequest(
+            url: url(for: "/api/vault/uploads/\(Self.pathEncode(uploadID))?offset=\(offset)")
+        )
+        request.httpMethod = "PUT"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue(origin, forHTTPHeaderField: "Origin")
+        request.timeoutInterval = 120
+        try addCSRF(to: &request)
+        request.httpBody = data
+        return try await send(request)
+    }
+
+    func completeVaultUpload(uploadID: String) async throws -> VaultUploadStatus {
+        let response: VaultUploadStatus = try await post(
+            "/api/vault/uploads/\(Self.pathEncode(uploadID))/complete"
+        )
+        return response
+    }
+
+    func getVaultUpload(uploadID: String) async throws -> VaultUploadStatus {
+        try await get("/api/vault/uploads/\(Self.pathEncode(uploadID))")
+    }
+
+    func getVaultLibrary(identity: String? = nil) async throws -> VaultLibraryResponse {
+        let suffix = identity.map { "?identity=\(Self.queryEncode($0))" } ?? ""
+        return try await get("/api/vault/library\(suffix)")
+    }
+
+    func downloadVaultItem(id: String, filename: String) async throws -> URL {
+        try await download(
+            "/api/vault/library/\(Self.pathEncode(id))/download",
+            filename: "vault-\(UUID().uuidString)-\(filename)"
+        )
+    }
+
     func getJobDefinitions() async throws -> [JobDefinition] {
         try await get("/api/jobs/definitions")
     }
@@ -627,7 +725,7 @@ final class APIClient: APIClientProtocol {
     func downloadSupportBundle() async throws -> URL {
         try await download(
             "/api/maintenance/support-bundle",
-            filename: "rclone-sync-support-\(UUID().uuidString).zip"
+            filename: "sicherpfad-support-\(UUID().uuidString).zip"
         )
     }
 
@@ -652,7 +750,7 @@ final class APIClient: APIClientProtocol {
         if !query.isEmpty { parameters.append("q=\(Self.queryEncode(query))") }
         return try await download(
             "/api/jobs/export.csv?\(parameters.joined(separator: "&"))",
-            filename: "rclone-sync-jobs-\(UUID().uuidString).csv"
+            filename: "sicherpfad-jobs-\(UUID().uuidString).csv"
         )
     }
 
@@ -667,7 +765,7 @@ final class APIClient: APIClientProtocol {
     func downloadJobLog(id: Int) async throws -> URL {
         try await download(
             "/api/jobs/\(id)/log/download",
-            filename: "rclone-sync-job-\(id)-\(UUID().uuidString).log"
+            filename: "sicherpfad-job-\(id)-\(UUID().uuidString).log"
         )
     }
 

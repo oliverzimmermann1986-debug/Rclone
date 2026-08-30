@@ -22,6 +22,9 @@ struct SystemView: View {
                 }
                 schedulerSection
                 Section("Spezialwerkzeuge") {
+                    NavigationLink { DeviceVaultView() } label: {
+                        Label("Geräte-Vault", systemImage: "iphone.and.arrow.forward")
+                    }
                     NavigationLink { RecoveryCenterView() } label: {
                         Label("Recovery Center", systemImage: "lifepreserver")
                     }
@@ -43,7 +46,7 @@ struct SystemView: View {
                 }
                 diagnosticsSection
                 Section("Software") {
-                    LabeledContent("Rclone Sync", value: model.overview?.app.version ?? "–")
+                    LabeledContent("Sicherpfad Server", value: model.overview?.app.version ?? "–")
                     LabeledContent("Python", value: system.python)
                     LabeledContent("Kernel", value: system.kernel)
                 }
@@ -165,7 +168,7 @@ private struct PushStatusView: View {
             } header: {
                 Text("Dieses iPhone")
             } footer: {
-                Text("Rclone Sync informiert nur über Sicherungs- und Prüfprobleme, nicht über erfolgreiche Läufe.")
+                Text("Sicherpfad informiert nur über Sicherungs- und Prüfprobleme, nicht über erfolgreiche Läufe.")
             }
             if let status {
                 Section("Bereitschaft") {
