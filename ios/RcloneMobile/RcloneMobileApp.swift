@@ -30,7 +30,11 @@ private struct AppRootView: View {
             case .signedOut:
                 LoginView()
             case .signedIn:
-                RootTabView()
+                if StorePreviewMode.opensDeviceVault {
+                    NavigationStack { DeviceVaultView() }
+                } else {
+                    RootTabView()
+                }
             }
         }
         .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: model.phase)
