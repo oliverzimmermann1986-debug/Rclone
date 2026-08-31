@@ -31,6 +31,15 @@ def test_store_preview_fixture_covers_all_primary_tabs():
     assert fixture["doctor"]["ok"] is True
 
 
+def test_vault_store_preview_renders_directly_without_a_dimming_sheet():
+    app = (ROOT / "ios" / "RcloneMobile" / "RcloneMobileApp.swift").read_text(
+        encoding="utf-8"
+    )
+
+    assert "if StorePreviewMode.opensDeviceVault" in app
+    assert "NavigationStack { DeviceVaultView() }" in app
+
+
 def test_support_and_privacy_pages_are_publishable_without_tracking():
     support = (ROOT / "docs" / "index.html").read_text(encoding="utf-8")
     privacy = (ROOT / "docs" / "datenschutz.html").read_text(encoding="utf-8")
