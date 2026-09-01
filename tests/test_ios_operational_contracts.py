@@ -68,6 +68,7 @@ def test_storage_cards_drill_into_native_privacy_preserving_charts():
 
 def test_dashboard_exposes_distinct_evidence_based_protection_score():
     models = _swift("Core/Models.swift")
+    model = _swift("Core/AppModel.swift")
     dashboard = _swift("Views/DashboardView.swift")
     protection_path = _swift("Views/ProtectionPathView.swift")
 
@@ -87,6 +88,12 @@ def test_dashboard_exposes_distinct_evidence_based_protection_score():
     assert "Schutzschild" in assessment
     assert "Incident Center" in incidents
     assert "Empfohlener nächster Schritt" in incidents
+    assert 'return (\n                "Restore-Test"' in incidents
+    assert "activeRestoreTestPairs" in model
+    assert "isRestoreTestRunning(for pair: String)" in model
+    assert "trackingRestorePairs" in model
+    assert "isRestoreTesting: model.isRestoreTestRunning(for: pair.name)" in dashboard
+    assert "current.isEmpty" in _swift("Views/RecoveryCenterView.swift")
     assert "struct RestoreEvidence: Decodable, Equatable" in models
     assert 'case restoreEvidence = "restore_evidence"' in models
     assert "ProtectionPathDetailView" in dashboard

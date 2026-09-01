@@ -65,6 +65,18 @@ extension ProtectionIncident {
         if value.contains("network") || value.contains("connection") || value.contains("not found") || value.contains("server") {
             return ("Verbindung", "Serveradresse, Port, TLS und Erreichbarkeit prüfen. Danach die Lage neu laden.")
         }
+        if value.contains("rückholen fehlgeschlagen") || value.contains("rclone copy exit") || value.contains("restore fehlgeschlagen") {
+            return (
+                "Restore-Test",
+                "Restore-Protokoll öffnen und Sicherungsziel prüfen. Nach der Korrektur die Notfallübung erneut starten."
+            )
+        }
+        if value.contains("prüfsumme") || value.contains("checksum") {
+            return (
+                "Datenintegrität",
+                "Abweichende Datei im Restore-Protokoll prüfen und Quelle sowie Sicherung vor einem produktiven Lauf vergleichen."
+            )
+        }
         if value.contains("überfällig") || value.contains("scheduler") || value.contains("zeitplan") {
             return ("Zeitplan", "Schedulerzustand und nächste Ausführung prüfen; bei Bedarf einen sicheren manuellen Lauf starten.")
         }

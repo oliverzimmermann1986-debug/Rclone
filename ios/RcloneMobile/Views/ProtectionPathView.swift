@@ -3,6 +3,7 @@ import Charts
 
 struct RestoreEvidenceBadge: View {
     let evidence: RestoreEvidence?
+    let isRunning: Bool
 
     var body: some View {
         Label(title, systemImage: symbol)
@@ -12,6 +13,7 @@ struct RestoreEvidenceBadge: View {
     }
 
     private var title: String {
+        if isRunning { return "Restore wird geprüft" }
         switch evidence?.state {
         case "passed": "Restore geprüft"
         case "failed": "Restore fehlgeschlagen"
@@ -21,6 +23,7 @@ struct RestoreEvidenceBadge: View {
     }
 
     private var symbol: String {
+        if isRunning { return "arrow.clockwise.circle.fill" }
         switch evidence?.state {
         case "passed": "checkmark.seal.fill"
         case "failed": "xmark.octagon.fill"
@@ -30,6 +33,7 @@ struct RestoreEvidenceBadge: View {
     }
 
     private var color: Color {
+        if isRunning { return .blue }
         switch evidence?.state {
         case "passed": .green
         case "failed": .red
@@ -102,7 +106,11 @@ struct ProtectionPathDetailView: View {
                     value: pair.restoreEvidence?.checksumVerified == true ? "Bestätigt" : "Nicht bestätigt"
                 )
                 LabeledContent("Stichprobe", value: sampleDescription)
-                if let error = pair.restoreEvidence?.error, !error.isEmpty {
+                if isRestoreTestRunning {
+                    Label("Stichprobe wird zurückgeholt und geprüft.", systemImage: "hourglass")
+                        .font(.subheadline)
+                        .foregroundStyle(.blue)
+                } else if let error = pair.restoreEvidence?.error, !error.isEmpty {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.subheadline)
                         .foregroundStyle(.red)
@@ -120,10 +128,13 @@ struct ProtectionPathDetailView: View {
             Section {
                 Button { confirmRestore = true } label: {
                     Label(
-                        pair.restoreEvidence?.state == "passed" ? "Nachweis erneuern" : "Restore-Test starten",
-                        systemImage: "arrow.counterclockwise.circle.fill"
+                        isRestoreTestRunning
+                            ? "Restore-Test läuft …"
+                            : pair.restoreEvidence?.state == "passed" ? "Nachweis erneuern" : "Restore-Test starten",
+                        systemImage: isRestoreTestRunning ? "hourglass" : "arrow.counterclockwise.circle.fill"
                     )
                 }
+                .disabled(isRestoreTestRunning)
             } footer: {
                 Text("Der Test lädt eine begrenzte Stichprobe in ein temporäres Verzeichnis, vergleicht Prüfsummen und entfernt die Kopien anschließend.")
             }
@@ -203,6 +214,7 @@ struct ProtectionPathDetailView: View {
     }
 
     private var evidenceTitle: String {
+        if isRestoreTestRunning { return "Prüfung läuft" }
         switch pair.restoreEvidence?.state {
         case "passed": "Wiederherstellbar"
         case "failed": "Prüfung fehlgeschlagen"
@@ -212,6 +224,7 @@ struct ProtectionPathDetailView: View {
     }
 
     private var evidenceSubtitle: String {
+        if isRestoreTestRunning { return "Stichprobe wird zurückgeholt und per Prüfsumme verglichen." }
         if let success = pair.restoreEvidence?.lastSuccessAt {
             return "Zuletzt bestätigt \(AppFormat.relative(success))"
         }
@@ -219,6 +232,7 @@ struct ProtectionPathDetailView: View {
     }
 
     private var evidenceColor: Color {
+        if isRestoreTestRunning { return .blue }
         switch pair.restoreEvidence?.state {
         case "passed": .green
         case "failed": .red
@@ -227,6 +241,7 @@ struct ProtectionPathDetailView: View {
     }
 
     private var evidenceSymbol: String {
+        if isRestoreTestRunning { return "arrow.clockwise.circle.fill" }
         switch pair.restoreEvidence?.state {
         case "passed": "checkmark.seal.fill"
         case "failed": "xmark.octagon.fill"
@@ -238,6 +253,10 @@ struct ProtectionPathDetailView: View {
         guard let verified = pair.restoreEvidence?.verifiedFiles,
               let sampled = pair.restoreEvidence?.sampleSize else { return "Noch kein Beleg" }
         return "\(verified) von \(sampled) Dateien"
+    }
+
+    private var isRestoreTestRunning: Bool {
+        model.isRestoreTestRunning(for: pair.name)
     }
 
     private func pathNode(title: String, path: String, symbol: String) -> some View {

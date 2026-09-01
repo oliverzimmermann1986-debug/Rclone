@@ -34,7 +34,6 @@ from ..utils import bounded_int as _bounded_int
 from .rclone_sync import (
     DEFAULT_CANCEL_SCOPE,
     _SnapshotConfig,
-    _filter_args,
     _rclone_cache_args,
     _register_proc,
     _run_rclone_command,
@@ -496,8 +495,11 @@ def run_pair_restore_test(
             return result
 
         listing = _write_file_list(paths, workdir)
-        filter_args = _filter_args(cfg, dict(pair), "check")
 
+        # Die Stichprobe ist bereits eine abgeschlossene, exakte Dateiauswahl.
+        # rclone verbietet, --files-from-raw mit normalen Include-/Exclude-
+        # Filtern (unter anderem --filter-from) zu kombinieren. Pair- und
+        # globale Filter dürfen deshalb hier nicht erneut angehängt werden.
         copy_cmd = [
             "rclone",
             "copy",
@@ -511,7 +513,6 @@ def run_pair_restore_test(
             "--stats",
             "10s",
             "--stats-one-line",
-            *filter_args,
             "--",
             copy_target,
             str(restored),

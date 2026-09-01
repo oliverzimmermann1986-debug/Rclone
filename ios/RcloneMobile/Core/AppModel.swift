@@ -92,6 +92,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var requestedRunID: Int?
     @Published private(set) var batchDefinitions: [BatchDefinitionState] = []
     @Published private(set) var batchIsRunning = false
+    @Published private(set) var activeRestoreTestPairs: Set<String> = []
     @Published private(set) var isDemoMode = false
     @Published private(set) var savedServerProfiles: [SavedServerProfile] = []
 
@@ -711,11 +712,19 @@ final class AppModel: ObservableObject {
     }
 
     func runRestoreTest(pair: String?) async -> Bool {
-        await runOperationalAction(
-            success: pair == nil ? "Systemweiter Wiederherstellungstest wurde gestartet." : "Wiederherstellungstest wurde gestartet."
+        let targetPairs = pair.map { Set([$0]) }
+            ?? Set(storage?.pairs.map(\.name) ?? config?.backup.pairs.map(\.name) ?? [])
+        activeRestoreTestPairs = targetPairs
+        return await runOperationalAction(
+            success: pair == nil ? "Systemweiter Wiederherstellungstest wurde gestartet." : "Wiederherstellungstest wurde gestartet.",
+            trackingRestorePairs: targetPairs
         ) { client in
             try await client.runRestoreTest(pair: pair)
         }
+    }
+
+    func isRestoreTestRunning(for pair: String) -> Bool {
+        activeRestoreTestPairs.contains(pair)
     }
 
     func savePBSConfiguration(
@@ -769,19 +778,24 @@ final class AppModel: ObservableObject {
 
     private func runOperationalAction(
         success: String,
+        trackingRestorePairs: Set<String> = [],
         _ operation: (any APIClientProtocol) async throws -> ActionResponse
     ) async -> Bool {
         do {
             let response = try await withCurrentClient(operation)
             actionMessage = response.ok ? success : (response.error ?? "Aktion konnte nicht gestartet werden.")
             if response.ok {
-                beginRunTracking(response)
+                beginRunTracking(response, restorePairs: trackingRestorePairs)
                 await refreshVisibleRunData()
+            } else {
+                activeRestoreTestPairs.subtract(trackingRestorePairs)
             }
             return response.ok
         } catch is CancellationError {
+            activeRestoreTestPairs.subtract(trackingRestorePairs)
             return false
         } catch {
+            activeRestoreTestPairs.subtract(trackingRestorePairs)
             errorMessage = userMessage(for: error)
             return false
         }
@@ -1063,11 +1077,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func beginRunTracking(_ response: ActionResponse) {
+    private func beginRunTracking(
+        _ response: ActionResponse,
+        restorePairs: Set<String> = []
+    ) {
         let expectedDefinitionIDs = Set(response.definitions.map(\.definitionID).filter { !$0.isEmpty })
         let expectedJobIDs = Set([response.jobID].compactMap { $0 })
-        guard !expectedDefinitionIDs.isEmpty || !expectedJobIDs.isEmpty else { return }
         runTrackingTask?.cancel()
+        activeRestoreTestPairs = restorePairs
+        guard !expectedDefinitionIDs.isEmpty || !expectedJobIDs.isEmpty else {
+            activeRestoreTestPairs.removeAll()
+            return
+        }
         batchDefinitions = response.definitions
         batchIsRunning = true
         let session = sessionGeneration
@@ -1078,7 +1099,8 @@ final class AppModel: ObservableObject {
                 expectedDefinitionIDs: expectedDefinitionIDs,
                 expectedJobIDs: expectedJobIDs,
                 startedAt: startedAt,
-                session: session
+                session: session,
+                restorePairs: restorePairs
             )
         }
     }
@@ -1087,7 +1109,8 @@ final class AppModel: ObservableObject {
         expectedDefinitionIDs: Set<String>,
         expectedJobIDs: Set<Int>,
         startedAt: Double,
-        session: Int
+        session: Int,
+        restorePairs: Set<String>
     ) async {
         var quietPolls = 0
         var observedDefinitions: Set<String> = []
@@ -1146,6 +1169,7 @@ final class AppModel: ObservableObject {
                     }
                     batchIsRunning = false
                     await refreshVisibleRunData()
+                    activeRestoreTestPairs.subtract(restorePairs)
                     return
                 }
             } catch APIError.unauthenticated {
@@ -1479,6 +1503,7 @@ final class AppModel: ObservableObject {
         runTrackingTask = nil
         batchDefinitions = []
         batchIsRunning = false
+        activeRestoreTestPairs = []
         isDemoMode = false
         phase = .signedOut
     }
