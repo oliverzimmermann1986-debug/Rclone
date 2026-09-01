@@ -42,6 +42,11 @@ struct RecoveryCenterView: View {
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await load() }
         .task { await load() }
+        .onChange(of: model.activeRestoreTestPairs) { previous, current in
+            if !previous.isEmpty, current.isEmpty {
+                Task { await load() }
+            }
+        }
         .sheet(isPresented: $showingHandover) {
             NavigationStack { RecoveryHandoverView() }
         }
@@ -336,12 +341,17 @@ struct RecoveryCenterView: View {
 }
 
 private struct RecoveryPathRow: View {
+    @EnvironmentObject private var model: AppModel
     let path: RecoveryDataPath
+
+    private var isRestoreTesting: Bool {
+        model.isRestoreTestRunning(for: path.name)
+    }
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: path.restore.state == "passed" ? "checkmark.shield.fill" : "arrow.counterclockwise.circle")
-                .foregroundStyle(path.restore.state == "passed" ? .green : .orange)
+            Image(systemName: isRestoreTesting ? "hourglass" : path.restore.state == "passed" ? "checkmark.shield.fill" : "arrow.counterclockwise.circle")
+                .foregroundStyle(isRestoreTesting ? .blue : path.restore.state == "passed" ? .green : .orange)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 3) {
                 Text(path.name).font(.headline)
@@ -349,9 +359,9 @@ private struct RecoveryPathRow: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Text(path.restore.state == "passed" ? "Geprüft" : "Offen")
+            Text(isRestoreTesting ? "Prüft …" : path.restore.state == "passed" ? "Geprüft" : "Offen")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(path.restore.state == "passed" ? .green : .orange)
+                .foregroundStyle(isRestoreTesting ? .blue : path.restore.state == "passed" ? .green : .orange)
         }
     }
 }
@@ -373,11 +383,17 @@ private struct RecoveryDataPathDetail: View {
                     Text(dataPath.restore.durationSeconds.map { AppFormat.elapsed($0) } ?? "Noch nicht gemessen")
                         .foregroundStyle(dataPath.restore.durationSeconds == nil ? .orange : .primary)
                 }
-                LabeledContent("Prüfsumme", value: dataPath.restore.checksumVerified ? "Bestätigt" : "Offen")
+                LabeledContent(
+                    "Prüfsumme",
+                    value: isRestoreTesting ? "Wird geprüft" : dataPath.restore.checksumVerified ? "Bestätigt" : "Offen"
+                )
                 if let date = dataPath.restore.lastSuccessAt {
                     LabeledContent("Letzter Restore", value: AppFormat.date(date))
                 }
-                if let error = dataPath.restore.error {
+                if isRestoreTesting {
+                    Label("Stichprobe wird zurückgeholt und geprüft.", systemImage: "hourglass")
+                        .font(.subheadline).foregroundStyle(.blue)
+                } else if let error = dataPath.restore.error {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.subheadline).foregroundStyle(.orange)
                 }
@@ -390,9 +406,13 @@ private struct RecoveryDataPathDetail: View {
                     drillStep(4, "Temp-Daten automatisch vollständig löschen")
                 }
                 Button { confirmDrill = true } label: {
-                    if isStarting { ProgressView() } else { Label("Notfallübung starten", systemImage: "figure.run.circle") }
+                    if isRestoreTesting {
+                        Label("Notfallübung läuft …", systemImage: "hourglass")
+                    } else {
+                        Label("Notfallübung starten", systemImage: "figure.run.circle")
+                    }
                 }
-                .disabled(isStarting || model.isDemoMode)
+                .disabled(isRestoreTesting || model.isDemoMode)
             } header: {
                 Text("Geführte Notfallübung")
             } footer: {
@@ -431,6 +451,10 @@ private struct RecoveryDataPathDetail: View {
         defer { isStarting = false }
         let ok = await model.runRestoreTest(pair: dataPath.name)
         if ok { model.actionMessage = "Notfallübung läuft. RPO und RTO werden nach Abschluss im Recovery-Pass aktualisiert." }
+    }
+
+    private var isRestoreTesting: Bool {
+        isStarting || model.isRestoreTestRunning(for: dataPath.name)
     }
 }
 

@@ -74,7 +74,11 @@ struct DashboardView: View {
                     if let pairs = model.storage?.pairs, !pairs.isEmpty {
                         ForEach(pairs) { pair in
                             Button { selectedProtectionPath = pair } label: {
-                                CopyListRow(pair: pair, isMeasuring: model.storageSizesAreLoading)
+                                CopyListRow(
+                                    pair: pair,
+                                    isMeasuring: model.storageSizesAreLoading,
+                                    isRestoreTesting: model.isRestoreTestRunning(for: pair.name)
+                                )
                             }
                             .buttonStyle(.plain)
                             .accessibilityHint("Öffnet Statistiken, Schutzpfad und Restore-Nachweis.")
@@ -645,6 +649,7 @@ private struct ConfiguredCopyListRow: View {
 private struct CopyListRow: View {
     let pair: StoragePair
     let isMeasuring: Bool
+    let isRestoreTesting: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
@@ -656,7 +661,7 @@ private struct CopyListRow: View {
                     Text(AppFormat.relative(pair.lastSync))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    RestoreEvidenceBadge(evidence: pair.restoreEvidence)
+                    RestoreEvidenceBadge(evidence: pair.restoreEvidence, isRunning: isRestoreTesting)
                 }
             }
 

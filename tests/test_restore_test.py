@@ -410,7 +410,6 @@ def _patch_common(
     sample.setdefault("cancelled", False)
     monkeypatch.setattr(drill, "get_config", lambda: cfg)
     monkeypatch.setattr(drill, "_sample_paths", lambda *a, **kw: sample)
-    monkeypatch.setattr(drill, "_filter_args", lambda *a, **kw: [])
     monkeypatch.setattr(drill, "is_cancelled", lambda *a, **kw: False)
 
     calls = []
@@ -464,6 +463,48 @@ def test_drill_success_reports_verified_and_cleans_up(monkeypatch, tmp_path: Pat
     assert calls[1][-1] == str(tmp_path / "src")
     # Kein Temp-Rest mit Produktivdaten.
     assert list((tmp_path / "temp").glob("restore-*")) == []
+
+
+def test_restore_copy_does_not_mix_exact_file_list_with_normal_filters(
+    monkeypatch, tmp_path: Path
+):
+    cfg, calls = _patch_common(
+        monkeypatch,
+        tmp_path,
+        sample={"paths": ["datei.bin"], "scanned": 1, "truncated": False},
+    )
+    filter_file = tmp_path / "rclone-filters.txt"
+    filter_file.write_text("- *.tmp\n", encoding="utf-8")
+    cfg._data["backup"]["filter_file"] = str(filter_file)
+
+    result = drill.run_pair_restore_test(
+        {
+            "name": "archiv",
+            "direction": "push",
+            "local": str(tmp_path / "src"),
+            "remote": "wasabi:archiv",
+            "include": "*.bin",
+            "exclude": "*.tmp",
+            "filter": "+ wichtige/**",
+            "filter_file": str(filter_file),
+        },
+        log_file=tmp_path / "logs" / "drill.log",
+        settings=drill.restore_test_settings(cfg),
+        seed=1,
+    )
+
+    assert result["ok"] is True
+    copy_cmd = calls[0]
+    assert "--files-from-raw" in copy_cmd
+    for incompatible in (
+        "--include",
+        "--exclude",
+        "--filter",
+        "--filter-from",
+        "--include-from",
+        "--exclude-from",
+    ):
+        assert incompatible not in copy_cmd
 
 
 def test_partial_selection_is_checked_but_fails_closed(monkeypatch, tmp_path: Path):
