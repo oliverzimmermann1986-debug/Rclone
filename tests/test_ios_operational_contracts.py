@@ -101,6 +101,9 @@ def test_dashboard_exposes_distinct_evidence_based_protection_score():
     assert 'Section("Schutzpfad")' in protection_path
     assert 'Section("Schutzschild")' in protection_path
     assert "await model.runRestoreTest(pair: pair.name)" in protection_path
+    assert 'case "passed": return "Wiederherstellbar"' in protection_path
+    assert 'case "passed": return .green' in protection_path
+    assert 'case "passed": return "checkmark.seal.fill"' in protection_path
 
 
 def test_diagnostics_retry_and_app_build_are_visible():
