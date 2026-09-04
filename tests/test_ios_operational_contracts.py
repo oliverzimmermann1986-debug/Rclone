@@ -104,6 +104,9 @@ def test_dashboard_exposes_distinct_evidence_based_protection_score():
     assert 'case "passed": return "Wiederherstellbar"' in protection_path
     assert 'case "passed": return .green' in protection_path
     assert 'case "passed": return "checkmark.seal.fill"' in protection_path
+    assert 'case "never": return "Restore offen"' in protection_path
+    assert 'case "never": return .orange' in protection_path
+    assert "default: return .secondary" in protection_path
 
 
 def test_diagnostics_retry_and_app_build_are_visible():
