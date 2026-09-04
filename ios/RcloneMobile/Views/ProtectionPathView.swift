@@ -15,30 +15,30 @@ struct RestoreEvidenceBadge: View {
     private var title: String {
         if isRunning { return "Restore wird geprüft" }
         switch evidence?.state {
-        case "passed": "Restore geprüft"
-        case "failed": "Restore fehlgeschlagen"
-        case "never": "Restore offen"
-        default: "Nachweis unbekannt"
+        case "passed": return "Restore geprüft"
+        case "failed": return "Restore fehlgeschlagen"
+        case "never": return "Restore offen"
+        default: return "Nachweis unbekannt"
         }
     }
 
     private var symbol: String {
         if isRunning { return "arrow.clockwise.circle.fill" }
         switch evidence?.state {
-        case "passed": "checkmark.seal.fill"
-        case "failed": "xmark.octagon.fill"
-        case "never": "clock.badge.exclamationmark"
-        default: "questionmark.circle"
+        case "passed": return "checkmark.seal.fill"
+        case "failed": return "xmark.octagon.fill"
+        case "never": return "clock.badge.exclamationmark"
+        default: return "questionmark.circle"
         }
     }
 
     private var color: Color {
         if isRunning { return .blue }
         switch evidence?.state {
-        case "passed": .green
-        case "failed": .red
-        case "never": .orange
-        default: .secondary
+        case "passed": return .green
+        case "failed": return .red
+        case "never": return .orange
+        default: return .secondary
         }
     }
 }
