@@ -216,10 +216,10 @@ struct ProtectionPathDetailView: View {
     private var evidenceTitle: String {
         if isRestoreTestRunning { return "Prüfung läuft" }
         switch pair.restoreEvidence?.state {
-        case "passed": "Wiederherstellbar"
-        case "failed": "Prüfung fehlgeschlagen"
-        case "never": "Noch nicht nachgewiesen"
-        default: "Nachweis nicht verfügbar"
+        case "passed": return "Wiederherstellbar"
+        case "failed": return "Prüfung fehlgeschlagen"
+        case "never": return "Noch nicht nachgewiesen"
+        default: return "Nachweis nicht verfügbar"
         }
     }
 
@@ -234,18 +234,18 @@ struct ProtectionPathDetailView: View {
     private var evidenceColor: Color {
         if isRestoreTestRunning { return .blue }
         switch pair.restoreEvidence?.state {
-        case "passed": .green
-        case "failed": .red
-        default: .orange
+        case "passed": return .green
+        case "failed": return .red
+        default: return .orange
         }
     }
 
     private var evidenceSymbol: String {
         if isRestoreTestRunning { return "arrow.clockwise.circle.fill" }
         switch pair.restoreEvidence?.state {
-        case "passed": "checkmark.seal.fill"
-        case "failed": "xmark.octagon.fill"
-        default: "clock.badge.exclamationmark"
+        case "passed": return "checkmark.seal.fill"
+        case "failed": return "xmark.octagon.fill"
+        default: return "clock.badge.exclamationmark"
         }
     }
 
