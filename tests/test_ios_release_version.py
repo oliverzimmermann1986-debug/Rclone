@@ -71,7 +71,9 @@ def test_codemagic_verifies_fetched_main_and_exact_signed_tag_before_release_cha
     assert "groups:\n        - ios-release" in config
     assert "config --local gpg.format openpgp" in config
     assert 'config --local gpg.program "$(command -v gpg)"' in config
-    assert "gpg (GnuPG) 2.5.21" in config
+    assert 'GPG_VERSION="$(gpg --version | head -n 1)"' in config
+    assert "^gpg \\(GnuPG\\) 2\\.([4-9]|[1-9][0-9])\\." in config
+    assert "gpg (GnuPG) 2.5.21" not in config
     assert verifier_install < config.index("gpg --batch --quiet --import")
     assert config.index("IMPORTED_FINGERPRINT") < provenance
     assert config.index("gpg --batch --quiet --import") < provenance
