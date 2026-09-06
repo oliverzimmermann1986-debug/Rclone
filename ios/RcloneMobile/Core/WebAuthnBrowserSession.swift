@@ -59,7 +59,7 @@ final class WebAuthnBrowserSession: NSObject, ASWebAuthenticationPresentationCon
         guard let authenticationURL = components.url else { throw APIError.invalidServer }
 
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WebAuthnExchange, Error>) in
                 let browserSession = ASWebAuthenticationSession(
                     url: authenticationURL,
                     callbackURLScheme: "rclonesync"
@@ -116,7 +116,7 @@ final class WebAuthnBrowserSession: NSObject, ASWebAuthenticationPresentationCon
         guard let registrationURL = components.url else { throw APIError.invalidServer }
 
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let browserSession = ASWebAuthenticationSession(
                     url: registrationURL,
                     callbackURLScheme: "rclonesync"
