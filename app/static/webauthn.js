@@ -24,10 +24,8 @@
     const headers = new Headers(options.headers || {});
     headers.set("Accept", "application/json");
     if (options.body) headers.set("Content-Type", "application/json");
-    if (!["GET", "HEAD"].includes((options.method || "GET").toUpperCase())) {
-      const csrf = csrfToken();
-      if (csrf) headers.set("X-CSRF-Token", csrf);
-    }
+    const csrf = csrfToken();
+    if (csrf) headers.set("X-CSRF-Token", csrf);
     const response = await fetch(path, {...options, headers, credentials: "same-origin"});
     let payload = {};
     try { payload = await response.json(); } catch (_) { /* non-JSON proxy error */ }
@@ -129,6 +127,32 @@
     await loadCredentials();
   }
 
+  async function registerNative(method) {
+    if (!window.PublicKeyCredential || !navigator.credentials) {
+      throw new Error("Dieser Browser unterstützt WebAuthn nicht.");
+    }
+    const token = document.body.dataset.registrationToken || "";
+    const verifier = document.body.dataset.registrationVerifier
+      || new URLSearchParams(window.location.hash.slice(1)).get("verifier")
+      || "";
+    if (!token || !verifier) {
+      throw new Error("Die App-Freigabe ist unvollständig. Starte die Passkey-Erstellung erneut.");
+    }
+    document.body.dataset.registrationVerifier = verifier;
+    window.history.replaceState({}, document.title, window.location.pathname);
+    const start = await request("/api/webauthn/native/registration/options", {
+      method: "POST",
+      body: JSON.stringify({token, verifier})
+    });
+    const credential = await navigator.credentials.create({publicKey: decodeCreationOptions(start.publicKey)});
+    if (!credential) throw new Error("Die Registrierung wurde abgebrochen.");
+    await request("/api/webauthn/native/registration/verify", {
+      method: "POST",
+      body: JSON.stringify({challenge_id: start.challenge_id, credential: credentialJSON(credential)})
+    });
+    window.location.assign("rclonesync://webauthn-registration?status=success");
+  }
+
   async function loadCredentials() {
     const target = document.querySelector("[data-webauthn-credentials]");
     if (!target) return;
@@ -186,6 +210,8 @@
           window.location.assign(`rclonesync://webauthn?token=${encodeURIComponent(result.native_exchange_token)}`);
         } else if (action === "register") {
           await register(method);
+        } else if (action === "native-register") {
+          await registerNative(method);
         }
       } catch (error) {
         if (error?.name !== "NotAllowedError") showError(error?.message || "Die Aktion ist fehlgeschlagen.");

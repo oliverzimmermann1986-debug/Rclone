@@ -1,4 +1,5 @@
 import SwiftUI
+import AuthenticationServices
 
 struct SystemView: View {
     @EnvironmentObject private var model: AppModel
@@ -38,10 +39,8 @@ struct SystemView: View {
                     NavigationLink { PushStatusView() } label: {
                         Label("Push-Mitteilungen", systemImage: "bell.badge")
                     }
-                    if let securityURL = securityManagementURL {
-                        Link(destination: securityURL) {
-                            Label("Passkeys & Sicherheitsschlüssel", systemImage: "person.badge.key")
-                        }
+                    NavigationLink { WebAuthnSecurityView() } label: {
+                        Label("Passkeys & Sicherheitsschlüssel", systemImage: "person.badge.key")
                     }
                 }
                 diagnosticsSection
@@ -82,14 +81,6 @@ struct SystemView: View {
             Button("Fortsetzen") { Task { await model.resumeScheduler() } }
             Button("Abbrechen", role: .cancel) {}
         }
-    }
-
-    private var securityManagementURL: URL? {
-        guard !model.serverAddress.isEmpty,
-              let baseURL = try? APIClient.normalizedServerURL(model.serverAddress) else {
-            return nil
-        }
-        return URL(string: baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/security")
     }
 
     private var schedulerSection: some View {
@@ -147,6 +138,149 @@ struct SystemView: View {
             }
         }
     }
+}
+
+struct WebAuthnSecurityView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var credentials: [WebAuthnCredential] = []
+    @State private var isLoading = false
+    @State private var isRegistering = false
+    @State private var message: SecurityMessage?
+
+    var body: some View {
+        List {
+            Section {
+                Button { Task { await createPasskey() } } label: {
+                    HStack(spacing: 12) {
+                        if isRegistering { ProgressView() }
+                        Label("Passkey in der App erstellen", systemImage: "person.badge.key.fill")
+                    }
+                }
+                .disabled(isRegistering)
+                .accessibilityIdentifier("createPasskeyButton")
+            } header: {
+                Text("Neuer Zugang")
+            } footer: {
+                Text("iOS bestätigt die Anlage mit Face ID oder deinem Gerätecode. Der private Schlüssel verlässt den Apple-Schlüsselbund nicht.")
+            }
+
+            Section("Registrierte Zugänge") {
+                if isLoading && credentials.isEmpty {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Zugänge werden geladen …").foregroundStyle(.secondary)
+                    }
+                } else if credentials.isEmpty {
+                    ContentUnavailableView(
+                        "Noch kein sicherer Zugang",
+                        systemImage: "key.slash",
+                        description: Text("Erstelle zuerst einen Passkey. Danach kannst du dich ohne Passwort anmelden.")
+                    )
+                } else {
+                    ForEach(credentials) { credential in
+                        HStack(spacing: 12) {
+                            Image(systemName: credential.method == "passkey" ? "person.badge.key.fill" : "key.horizontal.fill")
+                                .foregroundStyle(.green)
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(credential.label.isEmpty ? credentialTitle(credential) : credential.label)
+                                    .font(.body.weight(.semibold))
+                                Text(credentialDetails(credential))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if credential.backedUp {
+                                Image(systemName: "icloud.fill")
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityLabel("Im Schlüsselbund synchronisiert")
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let securityURL {
+                Section {
+                    Link(destination: securityURL) {
+                        Label("Zugänge entfernen oder Schlüssel hinzufügen", systemImage: "safari")
+                    }
+                } footer: {
+                    Text("Für das Entfernen eines Zugangs oder einen physischen Sicherheitsschlüssel öffnet Sicherpfad die geschützte Serververwaltung.")
+                }
+            }
+        }
+        .navigationTitle("Sichere Zugänge")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable { await loadCredentials() }
+        .task { await loadCredentials() }
+        .alert(item: $message) { item in
+            Alert(title: Text(item.title), message: Text(item.text), dismissButton: .default(Text("OK")))
+        }
+    }
+
+    private var securityURL: URL? {
+        guard !model.serverAddress.isEmpty,
+              let baseURL = try? APIClient.normalizedServerURL(model.serverAddress) else {
+            return nil
+        }
+        return URL(
+            string: baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/security"
+        )
+    }
+
+    private func credentialTitle(_ credential: WebAuthnCredential) -> String {
+        credential.method == "passkey" ? "Passkey" : "Sicherheitsschlüssel"
+    }
+
+    private func credentialDetails(_ credential: WebAuthnCredential) -> String {
+        let type = credentialTitle(credential)
+        return "\(type) · erstellt \(AppFormat.date(credential.createdAt))"
+    }
+
+    private func loadCredentials() async {
+        guard !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            credentials = try await model.webAuthnCredentials()
+        } catch {
+            message = SecurityMessage(
+                title: "Zugänge nicht geladen",
+                text: error.localizedDescription
+            )
+        }
+    }
+
+    private func createPasskey() async {
+        guard !isRegistering else { return }
+        isRegistering = true
+        defer { isRegistering = false }
+        do {
+            try await model.registerWebAuthnCredential(
+                method: "passkey",
+                label: "Sicherpfad iPhone"
+            )
+            credentials = try await model.webAuthnCredentials()
+            message = SecurityMessage(
+                title: "Passkey erstellt",
+                text: "Du kannst dich ab jetzt über „Mit Passkey anmelden“ verbinden."
+            )
+        } catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {
+            return
+        } catch {
+            message = SecurityMessage(
+                title: "Passkey nicht erstellt",
+                text: error.localizedDescription
+            )
+        }
+    }
+}
+
+private struct SecurityMessage: Identifiable {
+    let id = UUID()
+    let title: String
+    let text: String
 }
 
 private struct PushStatusView: View {

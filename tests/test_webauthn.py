@@ -56,6 +56,35 @@ def test_native_exchange_is_hashed_and_single_use(tmp_path: Path):
     assert database.native_auth_exchange_consume(token_hash, verifier_hash) is None
 
 
+def test_native_registration_ticket_is_bound_and_single_use(tmp_path: Path):
+    database = Database(tmp_path / "registration-ticket.db")
+    token = "native-registration-token"
+    verifier = "R" * 43
+    verifier_hash = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    database.native_webauthn_registration_create(
+        token_hash,
+        verifier_hash,
+        "admin",
+        "passkey",
+        "Sicherpfad iPhone",
+    )
+
+    assert database.native_webauthn_registration_consume(token_hash, "wrong") is None
+    assert database.native_webauthn_registration_consume(token_hash, verifier_hash) == {
+        "username": "admin",
+        "method": "passkey",
+        "label": "Sicherpfad iPhone",
+    }
+    assert (
+        database.native_webauthn_registration_consume(token_hash, verifier_hash) is None
+    )
+
+
 def test_option_generation_uses_rp_and_separates_authenticator_types(
     tmp_path: Path, monkeypatch
 ):
@@ -159,6 +188,8 @@ def test_verified_registration_persists_only_public_credential_data(
     assert bytes(stored["public_key"]) == b"cose-public-key"
     assert stored["transports"] == ["internal"]
     assert stored["backed_up"] is True
+    assert result["native"] is False
+    assert result["app_binding"] == ""
 
 
 def test_native_exchange_endpoint_sets_session_once_and_security_page_redirects(
@@ -226,3 +257,156 @@ def test_native_exchange_endpoint_sets_session_once_and_security_page_redirects(
             headers={"Origin": "https://backup.example.de"},
         )
         assert replay.status_code == 401
+
+
+def test_authenticated_app_can_register_passkey_through_one_time_browser_ticket(
+    tmp_path: Path, monkeypatch
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "web": {
+                    "username": "admin",
+                    "password_hash": bcrypt.hashpw(
+                        b"very-secure-password", bcrypt.gensalt(rounds=4)
+                    ).decode(),
+                    "secret_key": "test-secret-which-is-long-enough-123456789",
+                    "session_version": 1,
+                    "secure_cookie": True,
+                    "allowed_hosts": ["backup.example.de"],
+                    "webauthn_rp_id": "backup.example.de",
+                    "webauthn_origin": "https://backup.example.de",
+                },
+                "paths": {
+                    "data_dir": str(tmp_path),
+                    "logs_dir": str(tmp_path),
+                    "temp_dir": str(tmp_path),
+                },
+                "backup": {"enabled": True, "pairs": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    database = Database(tmp_path / "native-registration-api.db")
+    monkeypatch.setattr(config_store, "_config", Config(config_path))
+    monkeypatch.setattr(db, "_db", database)
+    monkeypatch.setattr(
+        webauthn_service,
+        "verify_registration_response",
+        lambda **_kwargs: SimpleNamespace(
+            credential_id=b"native-passkey-id",
+            credential_public_key=b"native-public-key",
+            sign_count=0,
+            credential_device_type=SimpleNamespace(value="multi_device"),
+            credential_backed_up=True,
+        ),
+    )
+    from app import main
+
+    login_token = "native-exchange-token-for-registration-session"
+    login_verifier = "L" * 43
+    login_verifier_hash = (
+        base64.urlsafe_b64encode(hashlib.sha256(login_verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+    database.native_auth_exchange_create(
+        hashlib.sha256(login_token.encode()).hexdigest(),
+        login_verifier_hash,
+        "admin",
+    )
+    registration_verifier = "R" * 43
+    registration_challenge = (
+        base64.urlsafe_b64encode(
+            hashlib.sha256(registration_verifier.encode()).digest()
+        )
+        .rstrip(b"=")
+        .decode()
+    )
+
+    with TestClient(main.app, base_url="https://backup.example.de") as client:
+        exchanged = client.post(
+            "/api/webauthn/native/exchange",
+            json={"token": login_token, "verifier": login_verifier},
+            headers={"Origin": "https://backup.example.de"},
+        )
+        assert exchanged.status_code == 200
+        csrf = client.cookies.get("rclone_sync_csrf")
+        assert csrf
+
+        missing_csrf = client.post(
+            "/api/webauthn/native/registration/ticket",
+            json={
+                "method": "passkey",
+                "label": "Sicherpfad iPhone",
+                "app_challenge": registration_challenge,
+            },
+            headers={"Origin": "https://backup.example.de"},
+        )
+        assert missing_csrf.status_code == 403
+
+        issued = client.post(
+            "/api/webauthn/native/registration/ticket",
+            json={
+                "method": "passkey",
+                "label": "Sicherpfad iPhone",
+                "app_challenge": registration_challenge,
+            },
+            headers={
+                "Origin": "https://backup.example.de",
+                "X-CSRF-Token": csrf,
+            },
+        )
+        assert issued.status_code == 200
+        registration_token = issued.json()["registration_token"]
+        assert issued.json()["expires_in_seconds"] == 300
+
+        page = client.get(
+            "/webauthn/native/register",
+            params={"method": "passkey", "token": registration_token},
+        )
+        assert page.status_code == 200
+        assert page.headers["cache-control"] == "no-store"
+        assert page.headers["referrer-policy"] == "no-referrer"
+        assert 'data-webauthn-action="native-register"' in page.text
+
+        wrong_binding = client.post(
+            "/api/webauthn/native/registration/options",
+            json={"token": registration_token, "verifier": "W" * 43},
+        )
+        assert wrong_binding.status_code == 401
+
+        options = client.post(
+            "/api/webauthn/native/registration/options",
+            json={"token": registration_token, "verifier": registration_verifier},
+        )
+        assert options.status_code == 200
+        assert options.json()["publicKey"]["rp"]["id"] == "backup.example.de"
+
+        replay = client.post(
+            "/api/webauthn/native/registration/options",
+            json={"token": registration_token, "verifier": registration_verifier},
+        )
+        assert replay.status_code == 401
+
+        client.cookies.clear()
+        verified = client.post(
+            "/api/webauthn/native/registration/verify",
+            json={
+                "challenge_id": options.json()["challenge_id"],
+                "credential": {
+                    "id": "ignored-by-test-verifier",
+                    "response": {"transports": ["internal"]},
+                },
+            },
+        )
+        assert verified.status_code == 200
+        assert verified.json() == {"ok": True, "method": "passkey"}
+
+    stored = database.webauthn_credential_get(
+        base64.urlsafe_b64encode(b"native-passkey-id").rstrip(b"=").decode()
+    )
+    assert stored is not None
+    assert stored["label"] == "Sicherpfad iPhone"
+    assert stored["backed_up"] is True

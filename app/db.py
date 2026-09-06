@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 13
+_SCHEMA_VERSION = 14
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -243,6 +243,18 @@ CREATE TABLE IF NOT EXISTS native_auth_exchanges (
 );
 CREATE INDEX IF NOT EXISTS idx_native_auth_exchanges_expiry
 ON native_auth_exchanges(expires_at);
+
+CREATE TABLE IF NOT EXISTS native_webauthn_registrations (
+    token_hash TEXT PRIMARY KEY,
+    verifier_hash TEXT NOT NULL,
+    username TEXT NOT NULL,
+    method TEXT NOT NULL CHECK(method IN ('passkey', 'security_key')),
+    label TEXT NOT NULL DEFAULT '',
+    expires_at REAL NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_native_webauthn_registrations_expiry
+ON native_webauthn_registrations(expires_at);
 """
 
 
@@ -656,6 +668,21 @@ class Database:
                 connection.execute(statement)
             connection.execute("PRAGMA user_version=13")
             version = 13
+        if version < 14:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS native_webauthn_registrations ("
+                "token_hash TEXT PRIMARY KEY, verifier_hash TEXT NOT NULL, "
+                "username TEXT NOT NULL, "
+                "method TEXT NOT NULL CHECK(method IN ('passkey', 'security_key')), "
+                "label TEXT NOT NULL DEFAULT '', "
+                "expires_at REAL NOT NULL, created_at REAL NOT NULL)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_native_webauthn_registrations_expiry "
+                "ON native_webauthn_registrations(expires_at)"
+            )
+            connection.execute("PRAGMA user_version=14")
+            version = 14
 
     @staticmethod
     def _record_job_definition_schedule_state(
@@ -3286,6 +3313,73 @@ class Database:
         if not row or not valid:
             return None
         return str(row["username"])
+
+    def native_webauthn_registration_create(
+        self,
+        token_hash: str,
+        verifier_hash: str,
+        username: str,
+        method: str,
+        label: str,
+        *,
+        ttl_seconds: int = 300,
+    ) -> None:
+        if method not in {"passkey", "security_key"}:
+            raise ValueError("Ungültige WebAuthn-Methode")
+        now = time.time()
+        with self.conn() as connection:
+            connection.execute(
+                "DELETE FROM native_webauthn_registrations WHERE expires_at < ?",
+                (now,),
+            )
+            connection.execute(
+                "DELETE FROM native_webauthn_registrations WHERE token_hash IN ("
+                "SELECT token_hash FROM native_webauthn_registrations "
+                "ORDER BY created_at DESC LIMIT -1 OFFSET 255)"
+            )
+            connection.execute(
+                "INSERT INTO native_webauthn_registrations("
+                "token_hash, verifier_hash, username, method, label, expires_at, created_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    token_hash,
+                    verifier_hash,
+                    str(username or "")[:128],
+                    method,
+                    str(label or "")[:80],
+                    now + max(30, min(int(ttl_seconds), 600)),
+                    now,
+                ),
+            )
+
+    def native_webauthn_registration_consume(
+        self, token_hash: str, verifier_hash: str
+    ) -> Optional[Dict[str, str]]:
+        now = time.time()
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT username, method, label, verifier_hash, expires_at "
+                "FROM native_webauthn_registrations WHERE token_hash=?",
+                (token_hash,),
+            ).fetchone()
+            valid = bool(
+                row
+                and float(row["expires_at"]) >= now
+                and secrets.compare_digest(str(row["verifier_hash"]), verifier_hash)
+            )
+            if valid or (row and float(row["expires_at"]) < now):
+                connection.execute(
+                    "DELETE FROM native_webauthn_registrations WHERE token_hash=?",
+                    (token_hash,),
+                )
+        if not row or not valid:
+            return None
+        return {
+            "username": str(row["username"]),
+            "method": str(row["method"]),
+            "label": str(row["label"]),
+        }
 
     def runtime_get(self, key: str, default: Any = None) -> Any:
         if not key or len(key) > 128:
