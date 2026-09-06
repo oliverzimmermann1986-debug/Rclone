@@ -55,6 +55,12 @@ enum APIError: LocalizedError, Equatable {
 protocol APIClientProtocol: AnyObject {
     func login(username: String, password: String) async throws
     func exchangeWebAuthnToken(_ token: String, verifier: String) async throws
+    func getWebAuthnCredentials() async throws -> WebAuthnCredentialsResponse
+    func createNativeWebAuthnRegistration(
+        method: String,
+        label: String,
+        appChallenge: String
+    ) async throws -> NativeWebAuthnRegistrationTicket
     func getOverview() async throws -> OverviewResponse
     func getStorage(includeSizes: Bool, forceRefresh: Bool) async throws -> StorageOverview
     func getStorageComposition(pair: String, side: String, forceRefresh: Bool) async throws -> StorageCompositionResponse
@@ -126,6 +132,18 @@ protocol APIClientProtocol: AnyObject {
 extension APIClientProtocol {
     func exchangeWebAuthnToken(_ token: String, verifier: String) async throws {
         throw APIError.loginSecurityFailed
+    }
+
+    func getWebAuthnCredentials() async throws -> WebAuthnCredentialsResponse {
+        throw APIError.serverFeatureUnavailable(feature: "Passkey-Verwaltung in der App")
+    }
+
+    func createNativeWebAuthnRegistration(
+        method: String,
+        label: String,
+        appChallenge: String
+    ) async throws -> NativeWebAuthnRegistrationTicket {
+        throw APIError.serverFeatureUnavailable(feature: "Passkey-Erstellung in der App")
     }
 
     func getStorageComposition(pair: String, side: String, forceRefresh: Bool) async throws -> StorageCompositionResponse {
@@ -206,6 +224,47 @@ private struct NativeLoginRequest: Encodable {
 private struct NativeWebAuthnExchangeRequest: Encodable {
     let token: String
     let verifier: String
+}
+
+struct WebAuthnCredential: Decodable, Identifiable, Equatable {
+    let id: String
+    let method: String
+    let label: String
+    let createdAt: Double
+    let lastUsedAt: Double?
+    let backedUp: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, method, label
+        case createdAt = "created_at"
+        case lastUsedAt = "last_used_at"
+        case backedUp = "backed_up"
+    }
+}
+
+struct WebAuthnCredentialsResponse: Decodable, Equatable {
+    let credentials: [WebAuthnCredential]
+}
+
+struct NativeWebAuthnRegistrationTicket: Decodable, Equatable {
+    let registrationToken: String
+    let expiresInSeconds: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case registrationToken = "registration_token"
+        case expiresInSeconds = "expires_in_seconds"
+    }
+}
+
+private struct NativeWebAuthnRegistrationRequest: Encodable {
+    let method: String
+    let label: String
+    let appChallenge: String
+
+    private enum CodingKeys: String, CodingKey {
+        case method, label
+        case appChallenge = "app_challenge"
+    }
 }
 
 final class APIClient: APIClientProtocol {
@@ -398,6 +457,32 @@ final class APIClient: APIClientProtocol {
               (200..<300).contains(http.statusCode),
               cookie(named: Self.sessionCookie) != nil else {
             throw APIError.loginSecurityFailed
+        }
+    }
+
+    func getWebAuthnCredentials() async throws -> WebAuthnCredentialsResponse {
+        var request = URLRequest(url: url(for: "/api/webauthn/credentials"))
+        request.httpMethod = "GET"
+        try addCSRF(to: &request)
+        return try await send(request)
+    }
+
+    func createNativeWebAuthnRegistration(
+        method: String,
+        label: String,
+        appChallenge: String
+    ) async throws -> NativeWebAuthnRegistrationTicket {
+        do {
+            return try await post(
+                "/api/webauthn/native/registration/ticket",
+                body: NativeWebAuthnRegistrationRequest(
+                    method: method,
+                    label: label,
+                    appChallenge: appChallenge
+                )
+            )
+        } catch APIError.server(let status, _) where status == 404 || status == 405 {
+            throw APIError.serverFeatureUnavailable(feature: "Passkey-Erstellung in der App")
         }
     }
 

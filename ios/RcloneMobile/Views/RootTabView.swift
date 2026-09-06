@@ -133,6 +133,13 @@ private struct SettingsView: View {
                         Text("Gespeichert werden nur Adresse und Benutzername, niemals Passwörter. Serverwechsel erfolgt auf der Anmeldeseite.")
                     }
                 }
+                if !model.isDemoMode {
+                    Section("Sicherheit") {
+                        NavigationLink { WebAuthnSecurityView() } label: {
+                            Label("Passkeys & Sicherheitsschlüssel", systemImage: "person.badge.key")
+                        }
+                    }
+                }
                 Section("App") {
                     LabeledContent("App-Version", value: appVersion)
                     LabeledContent("TestFlight-Build", value: appBuild)

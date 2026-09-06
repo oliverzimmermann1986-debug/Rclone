@@ -90,7 +90,12 @@ def _descriptors(rows: list[dict[str, Any]]) -> list[PublicKeyCredentialDescript
 
 
 def registration_options(
-    method: WebAuthnMethod, label: str, *, database: Database | None = None
+    method: WebAuthnMethod,
+    label: str,
+    *,
+    native: bool = False,
+    app_binding: str = "",
+    database: Database | None = None,
 ) -> dict[str, Any]:
     db = database or get_db()
     rp_id, _origin, username = settings()
@@ -130,6 +135,8 @@ def registration_options(
         purpose="register",
         method=method,
         label=label,
+        native=native,
+        app_binding=app_binding,
     )
     return {
         "challenge_id": challenge_id,
@@ -141,6 +148,7 @@ def finish_registration(
     challenge_id: str,
     credential: dict[str, Any],
     *,
+    expected_native: bool | None = None,
     database: Database | None = None,
 ) -> dict[str, Any]:
     db = database or get_db()
@@ -148,6 +156,10 @@ def finish_registration(
     if not challenge:
         raise ValueError(
             "Die Registrierungsanfrage ist abgelaufen oder wurde bereits benutzt."
+        )
+    if expected_native is not None and bool(challenge["native"]) is not expected_native:
+        raise ValueError(
+            "Die Registrierungsanfrage gehört zu einem anderen Anmeldeweg."
         )
     rp_id, origin, _username = settings()
     verified = verify_registration_response(
@@ -175,7 +187,12 @@ def finish_registration(
         backed_up=verified.credential_backed_up,
         label=str(challenge["label"] or ""),
     )
-    return {"credential_id": credential_id, "method": str(challenge["method"])}
+    return {
+        "credential_id": credential_id,
+        "method": str(challenge["method"]),
+        "native": bool(challenge["native"]),
+        "app_binding": str(challenge["app_binding"] or ""),
+    }
 
 
 def authentication_options(

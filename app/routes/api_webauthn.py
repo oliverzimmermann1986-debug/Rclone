@@ -69,6 +69,19 @@ class ExchangeRequest(BaseModel):
     verifier: str = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]+$")
 
 
+class NativeRegistrationTicketRequest(BaseModel):
+    method: Method
+    label: str = Field(default="", max_length=80)
+    app_challenge: str = Field(
+        min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]+$"
+    )
+
+
+class NativeRegistrationOptionsRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    verifier: str = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]+$")
+
+
 def _cookie_secure(request: Request) -> bool:
     configured = get_config().get("web", "secure_cookie", default=False)
     if configured is True:
@@ -215,6 +228,79 @@ def exchange_native_session(body: ExchangeRequest, request: Request):
     return response
 
 
+@router.post(
+    "/api/webauthn/native/registration/ticket",
+    dependencies=[Depends(require_auth), Depends(require_csrf)],
+)
+def create_native_registration_ticket(
+    body: NativeRegistrationTicketRequest,
+    user: str = Depends(require_auth),
+) -> dict[str, Any]:
+    if not status().get("enabled"):
+        raise HTTPException(
+            status_code=503,
+            detail="Passkeys sind auf diesem Server noch nicht konfiguriert.",
+        )
+    token = secrets.token_urlsafe(48)
+    database = get_db()
+    database.native_webauthn_registration_create(
+        hashlib.sha256(token.encode("ascii")).hexdigest(),
+        body.app_challenge,
+        user,
+        body.method,
+        body.label.strip(),
+        ttl_seconds=300,
+    )
+    database.audit_add(
+        "webauthn_native_registration_started",
+        actor=user,
+        details={"method": body.method},
+    )
+    return {"registration_token": token, "expires_in_seconds": 300}
+
+
+@router.post("/api/webauthn/native/registration/options")
+def begin_native_registration(body: NativeRegistrationOptionsRequest):
+    token_hash = hashlib.sha256(body.token.encode("ascii", errors="ignore")).hexdigest()
+    ticket = get_db().native_webauthn_registration_consume(
+        token_hash, _pkce_challenge(body.verifier)
+    )
+    if not ticket:
+        raise HTTPException(
+            status_code=401,
+            detail="Die Freigabe ist abgelaufen oder ungültig. Starte die Passkey-Erstellung erneut in der App.",
+        )
+    try:
+        return registration_options(
+            ticket["method"],
+            ticket["label"],
+            native=True,
+            app_binding=ticket["username"],
+        )
+    except Exception as exc:
+        raise _ceremony_error(exc) from exc
+
+
+@router.post("/api/webauthn/native/registration/verify")
+def complete_native_registration(body: CeremonyResponse) -> dict[str, Any]:
+    try:
+        result = finish_registration(
+            body.challenge_id, body.credential, expected_native=True
+        )
+    except Exception as exc:
+        raise _ceremony_error(exc) from exc
+    get_db().audit_add(
+        "webauthn_credential_registered",
+        actor=result["app_binding"],
+        details={
+            "method": result["method"],
+            "credential_id": result["credential_id"],
+            "native": True,
+        },
+    )
+    return {"ok": True, "method": result["method"]}
+
+
 @router.get("/webauthn/native", response_class=HTMLResponse)
 def native_authentication_page(method: Method, app_challenge: str):
     if not re.fullmatch(r"[A-Za-z0-9_-]{43}", app_challenge):
@@ -225,6 +311,21 @@ def native_authentication_page(method: Method, app_challenge: str):
             "<!--WEBAUTHN_APP_CHALLENGE-->", app_challenge
         )
     )
+
+
+@router.get("/webauthn/native/register", response_class=HTMLResponse)
+def native_registration_page(method: Method, token: str):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token):
+        raise HTTPException(status_code=422, detail="Ungültige App-Freigabe")
+    html = (STATIC_DIR / "webauthn-native-register.html").read_text(encoding="utf-8")
+    response = HTMLResponse(
+        html.replace("<!--WEBAUTHN_METHOD-->", method).replace(
+            "<!--WEBAUTHN_REGISTRATION_TOKEN-->", token
+        )
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @router.get("/security", response_class=HTMLResponse)
@@ -279,7 +380,9 @@ def complete_registration(
     body: CeremonyResponse, user: str = Depends(require_auth)
 ) -> dict[str, Any]:
     try:
-        result = finish_registration(body.challenge_id, body.credential)
+        result = finish_registration(
+            body.challenge_id, body.credential, expected_native=False
+        )
     except Exception as exc:
         raise _ceremony_error(exc) from exc
     get_db().audit_add(

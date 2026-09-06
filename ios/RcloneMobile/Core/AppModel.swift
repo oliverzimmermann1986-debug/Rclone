@@ -1301,6 +1301,32 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func webAuthnCredentials() async throws -> [WebAuthnCredential] {
+        guard let client else { throw APIError.unauthenticated }
+        return try await client.getWebAuthnCredentials().credentials
+    }
+
+    func registerWebAuthnCredential(method: String, label: String) async throws {
+        guard let client else { throw APIError.unauthenticated }
+        let baseURL = try APIClient.normalizedServerURL(serverAddress)
+        guard baseURL.scheme?.lowercased() == "https" else {
+            throw WebAuthnBrowserSession.SessionError.insecureServer
+        }
+        let browser = WebAuthnBrowserSession()
+        let binding = try browser.makeRegistrationBinding()
+        let ticket = try await client.createNativeWebAuthnRegistration(
+            method: method,
+            label: label,
+            appChallenge: binding.appChallenge
+        )
+        try await browser.register(
+            baseURL: baseURL,
+            method: method,
+            token: ticket.registrationToken,
+            binding: binding
+        )
+    }
+
     /// A stored cookie must not become an active app session while revocations
     /// from an earlier logout are still outstanding. Unlike an explicit login,
     /// startup restore has no fresh user confirmation, so any cleanup failure is
