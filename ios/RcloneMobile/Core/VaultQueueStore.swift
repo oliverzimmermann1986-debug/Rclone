@@ -11,8 +11,10 @@ struct VaultQueueScope: Codable, Equatable, Sendable {
 
     init(serverURL: URL, username: String, pairID: String, source: String, target: String, direction: String) {
         var components = URLComponents(url: serverURL, resolvingAgainstBaseURL: false)
-        components?.scheme = components?.scheme?.lowercased()
-        components?.host = components?.host?.lowercased()
+        let normalizedScheme = components?.scheme?.lowercased()
+        let normalizedHost = components?.host?.lowercased()
+        components?.scheme = normalizedScheme
+        components?.host = normalizedHost
         components?.user = nil
         components?.password = nil
         components?.query = nil
