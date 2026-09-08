@@ -177,7 +177,12 @@ private final class VaultResumeURLProtocol: URLProtocol {
             "deduplicated": false, "verified": ready, "target_relative": "Sicherpfad/file.txt",
             "created_at": 100, "updated_at": 100
         ]
-        let body: Any = request.url?.path.hasSuffix("library") == true ? ["items": [item]] : item
+        let body: [String: Any]
+        if request.url?.path.hasSuffix("library") == true {
+            body = ["items": [item]]
+        } else {
+            body = item
+        }
         let data = try! JSONSerialization.data(withJSONObject: body)
         let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
