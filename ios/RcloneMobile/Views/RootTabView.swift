@@ -16,24 +16,20 @@ struct RootTabView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             NavigationStack { DashboardView(showingSettings: $showingSettings) }
-                .tabItem { Label("Lage", systemImage: "shield.checkered") }
+                .tabItem { Label("Übersicht", systemImage: "shield.checkered") }
                 .tag(0)
 
-            NavigationStack { DataPathsScreen(showingSettings: $showingSettings) }
-                .tabItem { Label("Datenwege", systemImage: "arrow.left.arrow.right") }
+            NavigationStack { ProtectionHomeView() }
+                .tabItem { Label("Sichern", systemImage: "square.and.arrow.up") }
                 .tag(1)
 
-            NavigationStack { JobsScreen(showingSettings: $showingSettings) }
-                .tabItem { Label("Jobs", systemImage: "calendar") }
+            NavigationStack { RecoveryCenterView() }
+                .tabItem { Label("Wiederherstellen", systemImage: "arrow.counterclockwise") }
                 .tag(2)
 
-            NavigationStack { RunsScreen(showingSettings: $showingSettings) }
-                .tabItem { Label("Läufe", systemImage: "clock.arrow.circlepath") }
+            AdministrationView(showingSettings: $showingSettings)
+                .tabItem { Label("Mehr", systemImage: "ellipsis") }
                 .tag(3)
-
-            NavigationStack { SystemView(showingSettings: $showingSettings) }
-                .tabItem { Label("System", systemImage: "server.rack") }
-                .tag(4)
         }
         .tint(.green)
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -64,7 +60,7 @@ struct RootTabView: View {
         .onAppear { selectRequestedRunIfNeeded() }
         .onChange(of: model.requestedRunID) { _, _ in selectRequestedRunIfNeeded() }
         .onReceive(NotificationCenter.default.publisher(for: .pushRecoveryNavigationRequested)) { _ in
-            showingRecoveryCenter = true
+            selectedTab = 2
         }
         .onReceive(NotificationCenter.default.publisher(for: .deviceVaultNavigationRequested)) { _ in
             showingDeviceVault = true
@@ -78,6 +74,44 @@ struct RootTabView: View {
     private func selectRequestedRunIfNeeded() {
         guard model.requestedRunID != nil else { return }
         selectedTab = 3
+    }
+}
+
+private struct AdministrationView: View {
+    @EnvironmentObject private var model: AppModel
+    @Binding var showingSettings: Bool
+    @State private var route = StorePreviewMode.adminDestination
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Verwalten") {
+                    NavigationLink("Datenwege", value: "paths")
+                    NavigationLink("Jobs & Zeitpläne", value: "jobs")
+                    NavigationLink("Läufe & Protokolle", value: "runs")
+                }
+                Section("Server") {
+                    NavigationLink("System & Wartung", value: "system")
+                    Button("Konto & Anmeldung") { showingSettings = true }
+                }
+            }
+            .navigationTitle("Mehr")
+            .navigationDestination(for: String.self) { destination($0) }
+            .navigationDestination(isPresented: Binding(get: { route != nil }, set: { if !$0 { route = nil } })) {
+                destination(route ?? "runs")
+            }
+            .onAppear { if model.requestedRunID != nil { route = "runs" } }
+            .onChange(of: model.requestedRunID) { _, id in if id != nil { route = "runs" } }
+        }
+    }
+
+    @ViewBuilder private func destination(_ value: String) -> some View {
+        switch value {
+        case "paths": DataPathsScreen(showingSettings: $showingSettings)
+        case "jobs": JobsScreen(showingSettings: $showingSettings)
+        case "system": SystemView(showingSettings: $showingSettings)
+        default: RunsScreen(showingSettings: $showingSettings)
+        }
     }
 }
 struct SettingsButton: View {
@@ -130,7 +164,7 @@ private struct SettingsView: View {
                     } header: {
                         Text("Gespeicherte Server")
                     } footer: {
-                        Text("Gespeichert werden nur Adresse und Benutzername, niemals Passwörter. Serverwechsel erfolgt auf der Anmeldeseite.")
+                        Text("Profile enthalten Adresse und Benutzername, niemals Passwörter. Auf Wunsch liegt die Sitzung geschützt im Geräteschlüsselbund. Entfernen beendet ihre Speicherung. Serverwechsel erfolgt auf der Anmeldeseite.")
                     }
                 }
                 if !model.isDemoMode {

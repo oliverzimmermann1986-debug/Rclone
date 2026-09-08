@@ -86,7 +86,84 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertTrue(client.clearedLocalSession)
         XCTAssertEqual(client.configCallCount, 0)
         XCTAssertEqual(model.serverAddress, "http://192.168.1.20:8001")
-        XCTAssertTrue(model.errorMessage?.contains("nicht automatisch wiederhergestellt") == true)
+        XCTAssertTrue(model.errorMessage?.contains("noch nicht gespeichert") == true)
+    }
+
+    func testRememberedHTTPLoginRestoresAfterNewAppModel() async throws {
+        let defaults = makeDefaults()
+        let original = StubAPIClient()
+        let login = AppModel(defaults: defaults) { _ in original }
+        await login.login(server: "http://192.168.1.20:8001/", username: "owner", password: "fixture-password", rememberSession: true)
+        let server = try APIClient.normalizedServerURL("http://192.168.1.20:8001").absoluteString
+        XCTAssertEqual(original.persistenceChoices, [true])
+        XCTAssertTrue((defaults.stringArray(forKey: "rememberedHTTPServers") ?? []).contains(server))
+
+        let restored = StubAPIClient()
+        let relaunched = AppModel(defaults: defaults) { _ in restored }
+        await relaunched.restoreSession()
+
+        XCTAssertEqual(relaunched.phase, .signedIn)
+        XCTAssertEqual(restored.configCallCount, 1)
+        XCTAssertFalse(restored.clearedLocalSession)
+        XCTAssertNil(defaults.string(forKey: "password"))
+        await login.logout()
+        await relaunched.logout()
+    }
+
+    func testRememberedHTTPApprovalDoesNotCoverDifferentPort() async {
+        let defaults = makeDefaults()
+        defaults.set("http://192.168.1.20:8002", forKey: "serverAddress")
+        defaults.set(["http://192.168.1.20:8001"], forKey: "rememberedHTTPServers")
+        let client = StubAPIClient()
+        let model = AppModel(defaults: defaults) { _ in client }
+
+        await model.restoreSession()
+
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertEqual(client.configCallCount, 0)
+        XCTAssertTrue(client.clearedLocalSession)
+    }
+
+    func testSessionOnlyLoginNeverRestoresHTTPOrHTTPS() async throws {
+        for server in ["http://192.168.1.20:8001", "https://backup.example.de"] {
+            let defaults = makeDefaults()
+            let original = StubAPIClient()
+            let login = AppModel(defaults: defaults) { _ in original }
+            await login.login(server: server, username: "owner", password: "fixture-password", rememberSession: false)
+            XCTAssertEqual(login.phase, .signedIn)
+            XCTAssertEqual(original.persistenceChoices, [false])
+            let normalized = try APIClient.normalizedServerURL(server).absoluteString
+            XCTAssertTrue((defaults.stringArray(forKey: "sessionOnlyServers") ?? []).contains(normalized))
+            XCTAssertFalse((defaults.stringArray(forKey: "rememberedHTTPServers") ?? []).contains(normalized))
+
+            let restored = StubAPIClient()
+            let relaunched = AppModel(defaults: defaults) { _ in restored }
+            await relaunched.restoreSession()
+
+            XCTAssertEqual(relaunched.phase, .signedOut)
+            XCTAssertEqual(restored.configCallCount, 0)
+            XCTAssertTrue(restored.clearedLocalSession)
+            await login.logout()
+        }
+    }
+
+    func testHTTPRestoreKeepsTransientFailureButClearsRejectedSession() async {
+        let server = "http://192.168.1.20:8001"
+        for rejected in [false, true] {
+            let defaults = makeDefaults()
+            defaults.set(server, forKey: "serverAddress")
+            defaults.set([server], forKey: "rememberedHTTPServers")
+            let client = StubAPIClient()
+            if rejected { client.configError = APIError.unauthenticated }
+            else { client.configError = URLError(.notConnectedToInternet) }
+            let model = AppModel(defaults: defaults) { _ in client }
+
+            await model.restoreSession()
+
+            XCTAssertEqual(model.phase, .signedOut)
+            XCTAssertEqual(client.configCallCount, 1)
+            XCTAssertEqual(client.clearedLocalSession, rejected)
+        }
     }
 
     func testRefreshPublishesSuccessfulEndpointsWhenOthersFail() async {
@@ -518,6 +595,7 @@ private final class StubAPIClient: APIClientProtocol {
     var baseConfig: ConfigSnapshot?
     private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
+    private(set) var persistenceChoices: [Bool] = []
     private(set) var jobsCallCount = 0
     private(set) var configCallCount = 0
     private(set) var doctorCallCount = 0
@@ -529,6 +607,10 @@ private final class StubAPIClient: APIClientProtocol {
     private(set) var unregisteredPushTokens: [String] = []
 
     func login(username: String, password: String) async throws {}
+
+    func setSessionPersistence(_ enabled: Bool) {
+        persistenceChoices.append(enabled)
+    }
 
     func getOverview() async throws -> OverviewResponse {
         throw APIError.server(status: 503, message: "Overview nicht verfügbar")

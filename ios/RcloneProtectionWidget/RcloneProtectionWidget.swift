@@ -46,9 +46,10 @@ private struct ProtectionWidgetView: View {
                 ProgressView(value: Double(snapshot.score), total: 100).tint(color(snapshot.score))
                 Text(snapshot.quarantines > 0 ? "\(snapshot.quarantines) Sicherheitsstopp(s)" : "\(snapshot.activePaths)/\(snapshot.totalPaths) Datenwege aktiv")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                if family != .systemSmall {
-                    Text("Stand \(Date(timeIntervalSince1970: snapshot.generatedAt), style: .relative)")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                Text("Stand \(Date(timeIntervalSince1970: snapshot.generatedAt), style: .relative)")
+                    .font(.caption2).foregroundStyle(.secondary)
+                if entry.date.timeIntervalSince1970 - snapshot.generatedAt > 3600 {
+                    Text("Stand veraltet · App öffnen").font(.caption2).foregroundStyle(.orange)
                 }
             }
             .widgetURL(URL(string: "rclonesync://recovery"))
@@ -73,7 +74,7 @@ struct RcloneProtectionWidget: Widget {
                 .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Schutzstatus")
-        .description("Zeigt den letzten verifizierten Schutzstatus und Sicherheitsstopps.")
+        .description("Zeigt den zuletzt geladenen Stand mit Datenalter. Keine laufende Serververbindung.")
         .supportedFamilies([.systemSmall, .systemMedium])
     }
 }
@@ -88,6 +89,9 @@ struct RcloneProtectionLiveActivity: Widget {
                     Text(context.state.pair).font(.headline)
                     Text(context.state.error ?? context.state.transferred ?? context.state.status)
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    if context.isStale {
+                        Text("Keine aktuelle Rückmeldung · App öffnen").font(.caption2).foregroundStyle(.orange)
+                    }
                 }
                 Spacer()
                 if let percent = context.state.percent {

@@ -165,10 +165,16 @@ final class AppModel: ObservableObject {
             let url = try APIClient.normalizedServerURL(serverAddress)
             let newClient = clientFactory(url)
             candidate = newClient
-            if APIClient.requiresExplicitInsecureTransportConfirmation(url) {
+            if (defaults.stringArray(forKey: "sessionOnlyServers") ?? []).contains(url.absoluteString) {
                 newClient.clearLocalSession()
                 clearSessionState()
-                errorMessage = "Eine gespeicherte HTTP-Verbindung wird aus Sicherheitsgründen nicht automatisch wiederhergestellt. Tippe erneut auf Verbinden und bestätige die unverschlüsselte Verbindung ausdrücklich."
+                return
+            }
+            if APIClient.requiresExplicitInsecureTransportConfirmation(url),
+               !(defaults.stringArray(forKey: "rememberedHTTPServers") ?? []).contains(url.absoluteString) {
+                newClient.clearLocalSession()
+                clearSessionState()
+                errorMessage = "Diese HTTP-Anmeldung ist noch nicht gespeichert. Verbinde dich einmal und aktiviere Angemeldet bleiben."
                 return
             }
             do {
@@ -212,7 +218,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func login(server: String, username: String, password: String) async {
+    func login(server: String, username: String, password: String, rememberSession: Bool = true) async {
         let generation = beginSessionTransition()
         let activity = beginActivity()
         errorMessage = nil
@@ -223,6 +229,7 @@ final class AppModel: ObservableObject {
             let url = try APIClient.normalizedServerURL(server)
             let newClient = clientFactory(url)
             candidate = newClient
+            newClient.setSessionPersistence(rememberSession)
             try await newClient.login(username: username, password: password)
             try Task.checkCancellation()
             guard isCurrentSession(generation) else {
@@ -231,6 +238,14 @@ final class AppModel: ObservableObject {
             }
             defaults.set(url.absoluteString, forKey: "serverAddress")
             defaults.set(username, forKey: "username")
+            var rememberedHTTP = Set(defaults.stringArray(forKey: "rememberedHTTPServers") ?? [])
+            if rememberSession && url.scheme == "http" { rememberedHTTP.insert(url.absoluteString) }
+            else { rememberedHTTP.remove(url.absoluteString) }
+            defaults.set(Array(rememberedHTTP), forKey: "rememberedHTTPServers")
+            var sessionOnly = Set(defaults.stringArray(forKey: "sessionOnlyServers") ?? [])
+            if rememberSession { sessionOnly.remove(url.absoluteString) }
+            else { sessionOnly.insert(url.absoluteString) }
+            defaults.set(Array(sessionOnly), forKey: "sessionOnlyServers")
             rememberServerProfile(url: url, username: username)
             client = newClient
             await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
@@ -1262,7 +1277,7 @@ final class AppModel: ObservableObject {
         savePendingPushRevocations(remaining)
     }
 
-    func loginWithWebAuthn(server: String, method: String) async {
+    func loginWithWebAuthn(server: String, method: String, rememberSession: Bool = true) async {
         let generation = beginSessionTransition()
         let activity = beginActivity()
         errorMessage = nil
@@ -1274,6 +1289,7 @@ final class AppModel: ObservableObject {
             let newClient = clientFactory(url)
             candidate = newClient
             let browser = WebAuthnBrowserSession()
+            newClient.setSessionPersistence(rememberSession)
             let exchange = try await browser.authenticate(baseURL: url, method: method)
             try await newClient.exchangeWebAuthnToken(
                 exchange.token,
@@ -1285,6 +1301,10 @@ final class AppModel: ObservableObject {
                 return
             }
             defaults.set(url.absoluteString, forKey: "serverAddress")
+            var sessionOnly = Set(defaults.stringArray(forKey: "sessionOnlyServers") ?? [])
+            if rememberSession { sessionOnly.remove(url.absoluteString) }
+            else { sessionOnly.insert(url.absoluteString) }
+            defaults.set(Array(sessionOnly), forKey: "sessionOnlyServers")
             rememberServerProfile(url: url, username: savedUsername)
             client = newClient
             await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
@@ -1365,6 +1385,19 @@ final class AppModel: ObservableObject {
     }
 
     func forgetServerProfile(_ profile: SavedServerProfile) {
+        RecoveryOfflineStore().remove(server: profile.address, username: profile.username)
+        if let url = try? APIClient.normalizedServerURL(profile.address) {
+            SessionCookieStore().remove(for: url)
+        }
+        for key in ["rememberedHTTPServers", "sessionOnlyServers"] {
+            defaults.set((defaults.stringArray(forKey: key) ?? []).filter { $0 != profile.address }, forKey: key)
+        }
+        if profile.address == serverAddress {
+            client?.setSessionPersistence(false)
+            var sessionOnly = Set(defaults.stringArray(forKey: "sessionOnlyServers") ?? [])
+            sessionOnly.insert(profile.address)
+            defaults.set(Array(sessionOnly), forKey: "sessionOnlyServers")
+        }
         savedServerProfiles.removeAll { $0.id == profile.id }
         persistServerProfiles()
     }
@@ -1501,6 +1534,7 @@ final class AppModel: ObservableObject {
     }
 
     private func clearSessionState() {
+        ProtectionWidgetSnapshot.clear()
         liveActivityCoordinator.endAll()
         client = nil
         overview = nil

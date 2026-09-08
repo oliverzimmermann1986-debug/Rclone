@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(WidgetKit)
+import WidgetKit
+#endif
 #if canImport(ActivityKit)
 import ActivityKit
 #endif
@@ -24,6 +27,16 @@ struct ProtectionWidgetSnapshot: Codable {
     func save() {
         guard let data = try? JSONEncoder().encode(self) else { return }
         UserDefaults(suiteName: protectionAppGroup)?.set(data, forKey: "protectionWidgetSnapshot")
+        #if canImport(WidgetKit)
+        WidgetCenter.shared.reloadAllTimelines()
+        #endif
+    }
+
+    static func clear() {
+        UserDefaults(suiteName: protectionAppGroup)?.removeObject(forKey: "protectionWidgetSnapshot")
+        #if canImport(WidgetKit)
+        WidgetCenter.shared.reloadAllTimelines()
+        #endif
     }
 }
 

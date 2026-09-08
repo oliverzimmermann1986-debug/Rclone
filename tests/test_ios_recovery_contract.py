@@ -52,7 +52,9 @@ def test_device_vault_is_native_resumable_and_visible_in_demo():
     assert "Demo-Sicherung abspielen" in vault
     assert "Geräte-Vault" in dashboard
     assert "1024 * 1024" in transfer
-    assert "SHA256" in transfer
+    queue = _read("RcloneMobile/Core/VaultQueueStore.swift")
+    assert "SHA256" in queue
+    assert "VaultQueueStore.digest" in transfer
 
 
 def test_offline_card_multi_server_and_encrypted_handover_are_explicit():
@@ -60,7 +62,11 @@ def test_offline_card_multi_server_and_encrypted_handover_are_explicit():
     model = _read("RcloneMobile/Core/AppModel.swift")
     login = _read("RcloneMobile/Views/LoginView.swift")
 
-    assert 'forKey: "offlineRecoveryPass"' in view
+    cache = _read("RcloneMobile/Core/RecoveryOfflineStore.swift")
+    assert "RecoveryOfflineStore().save" in view
+    assert "server: model.serverAddress, username: model.savedUsername" in view
+    assert 'canonical + "\\0" + username' in cache
+    assert "recoveryPass.v2." in cache
     assert "keine Serverpfade, Passwörter oder Cloud-Schlüssel" in view
     assert "AES-256-GCM" in view
     assert "SavedServerProfile" in model

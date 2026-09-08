@@ -24,6 +24,7 @@ from ..jobs.rclone_sync import _filter_args, _is_remote
 from ..jobs.restore_test import PAIR_PREFIX as RESTORE_PAIR_PREFIX
 from ..jobs.scheduler import rclone_history_key
 from ..rclone_args import rclone_subprocess_env
+from ..restore_evidence import evaluate_restore_evidence, restore_history_key
 from ..security import require_csrf
 
 router = APIRouter(
@@ -722,14 +723,18 @@ def _history_evidence_by_identity(
         for pair in pairs
         if isinstance(pair, dict) and str(pair.get("name") or "").strip()
     }
-    restore_identities = {
-        f"{RESTORE_PAIR_PREFIX}{str(pair.get('name') or '').strip()}": str(
-            pair.get("name") or ""
-        ).strip()
+    restore_pairs = {
+        restore_history_key(pair): pair
         for pair in pairs
         if isinstance(pair, dict) and str(pair.get("name") or "").strip()
     }
-    identities = {**sync_identities, **restore_identities}
+    restore_identities = {
+        key: str(pair["name"]).strip() for key, pair in restore_pairs.items()
+    }
+    legacy_identities = {
+        f"{RESTORE_PAIR_PREFIX}{name}": name for name in restore_identities.values()
+    }
+    identities = {**sync_identities, **restore_identities, **legacy_identities}
     histories = get_db().pair_last_history(identities) if identities else {}
 
     sync_found: dict[str, dict[str, Any]] = {}
@@ -750,46 +755,11 @@ def _history_evidence_by_identity(
     restore_found: dict[str, dict[str, Any]] = {}
     for history_key, name in restore_identities.items():
         history = histories.get(history_key) or {}
-        last_result = history.get("last_result")
-        last_success = history.get("last_success")
-        if not last_result and not last_success:
-            restore_found[name] = {
-                "state": "never",
-                "last_attempt_at": None,
-                "last_success_at": None,
-                "job_id": None,
-                "verified_files": None,
-                "sample_size": None,
-                "checksum_verified": False,
-                "error": None,
-            }
-            continue
-
-        result_pair = (last_result or {}).get("pair") or {}
-        proof_pair = (last_success or {}).get("pair") or {}
-        restore_item = {
-            "state": "passed" if last_result and last_result.get("ok") else "failed",
-            "last_attempt_at": (last_result or {}).get("ended_at"),
-            "last_success_at": (last_success or {}).get("ended_at"),
-            "job_id": (last_result or {}).get("job_id"),
-            "verified_files": proof_pair.get("verified"),
-            "sample_size": proof_pair.get("sample_size"),
-            # Ein erfolgreicher Restore-Drill wird erst nach rclone check
-            # --checksum gespeichert; der Erfolg selbst ist der Nachweis.
-            "checksum_verified": bool(last_success),
-            "error": result_pair.get("error")
-            if last_result and not last_result.get("ok")
-            else None,
-        }
-        if (last_result or {}).get("ended_at") and (last_result or {}).get(
-            "started_at"
-        ):
-            restore_item["duration_sec"] = max(
-                0.0,
-                float((last_result or {}).get("ended_at") or 0)
-                - float((last_result or {}).get("started_at") or 0),
-            )
-        restore_found[name] = restore_item
+        if not history.get("last_result") and not history.get("last_success"):
+            history = histories.get(f"{RESTORE_PAIR_PREFIX}{name}") or {}
+        restore_found[name] = evaluate_restore_evidence(
+            restore_pairs[history_key], history
+        )
     return sync_found, restore_found
 
 

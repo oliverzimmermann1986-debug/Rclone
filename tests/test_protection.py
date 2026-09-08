@@ -128,7 +128,7 @@ def test_protection_calendar_and_score_are_evidence_based(tmp_path: Path):
                 "health": [{"last_status": "ok", "overdue": False}],
             }
         },
-        storage={"pairs": [{"restore_evidence": {"state": "passed"}}]},
+        storage={"pairs": [{"restore_evidence": {"state": "passed", "valid": True}}]},
         config={"backup": {"pairs": [{**_pair(), "backup_dir": "versions"}]}},
     )
     assert score["score"] == 100

@@ -47,6 +47,19 @@ from ..recovery_points import (
 )
 from ..secret_redaction import REDACTED, redact_secrets
 from ..security import require_csrf
+from ..handover_rescue import (
+    HandoverError,
+    MAX_PACKAGE_BYTES,
+    import_handover,
+    portable_inventory,
+    preview_handover,
+)
+from ..recovery_snapshots import (
+    SnapshotError,
+    load_manifest,
+    run_snapshot_capture,
+    run_snapshot_restore,
+)
 from . import api_diagnostics, api_storage
 
 router = APIRouter(
@@ -146,6 +159,8 @@ def encrypted_handover(payload: Mapping[str, Any], passphrase: str) -> dict[str,
     plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
+    if len(plaintext) > MAX_PACKAGE_BYTES:
+        raise ValueError("Notfallakte überschreitet das zulässige Größenlimit")
     ciphertext = AESGCM(key).encrypt(nonce, plaintext, b"rclone-recovery-handover-v1")
     return {
         "schema": "rclone-recovery-handover-v1",
@@ -237,18 +252,23 @@ def create_handover(
     user: str = Depends(require_auth),
 ) -> Response:
     require_reauthentication(request, user, body.current_password)
-    config = redact_secrets(get_config().snapshot())
-    package = {
-        "created_at": time.time(),
-        "recovery_pass": build_recovery_pass(include_paths=body.include_paths),
-        "config": config,
-        "instructions": [
-            "Dieses Paket enthält keine Anmeldedaten oder Cloud-Schlüssel.",
-            "Passphrase getrennt und sicher an die bevollmächtigte Person übermitteln.",
-            "Wiederherstellungen zuerst in einen getrennten Staging-Ordner durchführen.",
-        ],
-    }
-    envelope = encrypted_handover(package, body.passphrase)
+    config = get_config().snapshot()
+    try:
+        package = {
+            "created_at": time.time(),
+            "recovery_pass": build_recovery_pass(include_paths=body.include_paths),
+            "rescue_inventory": portable_inventory(
+                config, include_paths=body.include_paths
+            ),
+            "instructions": [
+                "Dieses Paket enthält keine Anmeldedaten oder Cloud-Schlüssel.",
+                "Passphrase getrennt und sicher an die bevollmächtigte Person übermitteln.",
+                "Wiederherstellungen zuerst in einen getrennten Staging-Ordner durchführen.",
+            ],
+        }
+        envelope = encrypted_handover(package, body.passphrase)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     get_db().audit_add(
         "recovery_handover_exported",
         actor=user,
@@ -262,6 +282,108 @@ def create_handover(
             "Cache-Control": "no-store",
         },
     )
+
+
+class OpenHandoverRequest(BaseModel):
+    envelope: dict[str, Any]
+    passphrase: str = Field(min_length=12, max_length=1024)
+
+
+class ImportHandoverRequest(OpenHandoverRequest):
+    current_password: str = Field(min_length=1, max_length=1024)
+    mappings: dict[str, str] = Field(max_length=500)
+
+
+@router.post("/handover/preview")
+def preview_rescue(body: OpenHandoverRequest) -> dict[str, Any]:
+    try:
+        return preview_handover(get_config().snapshot(), body.envelope, body.passphrase)
+    except HandoverError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/handover/import")
+def import_rescue(
+    body: ImportHandoverRequest, request: Request, user: str = Depends(require_auth)
+) -> dict[str, Any]:
+    require_reauthentication(request, user, body.current_password)
+    try:
+        result = import_handover(
+            get_config().snapshot(), body.envelope, body.passphrase, body.mappings
+        )
+    except HandoverError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    get_db().audit_add(
+        "recovery_handover_imported",
+        actor=user,
+        details={
+            "imported": result["imported"],
+            "already_present": result["already_present"],
+        },
+    )
+    return result
+
+
+class SnapshotRequest(BaseModel):
+    identity: str = Field(min_length=1, max_length=128)
+    max_total_mb: int = Field(default=5120, ge=1, le=51_200)
+
+
+def _start_recovery_job() -> tuple[Any, int]:
+    database = get_db()
+    try:
+        job_id = database.job_start(JOB_KIND, trigger="manual", exclusive_scope=True)
+    except JobAlreadyRunningError as exc:
+        raise HTTPException(
+            409, "Während einer Sicherung oder Recovery kann kein weiterer Lauf starten"
+        ) from exc
+    return database, job_id
+
+
+@router.post("/snapshots", status_code=202)
+def start_snapshot(
+    body: SnapshotRequest, background: BackgroundTasks
+) -> dict[str, Any]:
+    config = get_config().snapshot()
+    pair = _find_pair(config, body.identity)
+    database, job_id = _start_recovery_job()
+    background.add_task(
+        run_snapshot_capture,
+        database,
+        config,
+        pair,
+        max_total_mb=body.max_total_mb,
+        job_id=job_id,
+    )
+    return {"ok": True, "job_id": job_id, "status": "running", "operation": "snapshot"}
+
+
+@router.post("/points/{point_id}/restore", status_code=202)
+def restore_full_snapshot(
+    point_id: str, body: SnapshotRequest, background: BackgroundTasks
+) -> dict[str, Any]:
+    config = get_config().snapshot()
+    pair = _find_pair(config, body.identity)
+    try:
+        load_manifest(config, pair, point_id)
+    except SnapshotError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    database, job_id = _start_recovery_job()
+    background.add_task(
+        run_snapshot_restore,
+        database,
+        config,
+        pair,
+        point_id=point_id,
+        max_total_mb=body.max_total_mb,
+        job_id=job_id,
+    )
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": "running",
+        "operation": "full-restore",
+    }
 
 
 def _relative_path(value: str) -> str:

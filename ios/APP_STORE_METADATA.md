@@ -25,36 +25,41 @@ Der eigens entwickelte Schutzstatus verdichtet aktive Datenwege, Zeitplanung, le
 Funktionen:
 
 - Geräte-Vault: ausgewählte Fotos und Dateien direkt vom Gerät in einen eigenen Datenweg sichern
-- Wiederaufnehmbare Blockübertragung, SHA-256-Deduplizierung und serverseitiges Zurücklesen der Zielkopie
-- Recovery-Zeitreise mit historischen Versionsständen, Änderungsübersicht und selektiver Wiederherstellung
+- Langlebige Upload-Warteschlange mit bewusster Wiederaufnahme nach App-Neustart, SHA-256 und Zurücklesen der Zielkopie
+- Fotos und Dateien aus dem Teilen-Menü lokal für den nächsten Upload vormerken
+- Geführter Schutzassistent mit Vorschau der Datenweg- und Job-Einstellungen und erster Restore-Stichprobe
+- Recovery-Zeitreise: Änderungsarchive ausdrücklich von vollständigen Ständen getrennt
+- Optionale vollständige Stände mit Datei- und SHA-256-Manifest auf dem Server (maximal 50 GiB je Stand); getrennte vollständige Wiederherstellung
 - Eigenständiger Schutzstatus mit konkretem nächsten Schritt
 - Lokale und Cloud-Datenwege mit Dateianzahl und Größe
 - Eigene Schutzpfad-Ansicht von der Quelle über zugewiesene Jobs zum Ziel
 - Jobs mit Zeitplan, Reihenfolge und zugewiesenen Datenwegen
 - Laufhistorie mit Status, Dauer, Protokoll und sicherem Neustart
 - Sicheres Anlegen lokaler und entfernter Zielordner
-- Dokumentierter Restore-Nachweis pro Datenweg mit Prüfsummenstatus und Stichprobengröße
+- Zielgebundener Restore-Stichprobenbeleg mit sieben Tagen Gültigkeit; letzter Versuch und letzter Erfolg getrennt
 - Recovery-Pass mit nachvollziehbarem Score, RPO/RTO und Schutzkalender
 - Gezielte Wiederherstellung ausschließlich in ein getrenntes, prüfsummengeprüftes Staging
 - Sicherheitsstopp vor destruktiven Läufen bei unerwartet geschrumpften Quellen
-- Verschlüsseltes Notfall-Übergabepaket ohne Passwörter oder Cloud-Schlüssel
+- Verschlüsselte Notfallakte: Vault-Inventar auf einem Ersatzserver bewusst zuordnen und Dateien aus dem Cloud-Ziel zurücklesen; keine Übernahme von Passwörtern oder Cloud-Schlüsseln
 - Schutzstatus-Widget, Live Activity für Sicherungen und Geräte-Uploads sowie Siri-Kurzbefehle
 - Passkey, physischer Sicherheitsschlüssel und mehrere Serverprofile ohne Passwortspeicherung
 - Native Push-Mitteilungen bei Sicherungsfehlern mit Vorfallansicht und authentifizierter Pausenaktion
 - Stillstands-Watchdog, Laufzeitgrenzen und kontrollierter Abbruch
 - Integrierte lokale Demo ohne Server oder echte Daten
 
-Sicherpfad stellt keinen Cloudspeicher bereit. Für den produktiven Einsatz benötigst du eine eigene kompatible Sicherpfad-Serverinstallation auf Basis von rclone. Passwörter werden nicht dauerhaft in der App gespeichert.
+Sicherpfad stellt keinen Cloudspeicher bereit. Für den produktiven Einsatz benötigst du eine eigene kompatible Sicherpfad-Serverinstallation auf Basis von rclone. Passwörter werden nicht dauerhaft in der App gespeichert. Auf Wunsch speichert der Geräteschlüsselbund die Sitzung, auch für bestätigte HTTP-Verbindungen. HTTP bleibt unverschlüsselt; HTTPS wird empfohlen. Übertragungen pausieren gegebenenfalls im Hintergrund und können in der App fortgesetzt werden. Widgets zeigen den zuletzt geladenen Stand, keine ständige Serververbindung. Vollständige Stände auf dem Server sind keine externe Katastrophensicherung; die Notfallakte enthält keine Nutzdateien und ersetzt keinen Cloud-Zugang.
 
 ## App-Prüfung
 
-- Anmeldung erforderlich: `Nein`
-- Prüfweg: Auf der Anmeldeseite `App mit Beispieldaten ansehen` wählen.
-- Anmerkung: Die lokale Demo enthält ausschließlich mitgelieferte Beispieldaten und stellt keine Netzwerkverbindung her. Bitte auf der Startseite zuerst „App mit Beispieldaten ansehen“ und danach unter „Direkt vom Gerät“ den „Geräte-Vault“ öffnen. Mit „Demo-Sicherung abspielen“ wird der vollständige verifizierte Uploadfluss lokal demonstriert. Unter System → Recovery Center → Fotos → Recovery-Zeitreise sind Versionsstände, Änderungsübersicht und das getrennte Recovery-Staging sichtbar. Lage, Datenwege, Jobs, Läufe, Systemdiagnose, Recovery-Pass, RPO/RTO, Schutzkalender und Sicherheitsstopps sind ebenfalls vollständig zugänglich.
+- Anmeldung erforderlich: `Ja` für echte Upload-, Snapshot- und Restore-Prüfungen.
+- Prüfserver: `https://rclone-review.mausbaeren.me`. Den bestehenden isolierten Review-Zugang in App Store Connect hinterlegen und vor Einreichung am vorgesehenen Build testen. Zugangsdaten nicht in Repository oder Video veröffentlichen.
+- Prüfweg: Sichern → Fotos & Dateien sichern → kleine Testdatei hochladen → bestätigte Zielkopie zurückholen. Danach Wiederherstellen → Testdatenweg → Recovery-Zeitreise → vollständigen Stand erstellen → gesamten Stand getrennt zurückholen → Vorgang und Ergebnis öffnen. Für den Serververlust-Ablauf eine eigene aktuelle Notfallakte exportieren, am vorbereiteten Ersatzserver zuordnen und eine Vault-Datei wirklich herunterladen.
+- Die lokale Demo unter „App mit Beispieldaten ansehen“ ist eine zusätzliche, ausdrücklich simulierte Vorschau. Sie beweist keine echte Übertragung oder Wiederherstellung und ersetzt den nutzbaren Review-Zugang nicht.
+- Vor Einreichung: vollständiger iOS-Build einschließlich Share Extension, Gerätetest, aktuelles Video, aktuelle Screenshots und erfolgreicher Ende-zu-Ende-Test des isolierten Review-Servers. Lokale Code-Änderungen allein sind keine Veröffentlichung.
 
 ### Hinweis zu Guideline 4.3(a)
 
-Sicherpfad ist keine umbenannte Vorlage und kein generischer rclone-Wrapper. Die App besitzt einen eigenen nativen SwiftUI-Codebestand, eine eigenständige visuelle Identität und speziell entwickelte Funktionen, die über eine übliche Administrationsoberfläche hinausgehen: Geräte-Vault mit resumierbarer und deduplizierter Übertragung, End-to-End-Zielprüfung, Recovery-Zeitreise, Änderungsvergleich, isoliertes selektives Staging, Recovery-Pass mit RPO/RTO, Anomalie-Quarantäne sowie Widget, Live Activity und Siri-Integration. Der Offline-Prüfweg macht diese Differenzierung ohne Zugang zu privater Infrastruktur nachvollziehbar.
+Der Schwerpunkt von Sicherpfad ist überprüfbare Wiederherstellbarkeit eigener Daten: Zielkopien werden tatsächlich zurückgelesen, Stichprobenbelege gelten nur für das geprüfte Ziel und einen begrenzten Zeitraum, vollständige Stände werden anhand von Dateimanifesten geprüft und ein Ersatzserver kann das Vault-Inventar ohne alte Server-Blobs zurückholen. Das native SwiftUI-Frontend führt über Übersicht, Sichern und Wiederherstellen; technische Verwaltung liegt unter Mehr. Bitte diese konkreten Abläufe am isolierten Review-Server und im aktuellen Video prüfen. Die technische rclone-Basis wird offen benannt. Daraus wird keine weltweite Einzigartigkeit oder garantierte Freigabe abgeleitet.
 - Veröffentlichung: `Manuell`, damit die Freigabe nach Apples Genehmigung kontrolliert erfolgt.
 
 ## Datenschutzangaben

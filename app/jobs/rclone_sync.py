@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -565,6 +567,114 @@ def _dedupe_single_value_rclone_args(args: list[str]) -> list[str]:
     return normalized
 
 
+RESERVED_SUBTREES = ("Sicherpfad", ".sicherpfad-snapshots", ".rclone-versions")
+
+
+def _protected_filter_args(args: list[str]) -> list[str]:
+    """Compile filters once, with reserved paths ahead of every user include.
+
+    rclone groups include/exclude/filter flag types independently of CLI order.
+    Converting all of them to one ordered rule stream prevents an early include
+    from bypassing the Vault exclusions. Filter resets and files-from overrides
+    cannot coexist with these mandatory protections, including expert mode.
+    """
+    groups: dict[str, list[str]] = {
+        key: []
+        for key in (
+            "--include",
+            "--include-from",
+            "--exclude",
+            "--exclude-from",
+            "--filter",
+            "--filter-from",
+        )
+    }
+    remainder: list[str] = []
+    index = 0
+    while index < len(args):
+        token = str(args[index])
+        flag, sep, value = token.partition("=")
+        if flag in {"--files-from", "--files-from-raw", "--files-from0"}:
+            raise ValueError("files-from würde den verbindlichen Vault-Schutz umgehen")
+        if flag == "--delete-excluded" and (
+            not sep or value.lower() not in {"false", "0"}
+        ):
+            raise ValueError(
+                "delete-excluded gefährdet geschützte Vault- und Recovery-Kopien"
+            )
+        group = "--filter-from" if flag == "--filters-file" else flag
+        if group not in groups:
+            remainder.append(token)
+            index += 1
+            continue
+        if not sep:
+            index += 1
+            if index >= len(args):
+                raise ValueError(f"Wert fehlt für {flag}")
+            value = str(args[index])
+        if group.endswith("-from"):
+            path = Path(value)
+            if value == "-" or not path.is_file() or path.stat().st_size > 1024 * 1024:
+                raise ValueError("Filterdatei fehlt oder überschreitet 1 MiB")
+            values = [
+                line.strip()
+                for line in path.read_text(encoding="utf-8-sig").splitlines()
+            ]
+            groups[group].extend(
+                line for line in values if line and not line.startswith(("#", ";"))
+            )
+        else:
+            groups[group].append(value.strip())
+        index += 1
+    rules = [f"- /{name}/**" for name in RESERVED_SUBTREES]
+    for group, values in groups.items():
+        for value in values:
+            if group.startswith("--filter"):
+                if value == "!":
+                    raise ValueError(
+                        "Filter-Reset (!) würde den verbindlichen Vault-Schutz entfernen"
+                    )
+                rules.append(value)
+            else:
+                rules.append(f"{'+' if group.startswith('--include') else '-'} {value}")
+    if groups["--include"] or groups["--include-from"]:
+        rules.append("- **")
+    return remainder + [
+        value for rule in dict.fromkeys(rules) for value in ("--filter", rule)
+    ]
+
+
+def _bisync_filter_snapshot(args: list[str], cfg) -> list[str]:
+    """Give bisync an immutable combined rules file so its hash guard applies."""
+    rules: list[str] = []
+    rest: list[str] = []
+    index = 0
+    while index < len(args):
+        if args[index] == "--filter":
+            rules.append(args[index + 1])
+            index += 2
+        else:
+            rest.append(args[index])
+            index += 1
+    content = "\n".join(rules) + "\n"
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    directory = (
+        Path(cfg.get("paths", "data_dir", default="/opt/rclone-sync/data"))
+        / ".protected-filters"
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{digest}.txt"
+    if not target.is_file() or target.read_text(encoding="utf-8") != content:
+        fd, name = tempfile.mkstemp(prefix="filter-", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+            os.replace(name, target)
+        finally:
+            Path(name).unlink(missing_ok=True)
+    return rest + ["--filters-file", str(target)]
+
+
 def _filter_args(cfg, pair: dict[str, Any], verb: str) -> list[str]:
     args: list[str] = []
     for pattern in _split_lines(pair.get("include")):
@@ -601,7 +711,7 @@ def _filter_args(cfg, pair: dict[str, Any], verb: str) -> list[str]:
                 f"filter_file gesetzt, aber nicht vorhanden: {filter_file}"
             )
         args += ["--filters-file" if verb == "bisync" else "--filter-from", filter_file]
-    return args
+    return _protected_filter_args(args)
 
 
 def command_to_string(cmd: list[str]) -> str:
@@ -959,6 +1069,9 @@ def _build_pair_command(
     )
     effective_args += _backup_dir_args(cfg, pair, verb, src, dst)
     effective_args = _dedupe_single_value_rclone_args(effective_args)
+    effective_args = _protected_filter_args(effective_args)
+    if verb == "bisync":
+        effective_args = _bisync_filter_snapshot(effective_args, cfg)
 
     if verb in {"sync", "bisync"} and not dry_run:
         if backup.get("require_delete_confirmation", True) and not pair.get(
@@ -1501,6 +1614,26 @@ def _sync_pair(
                 pair=pair,
                 measurement=anomaly_finding.get("measurement"),
             )
+        if (
+            summary["ok"]
+            and not dry_run
+            and not is_cancelled()
+            and pair.get("recovery_snapshots")
+        ):
+            from ..recovery_snapshots import capture_if_enabled
+
+            try:
+                summary["recovery_snapshot"] = capture_if_enabled(
+                    snapshot_config.data, pair
+                )
+            except Exception as exc:
+                logger.exception(
+                    "[%s] Vollständiger Recovery-Stand fehlgeschlagen", name
+                )
+                summary["recovery_snapshot"] = {"status": "error", "error": str(exc)}
+                summary["warning"] = (
+                    "Sicherung erfolgreich; vollständiger Recovery-Stand konnte nicht erstellt werden"
+                )
         if not summary["ok"]:
             if summary["cancelled"]:
                 summary["error"] = "Abgebrochen"
