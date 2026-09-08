@@ -65,11 +65,11 @@ jobs:
         run: python3 -m pip install -r requirements-dev.txt
       - name: Validate shared native API contracts and release version tooling
         run: python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_version.py
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install verified pinned XcodeGen
+        run: python3 scripts/install_pinned_xcodegen.py --destination "$GITHUB_WORKSPACE/.tools"
       - name: Generate Xcode project
         working-directory: ios
-        run: xcodegen generate
+        run: '"$GITHUB_WORKSPACE/.tools/xcodegen/bin/xcodegen" generate'
 
       - name: Validate iPhone launch metadata
         run: |
