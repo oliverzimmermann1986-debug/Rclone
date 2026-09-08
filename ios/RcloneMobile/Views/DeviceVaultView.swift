@@ -25,14 +25,74 @@ struct DeviceVaultView: View {
     }
 
     var body: some View {
+        lifecycleContent
+            .alert("Geräte-Vault", isPresented: isErrorPresented) {
+                Button("OK") { transfer.errorMessage = nil }
+            } message: {
+                Text(transfer.errorMessage ?? "")
+            }
+            .confirmationDialog("Neue Zielzuordnung übernehmen?", isPresented: isReassignmentPresented,
+                                titleVisibility: .visible) {
+                reassignmentButtons
+            } message: {
+                Text(reassignmentMessage)
+            }
+            .safeAreaInset(edge: .bottom) { exportFooter }
+    }
+
+    private var lifecycleContent: some View {
+        navigationContent
+            .fileImporter(isPresented: $showingFileImporter, allowedContentTypes: [.item],
+                          allowsMultipleSelection: true, onCompletion: handleImportedFiles)
+            .onChange(of: photoItems) { _, items in handlePhotoSelection(items) }
+            .onAppear(perform: viewAppeared)
+            .onChange(of: pairs.map(\.id)) { _, _ in selectDefaultPair() }
+            .onChange(of: selectedIdentity) { _, _ in selectedIdentityChanged() }
+            .onChange(of: activeScopeKeys) { _, _ in activeScopesChanged() }
+            .onChange(of: scenePhase) { _, phase in scenePhaseChanged(phase) }
+            .onDisappear(perform: viewDisappeared)
+            .task { await loadLibrary() }
+    }
+
+    private var navigationContent: some View {
+        vaultList
+            .listStyle(.insetGrouped)
+            .navigationTitle("Geräte-Vault")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { Task { await loadLibrary() } } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(selectedIdentity.isEmpty || model.isDemoMode)
+                    .accessibilityLabel("Vault aktualisieren")
+                }
+            }
+    }
+
+    private var vaultList: some View {
         List {
-            Section {
+            heroSection
+            destinationSection
+            importSection
+            inboxSection
+            importProgressSection
+            unassignedSection
+            queueSection
+            currentTransferSection
+            librarySection
+        }
+    }
+
+    private var heroSection: some View {
+        Section {
                 VaultHeroCard()
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
-            }
+        }
+    }
 
-            Section("Ziel") {
+    private var destinationSection: some View {
+        Section("Ziel") {
                 if pairs.isEmpty {
                     ContentUnavailableView(
                         "Kein Datenweg verfügbar",
@@ -50,9 +110,11 @@ struct DeviceVaultView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-            }
+        }
+    }
 
-            Section {
+    private var importSection: some View {
+        Section {
                 PhotosPicker(
                     selection: $photoItems,
                     maxSelectionCount: 100,
@@ -79,8 +141,11 @@ struct DeviceVaultView: View {
                 Text("Vom iPhone sichern")
             } footer: {
                 Text("Jede Datei wird in Blöcken übertragen, per SHA‑256 dedupliziert und nach dem Schreiben vom Ziel zurückgelesen.")
-            }
+        }
+    }
 
+    @ViewBuilder
+    private var inboxSection: some View {
             if !inboxItems.isEmpty, !model.isDemoMode {
                 Section {
                     ForEach(inboxItems) { item in
@@ -98,11 +163,17 @@ struct DeviceVaultView: View {
                     Text("Diese Dateien sind nur lokal vorgemerkt. Du bestimmst jetzt den Datenweg; danach startet die Sicherung.")
                 }
             }
+    }
 
+    @ViewBuilder
+    private var importProgressSection: some View {
             if isImporting {
                 Section { ProgressView("Dateien geschützt vormerken …") }
             }
+    }
 
+    @ViewBuilder
+    private var unassignedSection: some View {
             if !transfer.unassignedQueue.isEmpty, !model.isDemoMode {
                 Section {
                     ForEach(transfer.unassignedQueue) { entry in
@@ -112,10 +183,7 @@ struct DeviceVaultView: View {
                             onExport: {
                                 Task { await exportQueued(entry) }
                             },
-                            onReassign: {
-                                pendingReassignmentScope = queueScope
-                                pendingReassignment = entry
-                            }
+                            onReassign: { requestReassignment(entry) }
                         )
                     }
                 } header: {
@@ -124,16 +192,14 @@ struct DeviceVaultView: View {
                     Text("Ein Datenweg wurde geändert oder entfernt. Die lokalen Dateien sind erhalten und werden erst nach deiner neuen Zuordnung übertragen.")
                 }
             }
+    }
 
+    @ViewBuilder
+    private var queueSection: some View {
             if !transfer.queue.isEmpty, !model.isDemoMode {
                 Section {
-                    ForEach(transfer.queue) { entry in
-                        VaultQueuedRow(entry: entry, isActive: entry.id == transfer.activeEntryID)
-                        .swipeActions {
-                            if !transfer.isWorking, let scope = queueScope {
-                                Button("Verwerfen", role: .destructive) { transfer.removeQueued(entry, scope: scope) }
-                            }
-                        }
+                    ForEach(transfer.queue, id: \.id) { (entry: VaultQueueEntry) in
+                        queuedRow(entry)
                     }
                     if transfer.isWorking {
                         Button("Übertragung pausieren", systemImage: "pause.circle") { transfer.pause() }
@@ -147,7 +213,19 @@ struct DeviceVaultView: View {
                     Text("Vorgemerkte Dateien und Fortschritt bleiben bei einem Neustart erhalten. Zum Übertragen die App geöffnet lassen. Verwerfen entfernt nur die lokale Vormerkung.")
                 }
             }
+    }
 
+    private func queuedRow(_ entry: VaultQueueEntry) -> some View {
+        VaultQueuedRow(entry: entry, isActive: entry.id == transfer.activeEntryID)
+            .swipeActions {
+                if !transfer.isWorking, queueScope != nil {
+                    Button("Verwerfen", role: .destructive) { removeQueued(entry) }
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var currentTransferSection: some View {
             if let current = transfer.current {
                 Section("Aktuelle Übertragung") {
                     VaultTransferRow(item: current, showPath: true)
@@ -160,7 +238,9 @@ struct DeviceVaultView: View {
                     }
                 }
             }
+    }
 
+    private var librarySection: some View {
             Section("Wiederherstellbare Dateien") {
                 if transfer.library.isEmpty {
                     ContentUnavailableView(
@@ -170,7 +250,7 @@ struct DeviceVaultView: View {
                     )
                 } else {
                     ForEach(transfer.library) { item in
-                        Button { restoreTask = Task { await restore(item) } } label: {
+                        Button { startRestore(item) } label: {
                             VaultLibraryRow(item: item, isRestoring: restoringItemID == item.id)
                         }
                         .buttonStyle(.plain)
@@ -184,33 +264,23 @@ struct DeviceVaultView: View {
                     Button("Download abbrechen", role: .cancel) { restoreTask?.cancel() }
                 }
             }
-        }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Geräte-Vault")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { Task { await loadLibrary() } } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .disabled(selectedIdentity.isEmpty || model.isDemoMode)
-                .accessibilityLabel("Vault aktualisieren")
-            }
-        }
-        .fileImporter(
-            isPresented: $showingFileImporter,
-            allowedContentTypes: [.item],
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
+    }
+
+    private func handleImportedFiles(_ result: Result<[URL], Error>) {
+        switch result {
             case let .success(urls):
                 Task { await importFiles(urls) }
             case let .failure(error):
                 transfer.errorMessage = error.localizedDescription
-            }
         }
-        .onChange(of: photoItems) { _, items in
-            guard !items.isEmpty else { return }
-            Task {
+    }
+
+    private func handlePhotoSelection(_ items: [PhotosPickerItem]) {
+        guard !items.isEmpty else { return }
+        Task { await importPhotos(items) }
+    }
+
+    private func importPhotos(_ items: [PhotosPickerItem]) async {
                 guard let scope = queueScope else { return }
                 isImporting = true
                 var failures = 0
@@ -231,51 +301,71 @@ struct DeviceVaultView: View {
                 photoItems = []
                 if failures > 0 { transfer.errorMessage = "\(failures) von \(items.count) Fotos konnten nicht vorgemerkt werden. Die übrigen stehen in der Warteschlange." }
                 else if queueScope == scope { await resumeQueue() }
-            }
-        }
-        .onAppear { isVisible = true; selectDefaultPair() }
-        .onChange(of: pairs.map(\.id)) { _, _ in selectDefaultPair() }
-        .onChange(of: selectedIdentity) { _, _ in
-            restoreTask?.cancel()
-            restoredURL = nil
-            Task { await loadLibrary() }
-        }
-        .onChange(of: activeScopeKeys) { _, _ in
-            transfer.pause()
-            if let scope = queueContextScope { transfer.loadQueue(scope: scope, activeScopeKeys: activeScopeKeys) }
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .background { transfer.pause() }
-            if phase == .active { loadInbox() }
-        }
-        .onDisappear { isVisible = false; transfer.pause(); restoreTask?.cancel() }
-        .task { await loadLibrary() }
-        .alert("Geräte-Vault", isPresented: Binding(
+    }
+
+    private func viewAppeared() { isVisible = true; selectDefaultPair() }
+    private func viewDisappeared() { isVisible = false; transfer.pause(); restoreTask?.cancel() }
+    private func selectedIdentityChanged() {
+        restoreTask?.cancel()
+        restoredURL = nil
+        Task { await loadLibrary() }
+    }
+    private func activeScopesChanged() {
+        transfer.pause()
+        if let scope = queueContextScope { transfer.loadQueue(scope: scope, activeScopeKeys: activeScopeKeys) }
+    }
+    private func scenePhaseChanged(_ phase: ScenePhase) {
+        if phase == .background { transfer.pause() }
+        if phase == .active { loadInbox() }
+    }
+    private func startRestore(_ item: VaultUploadStatus) {
+        restoreTask = Task { await restore(item) }
+    }
+    private func removeQueued(_ entry: VaultQueueEntry) {
+        guard !transfer.isWorking, let scope = queueScope else { return }
+        transfer.removeQueued(entry, scope: scope)
+    }
+    private func requestReassignment(_ entry: VaultQueueEntry) {
+        pendingReassignmentScope = queueScope
+        pendingReassignment = entry
+    }
+
+    private var isErrorPresented: Binding<Bool> {
+        Binding(
             get: { transfer.errorMessage != nil },
             set: { if !$0 { transfer.errorMessage = nil } }
-        )) {
-            Button("OK") { transfer.errorMessage = nil }
-        } message: {
-            Text(transfer.errorMessage ?? "")
-        }
-        .confirmationDialog("Neue Zielzuordnung übernehmen?", isPresented: Binding(
+        )
+    }
+
+    private var isReassignmentPresented: Binding<Bool> {
+        Binding(
             get: { pendingReassignment != nil },
             set: { if !$0 { pendingReassignment = nil; pendingReassignmentScope = nil } }
-        ), titleVisibility: .visible) {
+        )
+    }
+
+    @ViewBuilder
+    private var reassignmentButtons: some View {
             if let entry = pendingReassignment, let scope = pendingReassignmentScope {
                 Button("Für dieses Ziel vormerken") {
-                    Task {
-                        guard queueScope == scope else { transfer.errorMessage = "Der Datenweg hat sich geändert. Bitte prüfe die Zuordnung erneut."; return }
-                        do { try await transfer.reassign(entry, to: scope) }
-                        catch { transfer.errorMessage = error.localizedDescription }
-                    }
+                    Task { await performReassignment(entry, to: scope) }
                 }
             }
             Button("Abbrechen", role: .cancel) {}
-        } message: {
-            Text("\(pendingReassignment?.filename ?? "Datei")\nBisher: \(pendingReassignment?.destinationDescription ?? "Unbekannt")\nNeu: \(pendingReassignmentScope?.destinationDescription ?? "Unbekannt")\nDie alte Serverübertragung bleibt unverändert. Fortsetzen startet eine neue Übertragung für das gewählte Ziel.")
-        }
-        .safeAreaInset(edge: .bottom) {
+    }
+
+    private func performReassignment(_ entry: VaultQueueEntry, to scope: VaultQueueScope) async {
+        guard queueScope == scope else { transfer.errorMessage = "Der Datenweg hat sich geändert. Bitte prüfe die Zuordnung erneut."; return }
+        do { try await transfer.reassign(entry, to: scope) }
+        catch { transfer.errorMessage = error.localizedDescription }
+    }
+
+    private var reassignmentMessage: String {
+        "\(pendingReassignment?.filename ?? "Datei")\nBisher: \(pendingReassignment?.destinationDescription ?? "Unbekannt")\nNeu: \(pendingReassignmentScope?.destinationDescription ?? "Unbekannt")\nDie alte Serverübertragung bleibt unverändert. Fortsetzen startet eine neue Übertragung für das gewählte Ziel."
+    }
+
+    @ViewBuilder
+    private var exportFooter: some View {
             if let restoredURL {
                 ShareLink(item: restoredURL) {
                     Label(exportIsVerified ? "Geprüfte Datei in Dateien sichern" : "Lokale Vormerkung exportieren", systemImage: "square.and.arrow.up")
@@ -286,7 +376,6 @@ struct DeviceVaultView: View {
                 .padding()
                 .background(.bar)
             }
-        }
     }
 
     private var selectedPairName: String {
