@@ -9,10 +9,11 @@ final class SessionPersistenceTests: XCTestCase {
         let first = SessionCookieStore()
         defer { first.remove(for: server) }
 
-        first.save(cookies, for: server)
-        let loaded = SessionCookieStore().load(for: server)
+        try first.saveChecked(cookies, for: server)
+        let loaded = try SessionCookieStore().loadChecked(for: server)
 
         XCTAssertEqual(Set(loaded.map(\.name)), Set([APIClient.sessionCookie, APIClient.csrfCookie]))
+        XCTAssertEqual(Set(SessionCookieStore().load(for: server).map(\.name)), Set(loaded.map(\.name)))
         XCTAssertTrue(loaded.allSatisfy { !$0.isSecure }, "An HTTP session must remain usable over the explicitly approved HTTP origin")
         let jar = URLSessionConfiguration.ephemeral.httpCookieStorage!
         loaded.forEach(jar.setCookie)
@@ -24,21 +25,55 @@ final class SessionPersistenceTests: XCTestCase {
         let server = try XCTUnwrap(URL(string: "http://\(hostname):8001/app"))
         let store = SessionCookieStore()
         defer { store.remove(for: server) }
-        store.save(try sessionCookies(server: server, expires: Date().addingTimeInterval(600)), for: server)
+        try store.saveChecked(try sessionCookies(server: server, expires: Date().addingTimeInterval(600)), for: server)
 
         for other in ["https://\(hostname):8001/app", "http://\(hostname):8002/app", "http://\(hostname):8001/other"] {
-            XCTAssertTrue(store.load(for: try XCTUnwrap(URL(string: other))).isEmpty)
+            XCTAssertTrue(try store.loadChecked(for: XCTUnwrap(URL(string: other))).isEmpty)
         }
-        XCTAssertFalse(store.load(for: server).isEmpty)
+        XCTAssertFalse(try store.loadChecked(for: server).isEmpty)
     }
 
     func testExpiredKeychainCookiesAreNotRestored() throws {
         let server = try XCTUnwrap(URL(string: "http://expired-\(UUID().uuidString.lowercased()).local"))
         let store = SessionCookieStore()
         defer { store.remove(for: server) }
-        store.save(try sessionCookies(server: server, expires: Date().addingTimeInterval(-60)), for: server)
+        try store.saveChecked(try sessionCookies(server: server, expires: Date().addingTimeInterval(-60)), for: server)
 
-        XCTAssertTrue(SessionCookieStore().load(for: server).isEmpty)
+        XCTAssertTrue(try SessionCookieStore().loadChecked(for: server).isEmpty)
+    }
+
+    func testCookieEncodingPreservesHTTPHTTPSExpiryAndRejectsWrongOrigin() throws {
+        for scheme in ["http", "https"] {
+            let server = try XCTUnwrap(URL(string: "\(scheme)://codec.local:8001/app"))
+            let expiry = Date().addingTimeInterval(600)
+            let cookies = try sessionCookies(server: server, expires: expiry)
+            let data = try SessionCookieStore.encodeCookies(cookies)
+            let decoded = try SessionCookieStore.decodeCookies(data, for: server)
+
+            XCTAssertEqual(Set(decoded.map(\.name)), Set([APIClient.sessionCookie, APIClient.csrfCookie]))
+            XCTAssertEqual(decoded.map(\.value), cookies.map(\.value))
+            XCTAssertTrue(decoded.allSatisfy { $0.isSecure == (scheme == "https") })
+            for cookie in decoded {
+                XCTAssertEqual(try XCTUnwrap(cookie.expiresDate).timeIntervalSince1970,
+                               expiry.timeIntervalSince1970, accuracy: 1)
+            }
+            let wrongOrigin = try XCTUnwrap(URL(string: "\(scheme)://other.local:8001/app"))
+            XCTAssertTrue(try SessionCookieStore.decodeCookies(data, for: wrongOrigin).isEmpty)
+            if scheme == "https" {
+                let insecureOrigin = try XCTUnwrap(URL(string: "http://codec.local:8001/app"))
+                XCTAssertTrue(try SessionCookieStore.decodeCookies(data, for: insecureOrigin).isEmpty)
+            }
+        }
+    }
+
+    func testCookieEncodingRejectsExpiredAndMalformedRecords() throws {
+        let server = try XCTUnwrap(URL(string: "http://codec.local:8001/app"))
+        let expired = try sessionCookies(server: server, expires: Date().addingTimeInterval(-60))
+        let data = try SessionCookieStore.encodeCookies(expired)
+        XCTAssertTrue(try SessionCookieStore.decodeCookies(data, for: server).isEmpty)
+        XCTAssertThrowsError(try SessionCookieStore.decodeCookies(Data("invalid".utf8), for: server)) { error in
+            XCTAssertEqual(error as? SessionCookieStore.StorageError, .invalidCookieData)
+        }
     }
 
     func testPersistenceOptOutRemovesExistingCredentialWithoutEndingCurrentSession() throws {

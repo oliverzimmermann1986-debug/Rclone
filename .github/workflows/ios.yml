@@ -83,4 +83,12 @@ jobs:
             -project ios/RcloneMobile.xcodeproj \
             -scheme RcloneMobile \
             -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
-            CODE_SIGNING_ALLOWED=NO
+            -derivedDataPath "$RUNNER_TEMP/ios-build" \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"
+      - name: Inspect simulator signing for Keychain tests
+        if: always()
+        run: |
+          SIM_APP="$RUNNER_TEMP/ios-build/Build/Products/Debug-iphonesimulator/RcloneMobile.app"
+          if test -d "$SIM_APP"; then
+            codesign -d --entitlements :- "$SIM_APP"
+          fi

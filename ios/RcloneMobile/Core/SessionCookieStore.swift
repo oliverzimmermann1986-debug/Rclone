@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Security
 
 protocol SessionPersisting {
@@ -9,6 +10,22 @@ protocol SessionPersisting {
 
 /// Session credentials remain on this device; passwords are never persisted.
 struct SessionCookieStore: SessionPersisting {
+    enum StorageError: Error, LocalizedError, Equatable {
+        case invalidCookieData
+        case keychain(operation: String, status: OSStatus)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidCookieData:
+                return "Die gespeicherte Sitzung konnte nicht gelesen werden."
+            case let .keychain(operation, status):
+                return "Schlüsselbund: \(operation) fehlgeschlagen (OSStatus \(status))."
+            }
+        }
+    }
+
+    private static let logger = Logger(subsystem: "de.sicherpfad.server-session", category: "Keychain")
+
     private struct Record: Codable {
         let name: String
         let value: String
@@ -44,13 +61,34 @@ struct SessionCookieStore: SessionPersisting {
     }
 
     func load(for server: URL) -> [HTTPCookie] {
+        do { return try loadChecked(for: server) }
+        catch {
+            // No cookie values, account addresses or credential data enter logs.
+            Self.logger.error("\(error.localizedDescription, privacy: .public)")
+            return []
+        }
+    }
+
+    func loadChecked(for server: URL) throws -> [HTTPCookie] {
         var request = query(server)
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        guard SecItemCopyMatching(request as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
-              let records = try? JSONDecoder().decode([Record].self, from: data) else { return [] }
+        let status = SecItemCopyMatching(request as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess else { throw StorageError.keychain(operation: "Lesen", status: status) }
+        guard let data = result as? Data else { throw StorageError.invalidCookieData }
+        return try Self.decodeCookies(data, for: server)
+    }
+
+    static func encodeCookies(_ cookies: [HTTPCookie]) throws -> Data {
+        try JSONEncoder().encode(cookies.map(Record.init))
+    }
+
+    static func decodeCookies(_ data: Data, for server: URL) throws -> [HTTPCookie] {
+        guard let records = try? JSONDecoder().decode([Record].self, from: data) else {
+            throw StorageError.invalidCookieData
+        }
         return records.compactMap(\.cookie).filter { cookie in
             let domain = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
             return domain.lowercased() == server.host?.lowercased()
@@ -59,17 +97,28 @@ struct SessionCookieStore: SessionPersisting {
     }
 
     func save(_ cookies: [HTTPCookie], for server: URL) {
-        guard cookies.contains(where: { $0.name == APIClient.sessionCookie }),
-              let data = try? JSONEncoder().encode(cookies.map(Record.init)) else { return }
+        do { try saveChecked(cookies, for: server) }
+        catch { Self.logger.error("\(error.localizedDescription, privacy: .public)") }
+    }
+
+    func saveChecked(_ cookies: [HTTPCookie], for server: URL) throws {
+        guard cookies.contains(where: { $0.name == APIClient.sessionCookie }) else { return }
+        let data = try Self.encodeCookies(cookies)
         let key = query(server)
         let changes = [kSecValueData as String: data]
-        let status = SecItemUpdate(key as CFDictionary, changes as CFDictionary)
+        var status = SecItemUpdate(key as CFDictionary, changes as CFDictionary)
         if status == errSecItemNotFound {
             var item = key
             item[kSecValueData as String] = data
             item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            SecItemAdd(item as CFDictionary, nil)
+            status = SecItemAdd(item as CFDictionary, nil)
+            if status == errSecDuplicateItem {
+                // Another client can create the same server item between update
+                // and add. Retrying update preserves the existing credential.
+                status = SecItemUpdate(key as CFDictionary, changes as CFDictionary)
+            }
         }
+        guard status == errSecSuccess else { throw StorageError.keychain(operation: "Speichern", status: status) }
     }
 
     func remove(for server: URL) {
