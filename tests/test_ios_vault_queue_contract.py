@@ -121,3 +121,40 @@ def test_vault_repeated_rows_have_independent_swiftui_typechecking_boundaries():
     assert (
         "VaultLibraryRow(item: item, isRestoring: restoringItemID == item.id)" in view
     )
+
+
+def test_vault_list_sections_and_event_handlers_typecheck_independently():
+    view = (IOS / "RcloneMobile/Views/DeviceVaultView.swift").read_text(
+        encoding="utf-8"
+    )
+    sections = [
+        "heroSection",
+        "destinationSection",
+        "importSection",
+        "inboxSection",
+        "importProgressSection",
+        "unassignedSection",
+        "queueSection",
+        "currentTransferSection",
+        "librarySection",
+    ]
+    list_body = view.split("private var vaultList: some View {", 1)[1].split(
+        "private var heroSection", 1
+    )[0]
+    for section in sections:
+        assert section in list_body
+        assert f"private var {section}: some View" in view
+    assert "ForEach" not in list_body
+    assert "AnyView" not in view
+    assert "ForEach(transfer.queue, id: \\.id) { (entry: VaultQueueEntry) in" in view
+    assert "private func queuedRow(_ entry: VaultQueueEntry) -> some View" in view
+    assert "onCompletion: handleImportedFiles" in view
+    assert "Task { await importPhotos(items) }" in view
+    assert "private func importPhotos(_ items: [PhotosPickerItem]) async" in view
+    removal = view.split("private func removeQueued(_ entry: VaultQueueEntry)", 1)[
+        1
+    ].split("private func requestReassignment", 1)[0]
+    assert (
+        "guard !transfer.isWorking, let scope = queueScope else { return }" in removal
+    )
+    assert "transfer.removeQueued(entry, scope: scope)" in removal
