@@ -141,9 +141,9 @@ private struct LaunchStatusView: View {
         ZStack {
             Color(.systemGroupedBackground).ignoresSafeArea()
             VStack(spacing: 16) {
-                Image(systemName: "arrow.triangle.2.circlepath.icloud")
-                    .font(.system(size: 42, weight: .semibold))
-                    .foregroundStyle(.green)
+                Image("SicherpfadMark")
+                    .resizable().scaledToFit().frame(width: 64, height: 64)
+                    .clipShape(RoundedRectangle(cornerRadius: 15))
                     .accessibilityHidden(true)
                 ProgressView()
                 Text("Verbindung wird geprüft …")

@@ -39,6 +39,23 @@ targets:
     dependencies:
       - target: RcloneProtectionWidget
         embed: true
+      - target: RcloneShareExtension
+        embed: true
+  RcloneShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: RcloneShareExtension
+      - path: Shared/VaultInbox.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.oliverzimmermann.rclonesync.share
+        INFOPLIST_FILE: RcloneShareExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: RcloneShareExtension/RcloneShareExtension.entitlements
+        GENERATE_INFOPLIST_FILE: false
+        SKIP_INSTALL: true
+        CODE_SIGN_STYLE: Automatic
+        APPLICATION_EXTENSION_API_ONLY: YES
   RcloneProtectionWidget:
     type: app-extension
     platform: iOS
@@ -70,3 +87,4 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.oliverzimmermann.rclonesync.tests
+        GENERATE_INFOPLIST_FILE: true

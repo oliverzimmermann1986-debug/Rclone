@@ -262,7 +262,7 @@ struct DashboardView: View {
         }
         if overview.alerts.contains(where: { ["warn", "warning"].contains($0.level.lowercased()) }) { return .warning }
         if overview.pairs.health.contains(where: { $0.overdue == true }) { return .warning }
-        if model.storage?.pairs.contains(where: { $0.restoreEvidence?.state == "never" }) == true { return .warning }
+        if model.storage?.pairs.contains(where: { $0.restoreEvidence?.isCurrent != true }) == true { return .warning }
         if overview.pairs.total == 0 || overview.pairs.scheduled == 0 || overview.jobs.lastSuccess == nil { return .warning }
         return .ok
     }
@@ -285,8 +285,8 @@ struct DashboardView: View {
         if let pair = overview.pairs.health.first(where: { $0.overdue == true }) {
             return "Datenweg \(pair.name) ist überfällig. Zeitplan oder Serverzustand prüfen."
         }
-        if let pair = model.storage?.pairs.first(where: { $0.restoreEvidence?.state == "never" }) {
-            return "Wiederherstellbarkeit von \(pair.name) erstmals mit einer Stichprobe nachweisen."
+        if let pair = model.storage?.pairs.first(where: { $0.restoreEvidence?.isCurrent != true }) {
+            return "Wiederherstellbarkeit von \(pair.name) mit einer aktuellen Stichprobe nachweisen."
         }
         if overview.pairs.total == 0 { return "Ersten Datenweg zwischen Quelle und Ziel anlegen." }
         if overview.pairs.scheduled == 0 { return "Einen Job mit Zeitplan anlegen, damit der Schutz automatisch läuft." }
@@ -299,7 +299,7 @@ struct DashboardView: View {
         guard let pairs = model.storage?.pairs else { return "–" }
         let evidence = pairs.compactMap(\.restoreEvidence)
         guard !evidence.isEmpty else { return "–" }
-        return "\(evidence.filter { $0.state == "passed" }.count)/\(evidence.count)"
+        return "\(evidence.filter { $0.isCurrent }.count)/\(pairs.count)"
     }
 
     private var liveProgress: some View {

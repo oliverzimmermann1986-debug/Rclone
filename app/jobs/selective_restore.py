@@ -7,6 +7,7 @@ remains in a private staging directory until the authenticated user removes it.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ from typing import Any, Mapping, Sequence
 from ..db import Database
 from ..notifications import notify
 from ..rclone_args import rclone_subprocess_env
+from ..restore_evidence import pair_binding
 from .rclone_sync import _rclone_cache_args
 from .restore_test import _endpoints
 
@@ -26,6 +28,143 @@ _STATE_KEY = "selective_recovery:v1"
 _MAX_ITEMS = 100
 _MAX_STATE_ITEMS = 100
 _FREE_SPACE_MARGIN = 64 * 1024 * 1024
+
+
+def _expected_manifest(
+    target: str,
+    listing: Path,
+    selection: Sequence[str],
+    *,
+    timeout: int,
+    limit_bytes: int,
+) -> dict[str, dict[str, Any]]:
+    measured = _run(
+        [
+            "rclone",
+            "lsjson",
+            "--recursive",
+            "--files-only",
+            "--hash",
+            *_rclone_cache_args(),
+            "--files-from-raw",
+            str(listing),
+            "--",
+            target,
+        ],
+        timeout=timeout,
+    )
+    if measured.returncode != 0:
+        raise RuntimeError(
+            "Auswahl konnte am Sicherungsziel nicht vollständig erfasst werden"
+        )
+    rows = json.loads(measured.stdout or "[]")
+    if not isinstance(rows, list) or len(rows) != len(selection):
+        raise RuntimeError(
+            "Auswahl unvollständig: ausgewählte Dateien fehlen am Sicherungsziel"
+        )
+    manifest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("IsDir"):
+            raise RuntimeError("Recovery-Auswahl muss aus einzelnen Dateien bestehen")
+        path = str(row.get("Path") or "")
+        if path not in selection or path in manifest:
+            raise RuntimeError(
+                "Sicherungsziel liefert unerwartete oder doppelte Dateipfade"
+            )
+        size = int(row.get("Size", -1))
+        if size < 0:
+            raise RuntimeError(
+                "Die Dateigröße konnte nicht verlässlich ermittelt werden"
+            )
+        hashes = {
+            str(key).lower().replace("-", ""): str(value).lower()
+            for key, value in (row.get("Hashes") or {}).items()
+            if value
+        }
+        algorithm = next(
+            (key for key in ("sha256", "sha1", "md5") if key in hashes), None
+        )
+        manifest[path] = {
+            "bytes": size,
+            "algorithm": algorithm,
+            "checksum": hashes.get(algorithm) if algorithm else None,
+        }
+    if set(manifest) != set(selection):
+        raise RuntimeError(
+            "Auswahl unvollständig: ausgewählte Dateien fehlen am Sicherungsziel"
+        )
+    if sum(item["bytes"] for item in manifest.values()) > limit_bytes:
+        raise RuntimeError("Die Auswahl überschreitet das bestätigte Recovery-Limit")
+    if any(not item["algorithm"] for item in manifest.values()):
+        # Providers without a common native checksum are read once before the
+        # copy. A later same-size replacement must not become a valid recovery.
+        checksums = _run(
+            [
+                "rclone",
+                "hashsum",
+                "SHA-256",
+                "--download",
+                *_rclone_cache_args(),
+                "--files-from-raw",
+                str(listing),
+                "--",
+                target,
+            ],
+            timeout=timeout,
+        )
+        if checksums.returncode != 0:
+            raise RuntimeError(
+                "Erwartete Prüfsummen konnten nicht vollständig gelesen werden"
+            )
+        seen: set[str] = set()
+        for line in (checksums.stdout or "").splitlines():
+            digest, separator, path = line.partition("  ")
+            if (
+                not separator
+                or len(digest) != 64
+                or any(char not in "0123456789abcdefABCDEF" for char in digest)
+                or path not in manifest
+                or path in seen
+            ):
+                raise RuntimeError(
+                    "Sicherungsziel liefert kein vollständiges Prüfsummenmanifest"
+                )
+            seen.add(path)
+            manifest[path].update(algorithm="sha256", checksum=digest.lower())
+        if seen != set(manifest):
+            raise RuntimeError(
+                "Prüfsummenmanifest unvollständig: ausgewählte Dateien fehlen"
+            )
+    return manifest
+
+
+def _verify_manifest(data: Path, manifest: Mapping[str, Mapping[str, Any]]) -> None:
+    actual: dict[str, Path] = {}
+    for item in data.rglob("*"):
+        if item.is_symlink():
+            raise RuntimeError(
+                "Recovery enthält einen nicht erlaubten symbolischen Link"
+            )
+        if item.is_file():
+            actual[item.relative_to(data).as_posix()] = item
+    if set(actual) != set(manifest):
+        raise RuntimeError(
+            "Recovery unvollständig: zurückgeholte Pfade entsprechen nicht der Auswahl"
+        )
+    for path, expected in manifest.items():
+        item = actual[path]
+        if item.stat().st_size != expected["bytes"]:
+            raise RuntimeError(
+                "Recovery-Dateigröße stimmt nicht mit dem erwarteten Stand überein"
+            )
+        digest = hashlib.new(str(expected["algorithm"]))
+        with item.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != expected["checksum"]:
+            raise RuntimeError(
+                "Recovery-Prüfsumme stimmt nicht mit dem erwarteten Stand überein"
+            )
 
 
 def normalize_selection(paths: Sequence[str]) -> list[str]:
@@ -155,6 +294,7 @@ def run_selective_restore(
         "requested_items": len(selection),
         "limit_bytes": limit_bytes,
         "recovery_point": recovery_point,
+        "evidence_binding": pair_binding(pair),
     }
     try:
         work.mkdir(mode=0o700)
@@ -168,28 +308,18 @@ def run_selective_restore(
         timeout = max(
             300, int(float((config.get("backup") or {}).get("timeout_hours", 4)) * 3600)
         )
-        size_cmd = [
-            "rclone",
-            "size",
-            "--json",
-            *_rclone_cache_args(),
-            "--files-from-raw",
-            str(listing),
-            "--",
+        manifest = _expected_manifest(
             backup_target,
-        ]
-        measured = _run(size_cmd, timeout=min(timeout, 900))
-        if measured.returncode != 0:
-            raise RuntimeError("Auswahl konnte am Sicherungsziel nicht gemessen werden")
-        size = json.loads(measured.stdout or "{}")
-        selected_bytes = int(size.get("bytes") or 0)
-        selected_count = int(size.get("count") or 0)
-        if selected_count <= 0:
-            raise RuntimeError("Die Auswahl enthält am Sicherungsziel keine Dateien")
-        if selected_bytes > limit_bytes:
-            raise RuntimeError(
-                "Die Auswahl überschreitet das bestätigte Recovery-Limit"
-            )
+            listing,
+            selection,
+            timeout=min(timeout, 900),
+            limit_bytes=limit_bytes,
+        )
+        selected_bytes = sum(item["bytes"] for item in manifest.values())
+        selected_count = len(manifest)
+        manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        (work / "expected-manifest.json").write_text(manifest_json, encoding="utf-8")
+        record["manifest_sha256"] = hashlib.sha256(manifest_json.encode()).hexdigest()
         free = shutil.disk_usage(work).free
         if free < selected_bytes + _FREE_SPACE_MARGIN:
             raise RuntimeError("Nicht genügend freier Speicher im Recovery-Staging")
@@ -215,11 +345,12 @@ def run_selective_restore(
             raise RuntimeError(
                 f"Recovery fehlgeschlagen (rclone exit {copied.returncode})"
             )
+        _verify_manifest(data, manifest)
         check_cmd = [
             "rclone",
             "check",
             *_rclone_cache_args(),
-            "--checksum",
+            "--download",
             "--one-way",
             "--",
             str(data),
@@ -239,6 +370,8 @@ def run_selective_restore(
                 "duration_sec": round(time.monotonic() - started, 2),
                 "staging_path": str(data),
                 "verified": True,
+                "verified_at": time.time(),
+                "verification_scope": "complete_selection",
             }
         )
         database.job_finish(job_id, "ok", {"ok": True, **record})

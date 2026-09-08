@@ -14,6 +14,8 @@ Support-Bundle. Protokolliert werden ausschließlich Pfadnamen und Zähler.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import logging
 import queue
 import random
@@ -25,15 +27,17 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from ..config_store import get_config
 from ..notifications import notify
 from ..rclone_args import rclone_subprocess_env
+from ..restore_evidence import pair_binding, restore_history_key
 from ..utils import bounded_int as _bounded_int
 from .rclone_sync import (
     DEFAULT_CANCEL_SCOPE,
     _SnapshotConfig,
+    _filter_args,
     _rclone_cache_args,
     _register_proc,
     _run_rclone_command,
@@ -106,6 +110,7 @@ def _sample_paths(
     max_total_bytes: int,
     rng: random.Random,
     timeout_sec: float = _LISTING_TIMEOUT_SEC,
+    filter_args: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Reservoir-Sampling über ein gestreamtes, größenbewusstes Listing.
 
@@ -129,6 +134,7 @@ def _sample_paths(
         "--separator",
         "\t",
         *_rclone_cache_args(),
+        *filter_args,
         "--",
         target,
     ]
@@ -370,6 +376,8 @@ def run_pair_restore_test(
         "scanned": 0,
         "truncated": False,
         "log_file": str(log_file),
+        "evidence_binding": pair_binding(pair),
+        "history_key": restore_history_key(pair),
     }
     if not source or not copy_target:
         result.update({"ok": False, "error": "Quelle oder Ziel ist nicht gesetzt"})
@@ -406,6 +414,7 @@ def run_pair_restore_test(
             max_scan=int(settings["max_scan_files"]),
             max_total_bytes=max_total_bytes,
             rng=rng,
+            filter_args=_filter_args(cfg, dict(pair), "lsf"),
         )
         result["scanned"] = sample["scanned"]
         result["truncated"] = sample["truncated"]
@@ -587,7 +596,7 @@ def run_pair_restore_test(
             "rclone",
             "check",
             *_rclone_cache_args(),
-            "--checksum",
+            "--download",
             "--one-way",
             "--stats",
             "10s",
@@ -617,6 +626,22 @@ def run_pair_restore_test(
             return result
         result["return_code"] = rc
         if rc == 0:
+            sample_manifest = []
+            for item in sorted(restored_items):
+                digest = hashlib.sha256()
+                with item.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                sample_manifest.append(
+                    [
+                        item.relative_to(restored).as_posix(),
+                        item.stat().st_size,
+                        digest.hexdigest(),
+                    ]
+                )
+            result["sample_manifest_sha256"] = hashlib.sha256(
+                json.dumps(sample_manifest, separators=(",", ":")).encode()
+            ).hexdigest()
             if partial_selection:
                 result.update(
                     {
@@ -664,6 +689,7 @@ def run_pair_restore_test(
         logger.exception("Restore-Drill für %s fehlgeschlagen", name)
         result.update({"ok": False, "sample_status": "error", "error": str(exc)})
     finally:
+        result["evidence_checked_at"] = time.time()
         # Produktivdaten dürfen nicht liegen bleiben — auch nicht nach Abbruch
         # oder Ausnahme.
         cleanup_error = ""
@@ -748,7 +774,14 @@ def run_restore_test(
         name = str(pair.get("name") or "?")
         if is_cancelled():
             results.append(
-                {"name": name, "ok": False, "cancelled": True, "error": "Abgebrochen"}
+                {
+                    "name": name,
+                    "ok": False,
+                    "cancelled": True,
+                    "error": "Abgebrochen",
+                    "history_key": restore_history_key(pair),
+                    "evidence_binding": pair_binding(pair),
+                }
             )
             continue
         log_file = (
@@ -771,7 +804,9 @@ def run_restore_test(
     sampled = sum(int(item.get("sample_size") or 0) for item in results)
 
     history_keys = {
-        str(item.get("name")): f"{PAIR_PREFIX}{item.get('name')}"
+        str(item.get("name")): str(
+            item.get("history_key") or f"{PAIR_PREFIX}{item.get('name')}"
+        )
         for item in results
         if item.get("name")
     }

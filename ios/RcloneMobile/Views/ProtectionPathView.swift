@@ -15,9 +15,9 @@ struct RestoreEvidenceBadge: View {
     private var title: String {
         if isRunning { return "Restore wird geprüft" }
         switch evidence?.state {
-        case "passed": return "Restore geprüft"
+        case "passed": return evidence?.isCurrent == true ? "Stichprobe geprüft" : "Nachweis erneuern"
         case "failed": return "Restore fehlgeschlagen"
-        case "never": return "Restore offen"
+        case "never", "stale": return "Restore offen"
         default: return "Nachweis unbekannt"
         }
     }
@@ -25,7 +25,7 @@ struct RestoreEvidenceBadge: View {
     private var symbol: String {
         if isRunning { return "arrow.clockwise.circle.fill" }
         switch evidence?.state {
-        case "passed": return "checkmark.seal.fill"
+        case "passed": return evidence?.isCurrent == true ? "checkmark.seal.fill" : "clock.badge.exclamationmark"
         case "failed": return "xmark.octagon.fill"
         case "never": return "clock.badge.exclamationmark"
         default: return "questionmark.circle"
@@ -35,9 +35,9 @@ struct RestoreEvidenceBadge: View {
     private var color: Color {
         if isRunning { return .blue }
         switch evidence?.state {
-        case "passed": return .green
+        case "passed": return evidence?.isCurrent == true ? .green : .orange
         case "failed": return .red
-        case "never": return .orange
+        case "never", "stale": return .orange
         default: return .secondary
         }
     }
@@ -103,7 +103,7 @@ struct ProtectionPathDetailView: View {
                 LabeledContent("Letzter Erfolg", value: AppFormat.date(pair.restoreEvidence?.lastSuccessAt))
                 LabeledContent(
                     "Prüfsumme",
-                    value: pair.restoreEvidence?.checksumVerified == true ? "Bestätigt" : "Nicht bestätigt"
+                    value: pair.restoreEvidence?.isCurrent == true ? "Stichprobe bestätigt" : "Nicht aktuell bestätigt"
                 )
                 LabeledContent("Stichprobe", value: sampleDescription)
                 if isRestoreTestRunning {
@@ -130,7 +130,7 @@ struct ProtectionPathDetailView: View {
                     Label(
                         isRestoreTestRunning
                             ? "Restore-Test läuft …"
-                            : pair.restoreEvidence?.state == "passed" ? "Nachweis erneuern" : "Restore-Test starten",
+                            : pair.restoreEvidence?.isCurrent == true ? "Nachweis erneuern" : "Restore-Test starten",
                         systemImage: isRestoreTestRunning ? "hourglass" : "arrow.counterclockwise.circle.fill"
                     )
                 }
@@ -216,7 +216,7 @@ struct ProtectionPathDetailView: View {
     private var evidenceTitle: String {
         if isRestoreTestRunning { return "Prüfung läuft" }
         switch pair.restoreEvidence?.state {
-        case "passed": return "Wiederherstellbar"
+        case "passed": return pair.restoreEvidence?.isCurrent == true ? "Stichprobe bestätigt" : "Nachweis erneuern"
         case "failed": return "Prüfung fehlgeschlagen"
         case "never": return "Noch nicht nachgewiesen"
         default: return "Nachweis nicht verfügbar"
@@ -234,7 +234,7 @@ struct ProtectionPathDetailView: View {
     private var evidenceColor: Color {
         if isRestoreTestRunning { return .blue }
         switch pair.restoreEvidence?.state {
-        case "passed": return .green
+        case "passed": return pair.restoreEvidence?.isCurrent == true ? .green : .orange
         case "failed": return .red
         default: return .orange
         }
@@ -243,7 +243,7 @@ struct ProtectionPathDetailView: View {
     private var evidenceSymbol: String {
         if isRestoreTestRunning { return "arrow.clockwise.circle.fill" }
         switch pair.restoreEvidence?.state {
-        case "passed": return "checkmark.seal.fill"
+        case "passed": return pair.restoreEvidence?.isCurrent == true ? "checkmark.seal.fill" : "clock.badge.exclamationmark"
         case "failed": return "xmark.octagon.fill"
         default: return "clock.badge.exclamationmark"
         }

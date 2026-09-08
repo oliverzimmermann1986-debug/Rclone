@@ -13,7 +13,30 @@ def test_public_release_build_is_not_restricted_to_internal_testflight():
     assert "Capture localized App Store screenshots" in workflow
     assert "build/app-store-screenshots/*.png" in workflow
     assert "--store-preview" in workflow
-    assert "dashboard vault paths jobs system" in workflow
+    assert "dashboard vault recovery protect system" in workflow
+
+
+def test_signed_bundle_gate_verifies_both_extensions_independent_of_directory_order():
+    workflow = (ROOT / "codemagic.yaml").read_text(encoding="utf-8")
+    assert 'WIDGET_PATH="$APP_PATH/PlugIns/RcloneProtectionWidget.appex"' in workflow
+    assert 'SHARE_PATH="$APP_PATH/PlugIns/RcloneShareExtension.appex"' in workflow
+    assert 'test -d "$SHARE_PATH"' in workflow
+    assert 'test -d "$WIDGET_PATH"' in workflow
+    assert "com.apple.share-services" in workflow
+    assert "share-entitlements.plist" in workflow
+    assert 'codesign --verify --deep --strict "$APP_PATH"' in workflow
+
+
+def test_simulator_keychain_tests_keep_ad_hoc_signing_enabled():
+    native_ci = (ROOT / ".github" / "workflows" / "ios.yml").read_text(encoding="utf-8")
+    release_ci = (ROOT / "codemagic.yaml").read_text(encoding="utf-8")
+    for workflow in (native_ci, release_ci):
+        assert 'CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"' in workflow
+        assert "CODE_SIGNING_ALLOWED=NO" not in workflow
+    assert 'codesign -d --entitlements :- "$SIM_APP"' in native_ci
+    project = (ROOT / "ios" / "project.yml").read_text(encoding="utf-8")
+    test_target = project.split("  RcloneMobileTests:", 1)[1]
+    assert "GENERATE_INFOPLIST_FILE: true" in test_target
 
 
 def test_store_preview_fixture_covers_all_primary_tabs():

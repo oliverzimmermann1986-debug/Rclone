@@ -233,7 +233,8 @@ def test_overview_measures_with_the_same_pair_filters_as_sync(monkeypatch):
     api_storage.overview(include_remote=True, refresh_sizes=True)
 
     assert len(calls) == 2
-    assert all(call[1]["filter_args"] == ("--exclude", "/.work/**") for call in calls)
+    assert all("- /.work/**" in call[1]["filter_args"] for call in calls)
+    assert all("- /Sicherpfad/**" in call[1]["filter_args"] for call in calls)
 
 
 class _FakeConfig:
@@ -538,6 +539,7 @@ def test_overview_keeps_last_sync_across_pair_rename(monkeypatch):
 
     assert database.identities == {
         key: "Fotos neu",
+        "restore:id:photos": "Fotos neu",
         "restore:Fotos neu": "Fotos neu",
     }
     assert item["last_sync"] == 1234
@@ -591,16 +593,20 @@ def test_overview_exposes_typed_restore_proof_without_mixing_sync_history(
     item = api_storage.overview()["pairs"][0]
 
     assert item["last_sync"] == 1200
-    assert item["restore_evidence"] == {
-        "state": "passed",
+    expected = {
+        "state": "stale",
         "last_attempt_at": 1300,
         "last_success_at": 1300,
         "job_id": 44,
         "verified_files": 20,
         "sample_size": 20,
-        "checksum_verified": True,
+        "checksum_verified": False,
         "error": None,
     }
+    assert all(
+        item["restore_evidence"][key] == value for key, value in expected.items()
+    )
+    assert item["restore_evidence"]["invalid_reason"] == "unbound"
 
 
 def test_overview_marks_failed_restore_but_keeps_previous_proof(monkeypatch):
@@ -638,7 +644,8 @@ def test_overview_marks_failed_restore_but_keeps_previous_proof(monkeypatch):
     assert evidence["state"] == "failed"
     assert evidence["last_attempt_at"] == 1400
     assert evidence["last_success_at"] == 1300
-    assert evidence["verified_files"] == 20
+    assert evidence["verified_files"] is None
+    assert evidence["last_success_verified_files"] == 20
     assert evidence["error"] == "Prüfsummen weichen ab"
 
 
@@ -750,7 +757,7 @@ def test_four_pairs_measure_all_eight_sides_in_one_parallel_wave(monkeypatch):
     peak = 0
     lock = threading.Lock()
 
-    def measure(path, *, timeout):
+    def measure(path, *, timeout, filter_args=()):
         nonlocal active, peak
         with lock:
             active += 1

@@ -9,9 +9,24 @@ struct RecoveryCenterView: View {
     @State private var errorMessage: String?
     @State private var exportURL: URL?
     @State private var showingHandover = false
+    @State private var loadID = UUID()
 
     var body: some View {
         List {
+            if let errorMessage, recoveryPass != nil {
+                Section {
+                    Label(errorMessage, systemImage: "wifi.exclamationmark").foregroundStyle(.orange)
+                    if let recoveryPass {
+                        Text("Gespeicherter Stand: \(AppFormat.date(recoveryPass.generatedAt)). Kein aktueller Nachweis der Erreichbarkeit.")
+                            .font(.caption)
+                    }
+                }
+            }
+            Section {
+                NavigationLink { RecoveryRescueView() } label: {
+                    Label("Nach Serververlust zurückholen", systemImage: "lifepreserver")
+                }
+            }
             if let recoveryPass {
                 protectionHeader(recoveryPass)
                 if recoveryPass.quarantine.active > 0 {
@@ -38,7 +53,7 @@ struct RecoveryCenterView: View {
                 }
             }
         }
-        .navigationTitle("Recovery Center")
+        .navigationTitle("Wiederherstellen")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await load() }
         .task { await load() }
@@ -159,7 +174,7 @@ struct RecoveryCenterView: View {
             } header: {
                 Text("Schutzprofile")
             } footer: {
-                Text("Profile sind sichere Ausgangspunkte. Übernahme erfolgt bewusst im Job-Editor, nie automatisch.")
+                Text("Profile im Schutzassistenten unter Sichern bewusst übernehmen.")
             }
         }
     }
@@ -214,19 +229,22 @@ struct RecoveryCenterView: View {
             loadDemo()
             return
         }
+        let requestID = UUID()
+        loadID = requestID
+        let server = model.serverAddress
+        let username = model.savedUsername
         isLoading = recoveryPass == nil
-        defer { isLoading = false }
+        defer { if loadID == requestID { isLoading = false } }
         do {
             async let passTask = model.withCurrentClient { try await $0.getRecoveryPass(includePaths: false) }
             async let calendarTask = model.withCurrentClient { try await $0.getRecoveryCalendar(days: 90) }
             async let policiesTask = model.withCurrentClient { try await $0.getRecoveryPolicies() }
             let (freshPass, freshCalendar, freshPolicies) = try await (passTask, calendarTask, policiesTask)
+            guard loadID == requestID, model.serverAddress == server, model.savedUsername == username else { return }
             recoveryPass = freshPass
             calendar = freshCalendar
             policies = freshPolicies.profiles
-            if let data = try? JSONEncoder().encode(freshPass) {
-                UserDefaults.standard.set(data, forKey: "offlineRecoveryPass")
-            }
+            RecoveryOfflineStore().save(freshPass, server: server, username: username)
             ProtectionWidgetSnapshot(
                 score: freshPass.protection.score,
                 state: freshPass.protection.state,
@@ -239,9 +257,9 @@ struct RecoveryCenterView: View {
             errorMessage = nil
         } catch is CancellationError {
         } catch {
+            guard loadID == requestID, model.serverAddress == server, model.savedUsername == username else { return }
             if recoveryPass == nil,
-               let data = UserDefaults.standard.data(forKey: "offlineRecoveryPass"),
-               let cached = try? JSONDecoder().decode(RecoveryPassResponse.self, from: data) {
+               let cached = RecoveryOfflineStore().load(server: model.serverAddress, username: model.savedUsername) {
                 recoveryPass = cached
                 errorMessage = "Offline-Stand vom \(AppFormat.date(cached.generatedAt))"
             } else {
@@ -278,6 +296,8 @@ struct RecoveryCenterView: View {
                 lastSyncAt: pair.lastSync,
                 rpoSeconds: pair.lastSync.map { max(0, Int(now - $0)) },
                 restore: RecoveryRestoreProof(
+                    valid: true,
+                    validUntil: now + 7 * 86400,
                     state: pair.restoreEvidence?.state ?? "passed",
                     lastAttemptAt: pair.restoreEvidence?.lastAttemptAt ?? now - 86_400,
                     lastSuccessAt: pair.restoreEvidence?.lastSuccessAt ?? now - 86_400,
@@ -350,8 +370,8 @@ private struct RecoveryPathRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: isRestoreTesting ? "hourglass" : path.restore.state == "passed" ? "checkmark.shield.fill" : "arrow.counterclockwise.circle")
-                .foregroundStyle(isRestoreTesting ? .blue : path.restore.state == "passed" ? .green : .orange)
+            Image(systemName: isRestoreTesting ? "hourglass" : path.restore.isCurrent ? "checkmark.shield.fill" : "arrow.counterclockwise.circle")
+                .foregroundStyle(isRestoreTesting ? .blue : path.restore.isCurrent ? .green : .orange)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 3) {
                 Text(path.name).font(.headline)
@@ -359,9 +379,9 @@ private struct RecoveryPathRow: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Text(isRestoreTesting ? "Prüft …" : path.restore.state == "passed" ? "Geprüft" : "Offen")
+            Text(isRestoreTesting ? "Prüft …" : path.restore.isCurrent ? "Geprüft" : "Offen")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(isRestoreTesting ? .blue : path.restore.state == "passed" ? .green : .orange)
+                .foregroundStyle(isRestoreTesting ? .blue : path.restore.isCurrent ? .green : .orange)
         }
     }
 }
@@ -385,8 +405,21 @@ private struct RecoveryDataPathDetail: View {
                 }
                 LabeledContent(
                     "Prüfsumme",
-                    value: isRestoreTesting ? "Wird geprüft" : dataPath.restore.checksumVerified ? "Bestätigt" : "Offen"
+                    value: isRestoreTesting ? "Wird geprüft" : dataPath.restore.isCurrent ? "Stichprobe bestätigt" : "Nicht aktuell belegt"
                 )
+                if let count = dataPath.restore.verifiedFiles {
+                    LabeledContent("Geprüfte Dateien", value: "\(count) (Stichprobe)")
+                }
+                if let date = dataPath.restore.validUntil {
+                    LabeledContent("Gültig bis", value: AppFormat.date(date))
+                }
+                if dataPath.restore.state == "stale" {
+                    Label("Nachweis abgelaufen oder Ziel geändert. Bitte erneut prüfen.", systemImage: "clock.badge.exclamationmark")
+                        .foregroundStyle(.orange)
+                }
+                if let id = dataPath.restore.jobID {
+                    Button("Prüfprotokoll öffnen") { model.requestRunNavigation(id: id) }
+                }
                 if let date = dataPath.restore.lastSuccessAt {
                     LabeledContent("Letzter Restore", value: AppFormat.date(date))
                 }
@@ -649,6 +682,11 @@ private struct RecoveryTimelineView: View {
     let dataPath: RecoveryDataPath
     @State private var points: [RecoveryPoint] = []
     @State private var selectedPoint: RecoveryPoint?
+    @State private var snapshotLimitGiB = 5
+    @State private var snapshotOperation = "capture"
+    @State private var confirmSnapshot = false
+    @State private var operationJobID: Int?
+    @State private var isStartingSnapshot = false
     @State private var diff: RecoveryDiffResponse?
     @State private var isLoading = false
     @State private var errorMessage: String?
@@ -689,11 +727,37 @@ private struct RecoveryTimelineView: View {
                 }
             }
 
+            Section {
+                Stepper("Speicherlimit: \(snapshotLimitGiB) GiB", value: $snapshotLimitGiB, in: 1...50)
+                Button("Vollständigen Stand jetzt erstellen") { snapshotOperation = "capture"; confirmSnapshot = true }
+                    .disabled(model.isDemoMode || isStartingSnapshot)
+                if let operationJobID {
+                    Button("Vorgang und Ergebnis öffnen") { model.requestRunNavigation(id: operationJobID) }
+                }
+            } header: { Text("Vollständiger Stand") } footer: {
+                Text("Kopiert den aktuellen Sicherungsbestand mit allen Dateien und SHA-256-Beleg auf den Server. Zusätzlicher Speicher und Cloud-Download nötig. Nicht für Serververlust geeignet. Überschreitet der Bestand das Limit, wird kein vollständiger Stand zugesagt.")
+            }
+
             if let point = selectedPoint, point.id != "current" {
+                Section {
+                    if point.complete == true {
+                        Label("Vollständiger Stand · \(point.files ?? 0) Dateien", systemImage: "checkmark.seal")
+                        if let size = point.totalBytes { LabeledContent("Größe", value: AppFormat.bytes(size)) }
+                        Button("Gesamten Stand getrennt zurückholen") { snapshotOperation = "restore"; confirmSnapshot = true }
+                            .disabled(model.isDemoMode || isStartingSnapshot)
+                    } else {
+                        Label("Änderungsarchiv – kein vollständiger Stand", systemImage: "info.circle")
+                            .foregroundStyle(.orange)
+                        Text("Enthält nur ersetzte oder gelöschte Dateien. Der Vergleich mit heute zeigt keinen vollständigen historischen Bestand.").font(.caption)
+                    }
+                }
                 Section("Änderungen bis heute") {
                     if isLoading && diff == nil {
                         ProgressView()
                     } else if let diff {
+                        if let warning = diff.warning {
+                            Label(warning, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                        }
                         HStack(spacing: 0) {
                             diffMetric("Neu", diff.counts.added, .green)
                             Divider().frame(height: 42)
@@ -702,7 +766,7 @@ private struct RecoveryTimelineView: View {
                             diffMetric("Geändert", diff.counts.changed, .orange)
                         }
                         if diff.truncated {
-                            Label("Großer Bestand: Die Anzeige ist begrenzt.", systemImage: "info.circle")
+                            Label("Vergleich begrenzt; nicht alle Inhalte sind vollständig verglichen.", systemImage: "info.circle")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
                         }
@@ -740,6 +804,31 @@ private struct RecoveryTimelineView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task { await loadPoints() }
         .refreshable { await loadPoints() }
+        .confirmationDialog(snapshotOperation == "capture" ? "Vollständige Kopie erstellen?" : "Stand ins private Staging zurückholen?",
+            isPresented: $confirmSnapshot, titleVisibility: .visible) {
+                Button("Vorgang starten") {
+                    let operation = snapshotOperation
+                    Task { await startSnapshotOperation(operation) }
+                }
+                Button("Abbrechen", role: .cancel) {}
+            }
+    }
+
+    private func startSnapshotOperation(_ operation: String?) async {
+        isStartingSnapshot = true
+        defer { isStartingSnapshot = false }
+        do {
+            let request = FullSnapshotRequest(identity: dataPath.name, maxTotalMB: snapshotLimitGiB * 1024)
+            let response: SelectiveRestoreResponse
+            if operation == "capture" {
+                response = try await model.withCurrentClient { try await $0.createFullSnapshot(request) }
+            } else if let point = selectedPoint, point.complete == true {
+                response = try await model.withCurrentClient { try await $0.restoreFullSnapshot(pointID: point.id, request: request) }
+            } else { return }
+            operationJobID = response.jobID
+            errorMessage = nil
+            model.requestRunNavigation(id: response.jobID)
+        } catch { errorMessage = error.localizedDescription }
     }
 
     private func diffMetric(_ label: String, _ value: Int, _ color: Color) -> some View {
@@ -794,17 +883,20 @@ private struct RecoveryTimelineView: View {
             return
         }
         isLoading = true
-        defer { isLoading = false }
+        defer { if selectedPoint?.id == point.id { isLoading = false } }
         do {
-            diff = try await model.withCurrentClient {
+            let response = try await model.withCurrentClient {
                 try await $0.getRecoveryDiff(
                     identity: dataPath.name,
                     fromPoint: point.id,
                     toPoint: "current"
                 )
             }
+            guard selectedPoint?.id == point.id else { return }
+            diff = response
             errorMessage = nil
         } catch {
+            guard selectedPoint?.id == point.id else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -820,6 +912,7 @@ private struct RecoveryHandoverView: View {
     @State private var exportURL: URL?
     @State private var isWorking = false
     @State private var errorMessage: String?
+    @State private var confirmHTTP = false
 
     var body: some View {
         Form {
@@ -834,7 +927,11 @@ private struct RecoveryHandoverView: View {
                 Text("Das Paket wird mit AES-256-GCM verschlüsselt. Die Passphrase getrennt übermitteln; sie ist nicht wiederherstellbar.")
             }
             Section {
-                Button { Task { await create() } } label: {
+                Button {
+                    if (try? APIClient.normalizedServerURL(model.serverAddress).scheme) == "http" {
+                        confirmHTTP = true
+                    } else { Task { await create() } }
+                } label: {
                     if isWorking { ProgressView() } else { Label("Paket verschlüsseln", systemImage: "lock.doc") }
                 }
                 .disabled(password.isEmpty || passphrase.count < 12 || passphrase != confirmation || isWorking)
@@ -847,6 +944,13 @@ private struct RecoveryHandoverView: View {
         .navigationTitle("Sichere Übergabe")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Schließen") { dismiss() } } }
+        .confirmationDialog("Passphrase unverschlüsselt übertragen?", isPresented: $confirmHTTP, titleVisibility: .visible) {
+            Button("Über bestätigten HTTP-Server erstellen", role: .destructive) { Task { await create() } }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Paketverschlüsselung schützt nicht die HTTP-Verbindung. Passwort und Passphrase können mitgelesen werden. Verwende möglichst HTTPS oder einen vertrauenswürdigen VPN-Tunnel.")
+        }
+        .onDisappear { password = ""; passphrase = ""; confirmation = "" }
     }
 
     private func create() async {

@@ -401,6 +401,7 @@ def score_components(
         if isinstance(item, Mapping)
         and isinstance(item.get("restore_evidence"), Mapping)
         and item["restore_evidence"].get("state") == "passed"
+        and item["restore_evidence"].get("valid") is True
     )
     config_pairs = [
         item

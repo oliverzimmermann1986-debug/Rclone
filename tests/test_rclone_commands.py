@@ -121,7 +121,7 @@ def test_command_separates_flags_from_paths(monkeypatch):
     )
     separator = cmd.index("--")
     assert cmd[separator + 1 :] == ["cloud:/source", "/mnt/target"]
-    assert cmd[cmd.index("--exclude") + 1] == "Folder with spaces/**"
+    assert "- Folder with spaces/**" in cmd
     assert "--dry-run" in cmd[:separator]
 
 
