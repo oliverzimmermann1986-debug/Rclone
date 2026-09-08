@@ -124,8 +124,10 @@ def test_selective_restore_stages_and_verifies_without_writing_original(
 
     def fake_run(command, *, timeout):
         commands.append(command)
-        if command[1] == "size":
-            return Result('{"count": 1, "bytes": 12}')
+        if command[1] == "lsjson":
+            return Result(
+                '[{"Path":"docs/a.txt","Size":5,"Hashes":{"MD5":"5d41402abc4b2a76b9719d911017c592"}}]'
+            )
         if command[1] == "copy":
             destination = Path(command[-1])
             (destination / "docs").mkdir(parents=True)

@@ -7,8 +7,10 @@ struct LoginView: View {
     @State private var server = ""
     @State private var username = "admin"
     @State private var password = ""
+    @State private var rememberSession = true
     @State private var loginTask: Task<Void, Never>?
     @State private var showHTTPWarning = false
+    @State private var showingOfflineCard = false
     @FocusState private var focusedField: LoginFieldID?
 
     var body: some View {
@@ -24,7 +26,7 @@ struct LoginView: View {
                     Text("Mit Server verbinden")
                         .font(.title2.weight(.bold))
 
-                    Text("Adresse und Zugangsdaten deiner Rclone-Installation.")
+                    Text("Adresse und Zugangsdaten deines Sicherpfad-Servers.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .padding(.top, 6)
@@ -36,6 +38,10 @@ struct LoginView: View {
                     }
 
                     connectionForm
+                    Toggle("Angemeldet bleiben", isOn: $rememberSession)
+                        .padding(.top, 16)
+                    Text("Die Sitzung wird geschützt auf diesem Gerät gespeichert – auch bei HTTP. Dein Passwort wird nicht gespeichert.")
+                        .font(.caption).foregroundStyle(.secondary)
 
                     if let error = model.errorMessage {
                         ErrorBanner(message: error, dismiss: model.dismissMessages)
@@ -48,6 +54,8 @@ struct LoginView: View {
 
                     secureLoginButtons
                         .padding(.top, 14)
+                    Button("Offline-Notfallkarte") { showingOfflineCard = true }
+                        .font(.footnote).frame(maxWidth: .infinity).padding(.top, 14)
 
                     Button {
                         focusedField = nil
@@ -98,17 +106,16 @@ struct LoginView: View {
             Button("Abbrechen", role: .cancel) {}
             Button("Über HTTP anmelden", role: .destructive, action: performLogin)
         } message: {
-            Text("Diese Serveradresse verwendet kein HTTPS. Benutzername und Passwort können im Netzwerk mitgelesen werden. Bestätige dies für diesen Anmeldeversuch ausdrücklich.")
+            Text("HTTP ist unverschlüsselt. Zugangsdaten und Sitzungen können im Netzwerk mitgelesen werden. Mit Angemeldet bleiben wird die bestätigte Verbindung bei späteren App-Starts wieder verwendet.")
         }
     }
 
     private var brand: some View {
         HStack(spacing: 12) {
-            Image(systemName: "arrow.triangle.2.circlepath.icloud.fill")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.green)
+            Image("SicherpfadMark")
+                .resizable().scaledToFit()
                 .frame(width: 44, height: 44)
-                .background(.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -229,6 +236,7 @@ struct LoginView: View {
                 }
             }
         }
+        .sheet(isPresented: $showingOfflineCard) { OfflineRecoveryCardView() }
     }
 
     private var secureLoginButtons: some View {
@@ -277,7 +285,7 @@ struct LoginView: View {
     private func performLogin() {
         loginTask?.cancel()
         loginTask = Task {
-            await model.login(server: server, username: username, password: password)
+            await model.login(server: server, username: username, password: password, rememberSession: rememberSession)
             loginTask = nil
         }
     }
@@ -286,7 +294,7 @@ struct LoginView: View {
         focusedField = nil
         loginTask?.cancel()
         loginTask = Task {
-            await model.loginWithWebAuthn(server: server, method: method)
+            await model.loginWithWebAuthn(server: server, method: method, rememberSession: rememberSession)
             loginTask = nil
         }
     }

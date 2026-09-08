@@ -702,6 +702,9 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         seen_names.add(folded)
         pair["name"] = name
         pair["enabled"] = _boolean(pair.get("enabled", True), default=True)
+        pair["recovery_snapshots"] = _boolean(
+            pair.get("recovery_snapshots", False), default=False
+        )
 
         legacy_options = pair.pop("options", None)
         if legacy_options not in (None, {}):

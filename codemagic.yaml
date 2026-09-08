@@ -12,6 +12,9 @@ workflows:
         provisioning_profiles:
           - rclone-sync-app-store-shared-v2
           - rclone-sync-widget-app-store
+          # RELEASE GATE: create the .share App Store profile with the existing
+          # App Group, upload to Codemagic, then add its actual reference here.
+          # See ios/TESTFLIGHT.md; do not ship without the embedded extension.
         certificates:
           - rclone-sync-distribution
       vars:
@@ -136,7 +139,7 @@ workflows:
           xcrun simctl install "$SCREENSHOT_DEVICE" "$SCREENSHOT_APP"
           SCREENSHOT_DIR="$CM_BUILD_DIR/build/app-store-screenshots"
           mkdir -p "$SCREENSHOT_DIR/raw"
-          for screen in dashboard vault paths jobs system; do
+          for screen in dashboard vault recovery protect system; do
             xcrun simctl terminate "$SCREENSHOT_DEVICE" de.oliverzimmermann.rclonesync 2>/dev/null || true
             xcrun simctl launch "$SCREENSHOT_DEVICE" de.oliverzimmermann.rclonesync \
               --args -AppleLanguages '(de)' -AppleLocale de_DE --store-preview "$screen" >/dev/null
@@ -166,11 +169,18 @@ workflows:
           codesign -d --entitlements :- "$APP_PATH" > "$VERIFY_DIR/entitlements.plist" 2>/dev/null
           test "$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$VERIFY_DIR/entitlements.plist")" = "production"
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$VERIFY_DIR/entitlements.plist")" = "group.de.oliverzimmermann.rclonesync"
-          WIDGET_PATH="$(find "$APP_PATH/PlugIns" -maxdepth 1 -name '*.appex' -print -quit)"
-          test -n "$WIDGET_PATH"
+          WIDGET_PATH="$APP_PATH/PlugIns/RcloneProtectionWidget.appex"
+          SHARE_PATH="$APP_PATH/PlugIns/RcloneShareExtension.appex"
+          test -d "$WIDGET_PATH"
+          test -d "$SHARE_PATH"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$WIDGET_PATH/Info.plist")" = "de.oliverzimmermann.rclonesync.widget"
           codesign -d --entitlements :- "$WIDGET_PATH" > "$VERIFY_DIR/widget-entitlements.plist" 2>/dev/null
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$VERIFY_DIR/widget-entitlements.plist")" = "group.de.oliverzimmermann.rclonesync"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SHARE_PATH/Info.plist")" = "de.oliverzimmermann.rclonesync.share"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$SHARE_PATH/Info.plist")" = "com.apple.share-services"
+          codesign -d --entitlements :- "$SHARE_PATH" > "$VERIFY_DIR/share-entitlements.plist" 2>/dev/null
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$VERIFY_DIR/share-entitlements.plist")" = "group.de.oliverzimmermann.rclonesync"
+          codesign --verify --deep --strict "$APP_PATH"
           test -f "$APP_PATH/Assets.car"
     artifacts:
       - build/ios/ipa/*.ipa

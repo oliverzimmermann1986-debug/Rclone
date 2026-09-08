@@ -1,14 +1,24 @@
 import PhotosUI
+import CoreTransferable
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct DeviceVaultView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var transfer = VaultTransferModel()
     @State private var selectedIdentity = ""
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var showingFileImporter = false
     @State private var restoredURL: URL?
+    @State private var restoringItemID: String?
+    @State private var restoreTask: Task<Void, Never>?
+    @State private var inboxItems: [VaultInboxItem] = []
+    @State private var isImporting = false
+    @State private var isVisible = false
+    @State private var exportIsVerified = true
+    @State private var pendingReassignment: VaultQueueEntry?
+    @State private var pendingReassignmentScope: VaultQueueScope?
 
     private var pairs: [PairConfig] {
         (model.config?.backup.pairs ?? []).filter(\.enabled)
@@ -35,6 +45,7 @@ struct DeviceVaultView: View {
                             Text(pair.name).tag(pair.id)
                         }
                     }
+                    .disabled(transfer.isWorking || isImporting)
                     Text("Die Datei landet getrennt unter „Sicherpfad“, nicht in deiner Live-Quelle.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -44,17 +55,17 @@ struct DeviceVaultView: View {
             Section {
                 PhotosPicker(
                     selection: $photoItems,
-                    maxSelectionCount: 20,
+                    maxSelectionCount: 100,
                     matching: .images
                 ) {
                     Label("Fotos auswählen", systemImage: "photo.on.rectangle.angled")
                 }
-                .disabled(selectedIdentity.isEmpty || transfer.isWorking || model.isDemoMode)
+                .disabled(selectedIdentity.isEmpty || transfer.isWorking || isImporting || model.isDemoMode)
 
                 Button { showingFileImporter = true } label: {
                     Label("Dateien auswählen", systemImage: "folder.badge.plus")
                 }
-                .disabled(selectedIdentity.isEmpty || transfer.isWorking || model.isDemoMode)
+                .disabled(selectedIdentity.isEmpty || transfer.isWorking || isImporting || model.isDemoMode)
 
                 if model.isDemoMode {
                     Button {
@@ -68,6 +79,88 @@ struct DeviceVaultView: View {
                 Text("Vom iPhone sichern")
             } footer: {
                 Text("Jede Datei wird in Blöcken übertragen, per SHA‑256 dedupliziert und nach dem Schreiben vom Ziel zurückgelesen.")
+            }
+
+            if !inboxItems.isEmpty, !model.isDemoMode {
+                Section {
+                    ForEach(inboxItems) { item in
+                        HStack {
+                            Label(item.filename, systemImage: item.sourceType == "photo" ? "photo" : "doc")
+                            Spacer()
+                            Text(AppFormat.bytes(item.size)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Button {
+                        Task { await importInbox() }
+                    } label: {
+                        Label("\(inboxItems.count) Dateien für „\(selectedPairName)“ übernehmen", systemImage: "tray.and.arrow.down")
+                    }
+                    .disabled(selectedIdentity.isEmpty || transfer.isWorking || isImporting)
+                } header: {
+                    Text("Aus dem Teilen-Menü")
+                } footer: {
+                    Text("Diese Dateien sind nur lokal vorgemerkt. Du bestimmst jetzt den Datenweg; danach startet die Sicherung.")
+                }
+            }
+
+            if isImporting {
+                Section { ProgressView("Dateien geschützt vormerken …") }
+            }
+
+            if !transfer.unassignedQueue.isEmpty, !model.isDemoMode {
+                Section {
+                    ForEach(transfer.unassignedQueue) { entry in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(entry.filename).font(.body.weight(.medium))
+                            Text("Bisheriges Ziel: \(entry.destinationDescription ?? "Nicht mehr zugeordnet")")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Button("Lokale Datei exportieren", systemImage: "square.and.arrow.up") {
+                                Task { await exportQueued(entry) }
+                            }
+                            Button("Neues Ziel zuordnen", systemImage: "point.3.connected.trianglepath.dotted") {
+                                pendingReassignmentScope = queueScope
+                                pendingReassignment = entry
+                            }
+                            .disabled(queueScope == nil || transfer.isWorking || isImporting)
+                        }
+                    }
+                } header: {
+                    Text("Zuordnung prüfen")
+                } footer: {
+                    Text("Ein Datenweg wurde geändert oder entfernt. Die lokalen Dateien sind erhalten und werden erst nach deiner neuen Zuordnung übertragen.")
+                }
+            }
+
+            if !transfer.queue.isEmpty, !model.isDemoMode {
+                Section {
+                    ForEach(transfer.queue) { entry in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(entry.filename).lineLimit(2)
+                                Spacer()
+                                Text(AppFormat.bytes(entry.size)).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Text(entry.lastError ?? (entry.id == transfer.activeEntryID ? "Wird übertragen" : "Zum Fortsetzen bereit"))
+                                .font(.caption).foregroundStyle(entry.lastError == nil ? Color.secondary : Color.orange)
+                            ProgressView(value: entry.size > 0 ? Double(entry.received) / Double(entry.size) : 0)
+                        }
+                        .swipeActions {
+                            if !transfer.isWorking, let scope = queueScope {
+                                Button("Verwerfen", role: .destructive) { transfer.removeQueued(entry, scope: scope) }
+                            }
+                        }
+                    }
+                    if transfer.isWorking {
+                        Button("Übertragung pausieren", systemImage: "pause.circle") { transfer.pause() }
+                    } else {
+                        Button("Warteschlange fortsetzen", systemImage: "play.circle") { Task { await resumeQueue() } }
+                            .disabled(isImporting)
+                    }
+                } header: {
+                    Text("Warteschlange · \(transfer.queue.count)")
+                } footer: {
+                    Text("Vorgemerkte Dateien und Fortschritt bleiben bei einem Neustart erhalten. Zum Übertragen die App geöffnet lassen. Verwerfen entfernt nur die lokale Vormerkung.")
+                }
             }
 
             if let current = transfer.current {
@@ -92,13 +185,26 @@ struct DeviceVaultView: View {
                     )
                 } else {
                     ForEach(transfer.library) { item in
-                        Button { Task { await restore(item) } } label: {
-                            VaultTransferRow(item: item, showPath: false)
+                        Button { restoreTask = Task { await restore(item) } } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                VaultTransferRow(item: item, showPath: false)
+                                if restoringItemID == item.id {
+                                    ProgressView("Datei wird zurückgeholt und geprüft …")
+                                } else if item.status == "remote" {
+                                    Text("Aus Notfallakte · zum Zurückholen und Prüfen öffnen")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
                         }
                         .buttonStyle(.plain)
-                        .disabled(!item.verified)
-                        .accessibilityHint("Lädt die geprüfte Datei, um sie in Dateien zu sichern oder zu teilen.")
+                        .disabled(restoringItemID != nil || !(item.verified || item.status == "remote"))
+                        .accessibilityHint("Holt die Datei zurück und prüft sie, bevor sie geteilt werden kann.")
                     }
+                }
+                if restoringItemID != nil {
+                    Text("Falls die lokale Kopie fehlt, wird zuerst die Cloud-Kopie vollständig geladen. Bei großen Dateien kann das mehrere Minuten dauern.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Download abbrechen", role: .cancel) { restoreTask?.cancel() }
                 }
             }
         }
@@ -118,36 +224,54 @@ struct DeviceVaultView: View {
             allowedContentTypes: [.item],
             allowsMultipleSelection: true
         ) { result in
-            guard case let .success(urls) = result else { return }
-            Task {
-                for url in urls.prefix(20) {
-                    await uploadFile(url, filename: url.lastPathComponent, sourceType: "file")
-                }
+            switch result {
+            case let .success(urls):
+                Task { await importFiles(urls) }
+            case let .failure(error):
+                transfer.errorMessage = error.localizedDescription
             }
         }
         .onChange(of: photoItems) { _, items in
             guard !items.isEmpty else { return }
             Task {
+                guard let scope = queueScope else { return }
+                isImporting = true
+                var failures = 0
                 for (index, item) in items.enumerated() {
-                    guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
-                    let fileExtension = item.supportedContentTypes.first?.preferredFilenameExtension ?? "heic"
-                    let filename = "Foto-\(Int(Date().timeIntervalSince1970))-\(index + 1).\(fileExtension)"
-                    let temporary = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("sicherpfad-photo-\(UUID().uuidString).\(fileExtension)")
                     do {
-                        try data.write(to: temporary, options: [.atomic, .completeFileProtection])
-                        await uploadFile(temporary, filename: filename, sourceType: "photo")
+                        guard let photo = try await item.loadTransferable(type: VaultPhotoSelection.self) else {
+                            throw CocoaError(.fileReadUnknown)
+                        }
+                        defer { try? FileManager.default.removeItem(at: photo.url) }
+                        let fileExtension = photo.url.pathExtension.isEmpty ? "heic" : photo.url.pathExtension
+                        let filename = "Foto-\(Int(Date().timeIntervalSince1970))-\(index + 1).\(fileExtension)"
+                        try await transfer.enqueue(fileURL: photo.url, filename: filename, sourceType: "photo", scope: scope)
                     } catch {
-                        transfer.errorMessage = error.localizedDescription
+                        failures += 1
                     }
-                    try? FileManager.default.removeItem(at: temporary)
                 }
+                isImporting = false
                 photoItems = []
+                if failures > 0 { transfer.errorMessage = "\(failures) von \(items.count) Fotos konnten nicht vorgemerkt werden. Die übrigen stehen in der Warteschlange." }
+                else if queueScope == scope { await resumeQueue() }
             }
         }
-        .onAppear { selectDefaultPair() }
+        .onAppear { isVisible = true; selectDefaultPair() }
         .onChange(of: pairs.map(\.id)) { _, _ in selectDefaultPair() }
-        .onChange(of: selectedIdentity) { _, _ in Task { await loadLibrary() } }
+        .onChange(of: selectedIdentity) { _, _ in
+            restoreTask?.cancel()
+            restoredURL = nil
+            Task { await loadLibrary() }
+        }
+        .onChange(of: activeScopeKeys) { _, _ in
+            transfer.pause()
+            if let scope = queueContextScope { transfer.loadQueue(scope: scope, activeScopeKeys: activeScopeKeys) }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { transfer.pause() }
+            if phase == .active { loadInbox() }
+        }
+        .onDisappear { isVisible = false; transfer.pause(); restoreTask?.cancel() }
         .task { await loadLibrary() }
         .alert("Geräte-Vault", isPresented: Binding(
             get: { transfer.errorMessage != nil },
@@ -157,10 +281,27 @@ struct DeviceVaultView: View {
         } message: {
             Text(transfer.errorMessage ?? "")
         }
+        .confirmationDialog("Neue Zielzuordnung übernehmen?", isPresented: Binding(
+            get: { pendingReassignment != nil },
+            set: { if !$0 { pendingReassignment = nil; pendingReassignmentScope = nil } }
+        ), titleVisibility: .visible) {
+            if let entry = pendingReassignment, let scope = pendingReassignmentScope {
+                Button("Für dieses Ziel vormerken") {
+                    Task {
+                        guard queueScope == scope else { transfer.errorMessage = "Der Datenweg hat sich geändert. Bitte prüfe die Zuordnung erneut."; return }
+                        do { try await transfer.reassign(entry, to: scope) }
+                        catch { transfer.errorMessage = error.localizedDescription }
+                    }
+                }
+            }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("\(pendingReassignment?.filename ?? "Datei")\nBisher: \(pendingReassignment?.destinationDescription ?? "Unbekannt")\nNeu: \(pendingReassignmentScope?.destinationDescription ?? "Unbekannt")\nDie alte Serverübertragung bleibt unverändert. Fortsetzen startet eine neue Übertragung für das gewählte Ziel.")
+        }
         .safeAreaInset(edge: .bottom) {
             if let restoredURL {
                 ShareLink(item: restoredURL) {
-                    Label("Geprüfte Datei in Dateien sichern", systemImage: "square.and.arrow.up")
+                    Label(exportIsVerified ? "Geprüfte Datei in Dateien sichern" : "Lokale Vormerkung exportieren", systemImage: "square.and.arrow.up")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -180,17 +321,64 @@ struct DeviceVaultView: View {
         selectedIdentity = pairs.first?.id ?? ""
     }
 
-    private func uploadFile(_ url: URL, filename: String, sourceType: String) async {
-        guard !selectedIdentity.isEmpty else { return }
+    private var queueScope: VaultQueueScope? {
+        pairs.first(where: { $0.id == selectedIdentity }).flatMap { scope(for: $0) }
+    }
+
+    private var activeScopeKeys: Set<String> { Set(pairs.compactMap { scope(for: $0)?.key }) }
+
+    private var queueContextScope: VaultQueueScope? {
+        if let queueScope { return queueScope }
+        guard !model.isDemoMode, let server = try? APIClient.normalizedServerURL(model.serverAddress) else { return nil }
+        return VaultQueueScope(serverURL: server, username: model.savedUsername, pairID: "", source: "", target: "", direction: "push")
+    }
+
+    private func scope(for pair: PairConfig) -> VaultQueueScope? {
+        guard !model.isDemoMode,
+              let server = try? APIClient.normalizedServerURL(model.serverAddress) else { return nil }
+        return VaultQueueScope(serverURL: server, username: model.savedUsername, pairID: pair.id,
+            source: pair.local, target: pair.remote, direction: pair.direction)
+    }
+
+    private func importFiles(_ urls: [URL]) async {
+        guard let scope = queueScope else { return }
+        isImporting = true
+        var failures = 0
+        for url in urls {
+            do { try await transfer.enqueue(fileURL: url, filename: url.lastPathComponent, sourceType: "file", scope: scope) }
+            catch { failures += 1 }
+        }
+        isImporting = false
+        if failures > 0 { transfer.errorMessage = "\(failures) von \(urls.count) Dateien konnten nicht vorgemerkt werden. Die übrigen stehen in der Warteschlange." }
+        else if queueScope == scope { await resumeQueue() }
+    }
+
+    private func importInbox() async {
+        guard let scope = queueScope, let inbox = try? VaultInbox() else { return }
+        isImporting = true
+        defer { isImporting = false; loadInbox() }
+        do {
+            for item in inboxItems {
+                try await transfer.enqueue(fileURL: inbox.payload(for: item), filename: item.filename,
+                    sourceType: item.sourceType, scope: scope, id: item.id)
+                try inbox.remove(item)
+            }
+            if queueScope == scope { await resumeQueue() }
+        } catch { transfer.errorMessage = error.localizedDescription }
+    }
+
+    private func loadInbox() {
+        do { inboxItems = try VaultInbox().items() }
+        catch { transfer.errorMessage = error.localizedDescription }
+    }
+
+    private func resumeQueue() async {
+        guard isVisible, scenePhase == .active, let scope = queueScope else { return }
         do {
             try await model.withCurrentClient { client in
-                await transfer.upload(
-                    fileURL: url,
-                    filename: filename,
-                    sourceType: sourceType,
-                    identity: selectedIdentity,
-                    using: client
-                )
+                await transfer.resumeQueue(scope: scope, using: client) {
+                    isVisible && scenePhase == .active && queueScope == scope && model.phase == .signedIn
+                }
             }
         } catch {
             transfer.errorMessage = error.localizedDescription
@@ -202,6 +390,8 @@ struct DeviceVaultView: View {
             if transfer.library.isEmpty { await transfer.simulateDemoUpload(identity: selectedPairName) }
             return
         }
+        loadInbox()
+        if let scope = queueContextScope { transfer.loadQueue(scope: scope, activeScopeKeys: activeScopeKeys) }
         guard !selectedIdentity.isEmpty else { return }
         do {
             try await model.withCurrentClient { client in
@@ -213,12 +403,50 @@ struct DeviceVaultView: View {
     }
 
     private func restore(_ item: VaultUploadStatus) async {
+        guard let scope = queueScope, restoringItemID == nil else { return }
+        restoringItemID = item.id
+        defer { restoringItemID = nil }
+        // A previous local export must never inherit this download's verification label.
+        restoredURL = nil
+        exportIsVerified = false
         do {
-            restoredURL = try await model.withCurrentClient {
+            let url = try await model.withCurrentClient {
                 try await $0.downloadVaultItem(id: item.id, filename: item.filename)
             }
+            try Task.checkCancellation()
+            guard queueScope == scope else { return }
+            restoredURL = url
+            exportIsVerified = true
         } catch {
+            guard !Task.isCancelled else { return }
+            guard queueScope == scope else { return }
             transfer.errorMessage = error.localizedDescription
+        }
+        // Cloud fallback can change verification/storage state, including on failure.
+        await loadLibrary()
+    }
+
+    private func exportQueued(_ entry: VaultQueueEntry) async {
+        guard let scope = queueContextScope else { return }
+        do {
+            let url = try await transfer.export(entry, scope: scope)
+            guard queueContextScope?.accountKey == scope.accountKey else { return }
+            exportIsVerified = false
+            restoredURL = url
+        } catch { transfer.errorMessage = error.localizedDescription }
+    }
+}
+
+private struct VaultPhotoSelection: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .image) { received in
+            let suffix = received.file.pathExtension.isEmpty ? "heic" : received.file.pathExtension
+            let staged = FileManager.default.temporaryDirectory.appendingPathComponent("sicherpfad-photo-\(UUID().uuidString).\(suffix)")
+            try FileManager.default.copyItem(at: received.file, to: staged)
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: staged.path)
+            return VaultPhotoSelection(url: staged)
         }
     }
 }
