@@ -87,3 +87,4 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.oliverzimmermann.rclonesync.tests
+        GENERATE_INFOPLIST_FILE: true
