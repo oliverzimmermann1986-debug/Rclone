@@ -34,6 +34,9 @@ def test_simulator_keychain_tests_keep_ad_hoc_signing_enabled():
         assert 'CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"' in workflow
         assert "CODE_SIGNING_ALLOWED=NO" not in workflow
     assert 'codesign -d --entitlements :- "$SIM_APP"' in native_ci
+    project = (ROOT / "ios" / "project.yml").read_text(encoding="utf-8")
+    test_target = project.split("  RcloneMobileTests:", 1)[1]
+    assert "GENERATE_INFOPLIST_FILE: true" in test_target
 
 
 def test_store_preview_fixture_covers_all_primary_tabs():
