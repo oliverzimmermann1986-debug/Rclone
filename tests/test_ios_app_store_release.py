@@ -27,6 +27,15 @@ def test_signed_bundle_gate_verifies_both_extensions_independent_of_directory_or
     assert 'codesign --verify --deep --strict "$APP_PATH"' in workflow
 
 
+def test_simulator_keychain_tests_keep_ad_hoc_signing_enabled():
+    native_ci = (ROOT / ".github" / "workflows" / "ios.yml").read_text(encoding="utf-8")
+    release_ci = (ROOT / "codemagic.yaml").read_text(encoding="utf-8")
+    for workflow in (native_ci, release_ci):
+        assert 'CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"' in workflow
+        assert "CODE_SIGNING_ALLOWED=NO" not in workflow
+    assert 'codesign -d --entitlements :- "$SIM_APP"' in native_ci
+
+
 def test_store_preview_fixture_covers_all_primary_tabs():
     fixture = json.loads(
         (ROOT / "ios" / "RcloneMobile" / "StorePreviewData.json").read_text(
