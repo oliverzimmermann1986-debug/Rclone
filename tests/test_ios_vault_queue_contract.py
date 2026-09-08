@@ -92,3 +92,32 @@ def test_vault_share_inbox_uses_section_header_footer_initializer():
         '} header: {\n                    Text("Aus dem Teilen-Menü")\n                } footer: {'
         in inbox_section
     )
+
+
+def test_vault_repeated_rows_have_independent_swiftui_typechecking_boundaries():
+    view = (IOS / "RcloneMobile/Views/DeviceVaultView.swift").read_text(
+        encoding="utf-8"
+    )
+    for name in [
+        "VaultQueuedRow",
+        "VaultInboxRow",
+        "VaultUnassignedRow",
+        "VaultLibraryRow",
+    ]:
+        assert f"private struct {name}: View" in view
+        assert f"{name}(" in view.split(f"private struct {name}: View", 1)[0]
+    queued = view.split("private struct VaultQueuedRow: View", 1)[1].split(
+        "private struct VaultInboxRow", 1
+    )[0]
+    assert "private var formattedSize: String" in queued
+    assert "private var statusText: String" in queued
+    assert "private var statusColor: Color" in queued
+    assert "private var progress: Double" in queued
+    assert "ProgressView(value: progress)" in queued
+    # Extraction must keep parent-owned actions and the scope-aware guards.
+    assert "transfer.removeQueued(entry, scope: scope)" in view
+    assert "Task { await exportQueued(entry) }" in view
+    assert "pendingReassignmentScope = queueScope" in view
+    assert (
+        "VaultLibraryRow(item: item, isRestoring: restoringItemID == item.id)" in view
+    )

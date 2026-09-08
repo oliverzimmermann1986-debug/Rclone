@@ -84,11 +84,7 @@ struct DeviceVaultView: View {
             if !inboxItems.isEmpty, !model.isDemoMode {
                 Section {
                     ForEach(inboxItems) { item in
-                        HStack {
-                            Label(item.filename, systemImage: item.sourceType == "photo" ? "photo" : "doc")
-                            Spacer()
-                            Text(AppFormat.bytes(item.size)).font(.caption).foregroundStyle(.secondary)
-                        }
+                        VaultInboxRow(item: item)
                     }
                     Button {
                         Task { await importInbox() }
@@ -110,19 +106,17 @@ struct DeviceVaultView: View {
             if !transfer.unassignedQueue.isEmpty, !model.isDemoMode {
                 Section {
                     ForEach(transfer.unassignedQueue) { entry in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(entry.filename).font(.body.weight(.medium))
-                            Text("Bisheriges Ziel: \(entry.destinationDescription ?? "Nicht mehr zugeordnet")")
-                                .font(.caption).foregroundStyle(.secondary)
-                            Button("Lokale Datei exportieren", systemImage: "square.and.arrow.up") {
+                        VaultUnassignedRow(
+                            entry: entry,
+                            canReassign: queueScope != nil && !transfer.isWorking && !isImporting,
+                            onExport: {
                                 Task { await exportQueued(entry) }
-                            }
-                            Button("Neues Ziel zuordnen", systemImage: "point.3.connected.trianglepath.dotted") {
+                            },
+                            onReassign: {
                                 pendingReassignmentScope = queueScope
                                 pendingReassignment = entry
                             }
-                            .disabled(queueScope == nil || transfer.isWorking || isImporting)
-                        }
+                        )
                     }
                 } header: {
                     Text("Zuordnung prüfen")
@@ -134,16 +128,7 @@ struct DeviceVaultView: View {
             if !transfer.queue.isEmpty, !model.isDemoMode {
                 Section {
                     ForEach(transfer.queue) { entry in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(entry.filename).lineLimit(2)
-                                Spacer()
-                                Text(AppFormat.bytes(entry.size)).font(.caption).foregroundStyle(.secondary)
-                            }
-                            Text(entry.lastError ?? (entry.id == transfer.activeEntryID ? "Wird übertragen" : "Zum Fortsetzen bereit"))
-                                .font(.caption).foregroundStyle(entry.lastError == nil ? Color.secondary : Color.orange)
-                            ProgressView(value: entry.size > 0 ? Double(entry.received) / Double(entry.size) : 0)
-                        }
+                        VaultQueuedRow(entry: entry, isActive: entry.id == transfer.activeEntryID)
                         .swipeActions {
                             if !transfer.isWorking, let scope = queueScope {
                                 Button("Verwerfen", role: .destructive) { transfer.removeQueued(entry, scope: scope) }
@@ -186,15 +171,7 @@ struct DeviceVaultView: View {
                 } else {
                     ForEach(transfer.library) { item in
                         Button { restoreTask = Task { await restore(item) } } label: {
-                            VStack(alignment: .leading, spacing: 8) {
-                                VaultTransferRow(item: item, showPath: false)
-                                if restoringItemID == item.id {
-                                    ProgressView("Datei wird zurückgeholt und geprüft …")
-                                } else if item.status == "remote" {
-                                    Text("Aus Notfallakte · zum Zurückholen und Prüfen öffnen")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
+                            VaultLibraryRow(item: item, isRestoring: restoringItemID == item.id)
                         }
                         .buttonStyle(.plain)
                         .disabled(restoringItemID != nil || !(item.verified || item.status == "remote"))
@@ -434,6 +411,84 @@ struct DeviceVaultView: View {
             exportIsVerified = false
             restoredURL = url
         } catch { transfer.errorMessage = error.localizedDescription }
+    }
+}
+
+private struct VaultQueuedRow: View {
+    let entry: VaultQueueEntry
+    let isActive: Bool
+
+    private var formattedSize: String { AppFormat.bytes(entry.size) }
+    private var statusText: String {
+        entry.lastError ?? (isActive ? "Wird übertragen" : "Zum Fortsetzen bereit")
+    }
+    private var statusColor: Color { entry.lastError == nil ? .secondary : .orange }
+    private var progress: Double {
+        entry.size > 0 ? Double(entry.received) / Double(entry.size) : 0
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(entry.filename).lineLimit(2)
+                Spacer()
+                Text(formattedSize).font(.caption).foregroundStyle(.secondary)
+            }
+            Text(statusText).font(.caption).foregroundStyle(statusColor)
+            ProgressView(value: progress)
+        }
+    }
+}
+
+private struct VaultInboxRow: View {
+    let item: VaultInboxItem
+    private var formattedSize: String { AppFormat.bytes(item.size) }
+    private var symbol: String { item.sourceType == "photo" ? "photo" : "doc" }
+
+    var body: some View {
+        HStack {
+            Label(item.filename, systemImage: symbol)
+            Spacer()
+            Text(formattedSize).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct VaultUnassignedRow: View {
+    let entry: VaultQueueEntry
+    let canReassign: Bool
+    let onExport: () -> Void
+    let onReassign: () -> Void
+
+    private var previousTarget: String {
+        "Bisheriges Ziel: \(entry.destinationDescription ?? "Nicht mehr zugeordnet")"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(entry.filename).font(.body.weight(.medium))
+            Text(previousTarget).font(.caption).foregroundStyle(.secondary)
+            Button("Lokale Datei exportieren", systemImage: "square.and.arrow.up", action: onExport)
+            Button("Neues Ziel zuordnen", systemImage: "point.3.connected.trianglepath.dotted", action: onReassign)
+                .disabled(!canReassign)
+        }
+    }
+}
+
+private struct VaultLibraryRow: View {
+    let item: VaultUploadStatus
+    let isRestoring: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VaultTransferRow(item: item, showPath: false)
+            if isRestoring {
+                ProgressView("Datei wird zurückgeholt und geprüft …")
+            } else if item.status == "remote" {
+                Text("Aus Notfallakte · zum Zurückholen und Prüfen öffnen")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
