@@ -6,6 +6,8 @@ struct ProtectionIncident: Identifiable {
     let category: String
     let message: String
     let recommendation: String
+    var pairName: String? = nil
+    var jobID: Int? = nil
 
     var color: Color { severity == "error" ? .red : .orange }
     var symbol: String { severity == "error" ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill" }
@@ -16,7 +18,7 @@ extension ProtectionIncident {
         var seen = Set<String>()
         var incidents: [ProtectionIncident] = []
 
-        func append(message: String, severity: String) {
+        func append(message: String, severity: String, pairName: String? = nil, jobID: Int? = nil) {
             let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalized.isEmpty, seen.insert(normalized).inserted else { return }
             let classified = classify(normalized)
@@ -25,7 +27,9 @@ extension ProtectionIncident {
                 severity: severity,
                 category: classified.category,
                 message: normalized,
-                recommendation: classified.recommendation
+                recommendation: classified.recommendation,
+                pairName: pairName,
+                jobID: jobID
             ))
         }
 
@@ -33,13 +37,16 @@ extension ProtectionIncident {
             append(message: alert.message, severity: alert.level.lowercased() == "error" ? "error" : "warning")
         }
         for pair in overview.pairs.health {
-            if let error = pair.error { append(message: "\(pair.name): \(error)", severity: "error") }
-            if pair.overdue == true { append(message: "\(pair.name): Sicherung ist überfällig.", severity: "warning") }
+            if let error = pair.error, !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                append(message: "\(pair.name): \(error)", severity: "error", pairName: pair.name, jobID: pair.jobID)
+            }
+            if pair.overdue == true { append(message: "\(pair.name): Sicherung ist überfällig.", severity: "warning", pairName: pair.name, jobID: pair.jobID) }
         }
-        for pair in storage?.pairs ?? [] where pair.restoreEvidence?.state == "failed" {
+        for pair in storage?.pairs ?? [] where pair.restoreEvidence?.isCurrent != true {
             append(
-                message: "\(pair.name): \(pair.restoreEvidence?.error ?? "Restore-Nachweis fehlgeschlagen.")",
-                severity: "error"
+                message: "\(pair.name): \(pair.restoreEvidence?.error ?? "Kein aktuell gültiger Restore-Nachweis. Stichprobe prüfen.")",
+                severity: pair.restoreEvidence?.state == "failed" ? "error" : "warning",
+                pairName: pair.name, jobID: pair.restoreEvidence?.jobID
             )
         }
         return incidents.sorted { ($0.severity == "error" ? 0 : 1) < ($1.severity == "error" ? 0 : 1) }
@@ -85,6 +92,7 @@ extension ProtectionIncident {
 }
 
 struct IncidentCenterView: View {
+    @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     let incidents: [ProtectionIncident]
 
@@ -112,6 +120,15 @@ struct IncidentCenterView: View {
                                 .foregroundStyle(.secondary)
                             Text(incident.recommendation)
                                 .font(.subheadline)
+                            if let name = incident.pairName {
+                                NavigationLink("Betroffenen Datenweg prüfen") { IncidentDataPathView(pairName: name) }
+                            }
+                            if let id = incident.jobID {
+                                Button("Zugehörigen Lauf öffnen") {
+                                    dismiss()
+                                    model.requestRunNavigation(id: id)
+                                }
+                            }
                         }
                         .padding(.vertical, 6)
                         .accessibilityElement(children: .combine)
@@ -126,6 +143,49 @@ struct IncidentCenterView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) { Button("Fertig") { dismiss() } }
+        }
+    }
+}
+
+private struct IncidentDataPathView: View {
+    @EnvironmentObject private var model: AppModel
+    let pairName: String
+    @State private var confirm = false
+    @State private var busy = false
+    @State private var result: String?
+    @State private var showingSettings = false
+
+    var body: some View {
+        List {
+            if let pair = model.config?.backup.pairs.first(where: { $0.name == pairName }) {
+                Section("Betroffener Datenweg") {
+                    LabeledContent("Lokal", value: pair.local)
+                    LabeledContent("Cloud / Ziel", value: pair.remote)
+                    LabeledContent("Verfahren", value: "\(pair.direction) / \(pair.mode)")
+                    LabeledContent("Löschen erlaubt", value: pair.allowDelete ? "Ja" : "Nein")
+                }
+                Section {
+                    Button(busy ? "Startet …" : "Sicheren Probelauf starten") { confirm = true }.disabled(busy || model.isDemoMode)
+                    NavigationLink("Restore-Nachweis und Notfallübung") { RecoveryCenterView() }
+                    NavigationLink("Datenwege bearbeiten") { DataPathsScreen(showingSettings: $showingSettings) }
+                    NavigationLink("Läufe & Protokolle") { RunsScreen(showingSettings: $showingSettings) }
+                }
+                if let result { Text(result) }
+            } else {
+                Text("Der Datenweg wurde entfernt oder umbenannt. Bitte die Übersicht aktualisieren.")
+            }
+        }
+        .navigationTitle(pairName)
+        .confirmationDialog("Probelauf ohne Dateiänderungen starten?", isPresented: $confirm) {
+            Button("Probelauf starten") {
+                Task {
+                    busy = true
+                    let ok = await model.runBackup(pair: pairName, dryRun: true)
+                    result = ok ? "Probelauf gestartet. Ergebnis unter Läufe & Protokolle öffnen." : "Start fehlgeschlagen. Bitte die Fehlermeldung prüfen."
+                    busy = false
+                }
+            }
+            Button("Abbrechen", role: .cancel) {}
         }
     }
 }

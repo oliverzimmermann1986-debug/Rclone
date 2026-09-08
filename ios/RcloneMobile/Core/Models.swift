@@ -322,6 +322,13 @@ extension StoragePair {
 }
 
 struct RestoreEvidence: Decodable, Equatable {
+    var isCurrent: Bool {
+        valid == true && state == "passed" && checksumVerified && (validUntil ?? 0) > Date().timeIntervalSince1970
+    }
+    var valid: Bool? = nil
+    var validUntil: Double? = nil
+    var binding: [String: String]? = nil
+    var invalidReason: String? = nil
     let state: String
     let lastAttemptAt: Double?
     let lastSuccessAt: Double?
@@ -332,6 +339,9 @@ struct RestoreEvidence: Decodable, Equatable {
     let error: String?
 
     enum CodingKeys: String, CodingKey {
+        case valid, binding
+        case validUntil = "valid_until"
+        case invalidReason = "invalid_reason"
         case state, error
         case lastAttemptAt = "last_attempt_at"
         case lastSuccessAt = "last_success_at"
@@ -1055,6 +1065,7 @@ struct JobSearchResponse: Decodable {
 }
 
 struct JobRecord: Decodable, Identifiable {
+    var summary: [String: JSONValue]? = nil
     let id: Int
     let kind: String
     let status: String
@@ -1066,7 +1077,7 @@ struct JobRecord: Decodable, Identifiable {
     let configRevision: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, status
+        case id, kind, status, summary
         case startedAt = "started_at"
         case endedAt = "ended_at"
         case logFile = "log_file"
@@ -1588,6 +1599,13 @@ struct RecoveryDataPath: Codable, Identifiable {
 }
 
 struct RecoveryRestoreProof: Codable {
+    var isCurrent: Bool {
+        valid == true && state == "passed" && checksumVerified && (validUntil ?? 0) > Date().timeIntervalSince1970
+    }
+    var valid: Bool? = nil
+    var validUntil: Double? = nil
+    var binding: [String: String]? = nil
+    var invalidReason: String? = nil
     let state: String
     let lastAttemptAt: Double?
     let lastSuccessAt: Double?
@@ -1599,6 +1617,9 @@ struct RecoveryRestoreProof: Codable {
     let durationSeconds: Double?
 
     enum CodingKeys: String, CodingKey {
+        case valid, binding
+        case validUntil = "valid_until"
+        case invalidReason = "invalid_reason"
         case state, error
         case lastAttemptAt = "last_attempt_at"
         case lastSuccessAt = "last_success_at"
@@ -1756,9 +1777,15 @@ struct RecoveryPoint: Decodable, Identifiable, Hashable {
     let label: String
     let createdAt: Double?
     let kind: String
+    var complete: Bool? = nil
+    var files: Int? = nil
+    var totalBytes: Int64? = nil
+    var storage: String? = nil
+    var warning: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, label, kind
+        case id, label, kind, complete, files, storage, warning
+        case totalBytes = "total_bytes"
         case createdAt = "created_at"
     }
 }
@@ -1776,6 +1803,8 @@ struct RecoveryPointBrowseResponse: Decodable {
 }
 
 struct RecoveryDiffResponse: Decodable {
+    var warning: String? = nil
+    var verification: String? = nil
     let pair: String
     let fromPoint: String
     let toPoint: String
@@ -1786,6 +1815,7 @@ struct RecoveryDiffResponse: Decodable {
     let truncated: Bool
 
     enum CodingKeys: String, CodingKey {
+        case warning, verification
         case pair, added, removed, changed, counts, truncated
         case fromPoint = "from_point"
         case toPoint = "to_point"

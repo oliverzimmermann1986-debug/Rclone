@@ -365,6 +365,35 @@ struct RunDetailView: View {
                 if isDetailLoading { ProgressView("Metadaten werden aktualisiert …") }
                 if let detailError { Text(detailError).font(.caption).foregroundStyle(.orange) }
             }
+            if let receipt = recoveryReceipt {
+                Section("Wiederherstellungsbeleg") {
+                    let restored = receipt["verified"] == .bool(true)
+                    let captured = receipt["complete"] == .bool(true)
+                    Label(restored ? "Gesamter Stand zurückgelesen & geprüft" : captured ? "Vollständiger Stand gespeichert" : "Prüfung nicht abgeschlossen",
+                          systemImage: restored || captured ? "checkmark.seal" : "exclamationmark.triangle")
+                        .foregroundStyle(restored || captured ? .green : .orange)
+                    if case let .number(count)? = receipt["files"] {
+                        LabeledContent("Dateien", value: "\(Int(count))")
+                    }
+                    if case let .number(size)? = receipt["bytes"] ?? receipt["total_bytes"] {
+                        LabeledContent("Datenmenge", value: AppFormat.bytes(Int64(size)))
+                    }
+                    if case let .string(point)? = receipt["recovery_point"] ?? receipt["id"] {
+                        LabeledContent("Stand", value: point).textSelection(.enabled)
+                    }
+                    if case let .string(hash)? = receipt["manifest_sha256"] {
+                        LabeledContent("Manifest SHA-256", value: hash).font(.caption).textSelection(.enabled)
+                    }
+                    if case let .string(path)? = receipt["staging_path"] {
+                        LabeledContent("Getrennter Ablageort", value: path).textSelection(.enabled)
+                    }
+                    if case let .string(error)? = receipt["error"] { Text(error).foregroundStyle(.red) }
+                    Text("Produktivdaten werden nicht überschrieben. Der Beleg bezieht sich auf den genannten Stand; lokale Stände liegen auf dem Server, nicht in einer unabhängigen Cloudkopie.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else if case let .string(error)? = currentJob.summary?["error"] {
+                Section("Befund") { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            }
             if isRetryCandidate {
                 Section("Aktionen") {
                     if canRetry {
@@ -419,7 +448,16 @@ struct RunDetailView: View {
             async let detailTask: Void = loadDetail()
             async let logTask: Void = loadLog()
             _ = await (detailTask, logTask)
+            // Stay on the actual result of an asynchronous snapshot/restore.
+            // Task cancellation when leaving the screen stops this bounded poll.
+            for _ in 0..<900 {
+                guard currentJob.status == "running", !Task.isCancelled, detailError == nil else { break }
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                await loadDetail()
+            }
+            if currentJob.status != "running" { await loadLog() }
         }
+        .refreshable { await loadDetail(); await loadLog() }
         .confirmationDialog(
             "Job erneut starten?",
             isPresented: $showRetryConfirmation,
@@ -433,6 +471,12 @@ struct RunDetailView: View {
     }
 
     private var currentJob: JobRecord { detail ?? job }
+
+    private var recoveryReceipt: [String: JSONValue]? {
+        if case let .object(snapshot)? = currentJob.summary?["snapshot"] { return snapshot }
+        if currentJob.summary?["verification_scope"] == .string("full-snapshot") { return currentJob.summary }
+        return nil
+    }
 
     private var isRetryCandidate: Bool {
         currentJob.kind == "backup" && ["error", "cancelled", "stale"].contains(currentJob.status)

@@ -117,6 +117,10 @@ protocol APIClientProtocol: AnyObject {
     func downloadRecoveryPass(includePaths: Bool) async throws -> URL
     func downloadRecoveryHandover(_ request: RecoveryHandoverRequest) async throws -> URL
     func getRecoveryPoints(identity: String) async throws -> RecoveryPointsResponse
+    func createFullSnapshot(_ request: FullSnapshotRequest) async throws -> SelectiveRestoreResponse
+    func restoreFullSnapshot(pointID: String, request: FullSnapshotRequest) async throws -> SelectiveRestoreResponse
+    func previewRecoveryRescue(_ request: RecoveryRescueRequest) async throws -> RecoveryRescuePreview
+    func importRecoveryRescue(_ request: RecoveryRescueRequest) async throws -> RecoveryRescueImport
     func browseRecoveryPoint(identity: String, pointID: String, path: String) async throws -> RecoveryPointBrowseResponse
     func getRecoveryDiff(identity: String, fromPoint: String, toPoint: String) async throws -> RecoveryDiffResponse
     func createVaultUpload(_ request: VaultUploadRequest) async throws -> VaultUploadStatus
@@ -127,9 +131,11 @@ protocol APIClientProtocol: AnyObject {
     func downloadVaultItem(id: String, filename: String) async throws -> URL
     func logout() async throws -> LogoutResult
     func clearLocalSession()
+    func setSessionPersistence(_ enabled: Bool)
 }
 
 extension APIClientProtocol {
+    func setSessionPersistence(_ enabled: Bool) {}
     func exchangeWebAuthnToken(_ token: String, verifier: String) async throws {
         throw APIError.loginSecurityFailed
     }
@@ -180,6 +186,10 @@ extension APIClientProtocol {
     func downloadRecoveryPass(includePaths: Bool) async throws -> URL { throw APIError.invalidResponse }
     func downloadRecoveryHandover(_ request: RecoveryHandoverRequest) async throws -> URL { throw APIError.invalidResponse }
     func getRecoveryPoints(identity: String) async throws -> RecoveryPointsResponse { throw APIError.invalidResponse }
+    func createFullSnapshot(_ request: FullSnapshotRequest) async throws -> SelectiveRestoreResponse { throw APIError.invalidResponse }
+    func restoreFullSnapshot(pointID: String, request: FullSnapshotRequest) async throws -> SelectiveRestoreResponse { throw APIError.invalidResponse }
+    func previewRecoveryRescue(_ request: RecoveryRescueRequest) async throws -> RecoveryRescuePreview { throw APIError.invalidResponse }
+    func importRecoveryRescue(_ request: RecoveryRescueRequest) async throws -> RecoveryRescueImport { throw APIError.invalidResponse }
     func browseRecoveryPoint(identity: String, pointID: String, path: String) async throws -> RecoveryPointBrowseResponse { throw APIError.invalidResponse }
     func getRecoveryDiff(identity: String, fromPoint: String, toPoint: String) async throws -> RecoveryDiffResponse { throw APIError.invalidResponse }
     func createVaultUpload(_ request: VaultUploadRequest) async throws -> VaultUploadStatus { throw APIError.invalidResponse }
@@ -275,17 +285,25 @@ final class APIClient: APIClientProtocol {
     private let session: URLSession
     private let loginSession: URLSession
     private let lifecycleSession: URLSession
+    private let vaultDownloadSession: URLSession
     private let cookieStorage: HTTPCookieStorage
     private let decoder: JSONDecoder
+    private let sessionPersistence: (any SessionPersisting)?
+    private var remembersSession = true
 
     init(
         baseURL: URL,
         session: URLSession? = nil,
         loginSession: URLSession? = nil,
-        cookieStorage: HTTPCookieStorage = .shared
+        cookieStorage: HTTPCookieStorage? = nil,
+        sessionPersistence: (any SessionPersisting)? = nil
     ) {
         self.baseURL = baseURL
+        // Cookies have no port isolation. Never share a production jar across
+        // servers; persist only under the complete normalized server URL.
+        let cookieStorage = cookieStorage ?? URLSessionConfiguration.ephemeral.httpCookieStorage!
         self.cookieStorage = cookieStorage
+        self.sessionPersistence = sessionPersistence ?? (session == nil ? SessionCookieStore() : nil)
         let configuration = URLSessionConfiguration.default
         configuration.httpCookieStorage = cookieStorage
         configuration.httpShouldSetCookies = true
@@ -331,6 +349,21 @@ final class APIClient: APIClientProtocol {
             self.lifecycleSession = URLSession(configuration: lifecycleConfiguration)
         }
         self.decoder = JSONDecoder()
+        if let session {
+            self.vaultDownloadSession = session
+        } else {
+            let recoveryConfiguration = URLSessionConfiguration.ephemeral
+            recoveryConfiguration.httpCookieStorage = cookieStorage
+            recoveryConfiguration.httpShouldSetCookies = true
+            recoveryConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            // A missing local Vault blob is first read back and hashed by the
+            // server (bounded at 900s), then streamed to the device.
+            recoveryConfiguration.timeoutIntervalForRequest = 960
+            recoveryConfiguration.timeoutIntervalForResource = 1800
+            recoveryConfiguration.waitsForConnectivity = false
+            self.vaultDownloadSession = URLSession(configuration: recoveryConfiguration)
+        }
+        self.sessionPersistence?.load(for: baseURL).forEach(cookieStorage.setCookie)
     }
 
     static func normalizedServerURL(_ rawValue: String) throws -> URL {
@@ -393,6 +426,7 @@ final class APIClient: APIClientProtocol {
             challenge = try await sendLogin(challengeRequest)
         } catch APIError.server(let status, _) where status == 404 || status == 405 {
             try await loginLegacy(username: username, password: password)
+            persistSession()
             return
         }
         guard challenge.status == "csrf_ready", !challenge.loginCSRF.isEmpty else {
@@ -437,6 +471,7 @@ final class APIClient: APIClientProtocol {
             )
         }
         guard cookie(named: Self.sessionCookie) != nil else { throw APIError.loginFailed }
+        persistSession()
     }
 
     func exchangeWebAuthnToken(_ token: String, verifier: String) async throws {
@@ -458,6 +493,7 @@ final class APIClient: APIClientProtocol {
               cookie(named: Self.sessionCookie) != nil else {
             throw APIError.loginSecurityFailed
         }
+        persistSession()
     }
 
     func getWebAuthnCredentials() async throws -> WebAuthnCredentialsResponse {
@@ -621,6 +657,22 @@ final class APIClient: APIClientProtocol {
         )
     }
 
+    func createFullSnapshot(_ request: FullSnapshotRequest) async throws -> SelectiveRestoreResponse {
+        try await post("/api/recovery/snapshots", body: request)
+    }
+
+    func restoreFullSnapshot(pointID: String, request: FullSnapshotRequest) async throws -> SelectiveRestoreResponse {
+        try await post("/api/recovery/points/\(Self.pathEncode(pointID))/restore", body: request)
+    }
+
+    func previewRecoveryRescue(_ request: RecoveryRescueRequest) async throws -> RecoveryRescuePreview {
+        try await post("/api/recovery/handover/preview", body: request)
+    }
+
+    func importRecoveryRescue(_ request: RecoveryRescueRequest) async throws -> RecoveryRescueImport {
+        try await post("/api/recovery/handover/import", body: request)
+    }
+
     func getRecoveryPoints(identity: String) async throws -> RecoveryPointsResponse {
         do {
             return try await get("/api/recovery/points?identity=\(Self.queryEncode(identity))", timeout: 75)
@@ -697,7 +749,9 @@ final class APIClient: APIClientProtocol {
     func downloadVaultItem(id: String, filename: String) async throws -> URL {
         try await download(
             "/api/vault/library/\(Self.pathEncode(id))/download",
-            filename: "vault-\(UUID().uuidString)-\(filename)"
+            filename: "vault-\(UUID().uuidString)-\(filename)",
+            using: vaultDownloadSession,
+            timeout: 960
         )
     }
 
@@ -926,6 +980,18 @@ final class APIClient: APIClientProtocol {
         clearCookies()
     }
 
+    func setSessionPersistence(_ enabled: Bool) {
+        remembersSession = enabled
+        if enabled { persistSession() } else { sessionPersistence?.remove(for: baseURL) }
+    }
+
+    private func persistSession() {
+        guard remembersSession else { return }
+        let names = Set([Self.sessionCookie, Self.csrfCookie])
+        let cookies = (cookieStorage.cookies(for: baseURL) ?? []).filter { names.contains($0.name) }
+        sessionPersistence?.save(cookies, for: baseURL)
+    }
+
     private func get<T: Decodable>(_ path: String, timeout: TimeInterval? = nil) async throws -> T {
         var request = URLRequest(url: url(for: path))
         request.httpMethod = "GET"
@@ -957,12 +1023,13 @@ final class APIClient: APIClientProtocol {
         return try await send(request, using: requestSession ?? session)
     }
 
-    private func download(_ path: String, filename: String) async throws -> URL {
+    private func download(_ path: String, filename: String, using requestSession: URLSession? = nil, timeout: TimeInterval? = nil) async throws -> URL {
         var request = URLRequest(url: url(for: path))
         request.httpMethod = "GET"
-        let (temporary, response) = try await session.download(for: request)
+        if let timeout { request.timeoutInterval = timeout }
+        let (temporary, response) = try await (requestSession ?? session).download(for: request)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
-        if http.statusCode == 401 { throw APIError.unauthenticated }
+        if http.statusCode == 401 { clearCookies(); throw APIError.unauthenticated }
         if !(200..<300).contains(http.statusCode) {
             let errorData = (try? Data(contentsOf: temporary)) ?? Data()
             try validate(response, data: errorData, allowed: 200..<300)
@@ -1023,7 +1090,7 @@ final class APIClient: APIClientProtocol {
     ) async throws -> T {
         let (data, response) = try await (requestSession ?? session).data(for: request)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
-        if http.statusCode == 401 { throw APIError.unauthenticated }
+        if http.statusCode == 401 { clearCookies(); throw APIError.unauthenticated }
         if !(200..<300).contains(http.statusCode) {
             if let structured = Self.structuredError(
                 status: http.statusCode,
@@ -1035,7 +1102,9 @@ final class APIClient: APIClientProtocol {
             throw APIError.server(status: http.statusCode, message: Self.errorMessage(data) ?? "Serverfehler (HTTP \(http.statusCode))")
         }
         do {
-            return try decoder.decode(T.self, from: data)
+            let decoded = try decoder.decode(T.self, from: data)
+            persistSession()
+            return decoded
         } catch {
             throw APIError.incompatibleResponse(
                 resource: Self.responseResource(for: request.url?.path ?? "")
@@ -1080,6 +1149,7 @@ final class APIClient: APIClientProtocol {
     }
 
     private func clearCookies() {
+        sessionPersistence?.remove(for: baseURL)
         let appCookieNames = Set([Self.sessionCookie, Self.csrfCookie])
         cookieStorage.cookies(for: baseURL)?
             .filter { appCookieNames.contains($0.name) }

@@ -65,11 +65,11 @@ jobs:
         run: python3 -m pip install -r requirements-dev.txt
       - name: Validate shared native API contracts and release version tooling
         run: python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_version.py
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install verified pinned XcodeGen
+        run: python3 scripts/install_pinned_xcodegen.py --destination "$GITHUB_WORKSPACE/.tools"
       - name: Generate Xcode project
         working-directory: ios
-        run: xcodegen generate
+        run: '"$GITHUB_WORKSPACE/.tools/xcodegen/bin/xcodegen" generate'
 
       - name: Validate iPhone launch metadata
         run: |
@@ -83,4 +83,12 @@ jobs:
             -project ios/RcloneMobile.xcodeproj \
             -scheme RcloneMobile \
             -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
-            CODE_SIGNING_ALLOWED=NO
+            -derivedDataPath "$RUNNER_TEMP/ios-build" \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"
+      - name: Inspect simulator signing for Keychain tests
+        if: always()
+        run: |
+          SIM_APP="$RUNNER_TEMP/ios-build/Build/Products/Debug-iphonesimulator/RcloneMobile.app"
+          if test -d "$SIM_APP"; then
+            codesign -d --entitlements :- "$SIM_APP"
+          fi

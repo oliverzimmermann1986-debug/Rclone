@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -512,14 +513,152 @@ def library(
     return records[: max(1, min(int(limit), MAX_LIBRARY_ITEMS))]
 
 
+def _restore_missing_blob(
+    root: Path, config: Mapping[str, Any], record: dict[str, Any]
+) -> Path:
+    from .jobs.restore_test import _endpoints
+    from .handover_rescue import HandoverError, _safe_relative
+
+    # A receipt never authorizes an arbitrary path or an old/reconfigured remote.
+    pairs = (config.get("backup") or {}).get("pairs") or []
+    configured = next(
+        (
+            pair
+            for pair in pairs
+            if isinstance(pair, Mapping)
+            and str(pair.get("id") or pair.get("name") or "")
+            == str(record.get("identity") or "")
+        ),
+        None,
+    )
+    if not configured or _endpoints(configured)[1] != str(
+        record.get("target_root") or ""
+    ):
+        raise VaultError(
+            "Sicherungsziel hat sich geändert; Notfallakte einem bestehenden Datenweg neu zuordnen"
+        )
+    try:
+        relative = _safe_relative(str(record.get("target_relative") or ""))
+    except HandoverError as exc:
+        raise VaultError(str(exc)) from exc
+    size = int(record.get("size") or 0)
+    digest = str(record.get("sha256") or "")
+    if (
+        not 1 <= size <= MAX_FILE_BYTES
+        or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        raise VaultError("Gespeicherter Wiederherstellungsbeleg ist beschädigt")
+    if shutil.disk_usage(root).free < size + 64 * 1024 * 1024:
+        raise VaultError("Nicht genügend Speicher für die Wiederherstellung")
+    target = _join_target(str(record["target_root"]), relative)
+    temporary = root / "uploads" / f"rescue-{uuid.uuid4().hex}.part"
+    process = None
+    watchdog = None
+    timed_out = threading.Event()
+    try:
+        with tempfile.TemporaryFile(dir=root / "uploads") as errors:
+            if _is_remote(target):
+                process = subprocess.Popen(
+                    ["rclone", "cat", "--", target],
+                    stdout=subprocess.PIPE,
+                    stderr=errors,
+                    stdin=subprocess.DEVNULL,
+                    env=rclone_subprocess_env(),
+                )
+
+                def kill_on_timeout() -> None:
+                    timed_out.set()
+                    process.kill()
+
+                watchdog = threading.Timer(900, kill_on_timeout)
+                watchdog.daemon = True
+                watchdog.start()
+                stream = process.stdout
+            else:
+                base = Path(str(record["target_root"])).expanduser().resolve()
+                origin = Path(target).expanduser()
+                if origin.is_symlink() or not origin.resolve().is_relative_to(base):
+                    raise VaultError(
+                        "Wiederherstellungsdatei liegt außerhalb des Sicherungsziels"
+                    )
+                stream = origin.open("rb")
+            assert stream is not None
+            actual = hashlib.sha256()
+            received = 0
+            with stream, temporary.open("xb") as output:
+                os.chmod(temporary, 0o600)
+                while True:
+                    block = stream.read(min(MAX_CHUNK_BYTES, size - received + 1))
+                    if not block:
+                        break
+                    received += len(block)
+                    if received > size:
+                        raise VaultError(
+                            "Cloud-Datei ist größer als der gespeicherte Wiederherstellungsbeleg"
+                        )
+                    actual.update(block)
+                    output.write(block)
+                output.flush()
+                os.fsync(output.fileno())
+            if process is not None:
+                process.wait(timeout=10)
+                if process.returncode or timed_out.is_set():
+                    raise VaultError(
+                        "Cloud-Datei konnte nicht vollständig zurückgeholt werden; Zugang und Verbindung prüfen"
+                    )
+            if received != size or actual.hexdigest() != digest:
+                raise VaultError(
+                    "SHA-256 oder Größe der zurückgeholten Datei stimmt nicht mit dem Beleg überein"
+                )
+        blob = _blob_path(root, digest)
+        blob.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.replace(temporary, blob)
+        record.update(
+            status="ready",
+            verified=True,
+            received=size,
+            error=None,
+            completed_at=time.time(),
+            rescue_verified_at=time.time(),
+        )
+        _save_record(root, record)
+        return blob
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise VaultError(
+            "Datei konnte nicht aus dem Sicherungsziel zurückgeholt werden"
+        ) from exc
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        temporary.unlink(missing_ok=True)
+
+
 def download_blob(config: Mapping[str, Any], upload_id: str) -> tuple[Path, str]:
     root = vault_root(config)
     record = _load_record(root, upload_id)
-    if record.get("status") != "ready" or not record.get("verified"):
+    remote_receipt = record.get("status") == "remote" and bool(
+        record.get("rescue_signature")
+    )
+    if not remote_receipt and (
+        record.get("status") != "ready" or not record.get("verified")
+    ):
         raise VaultError("Diese Datei ist noch nicht verifiziert und wiederherstellbar")
     blob = _blob_path(root, str(record.get("sha256") or ""))
-    if not blob.is_file() or blob.stat().st_size != int(record.get("size") or -1):
-        raise VaultError("Der lokale Wiederherstellungs-Blob fehlt")
+    if not blob.is_file() or remote_receipt:
+        with _LOCK:
+            transfer_lock = _TRANSFER_LOCKS.setdefault(upload_id, threading.Lock())
+        if not transfer_lock.acquire(blocking=False):
+            raise VaultError("Diese Datei wird bereits zurückgeholt")
+        try:
+            blob = _restore_missing_blob(root, config, record)
+        finally:
+            transfer_lock.release()
+    if blob.stat().st_size != int(record.get("size") or -1):
+        raise VaultError("Der lokale Wiederherstellungs-Blob ist beschädigt")
     if _hash_file(blob) != str(record.get("sha256") or ""):
         raise VaultError("Der lokale Wiederherstellungs-Blob ist beschädigt")
     return blob, safe_filename(str(record.get("filename") or "Wiederherstellung"))

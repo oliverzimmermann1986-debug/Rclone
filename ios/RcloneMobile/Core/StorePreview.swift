@@ -12,12 +12,18 @@ enum StorePreviewMode {
         guard let flagIndex = arguments.firstIndex(of: launchFlag),
               arguments.indices.contains(flagIndex + 1) else { return 0 }
         switch arguments[flagIndex + 1].lowercased() {
-        case "paths": return 1
-        case "jobs": return 2
-        case "runs": return 3
-        case "system": return 4
+        case "vault", "protect": return 1
+        case "recovery", "timeline", "rescue": return 2
+        case "paths", "jobs", "runs", "system": return 3
         default: return 0
         }
+    }
+
+    static var adminDestination: String? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: launchFlag), arguments.indices.contains(index + 1) else { return nil }
+        let value = arguments[index + 1].lowercased()
+        return ["paths", "jobs", "runs", "system"].contains(value) ? value : nil
     }
 
     static var opensDeviceVault: Bool {

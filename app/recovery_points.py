@@ -137,6 +137,8 @@ def _remote_directories(root: str) -> list[str]:
 def list_points(
     config: Mapping[str, Any], pair: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
+    from .recovery_snapshots import SnapshotError, list_snapshots
+
     root = version_root(config, pair)
     result: list[dict[str, Any]] = [
         {
@@ -144,8 +146,22 @@ def list_points(
             "label": "Aktueller Sicherungsstand",
             "created_at": None,
             "kind": "current",
+            "complete": False,
         }
     ]
+    try:
+        complete = list_snapshots(config, pair)
+    except SnapshotError as exc:
+        raise RecoveryPointError(str(exc)) from exc
+    display_timezone = _configured_timezone(config)
+    for point in complete:
+        point["label"] = (
+            datetime.fromtimestamp(point["created_at"], display_timezone).strftime(
+                "%d.%m.%Y · %H:%M"
+            )
+            + " · Vollständig"
+        )
+    result.extend(complete)
     if not root:
         return result
     if _is_remote(root):
@@ -173,6 +189,8 @@ def list_points(
                 ),
                 "created_at": created_at,
                 "kind": "version",
+                "complete": False,
+                "warning": "Änderungsarchiv: enthält nur ersetzte oder gelöschte Dateien, keinen vollständigen Stand.",
             }
         )
     points.sort(
@@ -186,6 +204,13 @@ def point_target(
     config: Mapping[str, Any], pair: Mapping[str, Any], point_id: str
 ) -> str:
     value = str(point_id or "current")
+    if value.startswith("full-"):
+        from .recovery_snapshots import SnapshotError, snapshot_target
+
+        try:
+            return snapshot_target(config, pair, value)
+        except SnapshotError as exc:
+            raise RecoveryPointError(str(exc)) from exc
     if value == "current":
         return _endpoints(pair)[1]
     known = {
@@ -343,10 +368,47 @@ def compare_points(
     from_point: str,
     to_point: str,
 ) -> dict[str, Any]:
-    source, source_truncated = _inventory(point_target(config, pair, from_point))
-    destination, destination_truncated = _inventory(
-        point_target(config, pair, to_point)
-    )
+    comparing_full = from_point.startswith("full-") or to_point.startswith("full-")
+
+    def inventory(point: str) -> tuple[dict[str, tuple[int, str]], bool]:
+        if not comparing_full:
+            return _inventory(point_target(config, pair, point))
+        from .recovery_snapshots import (
+            MAX_BYTES,
+            SnapshotError,
+            _inventory_local,
+            _inventory_remote as remote_snapshot_inventory,
+            load_manifest,
+            snapshot_root,
+        )
+
+        try:
+            if point.startswith("full-"):
+                manifest = load_manifest(config, pair, point)
+                return {
+                    item["path"]: (item["size"], item["sha256"])
+                    for item in manifest["entries"]
+                }, False
+            target = point_target(config, pair, point)
+            if _is_remote(target):
+                entries, _dirs = remote_snapshot_inventory(
+                    target, snapshot_root(config), MAX_BYTES
+                )
+                # Provider hashes may be MD5/SHA1; never compare them to SHA-256.
+                return {
+                    name: (value["size"], "") for name, value in entries.items()
+                }, False
+            files, _directories = _inventory_local(
+                Path(target).expanduser().resolve(), limit_bytes=MAX_BYTES, hashes=True
+            )
+            return {
+                name: (value["size"], value["sha256"]) for name, value in files.items()
+            }, False
+        except SnapshotError as exc:
+            raise RecoveryPointError(str(exc)) from exc
+
+    source, source_truncated = inventory(from_point)
+    destination, destination_truncated = inventory(to_point)
     source_paths = set(source)
     destination_paths = set(destination)
     added = sorted(destination_paths - source_paths, key=str.casefold)
@@ -363,6 +425,13 @@ def compare_points(
             )
         ),
         key=str.casefold,
+    )
+    unverified = sorted(
+        path
+        for path in source_paths & destination_paths
+        if comparing_full
+        and source[path][0] == destination[path][0]
+        and not (source[path][1] and destination[path][1])
     )
 
     def entries(
@@ -385,6 +454,13 @@ def compare_points(
             }
             for path in changed[:MAX_DIFF_RESULTS]
         ],
+        "unverified": entries(unverified, destination),
+        "verification": "sha256" if comparing_full and not unverified else "metadata",
+        "warning": (
+            "Für gleich große Dateien fehlen vergleichbare Cloud-Prüfsummen. Diese Dateien sind nicht als unverändert bestätigt."
+            if unverified
+            else None
+        ),
         "counts": {
             "added": len(added),
             "removed": len(removed),
@@ -392,6 +468,7 @@ def compare_points(
         },
         "truncated": source_truncated
         or destination_truncated
+        or bool(unverified)
         or any(len(items) > MAX_DIFF_RESULTS for items in (added, removed, changed)),
     }
 

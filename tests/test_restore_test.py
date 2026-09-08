@@ -459,7 +459,7 @@ def test_drill_success_reports_verified_and_cleans_up(monkeypatch, tmp_path: Pat
     assert calls[0][calls[0].index("--max-transfer") + 1] == str(256 * 1024 * 1024)
     assert calls[0][calls[0].index("--cutoff-mode") + 1] == "hard"
     assert calls[1][1] == "check"
-    assert "--checksum" in calls[1] and "--one-way" in calls[1]
+    assert "--download" in calls[1] and "--one-way" in calls[1]
     assert calls[1][-1] == str(tmp_path / "src")
     # Kein Temp-Rest mit Produktivdaten.
     assert list((tmp_path / "temp").glob("restore-*")) == []
@@ -730,7 +730,9 @@ def test_summary_carries_aggregate_history_key(monkeypatch, tmp_path: Path):
     names = [item["name"] for item in summary["pairs"]]
     assert drill.AGGREGATE_RUN_NAME in names
     assert summary["history_keys"][drill.AGGREGATE_RUN_NAME] == drill.HISTORY_KEY
-    assert summary["history_keys"]["archiv"] == f"{drill.PAIR_PREFIX}archiv"
+    assert summary["history_keys"]["archiv"].startswith("restore:fingerprint:")
+    assert summary["pairs"][0]["sample_manifest_sha256"]
+    assert summary["pairs"][0]["evidence_checked_at"] > 0
 
 
 def test_history_key_matches_scheduler():

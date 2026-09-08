@@ -32,7 +32,7 @@ struct ProtectionAssessment {
         }.count
         let freshPoints = Self.weighted(freshCount, of: enabled, maximum: 25)
 
-        let passedRestores = storage?.pairs.filter { $0.restoreEvidence?.state == "passed" }.count ?? 0
+        let passedRestores = storage?.pairs.filter { $0.restoreEvidence?.isCurrent == true }.count ?? 0
         let restorePoints = Self.weighted(passedRestores, of: total, maximum: 30)
 
         let enabledPairs = config?.backup.pairs.filter { $0.enabled } ?? []
@@ -73,7 +73,7 @@ struct ProtectionAssessment {
                 title: "Restore-Nachweise",
                 points: restorePoints,
                 maximum: 30,
-                detail: total == 0 ? "Noch kein Nachweis möglich." : "\(passedRestores) von \(total) Datenwegen wurden per Prüfsumme wiederhergestellt."
+                detail: total == 0 ? "Noch kein Nachweis möglich." : "\(passedRestores) von \(total) Datenwegen haben einen aktuell gültigen Stichprobenbeleg."
             ),
             Component(
                 id: "shield",
