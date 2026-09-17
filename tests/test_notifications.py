@@ -47,3 +47,17 @@ def test_notification_queue_failure_does_not_fail_backup(monkeypatch):
     monkeypatch.setattr(push_notifications, "queue_push_notification", fail)
 
     notifications.notify("sync_error", "Fehler", "Test")
+
+
+def test_restore_warning_is_allowed_without_enabling_error_subscriptions(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        push_notifications,
+        "queue_push_notification",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {},
+    )
+    notifications.notify(
+        "restore_test_warning", "Prüfumfang begrenzt", "19 von 20 geprüft"
+    )
+    assert calls[0][0][0] == "restore_test_warning"
+    assert "restore_test_warning" not in push_notifications.DEFAULT_ERROR_EVENTS

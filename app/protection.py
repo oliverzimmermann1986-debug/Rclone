@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from .db import Database
 from .jobs.scheduler import rclone_history_key
 from .rclone_args import rclone_subprocess_env
+from .restore_evidence import is_partial_restore_summary
 
 _ANOMALY_STATE_KEY = "anomaly_guard:v1"
 _MAX_QUARANTINES = 256
@@ -347,16 +348,25 @@ def protection_calendar(
                 "successful": 0,
                 "failed": 0,
                 "cancelled": 0,
+                "warnings": 0,
                 "restore_tests": 0,
                 "state": "empty",
             },
         )
         bucket["total"] += 1
         status = str(job.get("status") or "").casefold()
+        if (
+            job.get("kind") == "restoretest"
+            and status in {"error", "warning"}
+            and is_partial_restore_summary(job.get("summary") or {})
+        ):
+            status = "warning"
         if status == "ok":
             bucket["successful"] += 1
         elif status == "cancelled":
             bucket["cancelled"] += 1
+        elif status == "warning":
+            bucket["warnings"] += 1
         elif status != "running":
             bucket["failed"] += 1
         if str(job.get("kind") or "") == "restoretest":
@@ -364,7 +374,7 @@ def protection_calendar(
     for bucket in buckets.values():
         if bucket["failed"]:
             bucket["state"] = "error"
-        elif bucket["cancelled"]:
+        elif bucket["cancelled"] or bucket["warnings"]:
             bucket["state"] = "warning"
         elif bucket["successful"]:
             bucket["state"] = "ok"

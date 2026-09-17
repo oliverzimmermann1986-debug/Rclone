@@ -285,7 +285,9 @@ def _payload(row: Mapping[str, Any]) -> bytes:
                 "body": str(row.get("message") or "")[:900],
             },
             "sound": "default",
-            "thread-id": "rclone-errors",
+            "thread-id": "rclone-restore"
+            if event == "restore_test_warning"
+            else "rclone-errors",
             **({"category": "RCLONE_INCIDENT"} if event in incident_events else {}),
         },
         "event": event,

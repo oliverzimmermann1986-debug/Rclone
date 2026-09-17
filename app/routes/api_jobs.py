@@ -33,6 +33,7 @@ from ..jobs.logging_scope import JobScopeFilter
 from ..jobs.locks import HeldFileLock, try_file_lock
 from ..jobs.scheduler import rclone_history_key
 from ..rclone_args import redact_command_text, rclone_subprocess_env
+from ..restore_evidence import is_partial_restore_summary
 from ..scheduler_control import pause_scheduler, resume_scheduler, scheduler_state
 from ..security import ensure_within, is_relative_to, parse_browse_roots, require_csrf
 
@@ -158,6 +159,8 @@ def _parse_pair_filter(raw: Optional[str]) -> Optional[list[str]]:
 def _finish_status(result: dict[str, Any]) -> str:
     if result.get("cancelled") or rclone_job.is_cancelled():
         return "cancelled"
+    if result.get("kind") == "restoretest" and is_partial_restore_summary(result):
+        return "warning"
     return "ok" if result.get("ok") else "error"
 
 
@@ -1559,7 +1562,16 @@ def list_jobs(
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
+    allowed_status = {
+        None,
+        "running",
+        "ok",
+        "error",
+        "warning",
+        "skipped",
+        "cancelled",
+        "stale",
+    }
     if kind not in _ALLOWED_JOB_KINDS:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
@@ -1584,7 +1596,16 @@ def search_jobs(
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
+    allowed_status = {
+        None,
+        "running",
+        "ok",
+        "error",
+        "warning",
+        "skipped",
+        "cancelled",
+        "stale",
+    }
     if kind not in _ALLOWED_JOB_KINDS:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
@@ -1614,7 +1635,16 @@ def export_jobs_csv(
     q: str = Query("", max_length=200),
     limit: int = Query(5000, ge=1, le=10000),
 ) -> StreamingResponse:
-    allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
+    allowed_status = {
+        None,
+        "running",
+        "ok",
+        "error",
+        "warning",
+        "skipped",
+        "cancelled",
+        "stale",
+    }
     if kind not in _ALLOWED_JOB_KINDS:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
@@ -1644,6 +1674,7 @@ def export_jobs_csv(
                 "beendet",
                 "dauer_sekunden",
                 "zusammenfassung",
+                "anzeigestatus",
             ]
         )
         for job in db.job_iter(
@@ -1676,6 +1707,7 @@ def export_jobs_csv(
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),
+                    job.get("display_status") or job.get("status"),
                 ]
             )
 

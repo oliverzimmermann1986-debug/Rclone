@@ -576,6 +576,7 @@ def restore_test_due(cfg, db, *, now: Optional[float] = None) -> Dict[str, Any]:
     konkurrierten mehrere Drills um denselben Backup-Scope. Historie und
     Retry-Backoff nutzen darum einen einzigen globalen Schlüssel.
     """
+    from ..restore_evidence import is_partial_restore_summary
     from .restore_test import restore_test_settings
 
     settings = restore_test_settings(cfg)
@@ -607,9 +608,56 @@ def restore_test_due(cfg, db, *, now: Optional[float] = None) -> Dict[str, Any]:
     )
     history = _load_history(db, {RESTORE_TEST_HISTORY_KEY: RESTORE_TEST_HISTORY_KEY})
     try:
+        drill_history = history.get(RESTORE_TEST_HISTORY_KEY) or {}
+        last_attempt = drill_history.get("last_result") or {}
+        last_success = drill_history.get("last_success") or {}
+        attempt_context = last_attempt.get("summary") or last_attempt.get("pair") or {}
+        attempt_at = float(last_attempt.get("ended_at") or 0)
+        success_at = float(last_success.get("ended_at") or 0)
+        partial_completed_at = None
+        if (
+            last_attempt.get("ok") is False
+            and last_attempt.get("status") in {"error", "warning"}
+            and not last_attempt.get("dry_run")
+            and isinstance(attempt_context, Mapping)
+            and (last_attempt.get("trigger") or attempt_context.get("trigger"))
+            == "scheduler"
+            and success_at < attempt_at <= now_value
+        ):
+            # Aggregate pair history does not contain the individual results.
+            # Fetch only this job, and fail closed for older external adapters.
+            summary = last_attempt.get("summary")
+            if not isinstance(summary, Mapping) or "pairs" not in summary:
+                summary = None
+                job_get = getattr(db, "job_get", None)
+                job_id = last_attempt.get("job_id")
+                if callable(job_get) and type(job_id) is int and job_id > 0:
+                    try:
+                        job = job_get(job_id)
+                    except Exception:
+                        logger.warning("Restore-Warnung #%s nicht lesbar", job_id)
+                    else:
+                        if (
+                            isinstance(job, Mapping)
+                            and job.get("kind") == "restoretest"
+                            and job.get("status") in {"error", "warning"}
+                        ):
+                            summary = job.get("summary")
+            if (
+                is_partial_restore_summary(summary)
+                and summary.get("trigger") in (None, "scheduler")
+                and not summary.get("dry_run")
+            ):
+                partial_completed_at = attempt_at
+                # Scheduling-only execution cursor. Never write a successful
+                # proof or change the persisted ok=False / last_success rows.
+                drill_history = {
+                    **drill_history,
+                    "last_success": {"ended_at": partial_completed_at},
+                }
         evaluation = _evaluate_due(
             schedule,
-            history.get(RESTORE_TEST_HISTORY_KEY) or {},
+            drill_history,
             history_key=RESTORE_TEST_HISTORY_KEY,
             now=now_value,
             timezone_name=timezone_name,
@@ -617,6 +665,12 @@ def restore_test_due(cfg, db, *, now: Optional[float] = None) -> Dict[str, Any]:
             grace_minutes=grace_minutes,
             run_on_first_tick=False,
         )
+        if partial_completed_at is not None:
+            evaluation["last_run"] = success_at or None
+            evaluation["last_attempt"] = partial_completed_at
+            evaluation["last_scheduled_completion"] = partial_completed_at
+            if not evaluation["due"]:
+                evaluation["reason"] = "partial_restore_slot_completed"
     except Exception as exc:
         return {"due": False, "error": str(exc)}
     return {

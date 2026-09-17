@@ -31,6 +31,7 @@ from ..jobs.rclone_sync import _count_files_up_to, _is_remote, build_job_plan
 from ..jobs.scheduler import next_run_after, rclone_history_key
 from ..overdue import evaluate_pair
 from ..rclone_args import rclone_subprocess_env
+from ..restore_evidence import is_partial_restore_summary
 from ..scheduler_control import scheduler_state
 from ..security import require_csrf
 from ..system_info import system_snapshot
@@ -538,6 +539,68 @@ def overview() -> dict[str, Any]:
         return _build_overview()
 
 
+def _verified_partial_job(job: dict[str, Any]) -> bool:
+    return (
+        job.get("kind") == "restoretest"
+        and job.get("status") in {"error", "warning"}
+        and is_partial_restore_summary(job.get("summary") or {})
+    )
+
+
+def _last_job_alert(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Separate a bounded, verified drill from a real execution failure."""
+    if not job:
+        return None
+    kind = str(job.get("kind") or "")
+    context = {"source": "last_job", "job_id": job.get("id"), "kind": kind}
+    if _verified_partial_job(job):
+        return {
+            **context,
+            "level": "warn",
+            "message": "Letzte Restore-Prüfung: Prüfumfang begrenzt. "
+            "Die ausgewählten Dateien wurden erfolgreich geprüft; "
+            "der angeforderte Umfang ist noch nicht erfüllt.",
+        }
+    if job.get("status") not in {"error", "stale"}:
+        return None
+    label = {
+        "backup": "Letzte Sicherung",
+        "pbs": "Letzte PBS-Sicherung",
+        "restoretest": "Letzte Restore-Prüfung",
+        "check": "Letzter Vergleichslauf",
+        "quicksync": "Letzter Quick-Sync",
+        "recovery": "Letzte Wiederherstellung",
+    }.get(kind, "Letzter Job")
+    if job.get("dry_run"):
+        label = "Letzter Testlauf (ohne Änderungen)"
+    state = (
+        "wurde unterbrochen" if job.get("status") == "stale" else "ist fehlgeschlagen"
+    )
+    return {
+        **context,
+        "level": "error",
+        "message": f"{label} {state} (Lauf #{job.get('id')}).",
+    }
+
+
+def _pair_failure_text(latest: dict[str, Any] | None) -> str | None:
+    if not latest or latest.get("status") not in {"error", "stale", "skipped"}:
+        return None
+    pair = latest.get("pair") or {}
+    message = str(pair.get("error") or "").strip()
+    if latest.get("status") == "skipped":
+        # Failed prechecks and anomaly guards prevent execution and therefore
+        # persist as skipped. Only an explicit current failure is an incident;
+        # a harmless skip must not acquire the generic failure fallback.
+        if pair.get("ok") is True or pair.get("cancelled"):
+            return None
+        return message or None
+    return (
+        message
+        or "Der letzte Lauf dieses Datenwegs ist fehlgeschlagen. Protokoll prüfen."
+    )
+
+
 def _build_overview() -> dict[str, Any]:
     global _OVERVIEW_CACHE
     cfg = get_config().snapshot()
@@ -569,7 +632,12 @@ def _build_overview() -> dict[str, Any]:
     last_job = last_jobs[0] if last_jobs else None
     last_success = next((job for job in last_jobs if job.get("status") == "ok"), None)
     last_error = next(
-        (job for job in last_jobs if job.get("status") in {"error", "stale"}),
+        (
+            job
+            for job in last_jobs
+            if job.get("status") in {"error", "stale"}
+            and not _verified_partial_job(job)
+        ),
         None,
     )
     now = time.time()
@@ -638,7 +706,7 @@ def _build_overview() -> dict[str, Any]:
                 "last_run": latest.get("ended_at") if latest else None,
                 "job_id": latest.get("job_id") if latest else None,
                 **evaluate_pair(pair, last_success_at, now=now),
-                "error": ((latest.get("pair") or {}).get("error") if latest else None),
+                "error": _pair_failure_text(latest),
             }
         )
 
@@ -646,7 +714,7 @@ def _build_overview() -> dict[str, Any]:
     scheduler_control = scheduler_state(db, now=now)
     web_enabled, web_active = operational["services"]["web"]
     system = operational["system"]
-    alerts: list[dict[str, str]] = []
+    alerts: list[dict[str, Any]] = []
     if not bool(backup.get("enabled", True)):
         alerts.append(
             {
@@ -671,10 +739,8 @@ def _build_overview() -> dict[str, Any]:
         alerts.append(
             {"level": "warn", "message": "Per-Pair-Scheduler ist nicht aktiv"}
         )
-    if last_job and last_job.get("status") in {"error", "stale"}:
-        alerts.append(
-            {"level": "error", "message": "Der letzte Job ist fehlgeschlagen"}
-        )
+    if alert := _last_job_alert(last_job):
+        alerts.append(alert)
     if destructive and any(not pair.get("allow_delete") for pair in destructive):
         alerts.append(
             {

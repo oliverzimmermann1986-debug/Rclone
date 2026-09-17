@@ -129,6 +129,14 @@ struct SystemAlert: Decodable, Identifiable {
     var id: String { level + message }
     let level: String
     let message: String
+    var jobID: Int? = nil
+    var kind: String? = nil
+    var source: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case level, message, kind, source
+        case jobID = "job_id"
+    }
 }
 
 struct SystemSnapshot: Decodable {
@@ -329,6 +337,10 @@ struct RestoreEvidence: Decodable, Equatable {
     var validUntil: Double? = nil
     var binding: [String: String]? = nil
     var invalidReason: String? = nil
+    var requestedSampleSize: Int? = nil
+    var budgetBytes: Int64? = nil
+    var sampleShortfallReason: String? = nil
+    var warning: String? = nil
     let state: String
     let lastAttemptAt: Double?
     let lastSuccessAt: Double?
@@ -338,8 +350,17 @@ struct RestoreEvidence: Decodable, Equatable {
     let checksumVerified: Bool
     let error: String?
 
+    var sampleScope: RestoreSampleScope {
+        RestoreSampleScope(state: state, verifiedFiles: verifiedFiles, sampleSize: sampleSize,
+            requestedSampleSize: requestedSampleSize, budgetBytes: budgetBytes,
+            shortfallReason: sampleShortfallReason, warning: warning)
+    }
+
     enum CodingKeys: String, CodingKey {
-        case valid, binding
+        case valid, binding, warning
+        case requestedSampleSize = "requested_sample_size"
+        case budgetBytes = "budget_bytes"
+        case sampleShortfallReason = "sample_shortfall_reason"
         case validUntil = "valid_until"
         case invalidReason = "invalid_reason"
         case state, error
@@ -349,6 +370,45 @@ struct RestoreEvidence: Decodable, Equatable {
         case verifiedFiles = "verified_files"
         case sampleSize = "sample_size"
         case checksumVerified = "checksum_verified"
+    }
+}
+
+/// Presentation of the latest attempt, never a substitute for a complete, current proof.
+struct RestoreSampleScope {
+    let state: String
+    let verifiedFiles: Int?
+    let sampleSize: Int?
+    let requestedSampleSize: Int?
+    let budgetBytes: Int64?
+    let shortfallReason: String?
+    let warning: String?
+
+    var isPartial: Bool { state == "partial" }
+    var countDescription: String {
+        guard let verifiedFiles, let requested = requestedSampleSize ?? sampleSize else { return "Noch kein Beleg" }
+        return "\(verifiedFiles) von \(requested) Dateien"
+    }
+    var budgetDescription: String? {
+        guard let budgetBytes, budgetBytes > 0 else { return nil }
+        if budgetBytes.isMultiple(of: 1_048_576) { return "\(budgetBytes / 1_048_576) MiB" }
+        return "\(budgetBytes) Bytes"
+    }
+    var explanation: String {
+        switch shortfallReason {
+        case "byte_budget":
+            return budgetDescription.map { "Das Datenlimit von \($0) begrenzt die Stichprobe." }
+                ?? "Das Datenlimit begrenzt die Stichprobe."
+        case "insufficient_eligible_files": return "Am Sicherungsziel waren nicht genügend geeignete Dateien verfügbar."
+        case "listing_truncated": return "Die Dateiliste war begrenzt; weitere geeignete Dateien wurden nicht erfasst."
+        default:
+            let text = warning?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return text.isEmpty ? "Die angeforderte Stichprobe wurde nicht vollständig geprüft." : text
+        }
+    }
+    var message: String { "Prüfumfang begrenzt: \(countDescription) geprüft. \(explanation)" }
+    var recommendation: String {
+        let requested = requestedSampleSize.map { "\($0) Dateien" } ?? "der angeforderten Dateizahl"
+        return "Lass die Stichprobe bei \(requested). Prüfe die Dateiauswahl und das Prüfprotokoll. Erhöhe das Datenlimit nur bewusst, wenn es den Prüfumfang begrenzt; danach erneut prüfen."
     }
 }
 
@@ -1066,6 +1126,8 @@ struct JobSearchResponse: Decodable {
 
 struct JobRecord: Decodable, Identifiable {
     var summary: [String: JSONValue]? = nil
+    var displayStatus: String? = nil
+    var effectiveStatus: String { displayStatus ?? status }
     let id: Int
     let kind: String
     let status: String
@@ -1078,6 +1140,7 @@ struct JobRecord: Decodable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case id, kind, status, summary
+        case displayStatus = "display_status"
         case startedAt = "started_at"
         case endedAt = "ended_at"
         case logFile = "log_file"
@@ -1606,6 +1669,10 @@ struct RecoveryRestoreProof: Codable {
     var validUntil: Double? = nil
     var binding: [String: String]? = nil
     var invalidReason: String? = nil
+    var requestedSampleSize: Int? = nil
+    var budgetBytes: Int64? = nil
+    var sampleShortfallReason: String? = nil
+    var warning: String? = nil
     let state: String
     let lastAttemptAt: Double?
     let lastSuccessAt: Double?
@@ -1616,8 +1683,17 @@ struct RecoveryRestoreProof: Codable {
     let error: String?
     let durationSeconds: Double?
 
+    var sampleScope: RestoreSampleScope {
+        RestoreSampleScope(state: state, verifiedFiles: verifiedFiles, sampleSize: sampleSize,
+            requestedSampleSize: requestedSampleSize, budgetBytes: budgetBytes,
+            shortfallReason: sampleShortfallReason, warning: warning)
+    }
+
     enum CodingKeys: String, CodingKey {
-        case valid, binding
+        case valid, binding, warning
+        case requestedSampleSize = "requested_sample_size"
+        case budgetBytes = "budget_bytes"
+        case sampleShortfallReason = "sample_shortfall_reason"
         case validUntil = "valid_until"
         case invalidReason = "invalid_reason"
         case state, error

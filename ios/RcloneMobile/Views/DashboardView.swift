@@ -140,7 +140,7 @@ struct DashboardView: View {
                             HStack(spacing: 12) {
                                 Image(systemName: "clock.arrow.circlepath")
                                     .font(.title3)
-                                    .foregroundStyle(StatusStyle.color(for: last.status))
+                                    .foregroundStyle(StatusStyle.color(for: last.effectiveStatus))
                                     .frame(width: 28)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(AppFormat.date(last.startedAt))
@@ -150,7 +150,7 @@ struct DashboardView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                StatusBadge(status: last.status)
+                                StatusBadge(status: last.effectiveStatus)
                             }
                         }
                     }
