@@ -17,6 +17,7 @@ EVENTS = (
     "pair_overdue",
     "restore_test_ok",
     "restore_test_error",
+    "restore_test_warning",
     "anomaly_blocked",
     "recovery_ready",
     "recovery_error",

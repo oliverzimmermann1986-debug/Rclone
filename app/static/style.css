@@ -874,8 +874,8 @@ code { font-family: var(--mono); }
 .job-status-icon.error span, .job-status-icon.stale span { background: var(--danger); }
 .job-status-icon.running { background: var(--running-soft); }
 .job-status-icon.running span { background: var(--running); animation: pulse 1.8s var(--ease-in-out) infinite; }
-.job-status-icon.skipped, .job-status-icon.cancelled { background: var(--warning-soft); }
-.job-status-icon.skipped span, .job-status-icon.cancelled span { background: var(--warning); }
+.job-status-icon.skipped, .job-status-icon.cancelled, .job-status-icon.warning { background: var(--warning-soft); }
+.job-status-icon.skipped span, .job-status-icon.cancelled span, .job-status-icon.warning span { background: var(--warning); }
 
 .job-main, .job-time, .job-column { min-width: 0; }
 .job-main strong, .job-main small,
