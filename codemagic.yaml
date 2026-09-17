@@ -12,9 +12,7 @@ workflows:
         provisioning_profiles:
           - rclone-sync-app-store-shared-v2
           - rclone-sync-widget-app-store
-          # RELEASE GATE: create the .share App Store profile with the existing
-          # App Group, upload to Codemagic, then add its actual reference here.
-          # See ios/TESTFLIGHT.md; do not ship without the embedded extension.
+          - rclone-sync-share-app-store
         certificates:
           - rclone-sync-distribution
       vars:

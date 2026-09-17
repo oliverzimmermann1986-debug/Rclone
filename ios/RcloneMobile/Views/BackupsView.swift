@@ -165,6 +165,7 @@ private struct RunsListView: View {
                     Text("Alle").tag("")
                     Text("Läuft").tag("running")
                     Text("Erfolgreich").tag("ok")
+                    Text("Hinweise").tag("warning")
                     Text("Fehler").tag("error")
                     Text("Abgebrochen").tag("cancelled")
                     Text("Veraltet").tag("stale")
@@ -231,7 +232,7 @@ private struct RunsListView: View {
             let normalizedQuery = selectedQuery.lowercased()
             let filtered = model.jobs.filter { job in
                 (selectedKind.isEmpty || job.kind == selectedKind)
-                    && (selectedStatus.isEmpty || job.status == selectedStatus)
+                    && (selectedStatus.isEmpty || job.effectiveStatus == selectedStatus)
                     && (normalizedQuery.isEmpty
                         || String(job.id).contains(normalizedQuery)
                         || (job.definitionName ?? "").lowercased().contains(normalizedQuery))
@@ -296,17 +297,17 @@ private struct RunRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: symbol)
-                .font(.title3).foregroundStyle(StatusStyle.color(for: job.status)).frame(width: 30)
+                .font(.title3).foregroundStyle(StatusStyle.color(for: job.effectiveStatus)).frame(width: 30)
             VStack(alignment: .leading, spacing: 4) {
                 Text(label).font(.headline)
                 Text("\(AppFormat.date(job.startedAt)) · \(AppFormat.duration(start: job.startedAt, end: job.endedAt))")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            StatusBadge(status: job.status)
+            StatusBadge(status: job.effectiveStatus)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(label), Status \(StatusStyle.label(for: job.status)), gestartet \(AppFormat.date(job.startedAt))")
+        .accessibilityLabel("\(label), Status \(StatusStyle.label(for: job.effectiveStatus)), gestartet \(AppFormat.date(job.startedAt))")
         .accessibilityHint("Öffnet die Details dieses Laufs.")
     }
 
@@ -355,7 +356,7 @@ struct RunDetailView: View {
     var body: some View {
         List {
             Section("Status") {
-                LabeledContent("Ergebnis") { StatusBadge(status: detail?.status ?? job.status) }
+                LabeledContent("Ergebnis") { StatusBadge(status: currentJob.effectiveStatus) }
                 LabeledContent("Gestartet", value: AppFormat.date(detail?.startedAt ?? job.startedAt))
                 LabeledContent("Dauer", value: AppFormat.duration(start: detail?.startedAt ?? job.startedAt, end: detail?.endedAt ?? job.endedAt))
                 LabeledContent("Typ", value: (detail?.kind ?? job.kind).uppercased())
@@ -391,8 +392,12 @@ struct RunDetailView: View {
                     Text("Produktivdaten werden nicht überschrieben. Der Beleg bezieht sich auf den genannten Stand; lokale Stände liegen auf dem Server, nicht in einer unabhängigen Cloudkopie.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-            } else if case let .string(error)? = currentJob.summary?["error"] {
-                Section("Befund") { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            } else if let message = findingMessage {
+                Section("Befund") {
+                    Text(message)
+                        .foregroundStyle(StatusStyle.color(for: JobFindings.severity(for: currentJob)))
+                        .textSelection(.enabled)
+                }
             }
             if isRetryCandidate {
                 Section("Aktionen") {
@@ -422,11 +427,12 @@ struct RunDetailView: View {
                 } else if log.isEmpty {
                     Text("Kein Protokoll verfügbar").foregroundStyle(.secondary)
                 } else {
-                    ScrollView(.horizontal) {
-                        Text(log)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                    }
+                    Text(log)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if let logDownloadURL {
                     ShareLink(item: logDownloadURL) { Label("Vollständiges redigiertes Log teilen", systemImage: "square.and.arrow.up") }
@@ -471,6 +477,10 @@ struct RunDetailView: View {
     }
 
     private var currentJob: JobRecord { detail ?? job }
+
+    private var findingMessage: String? {
+        JobFindings.message(for: currentJob)
+    }
 
     private var recoveryReceipt: [String: JSONValue]? {
         if case let .object(snapshot)? = currentJob.summary?["snapshot"] { return snapshot }

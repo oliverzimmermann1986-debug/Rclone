@@ -132,7 +132,7 @@ function app() {
       this.jobs.kind = safeStoredValue('rclone-sync-job-kind', ['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs'], '');
       this.jobs.status = safeStoredValue(
         'rclone-sync-job-status',
-        ['', 'running', 'ok', 'error', 'skipped', 'cancelled', 'stale'],
+        ['', 'running', 'ok', 'error', 'warning', 'skipped', 'cancelled', 'stale'],
         '',
       );
       this.applyTheme();
@@ -2583,7 +2583,7 @@ function app() {
     },
 
     statusLabel(status) {
-      return ({ running: 'Läuft', ok: 'Erfolgreich', error: 'Fehler', skipped: 'Übersprungen', cancelled: 'Abgebrochen', stale: 'Verwaist', pending: 'Ausstehend', done: 'Fertig', disabled: 'Deaktiviert', warn: 'Prüfen' })[status] || status || 'Unbekannt';
+      return ({ running: 'Läuft', ok: 'Erfolgreich', error: 'Fehler', warning: 'Mit Hinweis', skipped: 'Übersprungen', cancelled: 'Abgebrochen', stale: 'Verwaist', pending: 'Ausstehend', done: 'Fertig', disabled: 'Deaktiviert', warn: 'Prüfen' })[status] || status || 'Unbekannt';
     },
 
     kindLabel(kind) {
@@ -2604,6 +2604,7 @@ function app() {
 
     summaryShort(summary) {
       if (!summary) return 'Keine Zusammenfassung';
+      if (summary.kind === 'restoretest' && summary.outcome === 'partial') return 'Prüfumfang begrenzt · Details im Lauf';
       if (summary.ok_count !== undefined) return `${summary.ok_count}/${summary.total_pairs} Paare${summary.dry_run ? ' · Dry-Run' : ''}`;
       if (summary.pair && summary.command) return `Check ${summary.pair}`;
       if (summary.error) return String(summary.error).substring(0, 120);

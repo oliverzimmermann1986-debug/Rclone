@@ -111,7 +111,7 @@ backup:
     enabled: false
     schedule: "manual"     # z. B. "0 5 * * 0" für sonntags 05:00
     sample_files: 20
-    max_total_mb: 256
+    max_total_mb: 256       # MiB pro Pair; bewusst erhöhen, falls das Datenlimit die Stichprobe begrenzt
     max_scan_files: 20000
 
   # Gefährliche freie rclone-Flags werden standardmäßig blockiert. Diese Ausnahme

@@ -144,7 +144,7 @@
             </article>
             <article class="metric-card">
               <div class="metric-head"><span>Letzter Job</span><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></span></div>
-              <strong class="metric-value text" x-text="statusLabel(overview.data?.jobs?.last?.status)"></strong>
+              <strong class="metric-value text" x-text="statusLabel(overview.data?.jobs?.last?.display_status || overview.data?.jobs?.last?.status)"></strong>
               <span class="metric-sub" x-text="formatTs(overview.data?.jobs?.last?.started_at)"></span>
             </article>
             <article class="metric-card">
@@ -317,10 +317,10 @@
             <div class="job-list compact-list">
               <template x-for="job in recentJobs" :key="job.id">
                 <button class="job-row" @click="showJob(job)">
-                  <span class="job-status-icon" :class="job.status"><span></span></span>
+                  <span class="job-status-icon" :class="job.display_status || job.status"><span></span></span>
                   <span class="job-main"><strong x-text="kindLabel(job.kind)"></strong><small x-text="summaryShort(job.summary)"></small></span>
                   <span class="job-time"><strong x-text="formatTs(job.started_at)"></strong><small x-text="job.ended_at ? formatDur(job.ended_at-job.started_at) : 'läuft'"></small></span>
-                  <span class="badge compact" :class="job.status" x-text="statusLabel(job.status)"></span>
+                  <span class="badge compact" :class="job.display_status || job.status" x-text="statusLabel(job.display_status || job.status)"></span>
                   <span class="chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
                 </button>
               </template>
@@ -565,7 +565,7 @@
           <div class="toolbar panel slim jobs-toolbar">
             <label class="search-field job-search"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg></span><input id="job-search" x-model="jobs.q" @input.debounce.350ms="loadJobs(true)" placeholder="Job, Datenweg, Fehler oder Lauf-ID" aria-label="Läufe durchsuchen"></label>
             <select x-model="jobs.kind" @change="loadJobs(true)" aria-label="Jobtyp filtern"><option value="">Alle Typen</option><option value="backup">Backup</option><option value="check">Check</option><option value="quicksync">Quick-Sync</option><option value="pbs">PBS-Backup</option><option value="restoretest">Restore-Drill</option></select>
-            <select x-model="jobs.status" @change="loadJobs(true)" aria-label="Jobstatus filtern"><option value="">Alle Status</option><option value="running">Läuft</option><option value="ok">Erfolgreich</option><option value="error">Fehler</option><option value="skipped">Übersprungen</option><option value="cancelled">Abgebrochen</option><option value="stale">Verwaist</option></select>
+            <select x-model="jobs.status" @change="loadJobs(true)" aria-label="Jobstatus filtern"><option value="">Alle Status</option><option value="running">Läuft</option><option value="ok">Erfolgreich</option><option value="warning">Mit Hinweis</option><option value="error">Fehler</option><option value="skipped">Übersprungen</option><option value="cancelled">Abgebrochen</option><option value="stale">Verwaist</option></select>
             <select x-model.number="jobs.limit" @change="loadJobs(true)" aria-label="Jobs pro Seite"><option :value="25">25 pro Seite</option><option :value="50">50 pro Seite</option><option :value="100">100 pro Seite</option></select>
             <div class="toolbar-meta">Seite <span x-text="jobPage()"></span> von <span x-text="jobPages()"></span></div>
           </div>
@@ -574,11 +574,11 @@
             <div class="job-list" :aria-busy="jobs.loading">
               <template x-for="job in jobs.items" :key="job.id">
                 <button class="job-row detailed" @click="showJob(job)">
-                  <span class="job-status-icon" :class="job.status"><span></span></span>
+                  <span class="job-status-icon" :class="job.display_status || job.status"><span></span></span>
                   <span class="job-main"><strong><span x-text="job.definition_name || kindLabel(job.kind)"></span> <em x-text="'#' + job.id"></em></strong><small x-text="summaryShort(job.summary)"></small></span>
                   <span class="job-column"><small>Gestartet</small><strong x-text="formatTs(job.started_at)"></strong></span>
                   <span class="job-column"><small>Dauer</small><strong x-text="job.ended_at ? formatDur(job.ended_at-job.started_at) : 'läuft'"></strong></span>
-                  <span class="badge compact" :class="job.status" x-text="statusLabel(job.status)"></span><span class="chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+                  <span class="badge compact" :class="job.display_status || job.status" x-text="statusLabel(job.display_status || job.status)"></span><span class="chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
                 </button>
               </template>
             </div>
