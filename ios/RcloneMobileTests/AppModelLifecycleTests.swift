@@ -29,24 +29,82 @@ final class AppModelLifecycleTests: XCTestCase {
             forKey: "pendingPushRevocations"
         )
         let client = StubAPIClient()
-        client.suspendUnregisterPush = true
+        let suspended = expectation(description: "Push revocation is suspended")
+        let finished = expectation(description: "Session restoration finished")
+        client.suspendUnregisterPush(whenSuspended: suspended)
         let model = AppModel(defaults: defaults) { _ in client }
 
-        let restore = Task { await model.restoreSession() }
-        for _ in 0..<100 where client.unregisterPushCallCount == 0 {
-            await Task.yield()
+        let restore = Task {
+            await model.restoreSession()
+            finished.fulfill()
+        }
+        let readiness = await XCTWaiter.fulfillment(of: [suspended], timeout: 5)
+        guard readiness == .completed else {
+            restore.cancel()
+            await client.resumeUnregisterPush()
+            _ = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
+            XCTFail("Push revocation did not reach its suspension point: \(readiness)")
+            return
         }
 
         XCTAssertEqual(client.unregisterPushCallCount, 1)
         XCTAssertEqual(client.configCallCount, 0)
         XCTAssertEqual(model.phase, .checking)
 
-        client.resumeUnregisterPush()
-        await restore.value
+        await client.resumeUnregisterPush()
+        let completion = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
+        guard completion == .completed else {
+            restore.cancel()
+            await client.resumeUnregisterPush()
+            XCTFail("Session restoration did not finish after push revocation: \(completion)")
+            return
+        }
 
         XCTAssertEqual(client.configCallCount, 1)
         XCTAssertEqual(model.phase, .signedIn)
         XCTAssertNil(defaults.data(forKey: "pendingPushRevocations"))
+    }
+
+    func testCancelledRestoreWhilePushRevocationIsPendingNeverActivatesSession() async throws {
+        let defaults = makeDefaults()
+        let server = "https://backup.example.de"
+        defaults.set(server, forKey: "serverAddress")
+        defaults.set(
+            try JSONEncoder().encode([
+                PendingPushRevocationFixture(server: server, token: String(repeating: "ab", count: 32))
+            ]),
+            forKey: "pendingPushRevocations"
+        )
+        let client = StubAPIClient()
+        let suspended = expectation(description: "Push revocation is suspended before cancellation")
+        let finished = expectation(description: "Cancelled session restoration finished")
+        client.suspendUnregisterPush(whenSuspended: suspended)
+        let model = AppModel(defaults: defaults) { _ in client }
+        let restore = Task {
+            await model.restoreSession()
+            finished.fulfill()
+        }
+        let readiness = await XCTWaiter.fulfillment(of: [suspended], timeout: 5)
+        guard readiness == .completed else {
+            restore.cancel()
+            await client.resumeUnregisterPush()
+            _ = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
+            XCTFail("Push revocation did not reach its suspension point: \(readiness)")
+            return
+        }
+
+        // No explicit release: cancellation must unblock the suspended request.
+        restore.cancel()
+        let completion = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
+        await client.resumeUnregisterPush()
+        guard completion == .completed else {
+            XCTFail("Cancelling session restoration left push revocation suspended: \(completion)")
+            return
+        }
+        XCTAssertEqual(client.configCallCount, 0)
+        XCTAssertNotEqual(model.phase, .signedIn)
+        XCTAssertTrue(client.clearedLocalSession)
+        XCTAssertNotNil(defaults.data(forKey: "pendingPushRevocations"))
     }
 
     func testRestoreFailsClosedWhenPendingPushRevocationFails() async throws {
@@ -590,8 +648,7 @@ private final class StubAPIClient: APIClientProtocol {
     var detailedStorage: StorageOverview?
     var detailedStorageError: Error?
     var pushDelay: Duration?
-    var suspendUnregisterPush = false
-    private var unregisterPushContinuation: CheckedContinuation<Void, Never>?
+    private var unregisterPushGate: PushRevocationGate?
     var baseConfig: ConfigSnapshot?
     private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
@@ -740,25 +797,60 @@ private final class StubAPIClient: APIClientProtocol {
     }
     func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
         unregisterPushCallCount += 1
-        if suspendUnregisterPush {
-            await withCheckedContinuation { continuation in
-                unregisterPushContinuation = continuation
-            }
+        if let unregisterPushGate {
+            await unregisterPushGate.wait()
+            try Task.checkCancellation()
         }
         if let unregisterPushError { throw unregisterPushError }
         unregisteredPushTokens.append(token)
         return PushRegistrationResponse(ok: true)
     }
 
-    func resumeUnregisterPush() {
-        suspendUnregisterPush = false
-        unregisterPushContinuation?.resume()
-        unregisterPushContinuation = nil
+    func suspendUnregisterPush(whenSuspended expectation: XCTestExpectation) {
+        unregisterPushGate = PushRevocationGate(suspended: expectation)
+    }
+
+    func resumeUnregisterPush() async {
+        await unregisterPushGate?.release()
     }
     func logout() async throws -> LogoutResult { logoutResult }
 
     func clearLocalSession() {
         clearedLocalSession = true
+    }
+}
+
+/// Test-only gate: early release and cancellation cannot lose a wake-up.
+private actor PushRevocationGate {
+    private let suspended: XCTestExpectation
+    private var released = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    init(suspended: XCTestExpectation) {
+        self.suspended = suspended
+    }
+
+    func wait() async {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if released {
+                    continuation.resume()
+                } else {
+                    continuations.append(continuation)
+                    // Publish readiness only after the actor owns the continuation.
+                    suspended.fulfill()
+                }
+            }
+        } onCancel: {
+            Task { await self.release() }
+        }
+    }
+
+    func release() {
+        released = true
+        let pending = continuations
+        continuations.removeAll()
+        for continuation in pending { continuation.resume() }
     }
 }
 
