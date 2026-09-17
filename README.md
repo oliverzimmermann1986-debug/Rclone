@@ -64,6 +64,44 @@ Unter [`ios/`](ios/) liegt eine dependency-freie SwiftUI-App ab iOS 17. Sie biet
 
 Das Xcode-Projekt wird mit XcodeGen erzeugt. Ohne eigenen Mac übernimmt Codemagic Build, Signierung, native App-Store-Screenshots und den Upload zu App Store Connect; GitHub Actions kompiliert und testet jede iOS-Änderung mit Xcode 26. Einrichtung, Sicherheitsmodell und den nativen Funktionsumfang beschreibt [`ios/README.md`](ios/README.md). [Support](https://oliverzimmermann1986-debug.github.io/Rclone/) und [Datenschutz](https://oliverzimmermann1986-debug.github.io/Rclone/datenschutz.html) werden ohne Tracking über GitHub Pages bereitgestellt.
 
+## Restore-Stichprobe: 19/20 oder 20/20
+
+„19 von 20 erfolgreich geprüft“ bedeutet: Die 19 zurückgeholten Dateien wurden
+erfolgreich verglichen, der angeforderte Prüfumfang wurde jedoch nicht erreicht.
+Ein solcher begrenzter Prüfumfang ist ein Hinweis, kein Prüfsummenfehler und kein
+vollständig erfüllter Stichproben-Nachweis. Übertragungs-, Prüfsummen- und
+Bereinigungsfehler bleiben Fehler.
+
+Die Auswahl versucht, die gewünschte Dateizahl innerhalb des vorhandenen
+Datenlimits zu erreichen. Dazu kann sie größere Kandidaten durch kleinere
+ersetzen. Das gilt nur für den begrenzten, zufällig gebildeten Kandidatenpool;
+20/20 ist dadurch nicht für jeden Datenbestand garantiert.
+
+Falls weiterhin das Datenlimit die Auswahl begrenzt, kann der Administrator in
+der bestehenden Serverkonfiguration unter `backup.restore_test` das Limit
+bewusst erhöhen. Beispiel für 20 Dateien und höchstens 512 MiB pro Datenweg:
+
+```yaml
+backup:
+  restore_test:
+    sample_files: 20
+    max_total_mb: 512
+```
+
+Nur diese Werte in die vorhandene Konfiguration übernehmen; andere Einstellungen
+wie Zeitplan, Aktivierung und Datenwege beibehalten. Trotz des Namens
+`max_total_mb` verwendet das Limit MiB (1.048.576 Bytes). Standard sind 256 MiB.
+Ein höheres Limit benötigt mehr temporären Speicher und kann mehr Cloud-Egress
+verursachen. Mindestens 20 geeignete Dateien müssen zusammen in das Limit passen
+und erfolgreich zurückgeholt und geprüft werden. Ein Scanlimit oder weniger
+geeignete Dateien kann die Auswahl unabhängig davon begrenzen. Ein Hinweis
+löst keinen stündlichen Fehler-Retry aus; der nächste geplante Termin bleibt
+bestehen. `restore_test_warning` ist ein eigener, ausdrücklich zu abonnierender
+Benachrichtigungstyp.
+
+Auch 20/20 bestätigt ausschließlich diese Stichprobe, nicht sämtliche Dateien
+der Sicherung.
+
 ## Proxmox-Betrieb
 
 Empfohlen ist ein eigener, möglichst unprivilegierter Debian-/Ubuntu-LXC oder eine kleine VM. Die Anwendung benötigt keine Docker- oder Nesting-Funktion. Für typische Installationen genügen 1–2 vCPU und 512 MiB bis 1 GiB RAM; große Remotes, viele parallele Transfers oder `--fast-list` benötigen entsprechend mehr Speicher.

@@ -1,6 +1,6 @@
 # TestFlight- und App-Store-Veröffentlichung ohne eigenen Mac
 
-Der Haupt-Bundle-Identifier bleibt unverändert. Vor dem nächsten signierten Build muss zusätzlich das Profil der neuen Teilen-Erweiterung angelegt und in Codemagic hinterlegt werden (siehe unten):
+Der Haupt-Bundle-Identifier bleibt unverändert. App-Store-Profile für Haupt-App, Widget und Teilen-Erweiterung sind in Codemagic hinterlegt (Stand: 17.09.2026):
 
 ```text
 de.oliverzimmermann.rclonesync
@@ -25,7 +25,7 @@ de.oliverzimmermann.rclonesync
    ```
 
    Benötigt werden Issuer ID, Key ID und die `.p8`-Datei. Codemagic erzeugt beziehungsweise lädt damit Distribution-Zertifikat und Provisioning Profile automatisch.
-   In Codemagic sind Haupt-App (`rclone-sync-app-store-shared-v2`) und Widget (`rclone-sync-widget-app-store`) konfiguriert. Für `.share` ein zusätzliches App-Store-Profil mit derselben App Group und demselben Distribution-Zertifikat erstellen. Erst nach tatsächlicher Hinterlegung dessen Reference in `codemagic.yaml` unter `ios_signing.provisioning_profiles` aufnehmen. Diese Datei behauptet nicht, dass das neue Profil bereits existiert. Keine alten App-/Widget-Profile oder Bundle-IDs ersetzen.
+   In Codemagic sind Haupt-App (`rclone-sync-app-store-shared-v2`), Widget (`rclone-sync-widget-app-store`) und Teilen-Erweiterung (`rclone-sync-share-app-store`) konfiguriert. Das am 17.09.2026 erstellte und importierte Profil **Sicherpfad Share App Store** (`8K65SUVHZ8`) gehört zu `de.oliverzimmermann.rclonesync.share`, verwendet die bestehende App Group `group.de.oliverzimmermann.rclonesync` und passt zum Zertifikat `rclone-sync-distribution`; es läuft am 21.08.2027 ab. Alle drei Referenzen stehen in `codemagic.yaml` unter `ios_signing.provisioning_profiles`. Bestehende App-/Widget-Profile und Bundle-IDs bleiben erhalten.
 7. Den öffentlichen GPG-Schlüssel, der die iOS-Release-Tags prüft, ASCII-armored exportieren, Base64-kodieren und in Codemagic in der Variablengruppe `ios-release` als geschützte Variable `IOS_RELEASE_GPG_PUBLIC_KEY_B64` hinterlegen. Der private Schlüssel bleibt ausschließlich beim Release-Verantwortlichen. Die Pipeline importiert nur den öffentlichen Schlüssel in einen isolierten, leeren GPG-Schlüsselbund und akzeptiert deshalb keine Signaturen anderer Schlüssel. Der aktuell eingerichtete Release-Schlüssel hat den Fingerprint `47F8 4407 A9D8 76BC C960 973F 7E69 CA72 01C4 C7B3` und läuft am 26. August 2028 ab.
 
 ## Erster Build

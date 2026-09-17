@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
+from .restore_evidence import is_partial_restore_summary, is_verified_partial
+
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
 _SCHEMA_VERSION = 14
@@ -35,6 +37,17 @@ _JOB_SCOPE_KINDS = {
 
 class JobAlreadyRunningError(RuntimeError):
     """Der exklusive Job-Scope ist bereits durch eine DB-Reservation belegt."""
+
+
+def _historical_restore_warning(kind: str, status: str, summary_json: Any) -> int:
+    """Read-only SQL projection; use the same strict rule as visible badges."""
+    if kind != "restoretest" or status != "error":
+        return 0
+    try:
+        summary = json.loads(summary_json or "{}")
+    except (TypeError, ValueError, RecursionError):
+        return 0
+    return int(is_partial_restore_summary(summary))
 
 
 _DDL = """
@@ -1022,6 +1035,12 @@ class Database:
         )
         connection.row_factory = sqlite3.Row
         try:
+            connection.create_function(
+                "historical_restore_warning",
+                3,
+                _historical_restore_warning,
+                deterministic=True,
+            )
             connection.execute("PRAGMA busy_timeout=30000")
             connection.execute("PRAGMA foreign_keys=ON")
             # synchronous ist verbindungsgebunden (im Gegensatz zum persistenten
@@ -1167,7 +1186,15 @@ class Database:
     def job_finish(
         self, job_id: int, status: str, summary: Optional[Dict[str, Any]] = None
     ) -> bool:
-        if status not in {"running", "ok", "error", "skipped", "cancelled", "stale"}:
+        if status not in {
+            "running",
+            "ok",
+            "error",
+            "warning",
+            "skipped",
+            "cancelled",
+            "stale",
+        }:
             raise ValueError(f"Ungültiger Job-Status: {status}")
         ended_at = time.time()
         payload = (
@@ -1243,7 +1270,7 @@ class Database:
         self, job_id: int, status: str, summary: Optional[Dict[str, Any]] = None
     ) -> None:
         """Schreibt das externe Ergebnis idempotent vor den terminalen CAS."""
-        if status not in {"ok", "error", "skipped", "cancelled", "stale"}:
+        if status not in {"ok", "error", "warning", "skipped", "cancelled", "stale"}:
             raise ValueError(f"Ungueltiger terminaler Job-Status: {status}")
         payload = _json_dumps_bounded(summary or {}, _MAX_JOB_SUMMARY_BYTES)
         now = time.time()
@@ -1597,6 +1624,15 @@ class Database:
                     else ("skipped" if pair.get("skipped") else "error")
                 )
             )
+            if (
+                job_kind == "restoretest"
+                and not dry_run
+                and (
+                    is_verified_partial(pair)
+                    or (name == "restore-drill" and is_partial_restore_summary(summary))
+                )
+            ):
+                pair_status = "warning"
             connection.execute(
                 "INSERT INTO pair_runs "
                 "(job_id, pair_name, history_key, ok, dry_run, status, started_at, "
@@ -1760,6 +1796,14 @@ class Database:
             except (json.JSONDecodeError, TypeError):
                 data["summary"] = None
         data.pop("summary_json", None)
+        # Preserve immutable historic execution status while exposing a
+        # truthful display classification for verified, budget-limited drills.
+        if (
+            data.get("kind") == "restoretest"
+            and data.get("status") in {"error", "warning"}
+            and is_partial_restore_summary(data.get("summary") or {})
+        ):
+            data["display_status"] = "warning"
         return data
 
     @staticmethod
@@ -1800,7 +1844,17 @@ class Database:
         if kind:
             clauses.append("kind=?")
             params.append(kind)
-        if status:
+        if status == "warning":
+            clauses.append(
+                "(status='warning' OR (status='error' AND "
+                "historical_restore_warning(kind,status,summary_json)=1))"
+            )
+        elif status == "error":
+            clauses.append(
+                "(status='error' AND "
+                "historical_restore_warning(kind,status,summary_json)=0)"
+            )
+        elif status:
             clauses.append("status=?")
             params.append(status)
         needle = str(query or "").strip().casefold()
@@ -1927,7 +1981,9 @@ class Database:
         where = " AND ".join(clauses)
         with self.conn() as connection:
             rows = connection.execute(
-                f"SELECT status, COUNT(*) AS count FROM jobs WHERE {where} GROUP BY status",
+                "SELECT CASE WHEN historical_restore_warning(kind,status,summary_json)=1 "
+                "THEN 'warning' ELSE status END AS display_status, COUNT(*) AS count "
+                f"FROM jobs WHERE {where} GROUP BY display_status",
                 tuple(params),
             ).fetchall()
             kinds = connection.execute(
@@ -1936,7 +1992,9 @@ class Database:
             ).fetchall()
         return {
             "total": sum(int(row["count"]) for row in rows),
-            "by_status": {str(row["status"]): int(row["count"]) for row in rows},
+            "by_status": {
+                str(row["display_status"]): int(row["count"]) for row in rows
+            },
             "by_kind": {str(row["kind"]): int(row["count"]) for row in kinds},
         }
 
@@ -2581,7 +2639,8 @@ class Database:
     def jobs_delete_failed(self) -> int:
         with self.conn() as connection:
             cursor = connection.execute(
-                "DELETE FROM jobs WHERE status IN ('error', 'stale', 'cancelled')"
+                "DELETE FROM jobs WHERE status IN ('error', 'stale', 'cancelled') "
+                "AND historical_restore_warning(kind,status,summary_json)=0"
             )
             return int(cursor.rowcount or 0)
 

@@ -84,6 +84,7 @@ jobs:
             -scheme RcloneMobile \
             -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
             -derivedDataPath "$RUNNER_TEMP/ios-build" \
+            -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"
       - name: Inspect simulator signing for Keychain tests
         if: always()
@@ -92,3 +93,25 @@ jobs:
           if test -d "$SIM_APP"; then
             codesign -d --entitlements :- "$SIM_APP"
           fi
+      - name: Package simulator build and test results
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/ios-artifacts"
+          SIM_APP="$RUNNER_TEMP/ios-build/Build/Products/Debug-iphonesimulator/RcloneMobile.app"
+          if test -d "$SIM_APP"; then
+            VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SIM_APP/Info.plist")"
+            ditto -c -k --sequesterRsrc --keepParent "$SIM_APP" \
+              "$RUNNER_TEMP/ios-artifacts/Sicherpfad-$VERSION-simulator.zip"
+          fi
+          if test -d "$RUNNER_TEMP/ios-tests.xcresult"; then
+            ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/ios-tests.xcresult" \
+              "$RUNNER_TEMP/ios-artifacts/ios-tests.xcresult.zip"
+          fi
+      - name: Upload simulator build and test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sicherpfad-ios-simulator-${{ github.run_number }}
+          path: ${{ runner.temp }}/ios-artifacts/*.zip
+          if-no-files-found: warn
+          retention-days: 14

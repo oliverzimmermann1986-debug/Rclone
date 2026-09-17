@@ -119,7 +119,7 @@ final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUser
             return
         }
         let event = userInfo["event"] as? String ?? ""
-        if ["anomaly_blocked", "recovery_error", "restore_test_error"].contains(event) {
+        if ["anomaly_blocked", "recovery_error", "restore_test_error", "restore_test_warning"].contains(event) {
             pendingRecoveryNavigation = true
             NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
         }

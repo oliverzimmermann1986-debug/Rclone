@@ -29,6 +29,7 @@ from .rclone_sync import is_cancelled, reset_cancel, run_job
 from .restore_test import AGGREGATE_RUN_NAME as RESTORE_AGGREGATE_NAME
 from .restore_test import JOB_KIND as RESTORE_JOB_KIND
 from .restore_test import run_restore_test
+from ..restore_evidence import is_partial_restore_summary
 from .scheduler import (
     RESTORE_TEST_HISTORY_KEY,
     find_due_pairs,
@@ -47,6 +48,8 @@ def _job_status(summary: dict) -> str:
     )
     if cancelled:
         return "cancelled"
+    if summary.get("kind") == "restoretest" and is_partial_restore_summary(summary):
+        return "warning"
     return "ok" if summary.get("ok") else "error"
 
 
@@ -691,7 +694,7 @@ def main() -> int:
                         summary.get("verified_files"),
                         summary.get("sampled_files"),
                     )
-                    if status_name != "ok":
+                    if status_name not in {"ok", "warning"}:
                         rc = 1
                 except Exception as e:
                     logger.exception("Restore-Drill gescheitert: %s", e)

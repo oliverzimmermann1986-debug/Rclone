@@ -298,6 +298,10 @@ struct RecoveryCenterView: View {
                 restore: RecoveryRestoreProof(
                     valid: true,
                     validUntil: now + 7 * 86400,
+                    requestedSampleSize: pair.restoreEvidence?.requestedSampleSize,
+                    budgetBytes: pair.restoreEvidence?.budgetBytes,
+                    sampleShortfallReason: pair.restoreEvidence?.sampleShortfallReason,
+                    warning: pair.restoreEvidence?.warning,
                     state: pair.restoreEvidence?.state ?? "passed",
                     lastAttemptAt: pair.restoreEvidence?.lastAttemptAt ?? now - 86_400,
                     lastSuccessAt: pair.restoreEvidence?.lastSuccessAt ?? now - 86_400,
@@ -368,20 +372,36 @@ private struct RecoveryPathRow: View {
         model.isRestoreTestRunning(for: path.name)
     }
 
+    private var proofColor: Color {
+        if isRestoreTesting { return .blue }
+        if path.restore.state == "failed" { return .red }
+        return path.restore.isCurrent ? .green : .orange
+    }
+
+    private var proofTitle: String {
+        if isRestoreTesting { return "Prüft …" }
+        if path.restore.sampleScope.isPartial { return "Begrenzt" }
+        if path.restore.state == "failed" { return "Fehlgeschlagen" }
+        return path.restore.isCurrent ? "Geprüft" : "Offen"
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: isRestoreTesting ? "hourglass" : path.restore.isCurrent ? "checkmark.shield.fill" : "arrow.counterclockwise.circle")
-                .foregroundStyle(isRestoreTesting ? .blue : path.restore.isCurrent ? .green : .orange)
+                .foregroundStyle(proofColor)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 3) {
                 Text(path.name).font(.headline)
                 Text(path.rpoSeconds.map { "RPO aktuell: \(AppFormat.elapsed(Double($0)))" } ?? "Noch kein erfolgreicher Lauf")
                     .font(.caption).foregroundStyle(.secondary)
+                if path.restore.sampleScope.isPartial {
+                    Text(path.restore.sampleScope.countDescription).font(.caption).foregroundStyle(.orange)
+                }
             }
             Spacer()
-            Text(isRestoreTesting ? "Prüft …" : path.restore.isCurrent ? "Geprüft" : "Offen")
+            Text(proofTitle)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(isRestoreTesting ? .blue : path.restore.isCurrent ? .green : .orange)
+                .foregroundStyle(proofColor)
         }
     }
 }
@@ -407,8 +427,8 @@ private struct RecoveryDataPathDetail: View {
                     "Prüfsumme",
                     value: isRestoreTesting ? "Wird geprüft" : dataPath.restore.isCurrent ? "Stichprobe bestätigt" : "Nicht aktuell belegt"
                 )
-                if let count = dataPath.restore.verifiedFiles {
-                    LabeledContent("Geprüfte Dateien", value: "\(count) (Stichprobe)")
+                if dataPath.restore.verifiedFiles != nil {
+                    LabeledContent("Geprüfte Dateien", value: dataPath.restore.sampleScope.countDescription)
                 }
                 if let date = dataPath.restore.validUntil {
                     LabeledContent("Gültig bis", value: AppFormat.date(date))
@@ -426,9 +446,11 @@ private struct RecoveryDataPathDetail: View {
                 if isRestoreTesting {
                     Label("Stichprobe wird zurückgeholt und geprüft.", systemImage: "hourglass")
                         .font(.subheadline).foregroundStyle(.blue)
-                } else if let error = dataPath.restore.error {
+                } else if dataPath.restore.sampleScope.isPartial {
+                    RestoreSampleScopeView(scope: dataPath.restore.sampleScope)
+                } else if let error = dataPath.restore.error?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.subheadline).foregroundStyle(.orange)
+                        .font(.subheadline).foregroundStyle(dataPath.restore.state == "failed" ? .red : .orange)
                 }
             }
             Section {

@@ -17,6 +17,7 @@ struct RestoreEvidenceBadge: View {
         switch evidence?.state {
         case "passed": return evidence?.isCurrent == true ? "Stichprobe geprüft" : "Nachweis erneuern"
         case "failed": return "Restore fehlgeschlagen"
+        case "partial": return "Prüfumfang begrenzt"
         case "never", "stale": return "Restore offen"
         default: return "Nachweis unbekannt"
         }
@@ -27,6 +28,7 @@ struct RestoreEvidenceBadge: View {
         switch evidence?.state {
         case "passed": return evidence?.isCurrent == true ? "checkmark.seal.fill" : "clock.badge.exclamationmark"
         case "failed": return "xmark.octagon.fill"
+        case "partial": return "exclamationmark.triangle.fill"
         case "never": return "clock.badge.exclamationmark"
         default: return "questionmark.circle"
         }
@@ -38,7 +40,26 @@ struct RestoreEvidenceBadge: View {
         case "passed": return evidence?.isCurrent == true ? .green : .orange
         case "failed": return .red
         case "never", "stale": return .orange
+        case "partial": return .orange
         default: return .secondary
+        }
+    }
+}
+
+struct RestoreSampleScopeView: View {
+    let scope: RestoreSampleScope
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Prüfumfang begrenzt", systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
+            Text(scope.explanation).font(.subheadline)
+            if let budget = scope.budgetDescription {
+                LabeledContent("Datenlimit", value: budget).font(.subheadline)
+            }
+            Text("Kein vollständiger Nachweis für die angeforderte Stichprobe.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(scope.recommendation).font(.subheadline)
         }
     }
 }
@@ -110,10 +131,12 @@ struct ProtectionPathDetailView: View {
                     Label("Stichprobe wird zurückgeholt und geprüft.", systemImage: "hourglass")
                         .font(.subheadline)
                         .foregroundStyle(.blue)
-                } else if let error = pair.restoreEvidence?.error, !error.isEmpty {
+                } else if let scope = pair.restoreEvidence?.sampleScope, scope.isPartial {
+                    RestoreSampleScopeView(scope: scope)
+                } else if let error = pair.restoreEvidence?.error?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.subheadline)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(pair.restoreEvidence?.state == "failed" ? .red : .orange)
                 }
             }
 
@@ -218,6 +241,7 @@ struct ProtectionPathDetailView: View {
         switch pair.restoreEvidence?.state {
         case "passed": return pair.restoreEvidence?.isCurrent == true ? "Stichprobe bestätigt" : "Nachweis erneuern"
         case "failed": return "Prüfung fehlgeschlagen"
+        case "partial": return "Prüfumfang begrenzt"
         case "never": return "Noch nicht nachgewiesen"
         default: return "Nachweis nicht verfügbar"
         }
@@ -225,6 +249,7 @@ struct ProtectionPathDetailView: View {
 
     private var evidenceSubtitle: String {
         if isRestoreTestRunning { return "Stichprobe wird zurückgeholt und per Prüfsumme verglichen." }
+        if let scope = pair.restoreEvidence?.sampleScope, scope.isPartial { return "\(scope.countDescription) geprüft" }
         if let success = pair.restoreEvidence?.lastSuccessAt {
             return "Zuletzt bestätigt \(AppFormat.relative(success))"
         }
@@ -245,14 +270,13 @@ struct ProtectionPathDetailView: View {
         switch pair.restoreEvidence?.state {
         case "passed": return pair.restoreEvidence?.isCurrent == true ? "checkmark.seal.fill" : "clock.badge.exclamationmark"
         case "failed": return "xmark.octagon.fill"
+        case "partial": return "exclamationmark.triangle.fill"
         default: return "clock.badge.exclamationmark"
         }
     }
 
     private var sampleDescription: String {
-        guard let verified = pair.restoreEvidence?.verifiedFiles,
-              let sampled = pair.restoreEvidence?.sampleSize else { return "Noch kein Beleg" }
-        return "\(verified) von \(sampled) Dateien"
+        pair.restoreEvidence?.sampleScope.countDescription ?? "Noch kein Beleg"
     }
 
     private var isRestoreTestRunning: Bool {

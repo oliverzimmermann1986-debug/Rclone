@@ -298,11 +298,11 @@ private struct PushStatusView: View {
                 } label: {
                     Label("Mitteilungen aktivieren oder prüfen", systemImage: "bell.badge")
                 }
-                .accessibilityHint("Zeigt zuerst, welche Fehler gemeldet werden, und fragt danach nach der iOS-Berechtigung.")
+                .accessibilityHint("Zeigt zuerst, welche Fehler und Prüfhinweise gemeldet werden, und fragt danach nach der iOS-Berechtigung.")
             } header: {
                 Text("Dieses iPhone")
             } footer: {
-                Text("Sicherpfad informiert nur über Sicherungs- und Prüfprobleme, nicht über erfolgreiche Läufe.")
+                Text("Sicherpfad informiert über Sicherungsfehler und Prüfprobleme, auch bei begrenztem Prüfumfang. Erfolgreiche Läufe werden nicht gemeldet.")
             }
             if let status {
                 Section("Bereitschaft") {
@@ -337,12 +337,13 @@ private struct PushStatusView: View {
                         .foregroundStyle(.orange)
                     }
                 }
-                Section("Fehlerereignisse") {
+                Section("Fehler und Hinweise") {
                     if status.events.isEmpty {
                         Text("Keine Ereignisse aktiviert").foregroundStyle(.secondary)
                     } else {
                         ForEach(status.events, id: \.self) { event in
                             Label(eventLabel(event), systemImage: "exclamationmark.bubble")
+                                .foregroundStyle(event == "restore_test_warning" ? Color.orange : Color.primary)
                         }
                     }
                 }
@@ -405,6 +406,7 @@ private struct PushStatusView: View {
         case "sync_error": "Sicherungsfehler"
         case "check_error": "Prüffehler"
         case "restore_test_error": "Restore-Test fehlgeschlagen"
+        case "restore_test_warning": "Restore-Test: Prüfumfang begrenzt"
         case "pbs_error": "PBS-Fehler"
         default: event
         }
