@@ -288,7 +288,8 @@ private struct IncidentRestoreTestButton: View {
 
     private var isRestoreTesting: Bool { isStarting || model.isRestoreTestRunning(for: pairName) }
     private var canStart: Bool {
-        !isRestoreTesting && !model.isDemoMode && model.progress?.running != true && !model.batchIsRunning
+        !isRestoreTesting && model.activeRestoreTestPairs.isEmpty && !model.isDemoMode
+            && model.progress?.running != true && !model.batchIsRunning
             && model.config?.backup.pairs.contains(where: { $0.name == pairName }) == true
     }
 
