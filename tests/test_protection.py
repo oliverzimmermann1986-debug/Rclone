@@ -1,7 +1,9 @@
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.db import Database
+from app.jobs.scheduler import next_run_after
 from app.protection import (
     POLICY_PRESETS,
     acknowledge_quarantine,
@@ -12,6 +14,7 @@ from app.protection import (
     record_anomaly_baseline,
     score_components,
 )
+from app.restore_evidence import MAX_EVIDENCE_AGE_SEC
 
 
 def _pair() -> dict[str, object]:
@@ -139,3 +142,16 @@ def test_policy_presets_have_unique_stable_identifiers():
     identifiers = [item["id"] for item in POLICY_PRESETS]
     assert len(identifiers) == len(set(identifiers))
     assert {"family_photos", "documents", "archive", "critical"} == set(identifiers)
+
+
+def test_restore_preset_recurrence_matches_evidence_window():
+    # UTC checks the calendar policy independently of local DST/runtime delays.
+    # A monthly recommendation used to leave three weeks without valid proof.
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    for preset in POLICY_PRESETS:
+        schedule = preset["restore"]["schedule"]
+        previous = next_run_after(schedule, after=start, timezone_name="UTC")
+        for _ in range(60):
+            following = next_run_after(schedule, after=previous, timezone_name="UTC")
+            assert 0 < following - previous <= MAX_EVIDENCE_AGE_SEC, preset["id"]
+            previous = following

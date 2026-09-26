@@ -23,10 +23,10 @@ POLICY_PRESETS: tuple[dict[str, Any], ...] = (
     {
         "id": "family_photos",
         "name": "Familienfotos",
-        "description": "Tägliche Kopie ohne automatische Löschungen und mit monatlichem Restore-Nachweis.",
+        "description": "Tägliche Kopie ohne automatische Löschungen und mit wöchentlicher Restore-Stichprobe.",
         "pair": {"mode": "copy", "allow_delete": False, "min_local_files": 1},
         "job": {"schedule": "0 3 * * *", "retry_minutes": 60},
-        "restore": {"schedule": "0 5 1 * *", "sample_files": 20},
+        "restore": {"schedule": "0 5 * * 0", "sample_files": 20},
     },
     {
         "id": "documents",
@@ -45,10 +45,10 @@ POLICY_PRESETS: tuple[dict[str, Any], ...] = (
     {
         "id": "archive",
         "name": "Archiv",
-        "description": "Wöchentliche, bandbreitenschonende Kopie für große unveränderliche Bestände.",
+        "description": "Wöchentliche, bandbreitenschonende Kopie mit Restore-Stichprobe für große unveränderliche Bestände.",
         "pair": {"mode": "copy", "allow_delete": False, "min_local_files": 1},
         "job": {"schedule": "0 1 * * 0", "retry_minutes": 180},
-        "restore": {"schedule": "0 6 1 * *", "sample_files": 10},
+        "restore": {"schedule": "0 6 * * 0", "sample_files": 10},
     },
     {
         "id": "critical",

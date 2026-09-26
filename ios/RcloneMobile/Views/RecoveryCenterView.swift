@@ -345,7 +345,7 @@ struct RecoveryCenterView: View {
             timezone: "Europe/Berlin"
         )
         policies = [
-            RecoveryPolicyProfile(id: "family_photos", name: "Familienfotos", description: "Tägliche Kopie ohne automatische Löschungen und mit monatlichem Restore-Nachweis.", pair: [:], job: [:], restore: [:]),
+            RecoveryPolicyProfile(id: "family_photos", name: "Familienfotos", description: "Tägliche Kopie ohne automatische Löschungen und mit wöchentlicher Restore-Stichprobe.", pair: [:], job: [:], restore: [:]),
             RecoveryPolicyProfile(id: "documents", name: "Dokumente", description: "Tägliche Sicherung mit Versionsablage und eng begrenzten Löschungen.", pair: [:], job: [:], restore: [:]),
             RecoveryPolicyProfile(id: "critical", name: "Kritische Daten", description: "Engmaschige Sicherung mit niedriger Löschgrenze und wöchentlicher Notfallübung.", pair: [:], job: [:], restore: [:])
         ]
