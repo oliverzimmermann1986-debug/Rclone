@@ -102,6 +102,27 @@ Benachrichtigungstyp.
 Auch 20/20 bestätigt ausschließlich diese Stichprobe, nicht sämtliche Dateien
 der Sicherung.
 
+## Aktuelle Restore-Nachweise
+
+Ein vollständiger erfolgreicher Restore-Test gilt sieben Tage und ist an den
+Datenweg sowie Quelle und Ziel gebunden. Eine Umbenennung erhält den Nachweis;
+ein geändertes Ziel, eine fehlgeschlagene neue Prüfung oder eine unvollständige
+Stichprobe ergibt keinen aktuellen vollständigen Nachweis. Nach Ablauf muss eine
+neue Stichprobe erfolgreich geprüft werden. Ein normaler Sicherungs-Probelauf
+(Dry-Run) erneuert den Restore-Nachweis nicht.
+
+Das Incident Center unterscheidet fehlende, abgelaufene und nicht mehr passende
+Nachweise und bietet den Restore-Test für den betroffenen Datenweg direkt an.
+Der Test holt Dateien ausschließlich in ein temporäres Prüfverzeichnis zurück;
+Originaldateien werden nicht überschrieben.
+
+Die Schutzvorlagen empfehlen wöchentliche Restore-Prüfungen. Sie ändern einen
+bereits konfigurierten Restore-Zeitplan nicht automatisch. Ein monatlicher Plan
+lässt deshalb zwischen Prüfungen eine Nachweislücke. Für lückenlos aktuelle
+Nachweise sollten Prüfungen mit Reserve vor Ablauf stattfinden, etwa zweimal
+wöchentlich: Auch Laufzeit und die Zeitumstellung können einen exakt
+wöchentlichen Termin über die siebentägige Frist verschieben.
+
 ## Proxmox-Betrieb
 
 Empfohlen ist ein eigener, möglichst unprivilegierter Debian-/Ubuntu-LXC oder eine kleine VM. Die Anwendung benötigt keine Docker- oder Nesting-Funktion. Für typische Installationen genügen 1–2 vCPU und 512 MiB bis 1 GiB RAM; große Remotes, viele parallele Transfers oder `--fast-list` benötigen entsprechend mehr Speicher.
