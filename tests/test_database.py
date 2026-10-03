@@ -1062,6 +1062,37 @@ def test_exception_due_rows_keep_scheduler_trigger_for_retry(tmp_path: Path):
     assert attempt["pair"]["scheduled_slot"] == "slot-1"
 
 
+def test_restore_schedule_history_ignores_legacy_manual_global_success(
+    tmp_path, monkeypatch
+):
+    database = Database(tmp_path / "restore-automatic-history.db")
+    key = "restoretest:global"
+    jobs = []
+    for index, (trigger, ok) in enumerate(
+        [("scheduler", True), ("scheduler", False), ("manual", True)]
+    ):
+        monkeypatch.setattr(db_module.time, "time", lambda: 100 + index)
+        job_id = database.job_start("restoretest", trigger=trigger)
+        database.job_finish(
+            job_id,
+            "ok" if ok else "error",
+            {
+                "trigger": trigger,
+                "history_keys": {"restore-drill": key},
+                "pairs": [{"name": "restore-drill", "ok": ok}],
+            },
+        )
+        jobs.append(job_id)
+
+    history = database.restore_test_schedule_history(key)
+    all_history = database.pair_last_history({key: "restore-drill"})[key]
+
+    assert history["last_result"]["job_id"] == jobs[1]
+    assert history["last_result"]["ok"] is False
+    assert history["last_success"]["job_id"] == jobs[0]
+    assert all_history["last_success"]["job_id"] == jobs[2]
+
+
 def test_unfinished_attempt_result_is_terminalized_with_job(tmp_path: Path):
     database = Database(tmp_path / "unfinished-attempt.db")
     job_id = database.job_start(

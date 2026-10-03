@@ -6,6 +6,7 @@ import pytest
 
 from app.db import Database
 from app.jobs.scheduler import RESTORE_TEST_HISTORY_KEY, restore_test_due
+from app.jobs import restore_test as drill
 
 
 def stamp(day, hour, minute=0):
@@ -202,3 +203,67 @@ def test_persisted_aggregate_warning_does_not_award_success(tmp_path, monkeypatc
     assert stored[RESTORE_TEST_HISTORY_KEY]["last_success"] is None
     assert stored[RESTORE_TEST_HISTORY_KEY]["last_result"]["ok"] is False
     assert stored[RESTORE_TEST_HISTORY_KEY]["last_result"]["status"] == "warning"
+
+
+@pytest.mark.parametrize("legacy_manual", [False, True])
+def test_manual_fotos_success_does_not_suppress_failed_all_pair_retry(
+    tmp_path, monkeypatch, legacy_manual
+):
+    db = Database(tmp_path / "restore-retry.db")
+    cfg = config()
+    cfg["paths"] = {"logs_dir": str(tmp_path / "logs")}
+    cfg["backup"]["pairs"] = [
+        {"name": "Fotos", "enabled": True},
+        {"name": "Rezepte", "enabled": True},
+    ]
+    monkeypatch.setattr(drill, "reset_cancel", lambda *_a, **_kw: None)
+    monkeypatch.setattr(drill, "is_cancelled", lambda: False)
+    monkeypatch.setattr(drill, "notify", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        drill,
+        "run_pair_restore_test",
+        lambda pair, **_kw: {"name": pair["name"], "ok": False, "error": "mismatch"},
+    )
+    monkeypatch.setattr("app.db.time.time", lambda: stamp(9, 3))
+    automatic_id = db.job_start("restoretest", trigger="scheduler")
+    failed = drill.run_restore_test(
+        trigger="scheduler", config_snapshot=cfg, job_id=automatic_id
+    )
+    monkeypatch.setattr("app.db.time.time", lambda: stamp(9, 3, 5))
+    db.job_finish(automatic_id, "error", failed)
+
+    monkeypatch.setattr(
+        drill,
+        "run_pair_restore_test",
+        lambda pair, **_kw: {
+            "name": pair["name"],
+            "ok": True,
+            "verified": 1,
+            "sample_size": 1,
+        },
+    )
+    monkeypatch.setattr("app.db.time.time", lambda: stamp(9, 3, 30))
+    manual_id = db.job_start("restoretest", trigger="manual")
+    manual = drill.run_restore_test(
+        ["Fotos"], trigger="manual", config_snapshot=cfg, job_id=manual_id
+    )
+    if legacy_manual:
+        manual["history_keys"][drill.AGGREGATE_RUN_NAME] = drill.HISTORY_KEY
+    monkeypatch.setattr("app.db.time.time", lambda: stamp(9, 3, 35))
+    db.job_finish(manual_id, "ok", manual)
+
+    before_retry = restore_test_due(cfg, db, now=stamp(9, 4, 4))
+    retry = restore_test_due(cfg, db, now=stamp(9, 4, 6))
+
+    assert before_retry["due"] is False
+    assert before_retry["reason"] == "retry_backoff"
+    assert retry["due"] is True
+    assert retry["reason"] == "retry_after_failure"
+    assert str(automatic_id) in retry["scheduled_slot"]
+    assert [pair["name"] for pair in failed["pairs"][:-1]] == ["Fotos", "Rezepte"]
+    assert [pair["name"] for pair in manual["pairs"][:-1]] == ["Fotos"]
+    pair_history = db.pair_last_history(
+        {"restore:Fotos": "Fotos", "restore:Rezepte": "Rezepte"}
+    )
+    assert pair_history["restore:Fotos"]["last_success"]["job_id"] == manual_id
+    assert pair_history["restore:Rezepte"]["last_success"] is None
