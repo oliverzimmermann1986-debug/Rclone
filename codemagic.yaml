@@ -72,7 +72,7 @@ workflows:
       - name: Validate shared native API contracts and release version tooling
         script: |
           cd "$CM_BUILD_DIR"
-          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_install_pinned_xcodegen.py tests/test_ios_release_preflight.py tests/test_ios_release_version.py tests/test_ios_app_store_release.py
+          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_install_pinned_xcodegen.py tests/test_ios_release_preflight.py tests/test_ios_release_version.py tests/test_ios_simulator_destination.py tests/test_ios_app_store_release.py
       - name: Install verified pinned XcodeGen
         script: |
           python3 "$CM_BUILD_DIR/scripts/install_pinned_xcodegen.py" \
@@ -101,12 +101,36 @@ workflows:
           ACTUAL_BUILD="$(printf '%s\n' "$SETTINGS" | awk -F ' = ' '/^[[:space:]]*CURRENT_PROJECT_VERSION = / { print $2; exit }')"
           test "$ACTUAL_VERSION" = "$EXPECTED_VERSION"
           test "$ACTUAL_BUILD" = "$BUILD_NUMBER"
-      - name: Run iOS unit tests
+      - name: Run iOS unit and UI tests
         script: |
+          set -euo pipefail
+          RESULT_BUNDLE="$CM_BUILD_DIR/build/ios-tests.xcresult"
+          archive_test_results() {
+            TEST_STATUS=$?
+            trap - EXIT
+            if test -d "$RESULT_BUNDLE"; then
+              if ditto -c -k --sequesterRsrc --keepParent "$RESULT_BUNDLE" \
+                "$CM_BUILD_DIR/build/ios-tests.xcresult.zip"; then
+                :
+              else
+                ARCHIVE_STATUS=$?
+                echo "iOS-Testresultate konnten nicht archiviert werden" >&2
+                if test "$TEST_STATUS" -eq 0; then
+                  TEST_STATUS=$ARCHIVE_STATUS
+                fi
+              fi
+            fi
+            exit "$TEST_STATUS"
+          }
+          trap archive_test_results EXIT
+          mkdir -p "$CM_BUILD_DIR/build"
+          SIMULATOR_ID="$(python3 "$CM_BUILD_DIR/scripts/ios_simulator_destination.py")"
           xcodebuild test \
             -project "$CM_BUILD_DIR/$XCODE_PROJECT" \
             -scheme "$XCODE_SCHEME" \
-            -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RESULT_BUNDLE" \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"
       - name: Capture localized App Store screenshots
         script: |
@@ -182,6 +206,7 @@ workflows:
           test -f "$APP_PATH/Assets.car"
     artifacts:
       - build/ios/ipa/*.ipa
+      - build/ios-tests.xcresult.zip
       - build/app-store-screenshots/*.png
       - /tmp/xcodebuild_logs/*.log
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
