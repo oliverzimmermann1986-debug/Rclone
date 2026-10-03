@@ -76,7 +76,11 @@ final class RecoveryNavigationUITests: XCTestCase {
         XCTAssertTrue(restore.exists)
         XCTAssertFalse(restore.isEnabled)
         XCTAssertTrue(restore.label.contains("Fotos"))
-        tap(assessment, in: app)
+        reveal(assessment, in: app)
+        XCTAssertTrue(assessment.isHittable)
+        attachScreenshot(app, name: "Assessment label before center tap with largest text")
+        // Exercise the label rectangle itself, not an icon or a selected glyph.
+        assessment.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         XCTAssertTrue(app.navigationBars["Schutznachweis"].waitForExistence(timeout: 5))
         app.buttons["Fertig"].tap()
         XCTAssertTrue(app.navigationBars["Lage"].waitForExistence(timeout: 5))
