@@ -3,12 +3,34 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+from hashlib import sha256
 from os import PathLike
+from pathlib import Path
 
 from starlette.exceptions import HTTPException
 from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
+
+
+WEB_CACHE_ASSETS = (
+    "style.css",
+    "alpine.min.js",
+    "ui-helpers.js",
+    "app.js",
+    "manifest.json",
+    "app-icon-1024.png",
+)
+
+
+def web_asset_cache_revision(directory: Path, version: str) -> str:
+    """Bind the public web bundle's cache key to its current file contents."""
+
+    manifest = sha256()
+    for name in WEB_CACHE_ASSETS:
+        manifest.update(name.encode("utf-8") + b"\0")
+        manifest.update(sha256((directory / name).read_bytes()).digest())
+    return f"{version}-{manifest.hexdigest()[:16]}"
 
 
 class AllowlistedStaticFiles(StaticFiles):

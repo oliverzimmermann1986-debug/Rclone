@@ -90,15 +90,13 @@ def test_template_direct_calls_exist_in_alpine_component():
 def test_gui_assets_reference_current_cache_version():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     login = (STATIC / "login.html").read_text(encoding="utf-8")
-    main_source = (STATIC.parent / "main.py").read_text(encoding="utf-8")
     assert "/static/style.css?v=__APP_VERSION__" in html
     assert "/static/alpine.min.js?v=__APP_VERSION__" in html
     assert "/static/ui-helpers.js?v=__APP_VERSION__" in html
     assert "/static/app.js?v=__APP_VERSION__" in html
     assert html.index("/static/ui-helpers.js") < html.index("/static/app.js")
-    assert (
-        'html = html.replace("?v=__APP_VERSION__", f"?v={__version__}")' in main_source
-    )
+    # Runtime cache keys and content changes are covered through TestClient in
+    # test_web_app; this test checks only template references and script order.
     assert "Verifizierte Backup-Leitstelle" in login
     assert "Sicherpfad" in html
     assert "rclone-sync</strong>" not in html
