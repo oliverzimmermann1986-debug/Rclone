@@ -44,7 +44,7 @@ from .device_vault import cleanup_vault_scratch
 from .recovery_snapshots import snapshot_root
 from .rclone_args import rclone_subprocess_env
 from .security import CSRF_COOKIE, new_csrf_token, require_csrf
-from .static_assets import AllowlistedStaticFiles
+from .static_assets import AllowlistedStaticFiles, web_asset_cache_revision
 from .utils import bounded_number as _bounded_number
 from .routes import (
     api_pbs,
@@ -757,9 +757,10 @@ def index(request: Request):
     if not session_user(token):
         return RedirectResponse(url="/login", status_code=303)
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    # Cache-Busting: Query-Version an app.js/style.css folgt der App-Version,
-    # sonst hängen Browser nach Updates auf altem Frontend (fehlende GUI-Features).
-    html = html.replace("?v=__APP_VERSION__", f"?v={__version__}")
+    # Frontend patches can ship without changing the application version.
+    # Hash actual asset bytes so equal file timestamps cannot preserve old URLs.
+    asset_revision = web_asset_cache_revision(STATIC_DIR, __version__)
+    html = html.replace("?v=__APP_VERSION__", f"?v={asset_revision}")
     response = HTMLResponse(html)
     if not request.cookies.get(CSRF_COOKIE):
         _set_csrf_cookie(response, request, new_csrf_token())
