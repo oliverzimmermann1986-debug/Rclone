@@ -48,7 +48,7 @@ Die Pipeline:
 2. lädt ausschließlich XcodeGen 2.46.0 aus dem offiziellen Releasearchiv, prüft dessen fest hinterlegte SHA-256-Prüfsumme und die ausgeführte Version und generiert damit `RcloneMobile.xcodeproj`,
 3. installiert die App-Store-Profile für Haupt-App, Widget und Teilen-Erweiterung,
 4. setzt eine eindeutige Buildnummer,
-5. führt die iOS-Unit-Tests auf einem iPhone-17-Simulator aus,
+5. wählt einen verfügbaren iPhone-Simulator, führt Unit- und UI-Tests seriell aus und archiviert deren Ergebnis einschließlich Bildschirmaufnahmen auch bei einem Testfehler,
 6. erstellt die signierte IPA und
 7. erzeugt echte, lokalisierte App-Store-Screenshots aus dem nativen Simulator,
 8. baut eine öffentlich verteilbare IPA und lädt sie zu App Store Connect/TestFlight hoch.

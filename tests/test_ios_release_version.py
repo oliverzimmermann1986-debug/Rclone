@@ -113,12 +113,17 @@ def test_codemagic_uploads_public_app_store_eligible_build_without_auto_submissi
     assert "submit_to_app_store: false" in config
 
 
-def test_codemagic_pins_the_verified_simulator_image():
+def test_codemagic_pins_xcode_and_selects_an_available_simulator_by_id():
     root = Path(__file__).parents[1]
     config = (root / "codemagic.yaml").read_text(encoding="utf-8")
 
     assert "xcode: 26.4" in config
-    assert '-destination "platform=iOS Simulator,name=iPhone 17,OS=latest"' in config
+    assert (
+        'SIMULATOR_ID="$(python3 "$CM_BUILD_DIR/scripts/ios_simulator_destination.py")"'
+        in config
+    )
+    assert '-destination "platform=iOS Simulator,id=$SIMULATOR_ID"' in config
+    assert "tests/test_ios_simulator_destination.py" in config
 
 
 def test_ios_ci_selects_an_available_simulator_by_id():
