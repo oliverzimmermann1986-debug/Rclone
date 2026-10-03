@@ -5,8 +5,7 @@ struct RecoveryRescueView: View {
     @EnvironmentObject private var model: AppModel
     @State private var envelope: [String: JSONValue]?
     @State private var filename = ""
-    @State private var passphrase = ""
-    @State private var password = ""
+    @State private var credentials = RecoveryRescueCredentials()
     @State private var preview: RecoveryRescuePreview?
     @State private var mappings: [String: String] = [:]
     @State private var showingImporter = false
@@ -33,9 +32,13 @@ struct RecoveryRescueView: View {
             Section("2 · Verschlüsselte Notfallakte") {
                 Button("Datei öffnen …") { showingImporter = true }.disabled(isWorking)
                 if !filename.isEmpty { Text(filename).font(.caption) }
-                SecureField("Passphrase der Notfallakte", text: $passphrase)
+                SecureField("Passphrase der Notfallakte", text: $credentials.passphrase)
+                if preview != nil && !credentials.hasValidPassphrase && !imported {
+                    Text("Gib die Passphrase der Notfallakte mit mindestens 12 Zeichen erneut ein, bevor du das Rettungsinventar importierst.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Button("Inhalt prüfen") { confirmPreview = true }
-                    .disabled(envelope == nil || passphrase.isEmpty || isWorking || model.isDemoMode)
+                    .disabled(envelope == nil || !credentials.hasValidPassphrase || isWorking || model.isDemoMode)
                 if isHTTP {
                     Label("HTTP ist unverschlüsselt. Paket und Passphrase werden an diesen Server gesendet. Verwende möglichst HTTPS oder einen vertrauenswürdigen VPN-Tunnel.", systemImage: "exclamationmark.lock")
                         .font(.caption).foregroundStyle(.orange)
@@ -57,9 +60,9 @@ struct RecoveryRescueView: View {
                         }
                         if let hint = source.targetHint { Text("Bisher: \(hint)").font(.caption) }
                     }
-                    SecureField("Aktuelles Passwort des Ersatzservers", text: $password)
+                    SecureField("Aktuelles Passwort des Ersatzservers", text: $credentials.password)
                     Button("Rettungsinventar importieren") { confirmImport = true }
-                        .disabled(!mappingComplete || password.isEmpty || isWorking || imported)
+                        .disabled(!mappingComplete || !credentials.canImport || isWorking || imported || model.isDemoMode)
                     Text("Kein Überschreiben der Konfiguration und keine Übernahme alter Anmeldedaten. Noch kein Nachweis, dass die Dateien erreichbar sind.").font(.caption)
                 }
             }
@@ -84,7 +87,7 @@ struct RecoveryRescueView: View {
                 envelope = try JSONDecoder().decode([String: JSONValue].self, from: Data(contentsOf: url))
                 filename = url.lastPathComponent
                 preview = nil; mappings = [:]; imported = false; message = nil
-                passphrase = ""; password = ""
+                credentials.clear()
             } catch { message = error.localizedDescription }
         }
         .confirmationDialog("Notfallakte an diesen Server senden?", isPresented: $confirmPreview, titleVisibility: .visible) {
@@ -95,33 +98,34 @@ struct RecoveryRescueView: View {
             Button("Rettungsinventar importieren") { Task { await restoreInventory() } }
             Button("Abbrechen", role: .cancel) {}
         }
-        .onDisappear { password = ""; passphrase = "" }
+        .onDisappear { credentials.clear() }
     }
 
     private func inspect() async {
-        guard let envelope else { return }
+        guard let envelope, credentials.hasValidPassphrase, !isWorking, !model.isDemoMode else { return }
+        let request = RecoveryRescueRequest(envelope: envelope, passphrase: credentials.passphrase)
         isWorking = true
         defer { isWorking = false }
         preview = nil; mappings = [:]; imported = false; message = nil
         do {
             preview = try await model.withCurrentClient {
-                try await $0.previewRecoveryRescue(RecoveryRescueRequest(envelope: envelope, passphrase: passphrase))
+                try await $0.previewRecoveryRescue(request)
             }
         } catch { message = error.localizedDescription }
     }
 
     private func restoreInventory() async {
-        guard let envelope, mappingComplete else { return }
+        guard let envelope, mappingComplete, !isWorking, !imported, !model.isDemoMode,
+              let request = credentials.importRequest(envelope: envelope, mappings: mappings) else { return }
         isWorking = true
-        defer { isWorking = false; password = "" }
+        defer { isWorking = false; credentials.password = "" }
         do {
             let result = try await model.withCurrentClient {
-                try await $0.importRecoveryRescue(RecoveryRescueRequest(envelope: envelope, passphrase: passphrase,
-                    currentPassword: password, mappings: mappings))
+                try await $0.importRecoveryRescue(request)
             }
             imported = result.ok
             message = "\(result.imported) Einträge importiert, \(result.alreadyPresent) bereits vorhanden. Jetzt eine Datei aus dem Ziel zurückholen und prüfen."
-            passphrase = ""
+            credentials.passphrase = ""
         } catch { message = error.localizedDescription }
     }
 }
