@@ -12,6 +12,14 @@ function app() {
   let confirmationResolver = null;
   let navigationFocusReturn = null;
   let dialogFocusGeneration = 0;
+  let recoveryNavigationGeneration = 0;
+  let recoveryAuthGeneration = 0;
+  let restoreStatusReviewGeneration = 0;
+  let snapshotConfirmation = null;
+  const restoreStartStorageKey = 'sicherpfad-restore-start-uncertain';
+  // These statuses reject before job reservation: auth/CSRF dependencies,
+  // pair validation and scope acquisition in api_jobs.start_restore_test.
+  const restoreStartRejectionStatuses = new Set([400, 401, 403, 404, 409]);
   const ui = window.RcloneUI;
   const safeStoredValue = ui.storedChoice;
 
@@ -36,7 +44,9 @@ function app() {
     pending: {
       backup: false, plan: false, quick: false, pbs: false, pbsCancel: false,
       save: false, validate: false, filter: false, password: false, definition: false, retry: false,
+      restoreTest: false, snapshot: false,
     },
+    restoreTestStart: { phase: 'idle', pairName: '', checked: false, checking: false, error: '' },
     currentPasswordDialog: { show: false, password: '', error: '' },
     confirmationDialog: {
       show: false,
@@ -144,6 +154,15 @@ function app() {
       this.$watch('pairFilter', (value) => store('rclone-sync-pair-filter', value));
       this.$watch('jobs.kind', (value) => store('rclone-sync-job-kind', value));
       this.$watch('jobs.status', (value) => store('rclone-sync-job-status', value));
+      for (const key of ['snapshots.restoreName', 'snapshots.password', 'snapshots.items', 'config._revision']) {
+        this.$watch(key, () => this.checkSnapshotConfirmation());
+      }
+      try {
+        const uncertain = JSON.parse(sessionStorage.getItem(restoreStartStorageKey) || 'null');
+        if (uncertain?.origin === window.location.origin && typeof uncertain.pairName === 'string') {
+          this.restoreTestStart = { phase: 'unknown', pairName: uncertain.pairName, checked: false, checking: false, error: '' };
+        }
+      } catch (_) { /* storage is optional; the in-memory guard remains active */ }
       window.addEventListener('keydown', (event) => {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
           event.preventDefault();
@@ -309,6 +328,10 @@ function app() {
         );
         if (!confirmed) return;
       }
+      if (next !== this.page) {
+        recoveryNavigationGeneration += 1;
+        this.respondConfirmation(false);
+      }
       this.page = next;
       this.closeNavigation(false);
       if (updateHash && window.location.hash !== `#${next}`) history.pushState(null, '', `#${next}`);
@@ -405,7 +428,11 @@ function app() {
         const response = await fetch(url, opts);
         if (requestKey && requestRevisions.get(requestKey) !== revision) return staleResponse;
         if (!response.ok) {
-          if (response.status === 401) { window.location = '/login'; return null; }
+          if (response.status === 401) {
+            this.invalidateRecoveryAuth();
+            window.location = '/login';
+            return options.captureError ? { __error: true, status: 401, detail: 'Erneute Anmeldung erforderlich' } : null;
+          }
           const err = await response.json().catch((error) => {
             if (error.name === 'AbortError') throw error;
             return {};
@@ -502,14 +529,14 @@ function app() {
 
     busy() {
       return Boolean(
-        this.pending.backup || this.pending.quick || this.pending.pbs ||
+        this.pending.backup || this.pending.quick || this.pending.pbs || this.pending.restoreTest ||
         this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.pbs,
       );
     },
 
     rcloneBusy() {
       return Boolean(
-        this.pending.backup || this.pending.quick ||
+        this.pending.backup || this.pending.quick || this.pending.restoreTest ||
         this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest,
       );
     },
@@ -524,6 +551,7 @@ function app() {
       if (this.status?.check) return 'Check';
       if (this.status?.quicksync) return 'Quick-Sync';
       if (this.status?.restoretest) return 'Restore-Drill';
+      if (this.pending.restoreTest) return 'Restore-Drill';
       if (this.pending.backup) return 'Backup';
       if (this.pending.quick) return 'Quick-Sync';
       return '';
@@ -2247,18 +2275,125 @@ function app() {
       this.copies.loading = false;
     },
 
-    async runRestoreTest(pairName = '') {
+    recoveryContextKey() {
+      return JSON.stringify([this.page, window.location.pathname, window.location.hash,
+        recoveryNavigationGeneration, recoveryAuthGeneration, this.cookie('rclone_sync_csrf')]);
+    },
+
+    invalidateRecoveryAuth() {
+      recoveryAuthGeneration += 1;
+      this.respondConfirmation(false);
+      this.snapshots.password = '';
+    },
+
+    rememberUncertainRestoreStart(pairName) {
+      try {
+        sessionStorage.setItem(restoreStartStorageKey, JSON.stringify({ origin: window.location.origin, pairName }));
+      } catch (_) { /* storage is optional */ }
+    },
+
+    clearUncertainRestoreStart() {
+      restoreStatusReviewGeneration += 1;
+      try { sessionStorage.removeItem(restoreStartStorageKey); } catch (_) { /* storage is optional */ }
+      this.restoreTestStart = { phase: 'idle', pairName: '', checked: false, checking: false, error: '' };
+    },
+
+    async reviewRestoreTestStart() {
+      if (this.restoreTestStart.phase !== 'unknown' || this.restoreTestStart.checking) return;
+      const reviewGeneration = ++restoreStatusReviewGeneration;
+      let jobsRevision = 0;
+      this.restoreTestStart.checking = true;
+      this.restoreTestStart.checked = false;
+      this.restoreTestStart.error = '';
+      this.jobs.kind = 'restoretest';
+      this.jobs.status = '';
+      this.jobs.q = '';
+      try {
+        await this.navigate('runs');
+        if (this.page !== 'runs') {
+          this.restoreTestStart.error = 'Öffne die Läufe und prüfe die Aufträge, bevor du erneut startest.';
+          return;
+        }
+        const context = this.recoveryContextKey();
+        const statusRequest = this.api('GET', '/api/jobs/status/current', undefined, { silent: true, captureError: true, requestKey: 'current-status' });
+        const statusRevision = requestRevisions.get('current-status');
+        const jobsRequest = this.api('GET', '/api/jobs/search?limit=25&offset=0&kind=restoretest', undefined, { silent: true, captureError: true, requestKey: 'jobs' });
+        jobsRevision = requestRevisions.get('jobs');
+        const [status, jobs] = await Promise.all([statusRequest, jobsRequest]);
+        if (context !== this.recoveryContextKey() || reviewGeneration !== restoreStatusReviewGeneration
+          || this.restoreTestStart.phase !== 'unknown') return;
+        // Each response can already be resolved while the other is pending.
+        // Recheck both owners immediately before applying the combined result.
+        if (statusRevision !== requestRevisions.get('current-status') || jobsRevision !== requestRevisions.get('jobs')) {
+          this.restoreTestStart.error = 'Status oder Aufträge wurden inzwischen aktualisiert. Bitte erneut prüfen.';
+          return;
+        }
+        if (!status || status.__error || this.isStale(status) || !Object.prototype.hasOwnProperty.call(status, 'restoretest')
+          || !Array.isArray(jobs?.items) || jobs.__error) {
+          this.restoreTestStart.error = 'Aufträge konnten nicht zuverlässig geprüft werden. Bitte erneut prüfen.';
+          return;
+        }
+        this.status = { ...this.status, ...status };
+        this.jobs.items = jobs.items;
+        this.jobs.total = jobs.total || 0;
+        const running = Boolean(status.restoretest) || jobs.items.some((job) => job.status === 'running');
+        this.restoreTestStart.checked = !running;
+        this.restoreTestStart.error = running
+          ? 'Ein Restore-Drill läuft. Öffne den Lauf und warte auf sein Ergebnis.' : '';
+      } finally {
+        if (jobsRevision === requestRevisions.get('jobs')) this.jobs.loading = false;
+        if (reviewGeneration === restoreStatusReviewGeneration) this.restoreTestStart.checking = false;
+      }
+    },
+
+    retryRestoreTestStart() {
+      return this.runRestoreTest(this.restoreTestStart.pairName, true);
+    },
+
+    async runRestoreTest(pairName = '', retryUnknown = false) {
+      if (this.pending.restoreTest || this.busy()) return;
+      const previous = { ...this.restoreTestStart };
+      if (previous.phase !== 'idle' && !(retryUnknown && previous.phase === 'unknown' && previous.checked)) return;
+      pairName = String(pairName || '');
+      const context = this.recoveryContextKey();
       const scope = pairName ? `Pair „${pairName}“` : 'alle aktiven Pairs';
-      if (!(await this.requestConfirmation(
-        `Restore-Drill für ${scope} starten?\n\nEine Stichprobe wird vom Ziel zurückgeholt und per Prüfsumme mit der Quelle verglichen. Das erzeugt Egress-Kosten beim Anbieter. Die zurückgeholten Dateien werden nach dem Vergleich gelöscht.`,
-        { title: 'Restore-Drill starten', confirmLabel: 'Restore-Drill starten' },
-      ))) return;
-      const query = pairName ? `?pairs=${encodeURIComponent(pairName)}` : '';
-      const result = await this.api('POST', `/api/jobs/backup/restore-test${query}`);
-      if (result?.ok) {
-        this.showToast('Restore-Drill gestartet', 'ok');
-        this.loadJobs(true);
-        this.loadOverview(true);
+      this.pending.restoreTest = true;
+      this.restoreTestStart = { phase: 'confirming', pairName, checked: false, checking: false, error: '' };
+      let submitted = false;
+      try {
+        const warning = retryUnknown
+          ? 'Der erste Auftrag kann bereits abgeschlossen sein. Prüfe die aufgeführten Läufe, bevor du bewusst einen weiteren kostenpflichtigen Drill startest.\n\n' : '';
+        if (!(await this.requestConfirmation(
+          `${warning}Restore-Drill für ${scope} starten?\n\nEine Stichprobe wird vom Ziel zurückgeholt und per Prüfsumme mit der Quelle verglichen. Das erzeugt Egress-Kosten beim Anbieter. Die zurückgeholten Dateien werden nach dem Vergleich gelöscht.`,
+          { title: retryUnknown ? 'Weiteren Restore-Drill starten' : 'Restore-Drill starten', confirmLabel: retryUnknown ? 'Bewusst erneut starten' : 'Restore-Drill starten' },
+        ))) return;
+        if (context !== this.recoveryContextKey()) return;
+        this.restoreTestStart.phase = 'posting';
+        // Store before dispatch: a reload or a lost response must not enable a blind repeat.
+        this.rememberUncertainRestoreStart(pairName);
+        submitted = true;
+        const query = pairName ? `?pairs=${encodeURIComponent(pairName)}` : '';
+        const result = await this.api('POST', `/api/jobs/backup/restore-test${query}`, undefined, { captureError: true, silent: true });
+        if (result?.ok) {
+          this.clearUncertainRestoreStart();
+          if (context === this.recoveryContextKey()) {
+            this.showToast('Restore-Drill gestartet', 'ok');
+            this.loadJobs(true);
+            this.loadOverview(true);
+          }
+        } else if (result?.__error && restoreStartRejectionStatuses.has(result.status)) {
+          this.clearUncertainRestoreStart();
+          if (result.status !== 401) this.showToast(`Restore-Drill nicht gestartet: ${typeof result.detail === 'string' ? result.detail : result.detail?.message || 'Anfrage abgelehnt'}`, 'err');
+        } else {
+          this.restoreTestStart = { phase: 'unknown', pairName, checked: false, checking: false, error: '' };
+          this.announce('Startstatus unbekannt. Prüfe die Aufträge, bevor du einen weiteren Restore-Drill startest.');
+        }
+      } finally {
+        this.pending.restoreTest = false;
+        if (!submitted) this.restoreTestStart = previous;
+        else if (this.restoreTestStart.phase === 'posting') {
+          this.restoreTestStart = { phase: 'unknown', pairName, checked: false, checking: false, error: '' };
+        }
       }
     },
 
@@ -2341,23 +2476,53 @@ function app() {
     },
 
     async restoreSnapshot() {
+      if (this.pending.snapshot) return;
       if (!this.snapshots.restoreName || !this.snapshots.password) {
         this.showToast('Snapshot und aktuelles Passwort erforderlich', 'err'); return;
       }
-      if (!(await this.requestConfirmation(
-        'Diesen Snapshot wiederherstellen? Aktuelle Zugangsdaten bleiben erhalten; alle Sitzungen werden beendet.',
-        { title: 'Snapshot wiederherstellen', confirmLabel: 'Wiederherstellen' },
-      ))) return;
       const selected = this.snapshots.items.find((item) => item.name === this.snapshots.restoreName);
-      const result = await this.api('POST', '/api/maintenance/config/snapshots/restore', {
-        name: this.snapshots.restoreName,
-        current_password: this.snapshots.password,
-        expected_revision: this.config._revision,
-        sha256: selected?.sha256 || null,
-      });
-      if (result?.ok) {
-        this.showToast('Snapshot wiederhergestellt – erneute Anmeldung erforderlich');
-        setTimeout(() => { window.location = '/login'; }, 900);
+      if (!/^[a-f0-9]{64}$/i.test(selected?.sha256 || '') || !this.config._revision) {
+        this.showToast('Snapshot-Prüfsumme oder Konfigurationsstand fehlt. Bitte neu laden und erneut auswählen.', 'err'); return;
+      }
+      const payload = {
+        name: selected.name, sha256: selected.sha256,
+        expected_revision: this.config._revision, current_password: this.snapshots.password,
+      };
+      const confirmation = { context: this.recoveryContextKey(), metadata: JSON.stringify(selected), payload };
+      snapshotConfirmation = confirmation;
+      this.pending.snapshot = true;
+      try {
+        if (!(await this.requestConfirmation(
+          `Snapshot „${payload.name}“ wiederherstellen? Aktuelle Zugangsdaten bleiben erhalten; alle Sitzungen werden beendet.`,
+          { title: 'Snapshot wiederherstellen', confirmLabel: 'Wiederherstellen' },
+        ))) return;
+        if (!this.snapshotConfirmationMatches(confirmation)) {
+          this.showToast('Auswahl oder Konfigurationsstand geändert. Bitte erneut prüfen und bestätigen.', 'err'); return;
+        }
+        const result = await this.api('POST', '/api/maintenance/config/snapshots/restore', payload);
+        if (result?.ok) {
+          this.showToast('Snapshot wiederhergestellt – erneute Anmeldung erforderlich');
+          setTimeout(() => { window.location = '/login'; }, 900);
+        }
+      } finally {
+        if (snapshotConfirmation === confirmation) snapshotConfirmation = null;
+        this.pending.snapshot = false;
+      }
+    },
+
+    snapshotConfirmationMatches(confirmation) {
+      const selected = this.snapshots.items.find((item) => item.name === this.snapshots.restoreName);
+      return confirmation.context === this.recoveryContextKey()
+        && this.snapshots.restoreName === confirmation.payload.name
+        && this.snapshots.password === confirmation.payload.current_password
+        && this.config._revision === confirmation.payload.expected_revision
+        && JSON.stringify(selected) === confirmation.metadata;
+    },
+
+    checkSnapshotConfirmation() {
+      if (snapshotConfirmation && this.confirmationDialog.show && !this.snapshotConfirmationMatches(snapshotConfirmation)) {
+        this.respondConfirmation(false);
+        this.showToast('Auswahl oder Konfigurationsstand geändert. Bitte erneut prüfen und bestätigen.', 'err');
       }
     },
 
@@ -2435,6 +2600,7 @@ function app() {
         'Ungespeicherte Änderungen verwerfen und abmelden?',
         { title: 'Abmelden', confirmLabel: 'Verwerfen und abmelden' },
       ))) return;
+      this.invalidateRecoveryAuth();
       const result = await this.api('POST', '/logout');
       if (result !== null) window.location = '/login';
     },
