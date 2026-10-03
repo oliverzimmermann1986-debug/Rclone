@@ -36,6 +36,7 @@ targets:
     scheme:
       testTargets:
         - RcloneMobileTests
+        - RcloneMobileUITests
     dependencies:
       - target: RcloneProtectionWidget
         embed: true
@@ -88,3 +89,15 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.oliverzimmermann.rclonesync.tests
         GENERATE_INFOPLIST_FILE: true
+  RcloneMobileUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: RcloneMobileUITests
+    dependencies:
+      - target: RcloneMobile
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.oliverzimmermann.rclonesync.uitests
+        GENERATE_INFOPLIST_FILE: true
+        TEST_TARGET_NAME: RcloneMobile

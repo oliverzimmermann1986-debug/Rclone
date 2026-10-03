@@ -771,11 +771,20 @@ final class AppModelLifecycleTests: XCTestCase {
         ]
         client.repeatingJobs = [running]
         _ = await model.runRestoreTest(pair: "Fotos")
-        try await Task.sleep(for: .milliseconds(65))
+        let initialJobsCalls = client.jobsCallCount
+        let observationDeadline = Date().addingTimeInterval(2)
+        while client.jobsCallCount < initialJobsCalls + 4, Date() < observationDeadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertGreaterThanOrEqual(client.jobsCallCount, initialJobsCalls + 4)
         XCTAssertTrue(model.batchIsRunning)
         XCTAssertEqual(model.activeRestoreTestPairs, ["Fotos"])
         client.repeatingJobs = [.fixture(id: 91, status: "ok", definitionID: "", startedAt: 100)]
-        for _ in 0..<30 where model.batchIsRunning { try await Task.sleep(for: .milliseconds(10)) }
+        let completionDeadline = Date().addingTimeInterval(2)
+        while model.batchIsRunning || !model.activeRestoreTestPairs.isEmpty {
+            guard Date() < completionDeadline else { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
         XCTAssertFalse(model.batchIsRunning)
         XCTAssertTrue(model.activeRestoreTestPairs.isEmpty)
         await model.logout()

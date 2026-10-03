@@ -1,0 +1,6 @@
+{
+  "name": "sicherpfad-ui-checks",
+  "private": true,
+  "scripts": { "test:web": "playwright test" },
+  "devDependencies": { "@playwright/test": "1.63.0" }
+}

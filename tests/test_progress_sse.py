@@ -44,22 +44,34 @@ def test_forty_clients_share_one_expensive_snapshot_and_release_resources():
 
 def test_slow_client_queue_keeps_only_latest_snapshot_and_shutdown_unblocks_it():
     call_count = 0
+    snapshot_lock = threading.Lock()
 
     def snapshot():
         nonlocal call_count
-        call_count += 1
-        return {"sequence": call_count}
+        with snapshot_lock:
+            call_count += 1
+            return {"sequence": call_count}
 
     async def scenario() -> None:
         broadcaster = _ProgressBroadcaster(snapshot, interval=0.01)
         queue = await broadcaster.subscribe()
-        await asyncio.sleep(0.08)
-
-        assert call_count > 1
-        assert queue.maxsize == 1
-        assert queue.qsize() == 1
-        latest = json.loads(queue.get_nowait())
-        assert latest["sequence"] == call_count
+        deadline = asyncio.get_running_loop().time() + 5
+        while True:
+            # Wait for actual publication of at least two snapshots. Keep the
+            # producer's thread from changing its counter during assertions.
+            with snapshot_lock:
+                published = json.loads(broadcaster._last_payload or "{}")
+                if call_count > 1 and published.get("sequence") == call_count:
+                    assert call_count > 1
+                    assert queue.maxsize == 1
+                    assert queue.qsize() == 1
+                    latest = json.loads(queue.get_nowait())
+                    assert latest["sequence"] == call_count
+                    break
+            assert asyncio.get_running_loop().time() < deadline, (
+                "Snapshots were not published"
+            )
+            await asyncio.sleep(0.001)
 
         waiting = asyncio.create_task(queue.get())
         await broadcaster.stop()
