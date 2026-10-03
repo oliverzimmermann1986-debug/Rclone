@@ -11,6 +11,7 @@ final class RecoveryNavigationUITests: XCTestCase {
     @MainActor
     func testRecoveryTasksReachExistingFeaturesWithoutStartingAWrite() {
         let app = launchPreview(destination: "recovery")
+        attachScreenshot(app, name: "Recovery task entries with standard text")
 
         tap(app.buttons["recoverFilesLink"], in: app)
         tap(app.buttons["recoveryPath-Fotos"], in: app)
@@ -23,14 +24,14 @@ final class RecoveryNavigationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Getrennt wiederherstellen"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@",
                          "Produktive Quell- und Zielpfade werden nicht verändert")).firstMatch.exists)
-        app.buttons["Abbrechen"].tap()
+        dismissConfirmation(in: app)
         XCTAssertTrue(app.buttons["recoveryFile-Beispiel.pdf"].exists)
         goBack(in: app)
         goBack(in: app)
 
         tap(app.buttons["verifyRestoreLink"], in: app)
         tap(app.buttons["recoveryPath-Fotos"], in: app)
-        XCTAssertTrue(app.staticTexts["RTO-Stichprobe"].waitForExistence(timeout: 5))
+        reveal(app.staticTexts["RTO-Stichprobe"], in: app)
         let drill = app.buttons["restoreTestActionButton"]
         reveal(drill, in: app)
         XCTAssertTrue(drill.exists)
@@ -81,9 +82,24 @@ final class RecoveryNavigationUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Lage"].waitForExistence(timeout: 5))
 
         tap(app.tabBars.buttons["Wiederherstellen"], in: app)
-        XCTAssertTrue(app.buttons["recoverFilesLink"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["verifyRestoreLink"].exists)
-        XCTAssertTrue(app.buttons["serverLossLink"].exists)
+        tap(app.buttons["recoverFilesLink"], in: app)
+        XCTAssertTrue(app.navigationBars["Dateien zurückholen"].waitForExistence(timeout: 5))
+        tap(app.buttons["recoveryPath-Fotos"], in: app)
+        reveal(app.buttons["recoveryFile-Beispiel.pdf"], in: app)
+        goBack(in: app)
+        goBack(in: app)
+
+        tap(app.buttons["verifyRestoreLink"], in: app)
+        XCTAssertTrue(app.navigationBars["Wiederherstellbarkeit prüfen"].waitForExistence(timeout: 5))
+        tap(app.buttons["recoveryPath-Fotos"], in: app)
+        reveal(app.staticTexts["RTO-Stichprobe"], in: app)
+        goBack(in: app)
+        goBack(in: app)
+
+        tap(app.buttons["serverLossLink"], in: app)
+        XCTAssertTrue(app.navigationBars["Serververlust"].waitForExistence(timeout: 5))
+        goBack(in: app)
+
         tap(app.buttons["restorePlanLink"], in: app)
         XCTAssertTrue(app.navigationBars["Restore-Prüfplan"].waitForExistence(timeout: 5))
         attachScreenshot(app, name: "Restore plan with largest accessibility text")
@@ -111,7 +127,9 @@ final class RecoveryNavigationUITests: XCTestCase {
     @MainActor
     private func tap(_ element: XCUIElement, in app: XCUIApplication,
                      file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(element.waitForExistence(timeout: 10), file: file, line: line)
+        // SwiftUI List may create an offscreen row only after it is scrolled in.
+        // Existence is checked after scrolling, before any requested action.
+        reveal(element, in: app, file: file, line: line)
         for _ in 0..<12 {
             if element.isHittable { break }
             app.swipeUp()
@@ -121,12 +139,31 @@ final class RecoveryNavigationUITests: XCTestCase {
     }
 
     @MainActor
-    private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication,
+                        file: StaticString = #filePath, line: UInt = #line) {
         for _ in 0..<12 {
             if element.exists && !element.frame.isEmpty && element.frame.intersects(app.frame) { break }
             app.swipeUp()
         }
-        XCTAssertTrue(element.exists)
+        XCTAssertTrue(element.exists, file: file, line: line)
+    }
+
+    @MainActor
+    private func dismissConfirmation(in app: XCUIApplication) {
+        let confirmation = app.buttons["Getrennt wiederherstellen"]
+        // iOS 26 renders this toolbar confirmation as a popover. Its native
+        // dismissal region replaces the cancel row used by an action sheet.
+        let popoverDismissal = app.otherElements["PopoverDismissRegion"]
+        if popoverDismissal.exists {
+            XCTAssertTrue(popoverDismissal.isHittable)
+            popoverDismissal.tap()
+        } else {
+            let cancel = app.buttons.matching(NSPredicate(format: "label IN %@", ["Abbrechen", "Cancel"])).firstMatch
+            XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+            cancel.tap()
+        }
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: confirmation)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
     }
 
     @MainActor
