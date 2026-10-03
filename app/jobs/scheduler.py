@@ -606,7 +606,12 @@ def restore_test_due(cfg, db, *, now: Optional[float] = None) -> Dict[str, Any]:
     grace_minutes = _bounded_int(
         backup.get("scheduler_grace_minutes", 15), default=15, minimum=1, maximum=1440
     )
-    history = _load_history(db, {RESTORE_TEST_HISTORY_KEY: RESTORE_TEST_HISTORY_KEY})
+    schedule_history = getattr(db, "restore_test_schedule_history", None)
+    history = (
+        {RESTORE_TEST_HISTORY_KEY: schedule_history(RESTORE_TEST_HISTORY_KEY)}
+        if callable(schedule_history)
+        else _load_history(db, {RESTORE_TEST_HISTORY_KEY: RESTORE_TEST_HISTORY_KEY})
+    )
     try:
         drill_history = history.get(RESTORE_TEST_HISTORY_KEY) or {}
         last_attempt = drill_history.get("last_result") or {}

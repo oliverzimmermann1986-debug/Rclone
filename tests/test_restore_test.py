@@ -824,7 +824,8 @@ def test_missing_endpoint_is_rejected(tmp_path: Path, monkeypatch):
     assert "nicht gesetzt" in result["error"]
 
 
-def test_summary_carries_aggregate_history_key(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize("trigger", ["manual", "scheduler"])
+def test_summary_carries_aggregate_history_key(monkeypatch, tmp_path: Path, trigger):
     cfg, _calls = _patch_common(
         monkeypatch,
         tmp_path,
@@ -832,16 +833,65 @@ def test_summary_carries_aggregate_history_key(monkeypatch, tmp_path: Path):
     )
     monkeypatch.setattr(drill, "notify", lambda *a, **kw: None)
     monkeypatch.setattr(drill, "reset_cancel", lambda *a, **kw: None)
-    summary = drill.run_restore_test(trigger="manual", seed=1)
+    summary = drill.run_restore_test(trigger=trigger, seed=1, job_id=17)
 
     assert summary["ok"] is True
     assert summary["verified_files"] == 1
     names = [item["name"] for item in summary["pairs"]]
     assert drill.AGGREGATE_RUN_NAME in names
-    assert summary["history_keys"][drill.AGGREGATE_RUN_NAME] == drill.HISTORY_KEY
+    assert summary["history_keys"][drill.AGGREGATE_RUN_NAME] == (
+        drill.HISTORY_KEY if trigger == "scheduler" else drill.MANUAL_HISTORY_KEY
+    )
+    assert summary["job_id"] == 17
     assert summary["history_keys"]["archiv"].startswith("restore:fingerprint:")
     assert summary["pairs"][0]["sample_manifest_sha256"]
     assert summary["pairs"][0]["evidence_checked_at"] > 0
+
+
+def test_restore_notification_uses_the_persisted_run_identity(monkeypatch, tmp_path):
+    _patch_common(
+        monkeypatch,
+        tmp_path,
+        sample={"paths": ["datei.bin"], "scanned": 1, "truncated": False},
+        check_rc=1,
+    )
+    monkeypatch.setattr(drill, "reset_cancel", lambda *a, **kw: None)
+    notifications = []
+    monkeypatch.setattr(
+        drill, "notify", lambda *args, **kwargs: notifications.append(kwargs)
+    )
+
+    summary = drill.run_restore_test(job_id=42)
+    drill._notify_result(summary, summary["pairs"][:-1])
+
+    assert summary["job_id"] == 42
+    assert [notice["job_id"] for notice in notifications] == [42, 42]
+
+
+def test_standalone_restore_run_keeps_identity_on_notification_replay(
+    monkeypatch, tmp_path
+):
+    _patch_common(
+        monkeypatch,
+        tmp_path,
+        sample={"paths": ["datei.bin"], "scanned": 1, "truncated": False},
+    )
+    monkeypatch.setattr(drill, "reset_cancel", lambda *a, **kw: None)
+    notifications = []
+    monkeypatch.setattr(
+        drill, "notify", lambda *args, **kwargs: notifications.append(kwargs)
+    )
+
+    first = drill.run_restore_test()
+    second = drill.run_restore_test()
+    drill._notify_result(first, first["pairs"][:-1])
+
+    assert first["run_id"] != second["run_id"]
+    assert [notice["run_id"] for notice in notifications] == [
+        first["run_id"],
+        second["run_id"],
+        first["run_id"],
+    ]
 
 
 def test_history_key_matches_scheduler():
