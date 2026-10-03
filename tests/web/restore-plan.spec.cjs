@@ -10,6 +10,14 @@ async function openPlan(page, { previewDelay = 0, conflict = false } = {}) {
   const config = structuredClone(fixture.config);
   config._revision = 'a'.repeat(64);
   let settings = { enabled: true, schedule: '0 5 * * 0', sample_files: 20, max_total_mb: 256, max_scan_files: 20000 };
+  const previews = [];
+  let planLoads = 0;
+  const updateServer = (changes, revision = 'b'.repeat(64)) => {
+    settings = { ...settings, ...changes };
+    config.backup.restore_test = structuredClone(settings);
+    config._revision = revision;
+  };
+  updateServer({}, config._revision);
   const response = () => ({
     ok: true, revision: config._revision, settings, timezone: 'Europe/Berlin',
     generated_at: 1900000000, next_runs: [1900007200, 1900266400], due_now: false,
@@ -22,14 +30,20 @@ async function openPlan(page, { previewDelay = 0, conflict = false } = {}) {
     let data = {};
     if (url.pathname === '/api/recovery/restore-plan') {
       if (request.method() === 'PUT') {
-        writes.push(request.postDataJSON());
-        if (conflict) return route.fulfill({ status: 409, json: { detail: 'Konfiguration wurde parallel geändert. Plan neu laden.' } });
-        settings = request.postDataJSON().settings; config._revision = 'b'.repeat(64);
-      }
+        const body = request.postDataJSON();
+        writes.push(body);
+        if (conflict) { conflict = false; updateServer({ max_total_mb: 512 }); }
+        if (body.revision !== config._revision) return route.fulfill({ status: 409, json: { detail: 'Konfiguration wurde parallel geändert. Plan neu laden.' } });
+        const nextRevision = String.fromCharCode(config._revision.charCodeAt(0) + 1).repeat(64);
+        updateServer(body.settings, nextRevision);
+      } else planLoads += 1;
       data = response();
     } else if (url.pathname.endsWith('/restore-plan/preview')) {
-      const draft = request.postDataJSON().settings;
+      const body = request.postDataJSON();
+      previews.push(body);
       if (previewDelay) await new Promise((resolve) => setTimeout(resolve, previewDelay));
+      if (body.revision !== config._revision) return route.fulfill({ status: 409, json: { detail: 'Konfiguration wurde parallel geändert. Plan neu laden.' } });
+      const draft = body.settings;
       if (draft.schedule === '0 5 31 2 *') return route.fulfill({ status: 422, json: { detail: 'Zeitplan hat keinen erreichbaren Prüftermin' } });
       data = { ...response(), settings: draft };
     } else if (url.pathname === '/api/config') data = config;
@@ -48,7 +62,7 @@ async function openPlan(page, { previewDelay = 0, conflict = false } = {}) {
   await page.locator('#settings-tab-scheduler').click();
   const section = page.locator('section[aria-labelledby="restore-plan-title"]');
   await expect(section.getByLabel('Rhythmus')).toHaveValue('weekly');
-  return { section, writes, errors, response, config };
+  return { section, writes, errors, response, config, previews, updateServer, planLoads: () => planLoads };
 }
 
 function deferred() {
@@ -324,5 +338,173 @@ test('an obsolete preview error cannot replace evidence loaded with the same rev
   await expect(section).toContainText('Aktueller Stand nach erfolgreicher Stichprobe');
   await expect(section.getByRole('button', { name: 'Prüfplan übernehmen', exact: true })).toBeEnabled();
   expect(writes).toHaveLength(0);
+  expect(errors).toEqual([]);
+});
+
+test('an unsaved plan survives settings tabs, page reopening and status refreshes', async ({ page }) => {
+  const { section, planLoads, writes, errors } = await openPlan(page);
+  const originalLoads = planLoads();
+  await section.getByLabel('Rhythmus').selectOption('twice');
+  await section.getByLabel('Dateien je Datenweg').fill('31');
+  await expect(section.getByText(/Ungespeicherter Prüfplan-Entwurf/)).toBeVisible();
+  await page.locator('#settings-tab-general').click();
+  await page.locator('#settings-tab-scheduler').click();
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('31');
+  await expect(page.getByRole('dialog')).toBeHidden();
+  await page.evaluate(() => { window.location.hash = 'dashboard'; });
+  await expect(section).toBeHidden();
+  await page.evaluate(() => { window.location.hash = 'settings'; });
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('31');
+  await expect(section.getByLabel('Rhythmus')).toHaveValue('twice');
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('online'));
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('31');
+  expect(planLoads()).toBe(originalLoads);
+  expect(writes).toHaveLength(0);
+  expect(errors).toEqual([]);
+});
+
+test('discarding a draft requires confirmation and invalidates an in-flight preview', async ({ page }) => {
+  const { section, planLoads, writes, errors } = await openPlan(page);
+  await section.getByLabel('Dateien je Datenweg').fill('31');
+  const originalLoads = planLoads();
+  await section.getByRole('button', { name: 'Plan neu laden' }).click();
+  await expect(page.getByRole('dialog')).toContainText('lokalen Prüfplan-Entwurf verwerfen');
+  await page.getByRole('dialog').getByRole('button', { name: 'Abbrechen', exact: true }).click();
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('31');
+  expect(planLoads()).toBe(originalLoads);
+
+  const started = deferred();
+  const release = deferred();
+  await page.route('**/api/recovery/restore-plan/preview', async (route) => {
+    started.resolve();
+    await release.promise;
+    await route.fulfill({ status: 409, json: { detail: 'Veralteter Konflikt des verworfenen Entwurfs' } });
+  });
+  await section.getByRole('button', { name: 'Vorschau prüfen' }).click();
+  await started.promise;
+  await section.getByRole('button', { name: 'Plan neu laden' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Verwerfen und neu laden', exact: true }).click();
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('20');
+  await expect(section.getByText(/Ungespeicherter Prüfplan-Entwurf/)).toBeHidden();
+  const finished = page.waitForResponse('**/api/recovery/restore-plan/preview');
+  release.resolve();
+  await (await finished).finished();
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await expect(section.getByRole('alert')).toBeHidden();
+  await expect(section.getByRole('region', { name: 'Prüfplan-Konfliktvergleich' })).toBeHidden();
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('20');
+  expect(writes).toHaveLength(0);
+  expect(errors).toEqual([]);
+});
+
+test('a 409 retains the draft until an explicit comparison preview and confirmed save', async ({ page }) => {
+  const { section, writes, previews, updateServer, errors } = await openPlan(page);
+  await section.getByLabel('Dateien je Datenweg').fill('31');
+  const save = await previewTwiceWeekly(section);
+  updateServer({ sample_files: 45, max_total_mb: 512, max_scan_files: 37777 });
+  await confirmPlan(page, save);
+  const comparison = section.getByRole('region', { name: 'Prüfplan-Konfliktvergleich' });
+  await expect(comparison).toBeVisible();
+  await expect(comparison).toContainText('Dein Entwurf: 31 · Server: 45');
+  await expect(comparison).toContainText('Dein Entwurf: 256 · Server: 512');
+  await expect(comparison).toContainText('Dein Entwurf: 20000 · Server: 37777');
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('31');
+  await expect(save).toBeDisabled();
+  await expect(section.getByRole('button', { name: 'Vorschau prüfen', exact: true })).toBeDisabled();
+  await page.locator('#settings-tab-general').click();
+  await page.locator('#settings-tab-scheduler').click();
+  await expect(comparison).toBeVisible();
+  expect(writes).toHaveLength(1);
+  expect(previews).toHaveLength(1);
+  expect(writes[0].revision).toBe('a'.repeat(64));
+
+  await comparison.getByRole('button', { name: 'Entwurf gegen aktuellen Stand prüfen' }).click();
+  await expect(comparison).toBeHidden();
+  await expect(save).toBeEnabled();
+  expect(previews).toHaveLength(2);
+  expect(previews[1].revision).toBe('b'.repeat(64));
+  expect(previews[1].settings.sample_files).toBe(31);
+  expect(previews[1].settings.schedule).toBe('0 5 * * 0,3');
+  expect(previews[1].settings.max_total_mb).toBe(512);
+  expect(previews[1].settings.max_scan_files).toBe(37777);
+  await expect(section.getByLabel('Datenlimit je Datenweg (MiB)')).toHaveValue('512');
+  expect(writes).toHaveLength(1);
+  await confirmPlan(page, save);
+  await expect(page.getByText('Restore-Prüfplan gespeichert', { exact: true })).toBeVisible();
+  expect(writes).toHaveLength(2);
+  expect(writes[1]).toEqual(previews[1]);
+  await expect(section.getByText(/Ungespeicherter Prüfplan-Entwurf/)).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test('another revision change during conflict resolution requires a new comparison', async ({ page }) => {
+  const { section, writes, previews, updateServer, errors } = await openPlan(page);
+  await section.getByLabel('Dateien je Datenweg').fill('31');
+  updateServer({ sample_files: 45 });
+  await section.getByRole('button', { name: 'Vorschau prüfen', exact: true }).click();
+  const comparison = section.getByRole('region', { name: 'Prüfplan-Konfliktvergleich' });
+  await expect(comparison).toContainText('Dein Entwurf: 31 · Server: 45');
+  updateServer({ sample_files: 50 }, 'c'.repeat(64));
+  await comparison.getByRole('button', { name: 'Entwurf gegen aktuellen Stand prüfen' }).click();
+  await expect(comparison).toContainText('Dein Entwurf: 31 · Server: 50');
+  await expect(section.getByRole('button', { name: 'Prüfplan übernehmen', exact: true })).toBeDisabled();
+  expect(previews.map((request) => request.revision)).toEqual(['a'.repeat(64), 'b'.repeat(64)]);
+  await comparison.getByRole('button', { name: 'Entwurf gegen aktuellen Stand prüfen' }).click();
+  await expect(comparison).toBeHidden();
+  await expect(section.getByRole('button', { name: 'Prüfplan übernehmen', exact: true })).toBeEnabled();
+  expect(previews[2].revision).toBe('c'.repeat(64));
+  expect(writes).toHaveLength(0);
+  expect(errors).toEqual([]);
+});
+
+test('leaving the browser or logging out protects an unsaved restore draft', async ({ page }) => {
+  const { section, writes, errors } = await openPlan(page);
+  await section.getByLabel('Dateien je Datenweg').fill('31');
+  const unloadPrevented = await page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(unloadPrevented).toBe(true);
+  await page.getByRole('button', { name: 'Abmelden', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('Ungespeicherte Änderungen verwerfen');
+  await page.getByRole('dialog').getByRole('button', { name: 'Abbrechen', exact: true }).click();
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('31');
+  expect(writes).toHaveLength(0);
+  expect(errors).toEqual([]);
+});
+
+test('reopening a saving plan waits for its result instead of reloading old settings', async ({ page }) => {
+  const { section, writes, response, planLoads, errors } = await openPlan(page);
+  const started = deferred();
+  const release = deferred();
+  await page.route('**/api/recovery/restore-plan', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    const body = route.request().postDataJSON();
+    writes.push(body);
+    started.resolve();
+    await release.promise;
+    return route.fulfill({ json: { ...response(), revision: 'b'.repeat(64), settings: body.settings } });
+  });
+  await section.getByLabel('Dateien je Datenweg').fill('31');
+  const save = await previewTwiceWeekly(section);
+  await confirmPlan(page, save);
+  await started.promise;
+  const originalLoads = planLoads();
+  await page.evaluate(() => { window.location.hash = 'dashboard'; });
+  await expect(section).toBeHidden();
+  await page.evaluate(() => { window.location.hash = 'settings'; });
+  await expect(section.getByLabel('Dateien je Datenweg')).toBeDisabled();
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('31');
+  expect(planLoads()).toBe(originalLoads);
+  release.resolve();
+  await expect(page.getByText('Restore-Prüfplan gespeichert', { exact: true })).toBeVisible();
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('31');
+  await expect(section.getByLabel('Dateien je Datenweg')).toBeEnabled();
+  await expect(section.getByText(/Ungespeicherter Prüfplan-Entwurf/)).toBeHidden();
+  expect(writes).toHaveLength(1);
   expect(errors).toEqual([]);
 });

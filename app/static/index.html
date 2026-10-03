@@ -761,8 +761,9 @@
                     </section>
 
                     <section class="settings-section restore-plan" aria-labelledby="restore-plan-title" @input.stop="" @change.stop="">
-                      <div class="settings-section-head"><div><h3 id="restore-plan-title">Restore-Prüfplan</h3><p>Plane Stichproben mit Reserve vor dem siebentägigen Nachweisablauf. Die Änderung gilt für alle aktiven Datenwege.</p></div><button class="button secondary small" @click="loadRestorePlan()" :disabled="restorePlan.loading || restorePlan.saving">Plan neu laden</button></div>
+                      <div class="settings-section-head"><div><h3 id="restore-plan-title">Restore-Prüfplan</h3><p>Plane Stichproben mit Reserve vor dem siebentägigen Nachweisablauf. Die Änderung gilt für alle aktiven Datenwege.</p></div><button class="button secondary small" @click="reloadRestorePlan()" :disabled="restorePlan.loading || restorePlan.saving">Plan neu laden</button></div>
                       <p x-show="restorePlan.loading" role="status">Prüfplan wird geladen…</p>
+                      <p x-show="restorePlanDirty()" role="status">Ungespeicherter Prüfplan-Entwurf. Er bleibt beim Wechsel innerhalb der Anwendung erhalten.</p>
                       <div class="inline-error" x-show="restorePlan.error" x-text="restorePlan.error" role="alert"></div>
                       <template x-if="restorePlan.settings">
                         <div class="restore-plan-body">
@@ -777,7 +778,14 @@
                               <label class="field"><span>Datenlimit je Datenweg (MiB)</span><input type="number" min="1" max="51200" x-model.number="restorePlan.settings.max_total_mb" @input="changeRestorePlan()"></label>
                             </div>
                           </fieldset>
-                          <div class="button-row"><button class="button secondary" @click="previewRestorePlan()" :disabled="restorePlan.saving || restorePlan.loading">Vorschau prüfen</button><button class="button primary" @click="saveRestorePlan()" :disabled="restorePlan.saving || restorePlan.loading || restorePlan.previewKey !== restorePlanKey() || !!restorePlan.error" x-text="restorePlan.saving ? 'Speichert…' : 'Prüfplan übernehmen'"></button></div>
+                          <section x-show="restorePlan.conflict" aria-label="Prüfplan-Konfliktvergleich">
+                            <h4>Entwurf und aktuellen Serverstand vergleichen</h4>
+                            <p>Dein Entwurf wurde nicht gespeichert. Prüfe die Unterschiede, bevor du ihn gegen den aktuellen Stand prüfen lässt. Nur deine Änderungen werden übertragen; unveränderte Felder verwenden den aktuellen Serverwert. Erst die anschließende Übernahme speichert den Plan.</p>
+                            <ul><template x-for="item in restorePlanComparison()" :key="item.key"><li><strong x-text="item.label"></strong><br><span>Dein Entwurf: </span><span x-text="restorePlanValue(item.draft)"></span><span> · Server: </span><span x-text="restorePlanValue(item.current)"></span></li></template></ul>
+                            <p x-show="restorePlan.serverVersion">Aktuelle Server-Zeitzone: <strong x-text="restorePlan.serverVersion?.timezone"></strong></p>
+                            <div class="button-row"><button class="button secondary" @click="loadRestorePlanConflict()" :disabled="restorePlan.loading || restorePlan.saving">Serverstand zum Vergleich laden</button><button class="button secondary" @click="previewRestorePlan(true)" :disabled="!restorePlan.serverVersion || restorePlan.loading || restorePlan.saving">Entwurf gegen aktuellen Stand prüfen</button></div>
+                          </section>
+                          <div class="button-row"><button class="button secondary" @click="previewRestorePlan()" :disabled="restorePlan.saving || restorePlan.loading || restorePlan.conflict">Vorschau prüfen</button><button class="button primary" @click="saveRestorePlan()" :disabled="restorePlan.saving || restorePlan.loading || restorePlan.conflict || restorePlan.previewKey !== restorePlanKey() || !!restorePlan.error" x-text="restorePlan.saving ? 'Speichert…' : 'Prüfplan übernehmen'"></button></div>
                           <div class="restore-plan-preview" x-show="restorePlan.previewKey === restorePlanKey() && !!restorePlan.preview" aria-live="polite">
                             <p>Zeitzone: <strong x-text="restorePlan.preview?.timezone"></strong></p>
                             <p x-show="restorePlan.preview?.due_now">Automatische Prüfung ist bereits fällig.</p>
