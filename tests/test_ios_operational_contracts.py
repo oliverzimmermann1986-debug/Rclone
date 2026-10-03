@@ -100,7 +100,13 @@ def test_dashboard_exposes_distinct_evidence_based_protection_score():
     assert 'Text("RESTORE-NACHWEIS")' in protection_path
     assert 'Section("Schutzpfad")' in protection_path
     assert 'Section("Schutzschild")' in protection_path
-    assert "await model.runRestoreTest(pair: pair.name)" in protection_path
+    assert "RestoreTestActionButton(pairName: pair.name" in protection_path
+    restore_action = _swift("Views/Components.swift")
+    assert "await model.runRestoreTest(pair: target.name)" in restore_action
+    assert "model.canStartRestoreTest" in restore_action
+    assert "target.matches" in restore_action
+    assert "targetServer == model.serverAddress" in restore_action
+    assert "ProtectionPathSelection.resolve" in protection_path
     assert (
         'pair.restoreEvidence?.isCurrent == true ? "Stichprobe bestätigt"'
         in protection_path

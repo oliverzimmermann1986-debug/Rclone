@@ -9,6 +9,7 @@ Das eigenständige App-Icon zeigt einen markanten Schutzpfad durch ein Verifikat
 - **Lagebild:** Eigener Schutzstatus, Systemzustand, Warnungen, Live-Fortschritt und kontrollierter Abbruch, Datenwege, letzter Lauf und Kopienübersicht mit lokalem/cloudseitigem Ordner, Dateizahl und Größe.
 - **Geräte-Vault:** Fotos und Dateien direkt auswählen, in wiederaufnehmbaren 1-MiB-Blöcken übertragen, per SHA-256 deduplizieren, am Ziel zurücklesen und anschließend wieder in Dateien exportieren.
 - **Restore-Nachweis:** Pro Datenweg sichtbarer Prüfsummenbeleg mit letzter Prüfung, letztem Erfolg, Stichprobengröße und direktem erneuten Restore-Test.
+- **Restore-Prüfplan:** Termine in der Server-Zeitzone, Nachweisablauf und Prüflücken vor einer ausdrücklich bestätigten, revisionsgebundenen Übernahme für alle aktiven Datenwege.
 - **Recovery Center:** Recovery-Pass mit nachvollziehbarem Score, RPO/RTO, Schutzkalender, geführter Notfallübung, Anomalie-Quarantäne, Recovery-Zeitreise mit Änderungsvergleich und selektivem Restore in ein getrenntes Server-Staging.
 - **Notfallübergabe:** lokal teilbares AES-256-GCM-Paket mit redigierter Konfiguration und Nachweisen; Passphrase und Paket werden bewusst getrennt übermittelt.
 - **Offline und mehrere Server:** pfadlose Recovery-Pässe sind nach Server und Konto getrennt und schon vor der Anmeldung über die Offline-Notfallkarte erreichbar. Bis zu acht Serverprofile; Sitzungen können auf Wunsch geschützt im Geräteschlüsselbund gespeichert werden.
@@ -16,6 +17,7 @@ Das eigenständige App-Icon zeigt einen markanten Schutzpfad durch ein Verifikat
 - **Vollständige Stände:** zusätzliche lokale Serverkopie mit SHA-256-Manifest, einschließlich unveränderter Dateien und leerer Verzeichnisse. Standard 5 GiB, maximal 50 GiB je Stand. Änderungsarchive bleiben ausdrücklich unvollständig. Diese lokalen Stände ersetzen kein externes Backup.
 - **Serververlust:** verschlüsselte Akte am Ersatzserver prüfen, Vault-Inventar bewusst vorhandenen Zielen zuordnen und Zielkopien ohne alten lokalen Blob nach vollständiger SHA-256-Prüfung herunterladen. Cloud-Zugang zuvor separat einrichten.
 - **Upload-Warteschlange und Teilen-Erweiterung:** lokal geschützte Dateien, server-/konto-/zielgebundene Wiederaufnahme über App-Neustarts, explizite Weitergabe aus Fotos/Dateien; keine unbegrenzte Hintergrundausführung.
+- **Fehler je Vault-Datei:** Eine defekte Datei hält andere Dateien nicht auf. Erneut versuchen oder bewusst überspringen ist je Datei möglich; die lokale Ausgangsdatei bleibt für den Export erhalten. Verbindungs- und Anmeldefehler pausieren die Übertragung weiterhin.
 - **Schutzpfad:** Native Topologie von Quelle über zugewiesene Jobs zum Ziel in einem schlanken Detailfenster.
 - **Konfiguration:** native Datenweg- und Jobverwaltung mit geordneter Zuweisung, Zeitplan, Parallelität, Löschschutz, Plan und Probelauf; unbekannte neue Serverfelder bleiben beim Speichern erhalten.
 - **Läufe:** unveränderliche Historie mit Suche, Filtern, CSV, redigiertem Log-Download und revisionssicherem Retry für Fehlerläufe.

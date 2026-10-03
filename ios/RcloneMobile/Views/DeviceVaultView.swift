@@ -205,18 +205,37 @@ struct DeviceVaultView: View {
                         Button("Übertragung pausieren", systemImage: "pause.circle") { transfer.pause() }
                     } else {
                         Button("Warteschlange fortsetzen", systemImage: "play.circle") { Task { await resumeQueue() } }
-                            .disabled(isImporting)
+                            .disabled(isImporting || !transfer.queue.contains(where: { !$0.requiresUserRetry }))
                     }
                 } header: {
                     Text("Warteschlange · \(transfer.queue.count)")
                 } footer: {
-                    Text("Vorgemerkte Dateien und Fortschritt bleiben bei einem Neustart erhalten. Zum Übertragen die App geöffnet lassen. Verwerfen entfernt nur die lokale Vormerkung.")
+                    Text("Fehlgeschlagene Dateien bleiben lokal erhalten; andere Dateien werden weiter übertragen. Wähle bei Bedarf „Erneut versuchen“. Zurückstellen erhält die Datei für später. Zum Übertragen die App geöffnet lassen.")
                 }
             }
     }
 
     private func queuedRow(_ entry: VaultQueueEntry) -> some View {
-        VaultQueuedRow(entry: entry, isActive: entry.id == transfer.activeEntryID)
+        VStack(alignment: .leading, spacing: 10) {
+            VaultQueuedRow(entry: entry, isActive: entry.id == transfer.activeEntryID)
+            if entry.requiresUserRetry {
+                Button("Erneut versuchen", systemImage: "arrow.clockwise") {
+                    retryQueued(entry)
+                }
+                .disabled(transfer.isWorking || isImporting || queueScope == nil)
+                .accessibilityLabel("\(entry.filename) erneut übertragen")
+                if entry.state != "skipped" {
+                    Button("Für später zurückstellen", systemImage: "pause.circle") { skipQueued(entry) }
+                        .disabled(transfer.isWorking || isImporting || queueScope == nil)
+                        .accessibilityHint("Die lokale Datei bleibt erhalten und wird erst nach Erneut versuchen übertragen.")
+                }
+                Button("Lokale Datei exportieren", systemImage: "square.and.arrow.up") {
+                    Task { await exportQueued(entry) }
+                }
+                .disabled(transfer.isWorking)
+            }
+        }
+            .buttonStyle(.borderless)
             .swipeActions {
                 if !transfer.isWorking, queueScope != nil {
                     Button("Verwerfen", role: .destructive) { removeQueued(entry) }
@@ -324,6 +343,16 @@ struct DeviceVaultView: View {
     private func removeQueued(_ entry: VaultQueueEntry) {
         guard !transfer.isWorking, let scope = queueScope else { return }
         transfer.removeQueued(entry, scope: scope)
+    }
+    private func retryQueued(_ entry: VaultQueueEntry) {
+        guard !transfer.isWorking, !isImporting, let scope = queueScope else { return }
+        transfer.retryEntry(entry, scope: scope)
+        guard transfer.queue.contains(where: { $0.id == entry.id && !$0.requiresUserRetry }) else { return }
+        Task { await resumeQueue() }
+    }
+    private func skipQueued(_ entry: VaultQueueEntry) {
+        guard !transfer.isWorking, !isImporting, let scope = queueScope else { return }
+        transfer.skipEntry(entry, scope: scope)
     }
     private func requestReassignment(_ entry: VaultQueueEntry) {
         pendingReassignmentScope = queueScope
@@ -509,9 +538,10 @@ private struct VaultQueuedRow: View {
 
     private var formattedSize: String { AppFormat.bytes(entry.size) }
     private var statusText: String {
-        entry.lastError ?? (isActive ? "Wird übertragen" : "Zum Fortsetzen bereit")
+        if entry.state == "skipped" { return "Für später zurückgestellt · lokale Datei erhalten" }
+        return entry.lastError ?? (isActive ? "Wird übertragen" : "Zum Fortsetzen bereit")
     }
-    private var statusColor: Color { entry.lastError == nil ? .secondary : .orange }
+    private var statusColor: Color { entry.requiresUserRetry ? .orange : .secondary }
     private var progress: Double {
         entry.size > 0 ? Double(entry.received) / Double(entry.size) : 0
     }

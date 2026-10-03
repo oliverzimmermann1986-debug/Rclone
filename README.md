@@ -123,6 +123,15 @@ Nachweise sollten Prüfungen mit Reserve vor Ablauf stattfinden, etwa zweimal
 wöchentlich: Auch Laufzeit und die Zeitumstellung können einen exakt
 wöchentlichen Termin über die siebentägige Frist verschieben.
 
+Unter **Einstellungen → Scheduler → Restore-Prüfplan** zeigt die Weboberfläche
+die nächsten Termine in der Server-Zeitzone, den Ablauf vorhandener Nachweise
+und mögliche Prüflücken. In der iPhone-App liegt derselbe Plan unter
+**Wiederherstellen → Restore-Prüfplan**. Täglich, wöchentlich, Sonntag/Mittwoch
+oder ein eigener Cron-Ausdruck sind möglich. Eine Vorschau speichert nichts;
+erst die bestätigte Übernahme ändert den Restore-Plan für alle aktiven
+Datenwege. Parallele Konfigurationsänderungen erfordern ein erneutes Laden.
+Bestehende Sicherungsjobs und Zeitpläne werden dabei nicht umgestellt.
+
 ## Proxmox-Betrieb
 
 Empfohlen ist ein eigener, möglichst unprivilegierter Debian-/Ubuntu-LXC oder eine kleine VM. Die Anwendung benötigt keine Docker- oder Nesting-Funktion. Für typische Installationen genügen 1–2 vCPU und 512 MiB bis 1 GiB RAM; große Remotes, viele parallele Transfers oder `--fast-list` benötigen entsprechend mehr Speicher.
@@ -515,3 +524,18 @@ bash -n scripts/install.sh
 shellcheck scripts/install.sh
 git diff --check
 ```
+
+Die Browserprüfung bedient die tatsächliche Weboberfläche in Chromium und
+mobilem WebKit mit lokalen API-Fixtures. Sie startet keine produktiven Jobs:
+
+```bash
+npm ci
+npx playwright install chromium webkit
+npm run test:web
+node --test scripts/test_web_requests.cjs
+```
+
+Die iOS-CI führt zusätzlich native Navigationstests im Offline-Vorschaumodus
+aus, einschließlich der größten Bedienungshilfen-Schriftgröße. Simulator-Build,
+Testresultate und Screenshots werden als CI-Artefakte abgelegt; dies ist kein
+TestFlight-Upload und keine Installation auf einem iPhone.
