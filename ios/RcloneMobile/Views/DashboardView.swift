@@ -495,12 +495,15 @@ private struct ProtectionStatusCard: View {
                     Button("Hinweise öffnen", systemImage: "exclamationmark.bubble", action: openIncidents)
                         .buttonStyle(.bordered)
                 }
-                Button("Punkteberechnung ansehen", systemImage: "info.circle", action: openAssessment)
-                    .accessibilityIdentifier("protectionAssessmentButton")
-                    .font(.caption)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .accessibilityHint("Öffnet die Zusammensetzung des Vertrauensscores.")
+                Button(action: openAssessment) {
+                    Label("Punkteberechnung ansehen", systemImage: "info.circle")
+                        .contentShape(Rectangle())
+                }
+                .accessibilityIdentifier("protectionAssessmentButton")
+                .font(.caption)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityHint("Öffnet die Zusammensetzung des Vertrauensscores.")
             }
         }
         .padding(20)
