@@ -17,8 +17,16 @@ from typing import Any, Mapping, Sequence
 
 from ..db import Database
 from ..notifications import notify
-from ..rclone_args import rclone_subprocess_env
 from ..restore_evidence import pair_binding
+from .recovery_lifecycle import (
+    RecoveryBusy,
+    RecoveryCancelled,
+    check_cancelled,
+    ensure_cleanup_safe,
+    finish_job,
+    run_command,
+)
+from .locks import try_file_lock
 from .rclone_sync import _rclone_cache_args
 from .restore_test import _endpoints
 
@@ -141,6 +149,7 @@ def _expected_manifest(
 def _verify_manifest(data: Path, manifest: Mapping[str, Mapping[str, Any]]) -> None:
     actual: dict[str, Path] = {}
     for item in data.rglob("*"):
+        check_cancelled()
         if item.is_symlink():
             raise RuntimeError(
                 "Recovery enthält einen nicht erlaubten symbolischen Link"
@@ -160,6 +169,7 @@ def _verify_manifest(data: Path, manifest: Mapping[str, Mapping[str, Any]]) -> N
         digest = hashlib.new(str(expected["algorithm"]))
         with item.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                check_cancelled()
                 digest.update(chunk)
         if digest.hexdigest() != expected["checksum"]:
             raise RuntimeError(
@@ -205,14 +215,7 @@ def staging_root(config: Mapping[str, Any]) -> Path:
 
 
 def _run(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        stdin=subprocess.DEVNULL,
-        env=rclone_subprocess_env(),
-    )
+    return run_command(command, timeout=timeout)
 
 
 def _load_state(database: Database) -> list[dict[str, Any]]:
@@ -239,11 +242,38 @@ def list_staging(database: Database, config: Mapping[str, Any]) -> list[dict[str
         candidate = (root / str(record.get("id") or "")).resolve()
         if candidate.parent != root:
             continue
+        if record.get("status") == "running":
+            job = database.job_get(int(record.get("job_id") or 0)) or {}
+            summary = job.get("summary") or {}
+            if job.get("status") not in {None, "running"}:
+                if summary.get("id") == record.get("id"):
+                    record = {**record, **summary}
+                else:
+                    record = {
+                        **record,
+                        "status": job["status"],
+                        "verified": False,
+                        "cleanup_required": candidate.is_dir(),
+                        "error": summary.get("error") or "Recovery wurde unterbrochen",
+                    }
         result.append({**record, "exists": candidate.is_dir()})
     return result
 
 
 def remove_staging(
+    database: Database, config: Mapping[str, Any], recovery_id: str
+) -> bool:
+    lease = try_file_lock("backup")
+    if lease is None:
+        raise RecoveryBusy("Laufende Sicherung oder Recovery zuerst beenden")
+    try:
+        ensure_cleanup_safe()
+        return _remove_staging_locked(database, config, recovery_id)
+    finally:
+        lease.release()
+
+
+def _remove_staging_locked(
     database: Database, config: Mapping[str, Any], recovery_id: str
 ) -> bool:
     root = staging_root(config)
@@ -255,6 +285,11 @@ def remove_staging(
     target = (root / recovery_id).resolve()
     if target.parent != root:
         raise ValueError("Recovery-Ziel liegt außerhalb des Staging-Bereichs")
+    for record in _load_state(database):
+        if record.get("id") == recovery_id:
+            job = database.job_get(int(record.get("job_id") or 0)) or {}
+            if job.get("status") == "running":
+                raise RecoveryBusy("Laufende Recovery zuerst abbrechen")
     existed = target.is_dir()
     if existed:
         shutil.rmtree(target)
@@ -290,6 +325,8 @@ def run_selective_restore(
         "job_id": job_id,
         "pair": str(pair.get("name") or ""),
         "status": "running",
+        "verified": False,
+        "staging_path": str(data),
         "created_at": time.time(),
         "requested_items": len(selection),
         "limit_bytes": limit_bytes,
@@ -297,6 +334,8 @@ def run_selective_restore(
         "evidence_binding": pair_binding(pair),
     }
     try:
+        check_cancelled()
+        _save_record(database, record)
         work.mkdir(mode=0o700)
         data.mkdir(mode=0o700)
         listing = work / "selection.txt"
@@ -315,6 +354,7 @@ def run_selective_restore(
             timeout=min(timeout, 900),
             limit_bytes=limit_bytes,
         )
+        check_cancelled()
         selected_bytes = sum(item["bytes"] for item in manifest.values())
         selected_count = len(manifest)
         manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
@@ -341,6 +381,7 @@ def run_selective_restore(
             str(data),
         ]
         copied = _run(copy_cmd, timeout=timeout)
+        check_cancelled()
         if copied.returncode != 0:
             raise RuntimeError(
                 f"Recovery fehlgeschlagen (rclone exit {copied.returncode})"
@@ -357,6 +398,7 @@ def run_selective_restore(
             backup_target,
         ]
         checked = _run(check_cmd, timeout=timeout)
+        check_cancelled()
         if checked.returncode != 0:
             raise RuntimeError(
                 "Recovery-Prüfsummen stimmen nicht mit dem Sicherungsziel überein"
@@ -374,40 +416,54 @@ def run_selective_restore(
                 "verification_scope": "complete_selection",
             }
         )
-        database.job_finish(job_id, "ok", {"ok": True, **record})
-        database.audit_add(
-            "selective_recovery_ready",
-            actor="system",
-            details={
-                key: record[key] for key in ("id", "job_id", "pair", "files", "bytes")
-            },
-        )
-        notify(
-            "recovery_ready",
-            f"{record['pair']}: Recovery bereit",
-            f"{selected_count} Dateien wurden getrennt wiederhergestellt und geprüft.",
-            job_id=job_id,
-            pair=record["pair"],
-        )
     except Exception as exc:
         logger.exception("Selektive Recovery %s fehlgeschlagen", recovery_id)
-        shutil.rmtree(work, ignore_errors=True)
+        try:
+            if work.exists():
+                ensure_cleanup_safe()
+                shutil.rmtree(work)
+        except (OSError, RecoveryBusy) as cleanup_error:
+            record.update(cleanup_required=True, cleanup_error=str(cleanup_error))
         record.update(
             {
-                "status": "error",
+                "status": "cancelled"
+                if isinstance(exc, RecoveryCancelled)
+                else "error",
+                "verified": False,
                 "error": str(exc),
                 "duration_sec": round(time.monotonic() - started, 2),
             }
         )
-        database.job_finish(job_id, "error", {"ok": False, **record})
+    status = "ok" if record["verified"] else record["status"]
+    finish_job(database, job_id, status, {"ok": record["verified"], **record})
+    _save_record(database, record)
+    if record["verified"]:
+        try:
+            database.audit_add(
+                "selective_recovery_ready",
+                actor="system",
+                details={
+                    key: record[key]
+                    for key in ("id", "job_id", "pair", "files", "bytes")
+                },
+            )
+        except Exception:
+            logger.exception("Recovery-Audit konnte nicht gespeichert werden")
         notify(
-            "recovery_error",
-            f"{record['pair']}: Recovery fehlgeschlagen",
-            str(exc),
+            "recovery_ready",
+            f"{record['pair']}: Recovery bereit",
+            f"{record['files']} Dateien wurden getrennt wiederhergestellt und geprüft.",
             job_id=job_id,
             pair=record["pair"],
         )
-    _save_record(database, record)
+    elif status != "cancelled":
+        notify(
+            "recovery_error",
+            f"{record['pair']}: Recovery fehlgeschlagen",
+            record["error"],
+            job_id=job_id,
+            pair=record["pair"],
+        )
     return record
 
 
