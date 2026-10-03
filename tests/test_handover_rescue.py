@@ -2,6 +2,8 @@ import copy
 import hashlib
 import io
 import json
+import multiprocessing
+import queue
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,65 @@ from app.routes.api_recovery import encrypted_handover
 class AuditDB:
     def audit_add(self, *args, **kwargs):
         return 1
+
+
+def _concurrent_rescue_import(
+    config, envelope, before_write, release_write, validated, result
+):
+    """Pause one process after its existence check, before publishing a receipt."""
+    if before_write is not None:
+        original_save = device_vault._save_record
+
+        def paused_save(root, record):
+            before_write.set()
+            if not release_write.wait(20):
+                raise RuntimeError("Timed out waiting to publish the rescue receipt")
+            return original_save(root, record)
+
+        device_vault._save_record = paused_save
+    if validated is not None:
+        original_validate = rescue.validate_inventory
+
+        def signal_validated(package):
+            inventory = original_validate(package)
+            validated.set()
+            return inventory
+
+        rescue.validate_inventory = signal_validated
+    try:
+        imported = rescue.import_handover(
+            config, envelope, "correct-rescue-passphrase", {"old-photos": "new-photos"}
+        )
+        if before_write is None:
+            device_vault.download_blob(config, imported["items"][0]["id"])
+        result.put(("ok", imported["imported"], imported["items"][0]["id"]))
+    except Exception as exc:
+        result.put(("error", type(exc).__name__, str(exc)))
+
+
+def _failing_rescue_import(config, envelope, continue_import, result):
+    original_save = device_vault._save_record
+    writes = 0
+
+    def fail_after_publication(root, record):
+        nonlocal writes
+        writes += 1
+        if writes > 1:
+            raise OSError("Simulated disk write failure")
+        saved = original_save(root, record)
+        result.put(("published", record["id"]))
+        if not continue_import.wait(20):
+            raise RuntimeError("Timed out waiting for the parallel restore")
+        return saved
+
+    device_vault._save_record = fail_after_publication
+    try:
+        rescue.import_handover(
+            config, envelope, "correct-rescue-passphrase", {"old-photos": "new-photos"}
+        )
+        result.put(("unexpected_success",))
+    except Exception as exc:
+        result.put(("error", type(exc).__name__, str(exc)))
 
 
 def fixture(tmp_path, monkeypatch):
@@ -127,6 +188,125 @@ def test_rescue_rejects_wrong_passphrase_bad_kdf_and_traversal(tmp_path, monkeyp
     assert not (Path(fresh["paths"]["data_dir"]) / "device-vault").exists()
 
 
+@pytest.mark.parametrize("field", ["identity", "source_type"])
+@pytest.mark.parametrize("value", [[], {}])
+def test_malformed_encrypted_inventory_is_rejected_before_import(
+    tmp_path, monkeypatch, field, value
+):
+    _old, fresh, _record, envelope, _payload = fixture(tmp_path, monkeypatch)
+    package = rescue.decrypt_handover(envelope, "correct-rescue-passphrase")
+    package["rescue_inventory"]["records"][0][field] = value
+    malformed = encrypted_handover(package, "correct-rescue-passphrase")
+
+    for action in (
+        lambda: rescue.preview_handover(fresh, malformed, "correct-rescue-passphrase"),
+        lambda: rescue.import_handover(
+            fresh, malformed, "correct-rescue-passphrase", {"old-photos": "new-photos"}
+        ),
+    ):
+        with pytest.raises(rescue.HandoverError):
+            action()
+    assert not (Path(fresh["paths"]["data_dir"]) / "device-vault").exists()
+
+
+def test_concurrent_rescue_import_preserves_verified_receipt(tmp_path, monkeypatch):
+    _old, fresh, _record, envelope, payload = fixture(tmp_path, monkeypatch)
+    context = multiprocessing.get_context("spawn")
+    before_write = context.Event()
+    release_write = context.Event()
+    second_validated = context.Event()
+    first_results = context.Queue()
+    second_results = context.Queue()
+    first = context.Process(
+        target=_concurrent_rescue_import,
+        args=(fresh, envelope, before_write, release_write, None, first_results),
+    )
+    second = context.Process(
+        target=_concurrent_rescue_import,
+        args=(fresh, envelope, None, None, second_validated, second_results),
+    )
+    first.start()
+    try:
+        assert before_write.wait(15), "The first importer never reached publication"
+        second.start()
+        assert second_validated.wait(15), (
+            "The second importer never validated the package"
+        )
+        # Without a process lock the second importer creates and verifies the
+        # same receipt while the first still holds an unpublished stale copy.
+        try:
+            second_result = second_results.get(timeout=5)
+        except queue.Empty:
+            second_result = None
+        release_write.set()
+        first_result = first_results.get(timeout=15)
+        if second_result is None:
+            second_result = second_results.get(timeout=15)
+        first.join(15)
+        second.join(15)
+        assert first.exitcode == 0 and second.exitcode == 0
+        assert first_result[0] == second_result[0] == "ok"
+        assert first_result[1] + second_result[1] == 1
+        assert first_result[2] == second_result[2]
+        record = device_vault.upload_status(fresh, first_result[2])
+        assert record["status"] == "ready" and record["verified"] is True
+        restored, _name = device_vault.download_blob(fresh, record["id"])
+        assert restored.read_bytes() == payload
+    finally:
+        release_write.set()
+        for process in (first, second):
+            if process.pid is not None and process.is_alive():
+                process.terminate()
+            if process.pid is not None:
+                process.join(5)
+        first_results.close()
+        second_results.close()
+
+
+def test_partial_import_keeps_parallel_verified_receipt_and_resumes(
+    tmp_path, monkeypatch
+):
+    _old, fresh, _record, envelope, payload = fixture(tmp_path, monkeypatch)
+    package = rescue.decrypt_handover(envelope, "correct-rescue-passphrase")
+    second = copy.deepcopy(package["rescue_inventory"]["records"][0])
+    second["id"] = "second-file"
+    package["rescue_inventory"]["records"].append(second)
+    envelope = encrypted_handover(package, "correct-rescue-passphrase")
+    context = multiprocessing.get_context("spawn")
+    continue_import = context.Event()
+    result = context.Queue()
+    importer = context.Process(
+        target=_failing_rescue_import, args=(fresh, envelope, continue_import, result)
+    )
+    importer.start()
+    try:
+        published = result.get(timeout=15)
+        assert published[0] == "published"
+        recovered, _name = device_vault.download_blob(fresh, published[1])
+        assert recovered.read_bytes() == payload
+        continue_import.set()
+        failure = result.get(timeout=15)
+        importer.join(15)
+        assert importer.exitcode == 0
+        assert failure[0:2] == ("error", "HandoverError")
+        receipt = device_vault.upload_status(fresh, published[1])
+        assert receipt["status"] == "ready" and receipt["verified"] is True
+
+        resumed = rescue.import_handover(
+            fresh, envelope, "correct-rescue-passphrase", {"old-photos": "new-photos"}
+        )
+        assert resumed["already_present"] == 1 and resumed["imported"] == 1
+        receipt = device_vault.upload_status(fresh, published[1])
+        assert receipt["status"] == "ready" and receipt["verified"] is True
+        assert len(resumed["items"]) == 2
+    finally:
+        continue_import.set()
+        if importer.is_alive():
+            importer.terminate()
+        importer.join(5)
+        result.close()
+
+
 def test_cloud_corruption_is_not_released_or_cached(tmp_path, monkeypatch):
     old, fresh, record, envelope, payload = fixture(tmp_path, monkeypatch)
     imported = rescue.import_handover(
@@ -172,6 +352,39 @@ def test_reconfigured_target_requires_fresh_explicit_import(tmp_path, monkeypatc
     fresh["backup"]["pairs"][0]["remote"] = str(tmp_path / "different")
     with pytest.raises(device_vault.VaultError, match="geändert"):
         device_vault.download_blob(fresh, item["id"])
+
+
+def test_fresh_mapping_rebinds_removed_identity_at_the_same_target(
+    tmp_path, monkeypatch
+):
+    _old, fresh, _record, envelope, payload = fixture(tmp_path, monkeypatch)
+    original = rescue.import_handover(
+        fresh, envelope, "correct-rescue-passphrase", {"old-photos": "new-photos"}
+    )["items"][0]
+    fresh["backup"]["pairs"][0]["id"] = "replacement-photos"
+    expected_config = copy.deepcopy(fresh)
+    replaced = rescue.import_handover(
+        fresh,
+        envelope,
+        "correct-rescue-passphrase",
+        {"old-photos": "replacement-photos"},
+    )
+    assert replaced["imported"] == 1
+    replacement = replaced["items"][0]
+    assert replacement["id"] != original["id"]
+    assert replacement["identity"] == "replacement-photos"
+    recovered, _name = device_vault.download_blob(fresh, replacement["id"])
+    assert recovered.read_bytes() == payload
+    assert device_vault.upload_status(fresh, original["id"])["identity"] == "new-photos"
+    assert fresh == expected_config
+    repeated = rescue.import_handover(
+        fresh,
+        envelope,
+        "correct-rescue-passphrase",
+        {"old-photos": "replacement-photos"},
+    )
+    assert repeated["imported"] == 0 and repeated["already_present"] == 1
+    assert repeated["items"][0]["id"] == replacement["id"]
 
 
 def test_missing_server_blob_streams_cloud_bytes_through_size_and_hash_verification(
