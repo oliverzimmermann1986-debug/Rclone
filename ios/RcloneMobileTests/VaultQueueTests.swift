@@ -206,8 +206,123 @@ final class VaultQueueTests: XCTestCase {
         XCTAssertNotNil(transfer.errorMessage)
     }
 
-    private func queueClient(digest: String, failureStatus: Int? = nil) throws -> APIClient {
-        VaultResumeURLProtocol.reset(digest: digest, failureStatus: failureStatus)
+    @MainActor
+    func testFailedEntrySurvivesRelaunchAndOnlyExplicitRetryResumesIt() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("file.txt")
+        let bytes = Data("0123456789".utf8)
+        try bytes.write(to: source)
+        let store = VaultQueueStore(root: folder.appendingPathComponent("queue"))
+        var entry = try store.stage(source, filename: "file.txt", sourceType: "file", scope: scope())
+        entry.uploadID = "existing-upload"
+        try store.save(entry)
+        let rejected = try queueClient(digest: entry.sha256, failureStatus: 400)
+        let initial = VaultTransferModel(queueStore: store)
+        await initial.resumeQueue(scope: scope(), using: rejected) { true }
+        XCTAssertEqual(try store.entries(for: scope()).first?.state, "failed")
+
+        let relaunchedStore = VaultQueueStore(root: store.root)
+        let relaunched = VaultTransferModel(queueStore: relaunchedStore)
+        relaunched.loadQueue(scope: scope())
+        let retained = try XCTUnwrap(relaunched.queue.first)
+        XCTAssertEqual(retained.id, entry.id)
+        XCTAssertEqual(retained.uploadID, "existing-upload")
+        XCTAssertTrue(retained.requiresUserRetry)
+        XCTAssertNotNil(retained.lastError)
+        let usableClient = try queueClient(digest: retained.sha256)
+        await relaunched.resumeQueue(scope: scope(), using: usableClient) { true }
+        XCTAssertEqual(VaultResumeURLProtocol.recordedRequests().map { $0.url?.path }, ["/api/vault/library"])
+        XCTAssertEqual(try relaunchedStore.entries(for: scope()).first?.state, "failed")
+
+        relaunched.retryEntry(retained, scope: scope())
+        let scheduled = try XCTUnwrap(relaunchedStore.entries(for: scope()).first)
+        XCTAssertEqual(scheduled.state, "waiting")
+        XCTAssertEqual(scheduled.uploadID, "existing-upload")
+        XCTAssertNil(scheduled.lastError)
+        await relaunched.resumeQueue(scope: scope(), using: usableClient) { true }
+        XCTAssertTrue(try relaunchedStore.entries(for: scope()).isEmpty)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+        XCTAssertTrue(VaultResumeURLProtocol.recordedRequests().contains { $0.httpMethod == "PUT" })
+        XCTAssertFalse(VaultResumeURLProtocol.recordedRequests().contains {
+            $0.httpMethod == "POST" && $0.url?.path == "/api/vault/uploads"
+        })
+    }
+
+    @MainActor
+    func testSkippedFirstEntrySurvivesRelaunchWhileNextFileCompletes() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("original.txt")
+        let bytes = Data("0123456789".utf8)
+        try bytes.write(to: source)
+        let store = VaultQueueStore(root: folder.appendingPathComponent("queue"))
+        var skipped = try store.stage(source, filename: "skipped.txt", sourceType: "file", scope: scope())
+        skipped.uploadID = "skipped-upload"
+        try store.save(skipped)
+        var following = try store.stage(source, filename: "file.txt", sourceType: "file", scope: scope())
+        following.uploadID = "existing-upload"
+        try store.save(following)
+        let initial = VaultTransferModel(queueStore: store)
+        initial.skipEntry(skipped, scope: scope())
+
+        let relaunchedStore = VaultQueueStore(root: store.root)
+        let relaunched = VaultTransferModel(queueStore: relaunchedStore)
+        let client = try queueClient(digest: following.sha256)
+        await relaunched.resumeQueue(scope: scope(), using: client) { true }
+        let retained = try XCTUnwrap(relaunchedStore.entries(for: scope()).first)
+        XCTAssertEqual(retained.id, skipped.id)
+        XCTAssertEqual(retained.state, "skipped")
+        XCTAssertTrue(retained.requiresUserRetry)
+        XCTAssertEqual(try Data(contentsOf: relaunchedStore.payload(for: retained)), bytes)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+        XCTAssertEqual(try relaunchedStore.entries(for: scope()).count, 1)
+        XCTAssertFalse(VaultResumeURLProtocol.recordedRequests().contains {
+            $0.url?.path.contains("skipped-upload") == true
+        })
+        XCTAssertTrue(VaultResumeURLProtocol.recordedRequests().contains {
+            $0.url?.path == "/api/vault/uploads/existing-upload/complete"
+        })
+    }
+
+    @MainActor
+    func testNetworkFailurePausesAllFilesAndRelaunchCanResumeWithoutUserRetry() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("file.txt")
+        let bytes = Data("0123456789".utf8)
+        try bytes.write(to: source)
+        let store = VaultQueueStore(root: folder.appendingPathComponent("queue"))
+        var first = try store.stage(source, filename: "first.txt", sourceType: "file", scope: scope())
+        first.uploadID = "existing-upload"
+        first.received = 4
+        try store.save(first)
+        let second = try store.stage(source, filename: "second.txt", sourceType: "file", scope: scope())
+        let offline = try queueClient(digest: first.sha256, transportError: URLError(.notConnectedToInternet))
+        let initial = VaultTransferModel(queueStore: store)
+        await initial.resumeQueue(scope: scope(), using: offline) { true }
+        let paused = try store.entries(for: scope())
+        XCTAssertEqual(Set(paused.map(\.id)), Set([first.id, second.id]))
+        XCTAssertTrue(paused.allSatisfy { $0.state == "waiting" && !$0.requiresUserRetry })
+        XCTAssertEqual(paused.first(where: { $0.id == first.id })?.received, 4)
+        XCTAssertEqual(VaultResumeURLProtocol.recordedRequests().count, 1)
+        XCTAssertNotNil(initial.errorMessage)
+
+        let relaunchedStore = VaultQueueStore(root: store.root)
+        let relaunched = VaultTransferModel(queueStore: relaunchedStore)
+        let online = try queueClient(digest: first.sha256)
+        await relaunched.resumeQueue(scope: scope(), using: online) { true }
+        XCTAssertTrue(try relaunchedStore.entries(for: scope()).isEmpty)
+        XCTAssertNil(relaunched.errorMessage)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+        XCTAssertTrue(VaultResumeURLProtocol.recordedRequests().contains { $0.httpMethod == "PUT" })
+    }
+
+    private func queueClient(digest: String, failureStatus: Int? = nil, transportError: URLError? = nil) throws -> APIClient {
+        VaultResumeURLProtocol.reset(digest: digest, failureStatus: failureStatus, transportError: transportError)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [VaultResumeURLProtocol.self]
         let cookies = try XCTUnwrap(configuration.httpCookieStorage)
@@ -225,10 +340,12 @@ private final class VaultResumeURLProtocol: URLProtocol {
     private static var digest = ""
     private static var requests: [URLRequest] = []
     private static var failureStatus: Int?
-    static func reset(digest: String, failureStatus: Int? = nil) {
+    private static var transportError: URLError?
+    static func reset(digest: String, failureStatus: Int? = nil, transportError: URLError? = nil) {
         lock.lock(); defer { lock.unlock() }
         self.digest = digest
         self.failureStatus = failureStatus
+        self.transportError = transportError
         requests = []
     }
     static func recordedRequests() -> [URLRequest] {
@@ -242,7 +359,12 @@ private final class VaultResumeURLProtocol: URLProtocol {
         Self.requests.append(request)
         let digest = Self.digest
         let failureStatus = Self.failureStatus
+        let transportError = Self.transportError
         Self.lock.unlock()
+        if let transportError {
+            client?.urlProtocol(self, didFailWithError: transportError)
+            return
+        }
         if let failureStatus {
             let response = HTTPURLResponse(url: request.url!, statusCode: failureStatus,
                                            httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!

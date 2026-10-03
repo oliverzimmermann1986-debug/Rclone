@@ -10,7 +10,7 @@ import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import auth
+from app import auth, config_store
 from app.config_store import Config
 from app.config_validation import validate_config
 from app.db import Database
@@ -455,3 +455,186 @@ def test_preview_and_save_require_csrf(environment, method, suffix):
     before = env.path.read_bytes()
     assert getattr(env.client, method)(URL + suffix, json=body(env)).status_code == 403
     assert env.path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("sample_files", True),
+        ("sample_files", 20.0),
+        ("max_total_mb", "256"),
+        ("enabled", 1),
+        ("schedule", None),
+    ],
+)
+def test_save_rejects_coerced_setting_types_without_mutations(
+    environment, field, value
+):
+    env = environment
+    before = env.store.snapshot_with_revision()
+    config_bytes = env.path.read_bytes()
+    draft = settings()
+    draft[field] = value
+
+    response = env.client.put(URL, json=body(env, draft))
+
+    assert response.status_code == 422
+    assert env.path.read_bytes() == config_bytes
+    assert env.store.snapshot_with_revision() == before
+    assert env.db.job_list() == []
+
+
+def test_evidence_becomes_stale_exactly_at_the_seven_day_boundary(environment):
+    env = environment
+    now = env.clock["now"]
+    checked_at = now - MAX_EVIDENCE_AGE_SEC + 1
+    job_id = proof(env, "Fotos", checked_at)
+    for offset, expected_state in [(0, "passed"), (1, "stale"), (2, "stale")]:
+        env.clock["now"] = now + offset
+        response = env.client.get(URL)
+        assert response.status_code == 200
+        path = next(
+            item for item in response.json()["data_paths"] if item["name"] == "Fotos"
+        )
+        assert path["evidence_state"] == expected_state
+        assert path["valid_until"] == now + 1
+        if expected_state == "stale":
+            assert path["coverage_gap"] is True
+    assert env.db.job_get(job_id)["summary"]["pairs"][0]["ok"] is True
+
+
+def test_next_term_at_expiry_has_a_gap_but_one_second_before_expiry_does_not(
+    environment,
+):
+    env = environment
+    next_run = stamp(10, 4, 5)
+    for margin, expected_gap in [(0, True), (1, False)]:
+        proof(env, "Fotos", next_run - MAX_EVIDENCE_AGE_SEC + margin)
+        response = env.client.post(URL + "/preview", json=body(env))
+        assert response.status_code == 200
+        result = response.json()
+        path = next(item for item in result["data_paths"] if item["name"] == "Fotos")
+        assert result["next_runs"][0] == next_run
+        assert path["evidence_state"] == "passed"
+        assert path["coverage_gap"] is expected_gap
+
+
+def test_rename_and_temporarily_disable_preserve_proof_bound_to_the_same_id(
+    environment,
+):
+    env = environment
+    job_id = proof(env, "Fotos", env.clock["now"] - 60)
+    env.store.update(
+        lambda config: config["backup"]["pairs"][0].update({"name": "Familienfotos"})
+    )
+    renamed = env.client.get(URL).json()["data_paths"]
+    path = next(item for item in renamed if item["name"] == "Familienfotos")
+    assert path["id"] == "a" * 32
+    assert path["evidence_state"] == "passed"
+
+    env.store.update(
+        lambda config: config["backup"]["pairs"][0].update({"enabled": False})
+    )
+    assert [item["name"] for item in env.client.get(URL).json()["data_paths"]] == [
+        "Rezepte"
+    ]
+    env.store.update(
+        lambda config: config["backup"]["pairs"][0].update({"enabled": True})
+    )
+    restored = next(
+        item
+        for item in env.client.get(URL).json()["data_paths"]
+        if item["name"] == "Familienfotos"
+    )
+    assert restored["id"] == path["id"]
+    assert restored["evidence_state"] == "passed"
+    assert len(env.db.job_list()) == 1
+    assert env.db.job_get(job_id)["summary"]["pairs"][0]["name"] == "Fotos"
+
+
+def test_new_data_path_id_does_not_borrow_the_same_named_predecessor_proof(environment):
+    env = environment
+    job_id = proof(env, "Fotos", env.clock["now"] - 60)
+    env.store.update(
+        lambda config: config["backup"]["pairs"][0].update({"id": "c" * 32})
+    )
+
+    response = env.client.get(URL)
+
+    assert response.status_code == 200
+    path = next(
+        item for item in response.json()["data_paths"] if item["name"] == "Fotos"
+    )
+    assert path["id"] == "c" * 32
+    assert path["evidence_state"] == "never"
+    assert path["valid_until"] is None
+    assert path["coverage_gap"] is True
+    assert env.db.job_get(job_id)["summary"]["pairs"][0]["ok"] is True
+
+
+def test_atomic_disk_replace_failure_preserves_configuration_revision_and_proofs(
+    environment, monkeypatch
+):
+    env = environment
+    proof(env, "Fotos", env.clock["now"] - 60)
+    original_bytes = env.path.read_bytes()
+    snapshot = env.store.snapshot_with_revision()
+    jobs = env.db.job_list()
+    real_replace = config_store.os.replace
+    attempted_destinations = []
+
+    def fail_primary_replace(source, destination):
+        attempted_destinations.append(destination)
+        if destination == env.path:
+            raise OSError("simulated disk write failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(config_store.os, "replace", fail_primary_replace)
+
+    response = env.client.put(URL, json=body(env))
+
+    assert response.status_code == 500
+    assert env.path in attempted_destinations
+    assert env.path.read_bytes() == original_bytes
+    assert env.store.snapshot_with_revision() == snapshot
+    assert Config(env.path).snapshot_with_revision() == snapshot
+    assert env.db.job_list() == jobs
+    assert not list(env.path.parent.glob(".config.yaml.*.tmp"))
+
+
+def test_weekly_plan_reports_lord_howe_half_hour_dst_and_local_terms(environment):
+    env = environment
+    zone = "Australia/Lord_Howe"
+    env.store.update(lambda config: config["backup"].update({"timezone": zone}))
+
+    response = env.client.post(URL + "/preview", json=body(env, settings("0 5 * * 0")))
+
+    assert response.status_code == 200
+    result = response.json()
+    expected_terms = [
+        datetime(2026, 10, day, 5, tzinfo=ZoneInfo(zone)).timestamp() for day in (4, 11)
+    ]
+    assert result["timezone"] == zone
+    assert result["next_runs"] == expected_terms
+    assert result["max_interval_seconds"] == MAX_EVIDENCE_AGE_SEC + 1800
+    assert any("Zeitumstellung" in warning for warning in result["warnings"])
+
+
+def test_sparse_leap_day_schedule_reaches_next_two_leap_years_and_warns_about_gap(
+    environment,
+):
+    env = environment
+    env.store.update(lambda config: config["backup"].update({"timezone": "UTC"}))
+
+    response = env.client.post(URL + "/preview", json=body(env, settings("0 5 29 2 *")))
+
+    assert response.status_code == 200
+    result = response.json()
+    expected_terms = [
+        datetime(year, 2, 29, 5, tzinfo=ZoneInfo("UTC")).timestamp()
+        for year in (2028, 2032)
+    ]
+    assert result["next_runs"] == expected_terms
+    assert result["max_interval_seconds"] == expected_terms[1] - expected_terms[0]
+    assert all(path["coverage_gap"] for path in result["data_paths"])
+    assert any("Abstand" in warning for warning in result["warnings"])
