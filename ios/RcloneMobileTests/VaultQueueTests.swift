@@ -321,8 +321,81 @@ final class VaultQueueTests: XCTestCase {
         XCTAssertTrue(VaultResumeURLProtocol.recordedRequests().contains { $0.httpMethod == "PUT" })
     }
 
-    private func queueClient(digest: String, failureStatus: Int? = nil, transportError: URLError? = nil) throws -> APIClient {
-        VaultResumeURLProtocol.reset(digest: digest, failureStatus: failureStatus, transportError: transportError)
+    @MainActor
+    func testNewUploadBindsDisplayedEndpointsInActualAPIRequest() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("photo.jpg")
+        let bytes = Data("0123456789".utf8)
+        try bytes.write(to: source)
+        let selectedScope = VaultQueueScope(serverURL: URL(string: "https://backup.example")!, username: "admin",
+            pairID: "photos", source: "/Fotos/Grüße", target: "cloud:/Bilder 2026", direction: "push")
+        let store = VaultQueueStore(root: folder.appendingPathComponent("queue"))
+        let entry = try store.stage(source, filename: "photo.jpg", sourceType: "photo", scope: selectedScope)
+        let binding = ["local": selectedScope.source, "remote": selectedScope.target, "direction": selectedScope.direction]
+        let client = try queueClient(digest: entry.sha256, endpointBinding: binding)
+        let transfer = VaultTransferModel(queueStore: store)
+        await transfer.resumeQueue(scope: selectedScope, using: client) { true }
+        let body = try XCTUnwrap(VaultResumeURLProtocol.recordedCreateBody())
+        XCTAssertEqual(body["identity"] as? String, "photos")
+        XCTAssertEqual(body["expected_endpoints"] as? [String: String], binding)
+        XCTAssertTrue(try store.entries(for: selectedScope).isEmpty)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+    }
+
+    @MainActor
+    func testReturnedEndpointMismatchRetainsPayloadBeforeSendingBytesOrCompleting() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("original.txt")
+        let bytes = Data("0123456789".utf8)
+        try bytes.write(to: source)
+        let store = VaultQueueStore(root: folder.appendingPathComponent("queue"))
+        var entry = try store.stage(source, filename: "file.txt", sourceType: "file", scope: scope())
+        entry.uploadID = "existing-upload"
+        try store.save(entry)
+        let client = try queueClient(digest: entry.sha256,
+            endpointBinding: ["local": "/photos", "remote": "cloud:/Changed", "direction": "push"])
+        let transfer = VaultTransferModel(queueStore: store)
+        await transfer.resumeQueue(scope: scope(), using: client) { true }
+        let retained = try XCTUnwrap(store.entries(for: scope()).first)
+        XCTAssertEqual(retained.state, "failed")
+        XCTAssertTrue(retained.lastError?.contains("Datenweg hat sich geändert") == true)
+        XCTAssertEqual(try Data(contentsOf: store.payload(for: retained)), bytes)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+        XCTAssertFalse(VaultResumeURLProtocol.recordedRequests().contains {
+            $0.httpMethod == "PUT" || $0.url?.path.hasSuffix("complete") == true
+        })
+    }
+
+    @MainActor
+    func testStaleCreateConflictRetainsLocalQueuePayload() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("original.txt")
+        let bytes = Data("0123456789".utf8)
+        try bytes.write(to: source)
+        let store = VaultQueueStore(root: folder.appendingPathComponent("queue"))
+        let entry = try store.stage(source, filename: "file.txt", sourceType: "file", scope: scope())
+        let client = try queueClient(digest: entry.sha256, failureStatus: 409)
+        let transfer = VaultTransferModel(queueStore: store)
+        await transfer.resumeQueue(scope: scope(), using: client) { true }
+        let retained = try XCTUnwrap(store.entries(for: scope()).first)
+        XCTAssertEqual(retained.state, "failed")
+        XCTAssertNil(retained.uploadID)
+        XCTAssertEqual(try Data(contentsOf: store.payload(for: retained)), bytes)
+        XCTAssertFalse(VaultResumeURLProtocol.recordedRequests().contains {
+            $0.httpMethod == "PUT" || $0.url?.path.hasSuffix("complete") == true
+        })
+    }
+
+    private func queueClient(digest: String, failureStatus: Int? = nil, transportError: URLError? = nil,
+                             endpointBinding: [String: String]? = nil) throws -> APIClient {
+        VaultResumeURLProtocol.reset(digest: digest, failureStatus: failureStatus, transportError: transportError,
+                                    endpointBinding: endpointBinding)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [VaultResumeURLProtocol.self]
         let cookies = try XCTUnwrap(configuration.httpCookieStorage)
@@ -341,16 +414,25 @@ private final class VaultResumeURLProtocol: URLProtocol {
     private static var requests: [URLRequest] = []
     private static var failureStatus: Int?
     private static var transportError: URLError?
-    static func reset(digest: String, failureStatus: Int? = nil, transportError: URLError? = nil) {
+    private static var endpointBinding: [String: String]?
+    private static var createBody: [String: Any]?
+    static func reset(digest: String, failureStatus: Int? = nil, transportError: URLError? = nil,
+                      endpointBinding: [String: String]? = nil) {
         lock.lock(); defer { lock.unlock() }
         self.digest = digest
         self.failureStatus = failureStatus
         self.transportError = transportError
+        self.endpointBinding = endpointBinding
+        createBody = nil
         requests = []
     }
     static func recordedRequests() -> [URLRequest] {
         lock.lock(); defer { lock.unlock() }
         return requests
+    }
+    static func recordedCreateBody() -> [String: Any]? {
+        lock.lock(); defer { lock.unlock() }
+        return createBody
     }
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -360,6 +442,21 @@ private final class VaultResumeURLProtocol: URLProtocol {
         let digest = Self.digest
         let failureStatus = Self.failureStatus
         let transportError = Self.transportError
+        let endpointBinding = Self.endpointBinding
+        if request.httpMethod == "POST", request.url?.path == "/api/vault/uploads" {
+            var body = request.httpBody ?? Data()
+            if body.isEmpty, let stream = request.httpBodyStream {
+                stream.open()
+                defer { stream.close() }
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let count = stream.read(&buffer, maxLength: buffer.count)
+                    if count <= 0 { break }
+                    body.append(contentsOf: buffer.prefix(count))
+                }
+            }
+            Self.createBody = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        }
         Self.lock.unlock()
         if let transportError {
             client?.urlProtocol(self, didFailWithError: transportError)
@@ -375,13 +472,14 @@ private final class VaultResumeURLProtocol: URLProtocol {
         }
         let ready = request.url?.path.hasSuffix("complete") == true || request.url?.path.hasSuffix("library") == true
         let uploaded = request.httpMethod == "PUT"
-        let item: [String: Any] = [
+        var item: [String: Any] = [
             "id": "existing-upload", "pair": "Fotos", "identity": "photos", "filename": "file.txt",
             "source_type": "file", "device_name": "Test", "size": 10, "sha256": digest,
             "received": ready || uploaded ? 10 : 4, "status": ready ? "ready" : uploaded ? "uploaded" : "receiving",
             "deduplicated": false, "verified": ready, "target_relative": "Sicherpfad/file.txt",
             "created_at": 100, "updated_at": 100
         ]
+        if let endpointBinding { item["endpoint_binding"] = endpointBinding }
         let body: [String: Any]
         if request.url?.path.hasSuffix("library") == true {
             body = ["items": [item]]
