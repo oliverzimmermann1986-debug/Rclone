@@ -49,6 +49,8 @@ jobs:
         run: shellcheck scripts/install.sh
       - name: JavaScript syntax
         run: node --check app/static/app.js
+      - name: Web request regressions
+        run: node --test scripts/test_web_requests.cjs
       - name: Prepare systemd verification paths
         run: |
           sudo groupadd --system rclone-sync

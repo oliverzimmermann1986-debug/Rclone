@@ -385,6 +385,10 @@ function app() {
       const controller = new AbortController();
       if (requestKey) requestControllers.set(requestKey, controller);
       let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, options.timeoutMs || this.requestTimeoutMs);
       try {
         const upper = String(method || 'GET').toUpperCase();
         const opts = { method: upper, credentials: 'include', headers: {} };
@@ -396,16 +400,14 @@ function app() {
           opts.body = JSON.stringify(body);
         }
         opts.signal = controller.signal;
-        const timeout = setTimeout(() => {
-          timedOut = true;
-          controller.abort();
-        }, options.timeoutMs || this.requestTimeoutMs);
-        let response;
-        try { response = await fetch(url, opts); } finally { clearTimeout(timeout); }
+        const response = await fetch(url, opts);
         if (requestKey && requestRevisions.get(requestKey) !== revision) return staleResponse;
         if (!response.ok) {
           if (response.status === 401) { window.location = '/login'; return null; }
-          const err = await response.json().catch(() => ({}));
+          const err = await response.json().catch((error) => {
+            if (error.name === 'AbortError') throw error;
+            return {};
+          });
           if (requestKey && requestRevisions.get(requestKey) !== revision) return staleResponse;
           const rawDetail = err.detail || response.statusText;
           let detail = rawDetail;
@@ -450,6 +452,7 @@ function app() {
         }
         return null;
       } finally {
+        clearTimeout(timeout);
         if (requestKey && requestControllers.get(requestKey) === controller) {
           requestControllers.delete(requestKey);
         }
