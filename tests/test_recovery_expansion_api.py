@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import require_auth
 from app.db import Database
+from app.jobs import locks, runtime_state
 from app.routes import api_recovery
 from app.security import CSRF_COOKIE
 
@@ -19,6 +20,11 @@ class Config:
 
 
 def fixture(tmp_path, monkeypatch):
+    monkeypatch.setattr(locks, "LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(runtime_state, "STATE_DIR", tmp_path / "runtime")
+    monkeypatch.setattr(runtime_state, "RUN_FILE", tmp_path / "runtime" / "run.json")
+    monkeypatch.setattr(runtime_state, "CANCEL_FILE", tmp_path / "runtime" / "cancel")
+    monkeypatch.setattr(runtime_state, "PROCS_DIR", tmp_path / "runtime" / "processes")
     target = tmp_path / "target"
     target.mkdir()
     (target / "proof.txt").write_bytes(b"full recovery proof")
@@ -86,14 +92,19 @@ def test_expansion_mutations_require_auth_csrf_and_exclusive_job(tmp_path, monke
         == 403
     )
     client.headers["X-CSRF-Token"] = "test-csrf"
-    job = database.job_start("backup", exclusive_scope=True)
-    assert (
-        client.post(
-            "/api/recovery/snapshots", json={"identity": "documents"}
-        ).status_code
-        == 409
-    )
-    database.job_finish(job, "ok")
+    lease = locks.try_file_lock("backup")
+    assert lease is not None
+    try:
+        job = database.job_start("backup", exclusive_scope=True)
+        assert (
+            client.post(
+                "/api/recovery/snapshots", json={"identity": "documents"}
+            ).status_code
+            == 409
+        )
+        database.job_finish(job, "ok")
+    finally:
+        lease.release()
 
     def denied():
         raise HTTPException(401, "Login required")

@@ -12,17 +12,25 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import tempfile
-import threading
 import time
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from .device_vault import _atomic_json, _hash_file, _is_remote
+from .device_vault import _atomic_json, _is_remote
+from .device_vault import _hash_file as _plain_hash_file
+from .jobs.recovery_lifecycle import (
+    RecoveryBusy,
+    RecoveryCancelled,
+    check_cancelled,
+    ensure_cleanup_safe,
+    copy_file,
+    finish_job,
+    hash_file as _hash_file,
+    run_command,
+)
 from .jobs.restore_test import _endpoints
-from .rclone_args import rclone_subprocess_env
+from .jobs.restore_workspace import create_workspace, forget_workspace
 
 MAX_FILES = 100_000
 MAX_MANIFEST_BYTES = 32 * 1024 * 1024
@@ -87,7 +95,7 @@ def snapshot_root(config: Mapping[str, Any], *, create: bool = False) -> Path:
 
 
 def _inventory_local(
-    root: Path, *, limit_bytes: int, hashes: bool = False
+    root: Path, *, limit_bytes: int, hashes: bool = False, cancellable: bool = False
 ) -> tuple[dict, list]:
     files: dict[str, dict[str, Any]] = {}
     directories: list[str] = []
@@ -101,7 +109,11 @@ def _inventory_local(
         ) from exc
 
     for base, dirs, names in os.walk(root, followlinks=False, onerror=fail):
+        if cancellable:
+            check_cancelled()
         for name in sorted(dirs + names):
+            if cancellable:
+                check_cancelled()
             item = Path(base) / name
             if item.is_symlink():
                 raise SnapshotError(
@@ -115,7 +127,9 @@ def _inventory_local(
                 total += stat.st_size
                 files[relative] = {"size": stat.st_size, "modified": stat.st_mtime_ns}
                 if hashes:
-                    files[relative]["sha256"] = _hash_file(item)
+                    files[relative]["sha256"] = (
+                        _hash_file if cancellable else _plain_hash_file
+                    )(item)
             else:
                 raise SnapshotError(
                     "Spezialdateien werden im vollständigen Stand nicht unterstützt"
@@ -128,67 +142,39 @@ def _inventory_local(
 
 
 def _run(command: list[str], *, timeout: int = 900) -> None:
-    result = subprocess.run(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        timeout=timeout,
-        env=rclone_subprocess_env(),
-    )
+    result = run_command(command, timeout=timeout)
     if result.returncode:
         raise SnapshotError(
             f"Recovery-Übertragung oder Zielprüfung fehlgeschlagen (exit {result.returncode})"
         )
 
 
-def _inventory_remote(target: str, work: Path, limit_bytes: int) -> tuple[dict, list]:
-    # Stream a bounded listing; a pathological remote must not exhaust RAM/disk.
-    with tempfile.TemporaryFile(dir=work) as output:
-        process = subprocess.Popen(
+def _inventory_remote(
+    target: str, work: Path, limit_bytes: int, *, cancellable: bool = False
+) -> tuple[dict, list]:
+    try:
+        result = run_command(
             ["rclone", "lsjson", "--recursive", "--", target],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            env=rclone_subprocess_env(),
+            timeout=120,
+            max_output_bytes=MAX_MANIFEST_BYTES,
+            cancellable=cancellable,
         )
-        timed_out = threading.Event()
-
-        def kill_on_timeout() -> None:
-            timed_out.set()
-            process.kill()
-
-        watchdog = threading.Timer(120, kill_on_timeout)
-        watchdog.daemon = True
-        watchdog.start()
-        try:
-            assert process.stdout is not None
-            with process.stdout:
-                for block in iter(lambda: process.stdout.read(64 * 1024), b""):
-                    if output.tell() + len(block) > MAX_MANIFEST_BYTES:
-                        raise SnapshotError(
-                            "Sicherungsbestand überschreitet das Manifestlimit"
-                        )
-                    output.write(block)
-            process.wait(timeout=10)
-            if process.returncode or timed_out.is_set():
-                raise SnapshotError(
-                    "Sicherungsbestand ist nicht vollständig lesbar oder das Zeitlimit wurde erreicht"
-                )
-        finally:
-            watchdog.cancel()
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)
-        output.seek(0)
-        try:
-            rows = json.load(output)
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise SnapshotError("Sicherungsziel lieferte ungültigen Bestand") from exc
+    except RecoveryCancelled:
+        raise
+    except RuntimeError as exc:
+        raise SnapshotError(str(exc)) from exc
+    if result.returncode:
+        raise SnapshotError("Sicherungsbestand ist nicht vollständig lesbar")
+    try:
+        rows = json.loads(result.stdout)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise SnapshotError("Sicherungsziel lieferte ungültigen Bestand") from exc
     if not isinstance(rows, list) or len(rows) > MAX_FILES:
         raise SnapshotError("Sicherungsbestand überschreitet das Dateilimit")
     files, directories, total = {}, [], 0
     for row in rows:
+        if cancellable:
+            check_cancelled()
         if not isinstance(row, dict):
             raise SnapshotError("Ungültiger Eintrag im Sicherungsbestand")
         relative = _relative(str(row.get("Path") or ""))
@@ -218,14 +204,19 @@ def capture_snapshot(
     }
     root = snapshot_root(bound_config, create=True)
     point_id = f"full-{uuid.uuid4().hex}"
-    work = Path(tempfile.mkdtemp(prefix=".capture-", dir=root))
+    work, workspace_lease = create_workspace(
+        root, prefix="restore-snapshot-capture-", kind="snapshot-capture"
+    )
     source, target = _endpoints(pair)
     try:
         before, directories = (
-            _inventory_remote(target, work, limit)
+            _inventory_remote(target, work, limit, cancellable=True)
             if _is_remote(target)
             else _inventory_local(
-                Path(target).expanduser().resolve(), limit_bytes=limit, hashes=True
+                Path(target).expanduser().resolve(),
+                limit_bytes=limit,
+                hashes=True,
+                cancellable=True,
             )
         )
         required = sum(item["size"] for item in before.values())
@@ -253,8 +244,10 @@ def capture_snapshot(
         else:
             target_root = Path(target).expanduser().resolve()
             for relative in directories:
+                check_cancelled()
                 (data / relative).mkdir(mode=0o700, parents=True, exist_ok=True)
             for relative, info in before.items():
+                check_cancelled()
                 origin = target_root / relative
                 destination = data / relative
                 destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -267,6 +260,7 @@ def capture_snapshot(
                 with origin.open("rb") as src, destination.open("xb") as dst:
                     remaining = info["size"]
                     while remaining:
+                        check_cancelled()
                         block = src.read(min(1024 * 1024, remaining))
                         if not block:
                             raise SnapshotError(
@@ -282,7 +276,9 @@ def capture_snapshot(
                     raise SnapshotError(
                         "Sicherungsdatei änderte sich während der Erfassung"
                     )
-        captured, captured_dirs = _inventory_local(data, limit_bytes=limit, hashes=True)
+        captured, captured_dirs = _inventory_local(
+            data, limit_bytes=limit, hashes=True, cancellable=True
+        )
         if set(captured) != set(before) or any(
             captured[p]["size"] != before[p]["size"] for p in before
         ):
@@ -290,10 +286,13 @@ def capture_snapshot(
                 "Vollständiger Stand enthält nicht alle erwarteten Dateien"
             )
         after, after_dirs = (
-            _inventory_remote(target, work, limit)
+            _inventory_remote(target, work, limit, cancellable=True)
             if _is_remote(target)
             else _inventory_local(
-                Path(target).expanduser().resolve(), limit_bytes=limit, hashes=True
+                Path(target).expanduser().resolve(),
+                limit_bytes=limit,
+                hashes=True,
+                cancellable=True,
             )
         )
         if before != after or directories != after_dirs:
@@ -331,12 +330,23 @@ def capture_snapshot(
             > MAX_MANIFEST_BYTES
         ):
             raise SnapshotError("Vollständiger Stand überschreitet das Manifestlimit")
+        check_cancelled()
         _atomic_json(work / "manifest.json", manifest)
+        check_cancelled()
         os.replace(work, root / point_id)
         return public_snapshot(manifest)
     finally:
-        if work.exists() and work.parent == root:
-            shutil.rmtree(work)
+        try:
+            if work.exists() and work.parent == root:
+                ensure_cleanup_safe()
+                shutil.rmtree(work)
+            forget_workspace(work)
+        except RecoveryBusy:
+            # The registry must survive until startup confirms that every
+            # registered child has exited. The workspace is still unverified.
+            pass
+        finally:
+            workspace_lease.release()
 
 
 def capture_if_enabled(
@@ -458,8 +468,15 @@ def run_snapshot_capture(
             "snapshot": capture_snapshot(config, pair, max_total_mb=max_total_mb),
         }
     except Exception as exc:
-        result = {"ok": False, "error": str(exc)[:500]}
-    database.job_finish(job_id, "ok" if result["ok"] else "error", result)
+        result = {
+            "ok": False,
+            "error": str(exc)[:500],
+            "cancelled": isinstance(exc, RecoveryCancelled),
+        }
+    status = (
+        "ok" if result["ok"] else ("cancelled" if result.get("cancelled") else "error")
+    )
+    finish_job(database, job_id, status, result)
     database.audit_add(
         "recovery_snapshot_captured", actor="web", details={"job_id": job_id, **result}
     )
@@ -523,13 +540,18 @@ def run_snapshot_restore(
         if shutil.disk_usage(root).free < total + 64 * 1024 * 1024:
             raise SnapshotError("Nicht genügend Speicher für die Wiederherstellung")
         source = Path(snapshot_target(config, pair, point_id))
+        check_cancelled()
+        record["staging_path"] = str(work / "data")
+        _save_record(database, record)
         work.mkdir(mode=0o700)
         created = True
         data = work / "data"
         data.mkdir(mode=0o700)
         for directory in manifest["directories"]:
+            check_cancelled()
             (data / directory).mkdir(mode=0o700, parents=True, exist_ok=True)
         for entry in manifest["entries"]:
+            check_cancelled()
             origin = source / entry["path"]
             if origin.is_symlink() or not origin.resolve().is_relative_to(source):
                 raise SnapshotError("Unsichere Datei im vollständigen Stand")
@@ -537,12 +559,14 @@ def run_snapshot_restore(
                 raise SnapshotError("Gespeicherter Stand ist unvollständig")
             destination = data / entry["path"]
             destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            shutil.copyfile(origin, destination)
+            copy_file(origin, destination)
             if _hash_file(destination) != entry["sha256"]:
                 raise SnapshotError(
                     "SHA-256 des wiederhergestellten Stands stimmt nicht"
                 )
-        actual, _dirs = _inventory_local(data, limit_bytes=MAX_BYTES, hashes=True)
+        actual, _dirs = _inventory_local(
+            data, limit_bytes=MAX_BYTES, hashes=True, cancellable=True
+        )
         expected = {
             entry["path"]: {"size": entry["size"], "sha256": entry["sha256"]}
             for entry in manifest["entries"]
@@ -552,6 +576,7 @@ def run_snapshot_restore(
             for path, item in actual.items()
         } != expected:
             raise SnapshotError("Wiederherstellung ist unvollständig")
+        check_cancelled()
         record.update(
             status="ready",
             verified=True,
@@ -562,10 +587,20 @@ def run_snapshot_restore(
             manifest_sha256=_hash_file(source.parent / "manifest.json"),
         )
     except Exception as exc:
-        record.update(status="error", error=str(exc)[:500])
+        record.update(
+            status="cancelled" if isinstance(exc, RecoveryCancelled) else "error",
+            verified=False,
+            error=str(exc)[:500],
+        )
         if created and work is not None and work.exists() and work.parent == root:
-            shutil.rmtree(work)
+            try:
+                ensure_cleanup_safe()
+                shutil.rmtree(work)
+            except (OSError, RecoveryBusy) as cleanup_error:
+                record.update(cleanup_required=True, cleanup_error=str(cleanup_error))
+    finish_job(
+        database, job_id, "ok" if record["verified"] else record["status"], record
+    )
     _save_record(database, record)
-    database.job_finish(job_id, "ok" if record["verified"] else "error", record)
     database.audit_add("full_recovery_finished", actor="web", details=record)
     return record
