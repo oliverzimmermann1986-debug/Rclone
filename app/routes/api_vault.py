@@ -64,6 +64,12 @@ def _safe(callable_, *args, **kwargs):
         raise HTTPException(status, message) from exc
 
 
+class ExpectedEndpoints(BaseModel):
+    local: str = Field(min_length=1, max_length=4096)
+    remote: str = Field(min_length=1, max_length=4096)
+    direction: Literal["push", "pull", "bisync"]
+
+
 class CreateUploadRequest(BaseModel):
     identity: str = Field(min_length=1, max_length=128)
     filename: str = Field(min_length=1, max_length=240)
@@ -71,12 +77,21 @@ class CreateUploadRequest(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
     source_type: Literal["photo", "file"]
     device_name: str = Field(default="iPhone", min_length=1, max_length=80)
+    expected_endpoints: ExpectedEndpoints | None = None
 
 
 @router.post("/uploads", status_code=201)
 def start_upload(body: CreateUploadRequest) -> dict[str, Any]:
     config = get_config().snapshot()
-    pair = _find_pair(config, body.identity)
+    try:
+        pair = _find_pair(config, body.identity)
+    except HTTPException as exc:
+        if body.expected_endpoints is not None and exc.status_code == 404:
+            raise HTTPException(
+                409,
+                "Datenweg wurde entfernt; Konfiguration neu laden und das Sicherungsziel prüfen.",
+            ) from exc
+        raise
     _source, target = _endpoints(pair)
     result = _safe(
         create_upload,
@@ -88,6 +103,9 @@ def start_upload(body: CreateUploadRequest) -> dict[str, Any]:
         source_type=body.source_type,
         device_name=body.device_name,
         target_root=target,
+        expected_endpoints=body.expected_endpoints.model_dump()
+        if body.expected_endpoints is not None
+        else None,
     )
     get_db().audit_add(
         "device_vault_upload_started",
@@ -124,7 +142,13 @@ def finish_upload(upload_id: str, background: BackgroundTasks) -> dict[str, Any]
     config = get_config().snapshot()
     result = _safe(queue_completion, config, upload_id)
     if result.get("status") in {"queued", "transferring"}:
-        background.add_task(complete_upload, get_db(), config, upload_id)
+        background.add_task(
+            complete_upload,
+            get_db(),
+            config,
+            upload_id,
+            config_provider=get_config().snapshot,
+        )
     return result
 
 

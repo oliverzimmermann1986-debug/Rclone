@@ -21,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Iterator, Mapping
+from typing import Any, BinaryIO, Callable, Iterator, Mapping
 
 from .db import Database
 from .file_lock import acquire as acquire_file_lock
@@ -44,6 +44,41 @@ _UPLOAD_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")
 
 class VaultError(ValueError):
     """A safe error that may be shown to an authenticated client."""
+
+
+def endpoint_binding(pair: Mapping[str, Any]) -> dict[str, str]:
+    """Only endpoint semantics bind an upload; scheduling changes do not."""
+    return {
+        "local": str(pair.get("local") or ""),
+        "remote": str(pair.get("remote") or ""),
+        "direction": str(pair.get("direction") or "bisync").lower().strip(),
+    }
+
+
+def _validate_destination(config: Mapping[str, Any], record: Mapping[str, Any]) -> None:
+    from .jobs.restore_test import _endpoints
+
+    pairs = (config.get("backup") or {}).get("pairs") or []
+    configured = next(
+        (
+            pair
+            for pair in pairs
+            if isinstance(pair, Mapping)
+            and str(pair.get("id") or pair.get("name") or "")
+            == str(record.get("identity") or "")
+        ),
+        None,
+    )
+    binding = record.get("endpoint_binding")
+    if (
+        configured is None
+        or _endpoints(configured)[1] != str(record.get("target_root") or "")
+        or (binding is not None and binding != endpoint_binding(configured))
+    ):
+        raise VaultError(
+            "Datenweg hat sich geändert oder wurde entfernt; lokale Datei bleibt erhalten. "
+            "Konfiguration neu laden und die Datei dem gewünschten Datenweg neu zuordnen."
+        )
 
 
 def vault_root(config: Mapping[str, Any]) -> Path:
@@ -246,6 +281,7 @@ def _public_record(record: Mapping[str, Any]) -> dict[str, Any]:
             "updated_at",
             "completed_at",
             "error",
+            "endpoint_binding",
         )
     }
 
@@ -260,7 +296,16 @@ def create_upload(
     source_type: str,
     device_name: str,
     target_root: str,
+    expected_endpoints: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    binding = endpoint_binding(pair)
+    if (
+        expected_endpoints is not None
+        and endpoint_binding(expected_endpoints) != binding
+    ):
+        raise VaultError(
+            "Datenweg hat sich geändert; Konfiguration neu laden und das Sicherungsziel prüfen."
+        )
     if size < 1 or size > MAX_FILE_BYTES:
         raise VaultError("Dateigröße liegt außerhalb des erlaubten Bereichs")
     digest = str(sha256 or "").lower()
@@ -301,6 +346,7 @@ def create_upload(
         "deduplicated": deduplicated,
         "verified": False,
         "target_root": str(target_root),
+        "endpoint_binding": binding,
         "target_relative": target_relative,
         "created_at": now,
         "updated_at": now,
@@ -324,6 +370,7 @@ def append_chunk(
     root = vault_root(config)
     with _upload_record_lock(root, upload_id):
         record = _reconcile_received(root, _load_record(root, upload_id))
+        _validate_destination(config, record)
         if record.get("status") != "receiving":
             raise VaultError("Dieser Upload nimmt keine weiteren Daten an")
         part = _part_path(root, upload_id)
@@ -350,6 +397,8 @@ def queue_completion(config: Mapping[str, Any], upload_id: str) -> dict[str, Any
     root = vault_root(config)
     with _upload_record_lock(root, upload_id):
         record = _reconcile_received(root, _load_record(root, upload_id))
+        if record.get("status") != "ready":
+            _validate_destination(config, record)
         if record.get("status") in {"queued", "transferring", "ready"}:
             return _public_record(record)
         if record.get("status") != "uploaded":
@@ -455,7 +504,11 @@ def _copy_and_verify_remote(
 
 
 def complete_upload(
-    database: Database, config: Mapping[str, Any], upload_id: str
+    database: Database,
+    config: Mapping[str, Any],
+    upload_id: str,
+    *,
+    config_provider: Callable[[], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     root = vault_root(config)
     with _LOCK:
@@ -463,7 +516,9 @@ def complete_upload(
     if not transfer_lock.acquire(blocking=False):
         return _public_record(_load_record(root, upload_id))
     try:
-        return _complete_upload_locked(database, config, upload_id, root)
+        return _complete_upload_locked(
+            database, config, upload_id, root, config_provider=config_provider
+        )
     finally:
         transfer_lock.release()
 
@@ -473,6 +528,8 @@ def _complete_upload_locked(
     config: Mapping[str, Any],
     upload_id: str,
     root: Path,
+    *,
+    config_provider: Callable[[], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     with _upload_record_lock(root, upload_id):
         record = _load_record(root, upload_id)
@@ -483,13 +540,21 @@ def _complete_upload_locked(
         record["status"] = "transferring"
         record = _save_record(root, record)
     try:
+        current_config = config_provider() if config_provider else config
+        _validate_destination(current_config, record)
         blob = _prepare_blob(root, record)
+        # Preparing/hashing a large payload can outlive a configuration edit.
+        current_config = config_provider() if config_provider else config
+        _validate_destination(current_config, record)
         target = _join_target(
             str(record["target_root"]), str(record["target_relative"])
         )
         timeout = max(
             300,
-            int(float((config.get("backup") or {}).get("timeout_hours", 4)) * 3600),
+            int(
+                float((current_config.get("backup") or {}).get("timeout_hours", 4))
+                * 3600
+            ),
         )
         if _is_remote(target):
             _copy_and_verify_remote(
@@ -594,27 +659,10 @@ def library(
 def _restore_missing_blob(
     root: Path, config: Mapping[str, Any], record: dict[str, Any]
 ) -> Path:
-    from .jobs.restore_test import _endpoints
     from .handover_rescue import HandoverError, _safe_relative
 
     # A receipt never authorizes an arbitrary path or an old/reconfigured remote.
-    pairs = (config.get("backup") or {}).get("pairs") or []
-    configured = next(
-        (
-            pair
-            for pair in pairs
-            if isinstance(pair, Mapping)
-            and str(pair.get("id") or pair.get("name") or "")
-            == str(record.get("identity") or "")
-        ),
-        None,
-    )
-    if not configured or _endpoints(configured)[1] != str(
-        record.get("target_root") or ""
-    ):
-        raise VaultError(
-            "Sicherungsziel hat sich geändert; Notfallakte einem bestehenden Datenweg neu zuordnen"
-        )
+    _validate_destination(config, record)
     try:
         relative = _safe_relative(str(record.get("target_relative") or ""))
     except HandoverError as exc:
