@@ -13,6 +13,23 @@ permissions:
   contents: read
 
 jobs:
+  web-ui:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium webkit
+      - run: npm run test:web
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: web-ui-results
+          path: test-results/
+          retention-days: 14
   python:
     runs-on: ubuntu-24.04
     strategy:
@@ -49,6 +66,8 @@ jobs:
         run: shellcheck scripts/install.sh
       - name: JavaScript syntax
         run: node --check app/static/app.js
+      - name: Web request regressions
+        run: node --test scripts/test_web_requests.cjs
       - name: Prepare systemd verification paths
         run: |
           sudo groupadd --system rclone-sync

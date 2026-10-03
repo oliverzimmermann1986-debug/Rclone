@@ -92,6 +92,7 @@ function app() {
     configValidation: { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true },
     scheduleEditor: { mode: 'daily', time: '03:00', intervalHours: 6, intervalMinutes: 30, weekday: '0' },
     schedulePreview: { loading: false, valid: null, error: '', nextRuns: [], timer: null },
+    restorePlan: { loading: false, saving: false, generation: 0, receivedAt: 0, error: '', revision: '', settings: null, preview: null, previewKey: '', rhythm: 'custom', time: '05:00', weekday: '0' },
     performancePreset: 'balanced',
 
     plan: { loading: false, data: null, dry_run: true, definitionId: null },
@@ -334,6 +335,7 @@ function app() {
         this.loadOverview(true); if (!configAlreadyLoaded) this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadCopies(); this.loadSchedulerState(true); this.loadPushStatus(true);
       } else if (page === 'settings') {
         if (!configAlreadyLoaded) this.loadConfig(); this.loadFilterFile(); this.loadSchedulerState(true);
+        if (this.settingsTab === 'scheduler') this.loadRestorePlan();
       }
     },
 
@@ -385,6 +387,10 @@ function app() {
       const controller = new AbortController();
       if (requestKey) requestControllers.set(requestKey, controller);
       let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, options.timeoutMs || this.requestTimeoutMs);
       try {
         const upper = String(method || 'GET').toUpperCase();
         const opts = { method: upper, credentials: 'include', headers: {} };
@@ -396,16 +402,14 @@ function app() {
           opts.body = JSON.stringify(body);
         }
         opts.signal = controller.signal;
-        const timeout = setTimeout(() => {
-          timedOut = true;
-          controller.abort();
-        }, options.timeoutMs || this.requestTimeoutMs);
-        let response;
-        try { response = await fetch(url, opts); } finally { clearTimeout(timeout); }
+        const response = await fetch(url, opts);
         if (requestKey && requestRevisions.get(requestKey) !== revision) return staleResponse;
         if (!response.ok) {
           if (response.status === 401) { window.location = '/login'; return null; }
-          const err = await response.json().catch(() => ({}));
+          const err = await response.json().catch((error) => {
+            if (error.name === 'AbortError') throw error;
+            return {};
+          });
           if (requestKey && requestRevisions.get(requestKey) !== revision) return staleResponse;
           const rawDetail = err.detail || response.statusText;
           let detail = rawDetail;
@@ -450,6 +454,7 @@ function app() {
         }
         return null;
       } finally {
+        clearTimeout(timeout);
         if (requestKey && requestControllers.get(requestKey) === controller) {
           requestControllers.delete(requestKey);
         }
@@ -1354,6 +1359,120 @@ function app() {
         return;
       }
       this.schedulePreview = { ...this.schedulePreview, loading: false, valid: true, error: '', nextRuns: result?.next_runs || [], enabled: result?.enabled !== false };
+    },
+
+    restorePlanKey() {
+      return JSON.stringify(this.restorePlan.settings);
+    },
+
+    restorePlanDate(timestamp) {
+      return new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium', timeStyle: 'short', timeZone: this.restorePlan.preview?.timezone || 'Europe/Berlin' }).format(new Date(timestamp * 1000));
+    },
+
+    restorePlanEvidenceLabel(path) {
+      const preview = this.restorePlan.preview;
+      const serverNow = (preview?.generated_at || 0) + Math.max(0, performance.now() - this.restorePlan.receivedAt) / 1000;
+      return path.evidence_state === 'passed' && path.valid_until > serverNow
+        ? 'Nachweis gültig bis ' + this.restorePlanDate(path.valid_until)
+        : 'Kein aktuell gültiger Nachweis';
+    },
+
+    async loadRestorePlan() {
+      if (this.restorePlan.loading || this.restorePlan.saving) return;
+      this.restorePlan.generation += 1;
+      this.restorePlan.previewKey = '';
+      this.restorePlan.loading = true;
+      const result = await this.api('GET', '/api/recovery/restore-plan', undefined, { captureError: true, silent: true, requestKey: 'restore-plan' });
+      this.restorePlan.loading = false;
+      if (!result || this.isStale(result) || result.__error) {
+        this.restorePlan.error = result?.detail || 'Prüfplan konnte nicht geladen werden';
+        this.restorePlan.previewKey = '';
+        return;
+      }
+      this.restorePlan.revision = result.revision;
+      this.restorePlan.settings = { ...result.settings };
+      this.restorePlan.preview = result;
+      this.restorePlan.receivedAt = performance.now();
+      this.restorePlan.previewKey = this.restorePlanKey();
+      this.restorePlan.error = '';
+      const fields = result.settings.schedule.split(/\s+/);
+      this.restorePlan.rhythm = 'custom';
+      if (fields.length === 5 && /^\d+$/.test(fields[0]) && /^\d+$/.test(fields[1]) && fields[2] === '*' && fields[3] === '*') {
+        this.restorePlan.time = `${fields[1].padStart(2, '0')}:${fields[0].padStart(2, '0')}`;
+        if (fields[4] === '*') this.restorePlan.rhythm = 'daily';
+        else if (fields[4] === '0,3') this.restorePlan.rhythm = 'twice';
+        else if (/^[0-6]$/.test(fields[4])) { this.restorePlan.rhythm = 'weekly'; this.restorePlan.weekday = fields[4]; }
+      }
+    },
+
+    changeRestorePlan(updateExpression = false) {
+      if (!this.restorePlan.settings || this.restorePlan.saving) return;
+      if (updateExpression && this.restorePlan.rhythm !== 'custom') {
+        const [hour, minute] = this.restorePlan.time.split(':').map(Number);
+        const weekday = this.restorePlan.rhythm === 'daily' ? '*' : this.restorePlan.rhythm === 'twice' ? '0,3' : this.restorePlan.weekday;
+        this.restorePlan.settings.schedule = `${minute} ${hour} * * ${weekday}`;
+      }
+      this.restorePlan.previewKey = '';
+      this.restorePlan.error = '';
+    },
+
+    async previewRestorePlan() {
+      if (!this.restorePlan.settings || this.restorePlan.saving || this.restorePlan.loading) return false;
+      const key = this.restorePlanKey();
+      const revision = this.restorePlan.revision;
+      const generation = this.restorePlan.generation;
+      const result = await this.api('POST', '/api/recovery/restore-plan/preview', {
+        revision, settings: { ...this.restorePlan.settings },
+      }, { captureError: true, silent: true, requestKey: 'restore-plan-preview' });
+      if (this.isStale(result) || key !== this.restorePlanKey() || revision !== this.restorePlan.revision || generation !== this.restorePlan.generation) return false;
+      if (!result || result.__error) {
+        this.restorePlan.error = typeof result?.detail === 'string' ? result.detail : 'Prüfplan konnte nicht geprüft werden';
+        this.restorePlan.previewKey = '';
+        return false;
+      }
+      this.restorePlan.preview = result;
+      this.restorePlan.receivedAt = performance.now();
+      this.restorePlan.previewKey = key;
+      this.restorePlan.error = '';
+      return true;
+    },
+
+    async saveRestorePlan() {
+      if (this.restorePlan.saving || this.restorePlan.loading || !this.restorePlan.settings || this.restorePlan.previewKey !== this.restorePlanKey()) return;
+      if (this.configDirty || this.filterFile.dirty) {
+        this.showToast('Offene Konfigurationsänderungen zuerst speichern oder verwerfen.', 'err');
+        return;
+      }
+      const key = this.restorePlanKey();
+      const revision = this.restorePlan.revision;
+      const generation = this.restorePlan.generation;
+      const settings = { ...this.restorePlan.settings };
+      const names = (this.restorePlan.preview?.data_paths || []).map((path) => path.name).join(', ');
+      const confirmed = await this.requestConfirmation(
+        `Prüfplan für alle aktiven Datenwege übernehmen?\n\n${names}\nZeitplan: ${settings.schedule}\n${settings.sample_files} Dateien, höchstens ${settings.max_total_mb} MiB je Datenweg.`,
+        { title: 'Restore-Prüfplan übernehmen', confirmLabel: 'Prüfplan übernehmen', tone: 'normal' },
+      );
+      if (!confirmed || key !== this.restorePlanKey() || revision !== this.restorePlan.revision || generation !== this.restorePlan.generation || this.restorePlan.loading || this.configDirty || this.filterFile.dirty) return;
+      this.restorePlan.saving = true;
+      try {
+        const result = await this.api('PUT', '/api/recovery/restore-plan', { revision, settings }, { captureError: true });
+        if (!result || result.__error) {
+          this.restorePlan.error = typeof result?.detail === 'string' ? result.detail : 'Prüfplan konnte nicht gespeichert werden';
+          this.restorePlan.previewKey = '';
+          return;
+        }
+        this.restorePlan.revision = result.revision;
+        this.restorePlan.settings = { ...result.settings };
+        this.restorePlan.preview = result;
+        this.restorePlan.receivedAt = performance.now();
+        this.restorePlan.previewKey = this.restorePlanKey();
+        this.restorePlan.error = '';
+        this.showToast('Restore-Prüfplan gespeichert');
+        if (this.config?._revision === revision) {
+          this.config._revision = result.revision;
+          this.config.backup.restore_test = { ...result.settings };
+        }
+      } finally { this.restorePlan.saving = false; }
     },
 
     scheduleModeDescription() {
@@ -2470,7 +2589,7 @@ function app() {
     selectSettingsTab(tab, focus = false) {
       if (!this.settingsTabs.includes(tab)) return;
       this.settingsTab = tab;
-      if (tab === 'scheduler') this.refreshSchedulePreview();
+      if (tab === 'scheduler') { this.refreshSchedulePreview(); this.loadRestorePlan(); }
       if (tab === 'pbs') this.loadPbsStatus();
       if (focus) {
         this.$nextTick(() => document.getElementById(`settings-tab-${tab}`)?.focus());

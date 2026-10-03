@@ -17,6 +17,9 @@ temp/
 .vscode/
 .pytest_cache/
 .ruff_cache/
+node_modules/
+test-results/
+playwright-report/
 graphify-out/
 app/static/_preview*.html
 app/static/_stub-methods.js

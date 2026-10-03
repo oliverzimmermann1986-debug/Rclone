@@ -60,6 +60,10 @@ struct VaultQueueEntry: Codable, Identifiable, Sendable {
     var received: Int64 = 0
     var state = "waiting"
     var lastError: String?
+
+    // Permanent errors and explicit skips retain payloads until the user retries,
+    // exports or removes them. Old queue records require no migration.
+    var requiresUserRetry: Bool { state == "failed" || state == "skipped" }
 }
 
 /// Entries commit atomically and keep their payload until the target is verified.

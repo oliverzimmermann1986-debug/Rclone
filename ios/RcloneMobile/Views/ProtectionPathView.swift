@@ -67,12 +67,30 @@ struct RestoreSampleScopeView: View {
 struct ProtectionPathDetailView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    let pair: StoragePair
-    @State private var confirmRestore = false
-    @State private var successFeedback = 0
+    private let originalPair: StoragePair
+    private let dataPathID: String?
+    private let expectedServer: String?
+    private let expectedUsername: String?
+
+    init(pair: StoragePair, dataPathID: String? = nil, server: String? = nil, username: String? = nil) {
+        originalPair = pair
+        self.dataPathID = dataPathID
+        expectedServer = server
+        expectedUsername = username
+    }
+
+    private var currentPair: StoragePair? {
+        if let expectedServer, expectedServer != model.serverAddress { return nil }
+        if let expectedUsername, expectedUsername != model.savedUsername { return nil }
+        return ProtectionPathSelection.resolve(original: originalPair, dataPathID: dataPathID,
+                                               storage: model.storage, config: model.config)
+    }
+
+    private var pair: StoragePair { currentPair ?? originalPair }
 
     var body: some View {
         List {
+            if currentPair != nil {
             Section {
                 HStack(spacing: 14) {
                     ZStack {
@@ -149,17 +167,16 @@ struct ProtectionPathDetailView: View {
             }
 
             Section {
-                Button { confirmRestore = true } label: {
-                    Label(
-                        isRestoreTestRunning
-                            ? "Restore-Test läuft …"
-                            : pair.restoreEvidence?.isCurrent == true ? "Nachweis erneuern" : "Restore-Test starten",
-                        systemImage: isRestoreTestRunning ? "hourglass" : "arrow.counterclockwise.circle.fill"
-                    )
-                }
-                .disabled(isRestoreTestRunning)
+                RestoreTestActionButton(pairName: pair.name,
+                                        title: pair.restoreEvidence?.isCurrent == true ? "Nachweis erneuern" : "Restore-Test starten")
             } footer: {
                 Text("Der Test lädt eine begrenzte Stichprobe in ein temporäres Verzeichnis, vergleicht Prüfsummen und entfernt die Kopien anschließend.")
+            }
+            } else {
+                ContentUnavailableView(
+                    "Datenweg nicht verfügbar", systemImage: "point.3.connected.trianglepath.dotted",
+                    description: Text("Der Datenweg wurde geändert oder entfernt. Öffne den aktuellen Datenweg erneut aus der Übersicht.")
+                )
             }
         }
         .listStyle(.insetGrouped)
@@ -168,17 +185,6 @@ struct ProtectionPathDetailView: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) { Button("Fertig") { dismiss() } }
         }
-        .confirmationDialog("Wiederherstellbarkeit prüfen?", isPresented: $confirmRestore, titleVisibility: .visible) {
-            Button("Restore-Test starten") {
-                Task {
-                    if await model.runRestoreTest(pair: pair.name) { successFeedback += 1 }
-                }
-            }
-            Button("Abbrechen", role: .cancel) {}
-        } message: {
-            Text("Originaldateien werden nicht verändert. Der Server prüft eine sichere Stichprobe gegen die Quelle.")
-        }
-        .sensoryFeedback(.success, trigger: successFeedback)
     }
 
     private var sourceIsLocal: Bool { pair.source == pair.local }

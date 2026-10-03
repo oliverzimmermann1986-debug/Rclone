@@ -2,11 +2,15 @@ import SwiftUI
 
 struct DashboardView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
     @Binding var showingSettings: Bool
     @State private var confirmRunAll = false
     @State private var confirmCancel = false
     @State private var successFeedback = 0
     @State private var selectedProtectionPath: StoragePair?
+    @State private var selectedProtectionPathID: String?
+    @State private var selectedProtectionPathServer: String?
+    @State private var selectedProtectionPathUsername: String?
     @State private var showingAssessment = false
     @State private var showingIncidents = false
 
@@ -52,28 +56,16 @@ struct DashboardView: View {
                     }
                 }
 
-                Section("Direkt vom iPhone") {
-                    NavigationLink { DeviceVaultView() } label: {
-                        HStack(spacing: 13) {
-                            Image(systemName: "iphone.and.arrow.forward")
-                                .font(.title3)
-                                .foregroundStyle(.green)
-                                .frame(width: 34, height: 34)
-                                .background(.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Geräte-Vault").font(.body.weight(.semibold))
-                                Text("Fotos und Dateien verifiziert in deinen Schutzpfad legen")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
 
                 Section {
                     if let pairs = model.storage?.pairs, !pairs.isEmpty {
                         ForEach(pairs) { pair in
-                            Button { selectedProtectionPath = pair } label: {
+                            Button {
+                                selectedProtectionPathID = model.config?.backup.pairs.first { $0.name == pair.name }?.id
+                                selectedProtectionPathServer = model.serverAddress
+                                selectedProtectionPathUsername = model.savedUsername
+                                selectedProtectionPath = pair
+                            } label: {
                                 CopyListRow(
                                     pair: pair,
                                     isMeasuring: model.storageSizesAreLoading,
@@ -133,6 +125,25 @@ struct DashboardView: View {
                         Text("Datenweg antippen, um Größenvergleich und Dateitypen zu sehen.")
                     }
                 }
+
+                Section("Direkt vom iPhone") {
+                    NavigationLink { DeviceVaultView() } label: {
+                        HStack(spacing: 13) {
+                            Image(systemName: "iphone.and.arrow.forward")
+                                .font(.title3)
+                                .foregroundStyle(.green)
+                                .frame(width: 34, height: 34)
+                                .background(.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Geräte-Vault").font(.body.weight(.semibold))
+                                Text("Fotos und Dateien verifiziert in deinen Schutzpfad legen")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+
 
                 if let last = overview.jobs.last {
                     Section("Letzter Lauf") {
@@ -198,7 +209,10 @@ struct DashboardView: View {
         }
         .sensoryFeedback(.success, trigger: successFeedback)
         .sheet(item: $selectedProtectionPath) { pair in
-            NavigationStack { ProtectionPathDetailView(pair: pair) }
+            NavigationStack {
+                ProtectionPathDetailView(pair: pair, dataPathID: selectedProtectionPathID,
+                                         server: selectedProtectionPathServer, username: selectedProtectionPathUsername)
+            }
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
@@ -217,18 +231,20 @@ struct DashboardView: View {
             }
         }
         .task {
+            model.setSceneActive(scenePhase == .active)
             while !Task.isCancelled {
                 await model.refreshProgress()
-                try? await Task.sleep(for: .seconds(5))
+                let interval: Duration = model.progress?.running == true ? .seconds(5) : .seconds(15)
+                try? await Task.sleep(for: interval)
             }
         }
+        .onChange(of: scenePhase) { _, phase in model.setSceneActive(phase == .active) }
     }
 
     private func statusSummary(_ overview: OverviewResponse) -> some View {
         let level = protectionLevel(for: overview)
         let assessment = assessment(for: overview)
-        return Button { showingAssessment = true } label: {
-            ProtectionStatusCard(
+        return ProtectionStatusCard(
                 level: level,
                 score: assessment.score,
                 hostname: overview.system.hostname,
@@ -237,13 +253,22 @@ struct DashboardView: View {
                 totalPaths: overview.pairs.total,
                 scheduledPaths: overview.pairs.scheduled,
                 restoreProof: restoreProofMetric,
-                nextAction: nextProtectionAction(for: overview, level: level)
+                nextAction: nextProtectionAction(for: overview, level: level),
+                restorePairName: nextRestorePair(for: overview)?.name,
+                openIncidents: { showingIncidents = true },
+                openAssessment: { showingAssessment = true }
             )
-        }
-        .buttonStyle(.plain)
-        .accessibilityHint("Öffnet die nachvollziehbare Zusammensetzung des Vertrauensscores.")
         .listRowInsets(EdgeInsets())
         .listRowBackground(Color.clear)
+    }
+
+    private func nextRestorePair(for overview: OverviewResponse) -> StoragePair? {
+        guard !overview.alerts.contains(where: { ["error", "warn", "warning"].contains($0.level.lowercased()) }),
+              !overview.pairs.health.contains(where: {
+                  ["error", "failed", "timeout"].contains($0.lastStatus?.lowercased() ?? "") || $0.overdue == true
+              }) else { return nil }
+        return model.storage?.pairs.first { $0.restoreEvidence?.state == "failed" }
+            ?? model.storage?.pairs.first { $0.restoreEvidence?.isCurrent != true }
     }
 
     private func assessment(for overview: OverviewResponse) -> ProtectionAssessment {
@@ -405,6 +430,7 @@ private enum ProtectionLevel: Equatable {
 }
 
 private struct ProtectionStatusCard: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let level: ProtectionLevel
     let score: Int
     let hostname: String
@@ -414,10 +440,83 @@ private struct ProtectionStatusCard: View {
     let scheduledPaths: Int
     let restoreProof: String
     let nextAction: String
+    let restorePairName: String?
+    let openIncidents: () -> Void
+    let openAssessment: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .center, spacing: 15) {
+            ViewThatFits(in: .horizontal) {
+                statusHeading(horizontal: true)
+                statusHeading(horizontal: false)
+            }
+
+            AdaptiveMetricGroup {
+                protectionMetric(
+                    value: "\(activePaths)/\(totalPaths)",
+                    label: "Datenwege",
+                    symbol: "point.3.connected.trianglepath.dotted"
+                )
+                if !dynamicTypeSize.isAccessibilitySize { Divider().frame(height: 38) }
+                protectionMetric(
+                    value: "\(scheduledPaths)",
+                    label: "Geplant",
+                    symbol: "calendar.badge.clock"
+                )
+                if !dynamicTypeSize.isAccessibilitySize { Divider().frame(height: 38) }
+                protectionMetric(
+                    value: restoreProof,
+                    label: "Restore",
+                    symbol: "arrow.counterclockwise.circle"
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: level.symbol)
+                        .font(.caption.bold())
+                        .foregroundStyle(level.color)
+                        .frame(width: 22, height: 22)
+                        .background(level.color.opacity(0.14), in: Circle())
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(level == .ok ? "Nächster Check" : "Nächster Schritt")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(nextAction)
+                            .font(.subheadline.weight(.medium))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if let restorePairName {
+                    RestoreTestActionButton(pairName: restorePairName, title: "\(restorePairName) jetzt prüfen")
+                        .buttonStyle(.borderedProminent)
+                        .tint(level.color)
+                } else if level != .ok {
+                    Button("Hinweise öffnen", systemImage: "exclamationmark.bubble", action: openIncidents)
+                        .buttonStyle(.bordered)
+                }
+                Button("Punkteberechnung ansehen", systemImage: "info.circle", action: openAssessment)
+                    .accessibilityIdentifier("protectionAssessmentButton")
+                    .font(.caption)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHint("Öffnet die Zusammensetzung des Vertrauensscores.")
+            }
+        }
+        .padding(20)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .stroke(level.color.opacity(0.16), lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func statusHeading(horizontal: Bool) -> some View {
+        let layout = horizontal && !dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(HStackLayout(alignment: .center, spacing: 15))
+            : AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+        return layout {
                 DataPathSignatureMark(color: level.color)
                     .frame(width: 66, height: 66)
                     .accessibilityHidden(true)
@@ -433,9 +532,9 @@ private struct ProtectionStatusCard: View {
                     Text("\(hostname) · \(AppFormat.relative(generatedAt))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 0)
+                if horizontal && !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 0) }
                 VStack(alignment: .trailing, spacing: 1) {
                     Text("\(score)")
                         .font(.title2.monospacedDigit().bold())
@@ -445,68 +544,29 @@ private struct ProtectionStatusCard: View {
                         .tracking(0.7)
                         .foregroundStyle(.secondary)
                 }
-            }
-
-            HStack(spacing: 0) {
-                protectionMetric(
-                    value: "\(activePaths)/\(totalPaths)",
-                    label: "Datenwege",
-                    symbol: "point.3.connected.trianglepath.dotted"
-                )
-                Divider().frame(height: 38)
-                protectionMetric(
-                    value: "\(scheduledPaths)",
-                    label: "Geplant",
-                    symbol: "calendar.badge.clock"
-                )
-                Divider().frame(height: 38)
-                protectionMetric(
-                    value: restoreProof,
-                    label: "Restore",
-                    symbol: "arrow.counterclockwise.circle"
-                )
-            }
-
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: level.symbol)
-                    .font(.caption.bold())
-                    .foregroundStyle(level.color)
-                    .frame(width: 22, height: 22)
-                    .background(level.color.opacity(0.14), in: Circle())
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(level == .ok ? "Nächster Check" : "Nächster Schritt")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(nextAction)
-                        .font(.subheadline.weight(.medium))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
-        .padding(20)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .stroke(level.color.opacity(0.16), lineWidth: 1)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Schutzstatus \(level.title). Vertrauensscore \(score) von 100. \(activePaths) von \(totalPaths) Datenwegen aktiv. \(nextAction)")
+        .accessibilityLabel("Schutzstatus \(level.title). Vertrauensscore \(score) von 100. \(hostname), \(AppFormat.relative(generatedAt)).")
     }
 
     private func protectionMetric(value: String, label: String, symbol: String) -> some View {
-        VStack(spacing: 3) {
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(HStackLayout(alignment: .center, spacing: 10))
+            : AnyLayout(VStackLayout(alignment: .center, spacing: 3))
+        return layout {
             Image(systemName: symbol)
                 .font(.caption)
                 .foregroundStyle(level.color)
             Text(value)
                 .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: dynamicTypeSize.isAccessibilitySize ? .leading : .center)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label): \(value)")
+        .accessibilityIdentifier("protectionMetric-\(label)")
     }
 }
 

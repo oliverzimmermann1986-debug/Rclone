@@ -53,6 +53,7 @@ from .routes import (
     api_maintenance,
     api_push,
     api_recovery,
+    api_restore_plan,
     api_storage,
     api_test,
     api_vault,
@@ -541,6 +542,7 @@ app.include_router(api_pbs.router)
 app.include_router(api_push.router)
 app.include_router(api_webauthn.router)
 app.include_router(api_recovery.router)
+app.include_router(api_restore_plan.router)
 app.include_router(api_vault.router)
 
 STATIC_DIR = Path(__file__).parent / "static"

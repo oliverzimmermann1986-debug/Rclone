@@ -2,6 +2,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -284,25 +285,69 @@ def test_cancel_after_safety_recheck_still_blocks_process_creation(
     assert rc == 130
 
 
-def test_active_process_may_run_longer_than_inactivity_timeout(tmp_path: Path):
-    rclone_sync.reset_cancel()
-    log_file = tmp_path / "active.log"
-    script = (
-        "import sys,time\n"
-        "for index in range(8):\n"
-        " print(f'progress {index}', flush=True)\n"
-        " time.sleep(0.04)\n"
-    )
+def _controlled_progress_process(monkeypatch, line_for_index):
+    """Exercise the real log parser/watchdog without OS startup/scheduling races."""
 
-    started = time.monotonic()
+    class Clock:
+        elapsed = 0.0
+
+        def monotonic(self):
+            return self.elapsed
+
+        def sleep(self, seconds):
+            self.elapsed += seconds
+
+    clock = Clock()
+
+    class ProgressProcess:
+        def __init__(self, args, **kwargs):
+            self.args = args
+            self.output = kwargs["stdout"]
+            self.emitted = 0
+            self.terminated = False
+
+        def poll(self):
+            if self.terminated:
+                return 0
+            while self.emitted < 8 and clock.elapsed >= self.emitted * 0.04:
+                self.output.write(line_for_index(self.emitted) + "\n")
+                self.output.flush()
+                self.emitted += 1
+            return 0 if clock.elapsed >= 8 * 0.04 else None
+
+        def terminate(self):
+            self.terminated = True
+
+    monkeypatch.setattr(rclone_sync.subprocess, "Popen", ProgressProcess)
+    monkeypatch.setattr(rclone_sync, "_register_proc", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rclone_sync, "_unregister_proc", lambda _process: True)
+    monkeypatch.setattr(
+        rclone_sync, "_terminate_proc", lambda process: process.terminate()
+    )
+    monkeypatch.setattr(
+        rclone_sync,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep, time=time.time),
+    )
+    return clock
+
+
+def test_active_process_may_run_longer_than_inactivity_timeout(
+    tmp_path: Path, monkeypatch
+):
+    rclone_sync.reset_cancel()
+    clock = _controlled_progress_process(monkeypatch, lambda index: f"progress {index}")
+    log_file = tmp_path / "active.log"
+
+    started = clock.monotonic()
     rc = rclone_sync._run_rclone_command(
-        [sys.executable, "-c", script],
+        ["rclone", "copy", "source", "target"],
         log_file,
         timeout_sec=0.12,
     )
 
     assert rc == 0
-    assert time.monotonic() - started > 0.12
+    assert clock.monotonic() - started > 0.12
     assert "progress 7" in log_file.read_text(encoding="utf-8")
 
 
@@ -338,18 +383,16 @@ def test_repeated_stats_heartbeat_does_not_hide_stalled_process(tmp_path: Path):
     assert caught.value.watchdog_reason == "stalled"
 
 
-def test_changed_transfer_stats_count_as_real_progress(tmp_path: Path):
+def test_changed_transfer_stats_count_as_real_progress(tmp_path: Path, monkeypatch):
     rclone_sync.reset_cancel()
-    log_file = tmp_path / "transfer-progress.log"
-    script = (
-        "import time\n"
-        "for index in range(8):\n"
-        " print(f'Transferred: {index} B / 8 B, {index * 12.5}%, 1 B/s, ETA 1s', flush=True)\n"
-        " time.sleep(0.04)\n"
+    _controlled_progress_process(
+        monkeypatch,
+        lambda index: f"Transferred: {index} B / 8 B, {index * 12.5}%, 1 B/s, ETA 1s",
     )
+    log_file = tmp_path / "transfer-progress.log"
 
     rc = rclone_sync._run_rclone_command(
-        [sys.executable, "-c", script],
+        ["rclone", "copy", "source", "target"],
         log_file,
         timeout_sec=0.12,
     )
