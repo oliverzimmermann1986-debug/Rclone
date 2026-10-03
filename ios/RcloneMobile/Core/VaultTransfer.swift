@@ -195,7 +195,7 @@ final class VaultTransferModel: ObservableObject {
                 catch APIError.server(status: 404, message: _) { resumed = nil }
                 try checkActiveScope(isCurrentScope)
             }
-            if let resumed { try validate(resumed, for: entry) }
+            if let resumed { try validate(resumed, for: entry, scope: scope) }
             let statusToResume = resumed?.status == "error" ? nil : resumed
             var status: VaultUploadStatus
             if let statusToResume {
@@ -208,12 +208,13 @@ final class VaultTransferModel: ObservableObject {
                     size: size,
                     sha256: digest,
                     sourceType: entry.sourceType,
-                    deviceName: UIDevice.current.name
+                    deviceName: UIDevice.current.name,
+                    expectedEndpoints: VaultEndpointBinding(scope: scope)
                 )
             )
             }
             try checkActiveScope(isCurrentScope)
-            try validate(status, for: entry)
+            try validate(status, for: entry, scope: scope)
             try persist(status, entry: &entry)
             current = status
             await updateLiveActivity(status)
@@ -241,11 +242,11 @@ final class VaultTransferModel: ObservableObject {
                     try await Task.sleep(for: .seconds(retryCount))
                     try checkActiveScope(isCurrentScope)
                     status = try await client.getVaultUpload(uploadID: status.id)
-                    try validate(status, for: entry)
+                    try validate(status, for: entry, scope: scope)
                     try handle.seek(toOffset: UInt64(status.received))
                 }
                 try checkActiveScope(isCurrentScope)
-                try validate(status, for: entry)
+                try validate(status, for: entry, scope: scope)
                 try persist(status, entry: &entry)
                 offset = status.received
                 current = status
@@ -263,7 +264,7 @@ final class VaultTransferModel: ObservableObject {
                 }
             }
             try checkActiveScope(isCurrentScope)
-            try validate(status, for: entry)
+            try validate(status, for: entry, scope: scope)
             try persist(status, entry: &entry)
             current = status
             await updateLiveActivity(status)
@@ -282,7 +283,7 @@ final class VaultTransferModel: ObservableObject {
                     status = try await client.getVaultUpload(uploadID: status.id)
                 }
                 try checkActiveScope(isCurrentScope)
-                try validate(status, for: entry)
+                try validate(status, for: entry, scope: scope)
                 try persist(status, entry: &entry)
                 current = status
                 await updateLiveActivity(status)
@@ -295,7 +296,12 @@ final class VaultTransferModel: ObservableObject {
             await endLiveActivity(status)
     }
 
-    private func validate(_ status: VaultUploadStatus, for entry: VaultQueueEntry) throws {
+    private func validate(_ status: VaultUploadStatus, for entry: VaultQueueEntry, scope: VaultQueueScope) throws {
+        if let binding = status.endpointBinding, binding != VaultEndpointBinding(scope: scope) {
+            throw VaultTransferError.verificationFailed(
+                "Der Datenweg hat sich geändert. Die lokale Datei bleibt erhalten; Konfiguration neu laden und das Sicherungsziel prüfen."
+            )
+        }
         guard status.identity == entry.pairID, status.sha256.lowercased() == entry.sha256,
               status.size == entry.size, status.received >= 0, status.received <= entry.size else {
             throw APIError.invalidResponse

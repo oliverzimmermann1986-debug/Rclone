@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import time
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from cryptography.exceptions import InvalidTag
@@ -220,7 +220,11 @@ def validate_inventory(package: Mapping[str, Any]) -> dict:
     clean = []
     seen = set()
     for row in records:
-        if not isinstance(row, dict) or row.get("identity") not in known:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("identity"), str)
+            or row["identity"] not in known
+        ):
             raise HandoverError("Geräte-Datei ist keinem Datenweg zugeordnet")
         identity = row["identity"]
         identifier = str(row.get("id") or "")
@@ -236,7 +240,10 @@ def validate_inventory(package: Mapping[str, Any]) -> dict:
             raise HandoverError(
                 "Ungültige Dateigröße oder Prüfsumme in der Notfallakte"
             )
-        if row.get("source_type") not in {"photo", "file"}:
+        if not isinstance(row.get("source_type"), str) or row["source_type"] not in {
+            "photo",
+            "file",
+        }:
             raise HandoverError("Ungültiger Dateityp in der Notfallakte")
         try:
             filename = device_vault.safe_filename(str(row.get("filename") or ""))
@@ -306,6 +313,19 @@ def import_handover(
             "Jeden enthaltenen Datenweg ausdrücklich einem bestehenden Sicherungsziel zuordnen"
         )
     root = device_vault.vault_root(config)
+    # Serialize existence checks and publication across service processes.
+    # A process-local lock alone allows another importer to publish and verify
+    # a receipt before this importer overwrites its stale prepared copy.
+    with device_vault._upload_record_lock(root, "rescue-import"):
+        return _import_inventory(root, current, inventory, mappings)
+
+
+def _import_inventory(
+    root: Path,
+    current: Mapping[str, Mapping[str, Any]],
+    inventory: Mapping[str, Any],
+    mappings: Mapping[str, str],
+) -> dict:
     prepared = []
     for row in inventory["records"]:
         pair = current[mappings[row["identity"]]]
@@ -319,6 +339,21 @@ def import_handover(
         ).hexdigest()
         identifier = f"rescue-{signature[:40]}"
         path = device_vault._record_path(root, identifier)
+        if path.exists():
+            previous = device_vault._load_record(root, identifier)
+            if previous.get("rescue_signature") != signature:
+                raise HandoverError(
+                    "Eine vorhandene Datei kollidiert mit der Notfallakte"
+                )
+            if previous.get("identity") != _identity(pair):
+                # A fresh explicit mapping may reuse the same cloud endpoint
+                # after the old data-path ID was removed. Keep its old receipt,
+                # and bind the new receipt to the newly selected data-path ID.
+                signature = hashlib.sha256(
+                    json.dumps([signature, _identity(pair)]).encode()
+                ).hexdigest()
+                identifier = f"rescue-{signature[:40]}"
+                path = device_vault._record_path(root, identifier)
         if path.exists():
             existing = device_vault._load_record(root, identifier)
             if existing.get("rescue_signature") != signature:
@@ -345,19 +380,21 @@ def import_handover(
         prepared.append((path, record, True))
     written = []
     try:
-        with device_vault._LOCK:
-            for path, record, should_write in prepared:
-                if should_write:
-                    if path.exists():
-                        raise HandoverError(
-                            "Notfallimport wurde bereits parallel gestartet"
-                        )
-                    record.update(device_vault._save_record(root, record))
-                    written.append(path)
-    except Exception:
-        for path in written:
-            path.unlink(missing_ok=True)
-        raise
+        for path, record, should_write in prepared:
+            if should_write:
+                if path.exists():
+                    raise HandoverError(
+                        "Notfallimport wurde bereits parallel gestartet"
+                    )
+                record.update(device_vault._save_record(root, record))
+                written.append(path)
+    except OSError as exc:
+        # Published receipts can already have been restored by another process.
+        # Keep them: retrying this inventory skips them and imports the remainder.
+        raise HandoverError(
+            "Notfallimport konnte nicht vollständig gespeichert werden. "
+            "Vorhandene Einträge bleiben erhalten; dieselbe Notfallakte erneut importieren."
+        ) from exc
     return {
         "ok": True,
         "imported": len(written),

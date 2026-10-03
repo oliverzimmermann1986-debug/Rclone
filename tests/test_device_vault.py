@@ -24,7 +24,18 @@ def _config(tmp_path: Path) -> dict:
             "data_dir": str(tmp_path / "data"),
             "device_vault_dir": str(tmp_path / "vault"),
         },
-        "backup": {"timeout_hours": 0.1},
+        "backup": {
+            "timeout_hours": 0.1,
+            "pairs": [
+                {
+                    "id": "photos",
+                    "name": "Fotos",
+                    "local": str(tmp_path / "photos"),
+                    "remote": str(tmp_path / "target"),
+                    "direction": "push",
+                }
+            ],
+        },
     }
 
 
@@ -32,7 +43,7 @@ def _create(tmp_path: Path, payload: bytes) -> tuple[dict, dict]:
     config = _config(tmp_path)
     record = device_vault.create_upload(
         config,
-        pair={"id": "photos", "name": "Fotos"},
+        pair=config["backup"]["pairs"][0],
         filename="Urlaub.heic",
         size=len(payload),
         sha256=hashlib.sha256(payload).hexdigest(),

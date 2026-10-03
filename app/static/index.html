@@ -95,6 +95,14 @@
           <button class="button secondary small" @click="loadConfig()" :disabled="configLoading" x-text="configLoading ? 'Lädt…' : 'Neu laden'"></button>
         </div>
         <div class="loading-state page-loading" x-show="configLoading && !configLoaded" role="status" aria-live="polite" x-cloak>Konfiguration wird geladen…</div>
+        <div class="connection-alert error" x-show="restoreTestStart.phase === 'unknown'" role="alert" x-cloak>
+          <span class="alert-icon" aria-hidden="true">!</span>
+          <span><strong>Startstatus unbekannt</strong><small>Die Antwort zum Restore-Drill fehlt. Der Auftrag kann bereits laufen oder abgeschlossen sein. Prüfe die Läufe, bevor du einen weiteren Drill startest.</small><small x-show="restoreTestStart.checked">Status geprüft: Es läuft kein Restore-Drill. Prüfe auch die abgeschlossenen Läufe.</small><small x-show="restoreTestStart.error" x-text="restoreTestStart.error"></small></span>
+          <div class="button-stack">
+            <button class="button secondary small" @click="reviewRestoreTestStart()" :disabled="restoreTestStart.checking" x-text="restoreTestStart.checking ? 'Prüft…' : 'Aufträge prüfen'"></button>
+            <button class="button danger small" x-show="restoreTestStart.checked" @click="retryRestoreTestStart()" :disabled="pending.restoreTest || busy()">Weiteren Drill starten</button>
+          </div>
+        </div>
         <!-- DASHBOARD -->
         <section x-show="page==='dashboard'" x-cloak>
           <div class="page-heading">
@@ -634,7 +642,7 @@
               <div><span class="section-kicker">Abdeckung</span><h3>Kopien je Datenbestand</h3><p>Nach Quellpfad gruppiert statt nach Pair — beantwortet, ob jeder Bestand mehrfach, an getrennten Orten und versioniert liegt.</p></div>
               <div class="heading-actions">
                 <button class="button secondary" @click="loadCopies()" :disabled="copies.loading" x-text="copies.loading ? 'Lädt…' : 'Aktualisieren'"></button>
-                <button class="button secondary" @click="runRestoreTest()" :disabled="busy()">Restore-Drill starten</button>
+                <button class="button secondary" @click="runRestoreTest()" :disabled="busy() || restoreTestStart.phase !== 'idle'" x-text="pending.restoreTest ? 'Start wird geprüft…' : 'Restore-Drill starten'"></button>
               </div>
             </div>
 
@@ -697,7 +705,7 @@
               <div class="form-grid three">
                 <label class="field"><span>Snapshot</span><select x-model="snapshots.restoreName"><option value="">Bitte auswählen</option><template x-for="item in snapshots.items" :key="item.name"><option :value="item.name" x-text="formatDateTime(item.mtime) + ' · ' + item.name"></option></template></select></label>
                 <label class="field"><span>Aktuelles Passwort</span><input type="password" x-model="snapshots.password" autocomplete="current-password"></label>
-                <div class="field action-field"><span>Aktion</span><button class="button danger" @click="restoreSnapshot()" :disabled="!snapshots.restoreName || !snapshots.password">Wiederherstellen</button></div>
+                <div class="field action-field"><span>Aktion</span><button class="button danger" @click="restoreSnapshot()" :disabled="pending.snapshot || !snapshots.restoreName || !snapshots.password">Wiederherstellen</button></div>
               </div>
               <div class="snapshot-list"><template x-for="item in snapshots.items.slice(0,8)" :key="item.name"><div><span class="mono" x-text="item.name"></span><span x-text="formatBytes(item.size)"></span><span x-text="formatDateTime(item.mtime)"></span><span class="mono snapshot-hash" :title="item.sha256" x-text="item.sha256 ? item.sha256.slice(0,12) : '—'"></span></div></template></div>
             </div>

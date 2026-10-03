@@ -640,12 +640,8 @@ private struct SelectiveRecoveryBrowser: View {
     let dataPath: RecoveryDataPath
     let pointID: String
     let pointLabel: String
-    @State private var path = ""
-    @State private var items: [RecoveryBrowseItem] = []
-    @State private var selection: Set<String> = []
-    @State private var isLoading = false
+    @StateObject private var browser = RecoveryBrowserLoadState()
     @State private var confirmRestore = false
-    @State private var errorMessage: String?
 
     init(
         dataPath: RecoveryDataPath,
@@ -663,28 +659,28 @@ private struct SelectiveRecoveryBrowser: View {
                 Label("Wiederherstellung erfolgt nur in ein getrenntes Staging.", systemImage: "shield.lefthalf.filled")
                     .font(.subheadline).foregroundStyle(.green)
                 LabeledContent("Stand", value: pointLabel)
-                if !path.isEmpty {
+                if !browser.path.isEmpty {
                     Button { navigateUp() } label: { Label("Übergeordnet", systemImage: "arrow.up") }
                 }
             }
-            Section(path.isEmpty ? "Sicherungsziel" : path) {
-                if isLoading {
+            Section(browser.path.isEmpty ? "Sicherungsziel" : browser.path) {
+                if browser.isLoading {
                     ProgressView()
                 } else {
-                    ForEach(items) { item in
+                    ForEach(browser.items) { item in
                         if item.isDirectory {
-                            Button { path = item.path; Task { await load() } } label: {
+                            Button { Task { await load(path: item.path) } } label: {
                                 Label(item.name, systemImage: "folder.fill")
                             }
                             .foregroundStyle(.primary)
                         } else {
-                            Button { toggle(item.path) } label: {
+                            Button { browser.toggle(item.path) } label: {
                                 HStack {
                                     Label(item.name, systemImage: "doc")
                                     Spacer()
                                     if let size = item.size { Text(AppFormat.bytes(size)).font(.caption).foregroundStyle(.secondary) }
-                                    Image(systemName: selection.contains(item.path) ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(selection.contains(item.path) ? .green : .secondary)
+                                    Image(systemName: browser.selection.contains(item.path) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(browser.selection.contains(item.path) ? .green : .secondary)
                                 }
                             }
                             .foregroundStyle(.primary)
@@ -693,18 +689,18 @@ private struct SelectiveRecoveryBrowser: View {
                     }
                 }
             }
-            if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
+            if let errorMessage = browser.errorMessage { Text(errorMessage).foregroundStyle(.red) }
         }
         .navigationTitle(pointID == "current" ? dataPath.name : "Zeitreise")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Wiederherstellen") { confirmRestore = true }
-                    .disabled(selection.isEmpty)
+                    .disabled(!browser.canStartRestore)
             }
         }
-        .task { await load() }
-        .confirmationDialog("\(selection.count) Datei(en) ins Recovery-Staging holen?", isPresented: $confirmRestore) {
+        .task { await load(path: browser.path) }
+        .confirmationDialog("\(browser.selection.count) Datei(en) ins Recovery-Staging holen?", isPresented: $confirmRestore) {
             Button("Getrennt wiederherstellen") { Task { await restore() } }
             Button("Abbrechen", role: .cancel) {}
         } message: {
@@ -712,59 +708,53 @@ private struct SelectiveRecoveryBrowser: View {
         }
     }
 
-    private func load() async {
-        if model.isDemoMode {
-            items = [
-                RecoveryBrowseItem(name: "Dokumente", path: "Dokumente", isDirectory: true, size: nil, modifiedAt: nil),
-                RecoveryBrowseItem(name: "Beispiel.pdf", path: "Beispiel.pdf", isDirectory: false, size: 245_760, modifiedAt: nil)
-            ]
-            return
-        }
-        isLoading = true
-        defer { isLoading = false }
-        do {
+    private func load(path: String) async {
+        confirmRestore = false
+        await browser.load(path: path) { requestedPath in
+            if model.isDemoMode {
+                return [
+                    RecoveryBrowseItem(name: "Dokumente", path: "Dokumente", isDirectory: true, size: nil, modifiedAt: nil),
+                    RecoveryBrowseItem(name: "Beispiel.pdf", path: "Beispiel.pdf", isDirectory: false, size: 245_760, modifiedAt: nil)
+                ]
+            }
             if pointID == "current" {
-                items = try await model.withCurrentClient {
-                    try await $0.browseRecovery(identity: dataPath.name, path: path)
+                return try await model.withCurrentClient {
+                    try await $0.browseRecovery(identity: dataPath.name, path: requestedPath)
                 }.items
             } else {
-                items = try await model.withCurrentClient {
+                return try await model.withCurrentClient {
                     try await $0.browseRecoveryPoint(
                         identity: dataPath.name,
                         pointID: pointID,
-                        path: path
+                        path: requestedPath
                     )
                 }.items
             }
-            errorMessage = nil
-        } catch { errorMessage = error.localizedDescription }
-    }
-
-    private func toggle(_ value: String) {
-        if selection.contains(value) { selection.remove(value) } else if selection.count < 100 { selection.insert(value) }
+        }
     }
 
     private func navigateUp() {
-        path = path.split(separator: "/").dropLast().joined(separator: "/")
-        Task { await load() }
+        let parent = browser.path.split(separator: "/").dropLast().joined(separator: "/")
+        Task { await load(path: parent) }
     }
 
     private func restore() async {
         guard !model.isDemoMode else { return }
-        do {
-            let response = try await model.withCurrentClient {
+        let response = await browser.restore { capturedPaths in
+            try await model.withCurrentClient {
                 try await $0.startSelectiveRestore(
                     SelectiveRestoreRequest(
                         identity: dataPath.name,
-                        paths: selection.sorted(),
+                        paths: capturedPaths,
                         maxTotalMB: 512,
                         pointID: pointID
                     )
                 )
             }
+        }
+        if let response {
             model.actionMessage = "Recovery #\(response.jobID) läuft. Das geprüfte Ergebnis erscheint unter Läufe."
-            selection.removeAll()
-        } catch { errorMessage = error.localizedDescription }
+        }
     }
 }
 
