@@ -118,7 +118,7 @@ jobs:
           fi
       - name: Upload simulator build and test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sicherpfad-ios-simulator-${{ github.run_number }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ios-artifacts/
