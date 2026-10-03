@@ -42,6 +42,60 @@ def test_restore_warning_subscription_is_opt_in(tmp_path: Path):
     ]
 
 
+@pytest.mark.parametrize(
+    "event", ["restore_test_error", "restore_test_warning", "restore_test_ok"]
+)
+def test_restore_notifications_dedupe_each_run_instead_of_the_pair_scope(
+    tmp_path, monkeypatch, event
+):
+    from app.jobs import restore_test as drill
+
+    database = Database(tmp_path / "restore-events.db")
+    database.push_device_upsert(TOKEN, "production")
+    monkeypatch.setattr(
+        push_notifications, "_settings", lambda _event: {"retention_seconds": 86400}
+    )
+    monkeypatch.setattr(push_notifications, "dispatch_pending_pushes", lambda **_kw: {})
+    notices = []
+
+    def notify(name, title, message, **extra):
+        notices.append(
+            push_notifications.send_push_notifications(
+                name, title, message, extra=extra, db=database
+            )["queued"]
+        )
+
+    monkeypatch.setattr(drill, "notify", notify)
+    result = {
+        "name": "Fotos",
+        "ok": event == "restore_test_ok",
+        "verified": 1,
+        "sample_size": 1,
+    }
+    if event == "restore_test_warning":
+        result.update(
+            sample_status="partial_selection",
+            requested_sample_size=2,
+            restored_files=1,
+            return_code=0,
+            sample_shortfall_reason="byte_budget",
+        )
+    elif event == "restore_test_error":
+        result["error"] = "Prüfsummen weichen ab"
+    for job_id in (81, 82, 81):
+        summary = {
+            "kind": "restoretest",
+            "job_id": job_id,
+            "ok": event == "restore_test_ok",
+            "verified_files": 1,
+            "pairs": [result],
+        }
+        drill._notify_result(summary, [result])
+
+    assert notices == [1, 1, 0]
+    assert database.push_outbox_status()["pending"] == 2
+
+
 def _base_config(tmp_path: Path) -> dict:
     return {
         "web": {"username": "admin", "local_browse_roots": [str(tmp_path)]},

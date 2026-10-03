@@ -121,6 +121,14 @@ def test_codemagic_pins_the_verified_simulator_image():
     assert '-destination "platform=iOS Simulator,name=iPhone 17,OS=latest"' in config
 
 
+def test_ios_ci_selects_an_available_simulator_by_id():
+    root = Path(__file__).parents[1]
+    config = (root / ".github/workflows/ios.yml").read_text(encoding="utf-8")
+
+    assert 'SIMULATOR_ID="$(python3 scripts/ios_simulator_destination.py)"' in config
+    assert '-destination "platform=iOS Simulator,id=$SIMULATOR_ID"' in config
+
+
 def test_codemagic_uses_checksum_verified_exact_xcodegen_before_generation():
     root = Path(__file__).parents[1]
     config = (root / "codemagic.yaml").read_text(encoding="utf-8")

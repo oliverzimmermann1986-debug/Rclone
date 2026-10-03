@@ -31,7 +31,10 @@ def test_native_recovery_center_uses_real_server_endpoints_and_safe_staging():
     assert "RecoveryCenterView()" in system
     assert "Getrennt wiederherstellen" in view
     assert "Produktive Quell- und Zielpfade werden nicht verändert" in view
-    assert "Notfallübung starten" in view
+    assert (
+        'RestoreTestActionButton(pairName: dataPath.name, title: "Stichprobe prüfen")'
+        in view
+    )
     assert "RPO" in view and "RTO-Stichprobe" in view
     assert "func loadDemo()" in view
     assert "model.isDemoMode" in view

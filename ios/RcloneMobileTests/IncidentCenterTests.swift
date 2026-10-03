@@ -63,6 +63,81 @@ final class IncidentCenterTests: XCTestCase {
             XCTAssertEqual(incident.severity, "error")
             XCTAssertEqual(incident.color, Color.red)
             XCTAssertEqual(incident.jobID, 82)
+            XCTAssertEqual(incident.restoreReason, .failed)
+            XCTAssertEqual(incident.restoreTestPairName, "Fotos")
+        }
+    }
+
+    func testRestoreEvidenceReasonsHaveSpecificMessagesAndPairScopedRestoreActions() throws {
+        let cases: [(String, String?, RestoreIncidentReason, String)] = [
+            ("never", nil, .never, "Noch kein Restore-Nachweis"),
+            ("stale", "expired", .expired, "sieben Tagen abgelaufen"),
+            ("stale", "configuration_changed", .configurationChanged, "aktuelle Konfiguration"),
+            ("stale", "unbound", .unbound, "keinem eindeutig bestätigten Datenweg"),
+            ("stale", "invalid_timestamp", .invalidTimestamp, "Zeitstempel"),
+            ("stale", "unknown_reason", .unverified, "Kein aktuell gültiger Restore-Nachweis")
+        ]
+        for (state, invalidReason, reason, message) in cases {
+            var proof: [String: Any] = ["state": state, "valid": false, "checksum_verified": false]
+            if let invalidReason { proof["invalid_reason"] = invalidReason }
+            let storage = try makeStorage(proof: proof, name: "Serverfotos")
+            let incident = try XCTUnwrap(ProtectionIncident.collect(overview: try overview(), storage: storage).first)
+            XCTAssertEqual(incident.restoreReason, reason)
+            XCTAssertEqual(incident.category, "Restore-Nachweis", "Structured evidence must not be classified from the pair name")
+            XCTAssertEqual(incident.severity, "warning")
+            XCTAssertTrue(incident.message.contains(message))
+            XCTAssertTrue(incident.recommendation.contains("Restore-Test"))
+            XCTAssertTrue(incident.recommendation.contains("Originale bleiben unverändert"))
+            XCTAssertFalse(incident.recommendation.contains("Neustart"))
+            XCTAssertEqual(incident.restoreTestPairName, "Serverfotos")
+        }
+    }
+
+    func testAbsentRestoreEvidenceStillOffersProofForExactPair() throws {
+        let data = Data(#"{"pairs":[{"name":"Rezepte","local":"/recipes","remote":"cloud:recipes"}]}"#.utf8)
+        let storage = try JSONDecoder().decode(StorageOverview.self, from: data)
+        let incident = try XCTUnwrap(ProtectionIncident.collect(overview: try overview(), storage: storage).first)
+        XCTAssertEqual(incident.category, "Restore-Nachweis")
+        XCTAssertEqual(incident.restoreReason, .never)
+        XCTAssertEqual(incident.restoreTestPairName, "Rezepte")
+        XCTAssertNil(incident.jobID)
+    }
+
+    func testProofThatExpiresWhileResponseIsCachedIsNotCurrent() throws {
+        let proof: [String: Any] = ["state": "passed", "valid": true, "checksum_verified": true,
+            "valid_until": Date().timeIntervalSince1970 - 60, "job_id": 81]
+        let storage = try makeStorage(proof: proof)
+        XCTAssertFalse(try XCTUnwrap(storage.pairs.first?.restoreEvidence).isCurrent)
+        let incident = try XCTUnwrap(ProtectionIncident.collect(overview: try overview(), storage: storage).first)
+        XCTAssertEqual(incident.restoreReason, .expired)
+        XCTAssertEqual(incident.severity, "warning")
+        XCTAssertEqual(incident.jobID, 81)
+    }
+
+    func testCurrentProofCreatesNoIncidentAndBackupFailureDoesNotOfferRestoreAction() throws {
+        let proof: [String: Any] = ["state": "passed", "valid": true, "checksum_verified": true,
+            "valid_until": Date().timeIntervalSince1970 + 3600]
+        let storage = try makeStorage(proof: proof)
+        XCTAssertTrue(ProtectionIncident.collect(overview: try overview(), storage: storage).isEmpty)
+        let incident = try XCTUnwrap(ProtectionIncident.collect(
+            overview: try overview(health: [health(error: "Berechtigung fehlt")]), storage: storage).first)
+        XCTAssertEqual(incident.category, "Berechtigung")
+        XCTAssertEqual(incident.severity, "error")
+        XCTAssertNil(incident.restoreReason)
+        XCTAssertNil(incident.restoreTestPairName)
+    }
+
+    func testFailedProofRetainsFailureWhenInvalidReasonAlsoExists() throws {
+        for error in ["Datei konnte nicht gelesen werden", "mismatch", "rclone check exit 1"] {
+            let storage = try makeStorage(proof: ["state": "failed", "valid": false, "checksum_verified": false,
+                "invalid_reason": "expired", "error": error, "job_id": 82])
+            let incident = try XCTUnwrap(ProtectionIncident.collect(overview: try overview(), storage: storage).first)
+            XCTAssertEqual(incident.restoreReason, .failed)
+            XCTAssertEqual(incident.category, "Restore-Test")
+            XCTAssertEqual(incident.severity, "error")
+            XCTAssertTrue(incident.message.contains(error))
+            XCTAssertTrue(incident.recommendation.contains("Restore-Protokoll"))
+            XCTAssertFalse(incident.recommendation.contains("Neustart"))
         }
     }
 
@@ -84,6 +159,8 @@ final class IncidentCenterTests: XCTestCase {
         XCTAssertTrue(incident.recommendation.contains("nur bewusst"))
         XCTAssertEqual(incident.pairName, "Fotos")
         XCTAssertEqual(incident.jobID, 81)
+        XCTAssertEqual(incident.restoreReason, .partial)
+        XCTAssertEqual(incident.restoreTestPairName, "Fotos")
     }
 
     func testDuplicateMergesNavigationContextAndMaximumSeverity() throws {

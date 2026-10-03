@@ -99,3 +99,118 @@ struct LoadFailureView: View {
         }
     }
 }
+
+/// Keeps a confirmed action tied to the configuration the user actually saw.
+struct RestoreActionTarget: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let local: String
+    let remote: String
+    let direction: String
+
+    init(pair: PairConfig) {
+        id = pair.id
+        name = pair.name
+        local = pair.local
+        remote = pair.remote
+        direction = pair.direction
+    }
+
+    func matches(_ pair: PairConfig) -> Bool {
+        pair.enabled && id == pair.id && name == pair.name && local == pair.local
+            && remote == pair.remote && direction == pair.direction
+    }
+}
+
+struct RestoreTestActionButton: View {
+    @EnvironmentObject private var model: AppModel
+    let pairName: String
+    let title: String
+    @State private var target: RestoreActionTarget?
+    @State private var targetServer: String?
+    @State private var targetUsername: String?
+    @State private var isConfirming = false
+    @State private var successFeedback = 0
+
+    private var configuredPair: PairConfig? {
+        model.config?.backup.pairs.first { $0.name == pairName && $0.enabled }
+    }
+
+    var body: some View {
+        Button {
+            guard model.canStartRestoreTest, let configuredPair else { return }
+            target = RestoreActionTarget(pair: configuredPair)
+            targetServer = model.serverAddress
+            targetUsername = model.savedUsername
+            isConfirming = true
+        } label: {
+            Label(model.isRestoreTestRunning(for: pairName) ? "\(pairName) wird geprüft …" : title,
+                  systemImage: model.isRestoreTestRunning(for: pairName) ? "hourglass" : "arrow.counterclockwise.circle")
+        }
+        .disabled(!model.canStartRestoreTest || configuredPair == nil)
+        .accessibilityIdentifier("restoreTestActionButton")
+        .accessibilityHint("Öffnet die Bestätigung für eine Restore-Stichprobe dieses Datenwegs.")
+        .confirmationDialog("\(target?.name ?? pairName) jetzt prüfen?", isPresented: $isConfirming,
+                            titleVisibility: .visible) {
+            Button("Stichprobe starten") {
+                guard model.canStartRestoreTest, let target,
+                      targetServer == model.serverAddress, targetUsername == model.savedUsername,
+                      model.config?.backup.pairs.contains(where: target.matches) == true else { return }
+                Task {
+                    if await model.runRestoreTest(pair: target.name) { successFeedback += 1 }
+                }
+            }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Der Server holt eine begrenzte Stichprobe von \(target?.name ?? pairName) in einen temporären Ordner, prüft sie per Prüfsumme und entfernt die Testkopien anschließend. Originaldateien bleiben erhalten.")
+        }
+        .sensoryFeedback(.success, trigger: successFeedback)
+    }
+}
+
+struct AdaptiveMetricGroup<Content: View>: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private let content: Content
+    private let spacing: CGFloat
+
+    init(spacing: CGFloat = 0, @ViewBuilder content: () -> Content) {
+        self.spacing = spacing
+        self.content = content()
+    }
+
+    var body: some View {
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+            : AnyLayout(HStackLayout(alignment: .center, spacing: spacing))
+        layout { content }
+    }
+}
+
+extension RecoveryCalendarDay {
+    var accessibilitySummary: String {
+        "\(date). \(total) Läufe: \(successful) erfolgreich, \(failed) fehlgeschlagen, \(cancelled) abgebrochen. \(restoreTests) Restore-Prüfungen."
+    }
+}
+
+enum ProtectionPathSelection {
+    static func resolve(original: StoragePair, dataPathID: String?, storage: StorageOverview?,
+                        config: ConfigSnapshot?) -> StoragePair? {
+        if let dataPathID {
+            guard let configured = config?.backup.pairs.first(where: { $0.id == dataPathID }) else { return nil }
+            return storage?.pairs.first {
+                $0.name == configured.name && $0.local == configured.local
+                    && $0.remote == configured.remote && $0.direction == configured.direction
+            }
+        }
+        if let config {
+            guard config.backup.pairs.contains(where: {
+                $0.name == original.name && $0.local == original.local && $0.remote == original.remote
+                    && $0.direction == original.direction
+            }) else { return nil }
+        }
+        return storage?.pairs.first {
+            $0.name == original.name && $0.local == original.local && $0.remote == original.remote
+                && $0.direction == original.direction
+        }
+    }
+}

@@ -1,5 +1,49 @@
 import SwiftUI
 
+enum RestoreIncidentReason: Equatable {
+    case never, expired, configurationChanged, unbound, invalidTimestamp, partial, failed, unverified
+
+    init(evidence: RestoreEvidence?) {
+        guard let evidence else { self = .never; return }
+        // An incomplete or failed attempt remains visible even if it also has a stale binding.
+        if evidence.state == "failed" { self = .failed; return }
+        if evidence.state == "partial" { self = .partial; return }
+        switch evidence.invalidReason {
+        case "expired": self = .expired
+        case "configuration_changed": self = .configurationChanged
+        case "unbound": self = .unbound
+        case "invalid_timestamp": self = .invalidTimestamp
+        default:
+            if evidence.state == "never" {
+                self = .never
+            } else if let validUntil = evidence.validUntil,
+                      validUntil.isFinite, validUntil > 0, validUntil <= Date().timeIntervalSince1970 {
+                self = .expired
+            } else {
+                self = .unverified
+            }
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .never: return "Noch kein Restore-Nachweis vorhanden. Eine Stichprobe prüfen."
+        case .expired: return "Restore-Nachweis nach sieben Tagen abgelaufen. Eine neue Stichprobe prüfen."
+        case .configurationChanged: return "Der Datenweg wurde geändert. Der bisherige Restore-Nachweis gilt nicht für die aktuelle Konfiguration."
+        case .unbound: return "Der bisherige Restore-Nachweis ist keinem eindeutig bestätigten Datenweg zugeordnet. Erneut prüfen."
+        case .invalidTimestamp: return "Der Zeitstempel des Restore-Nachweises ist ungültig. Serverzeit prüfen und danach erneut testen."
+        case .partial: return "Die angeforderte Restore-Stichprobe wurde nicht vollständig geprüft."
+        case .failed: return "Restore-Prüfung fehlgeschlagen. Prüfprotokoll öffnen."
+        case .unverified: return "Kein aktuell gültiger Restore-Nachweis. Eine Stichprobe prüfen."
+        }
+    }
+
+    var recommendation: String {
+        let prerequisite = self == .invalidTimestamp ? "Zuerst die Serverzeit korrigieren. " : ""
+        return prerequisite + "Für diesen Datenweg einen Restore-Test starten: Dateien werden getrennt in ein temporäres Prüfverzeichnis zurückgeholt und per Prüfsumme geprüft. Die Originale bleiben unverändert."
+    }
+}
+
 struct ProtectionIncident: Identifiable {
     let id: String
     let severity: String
@@ -8,6 +52,9 @@ struct ProtectionIncident: Identifiable {
     let recommendation: String
     var pairName: String? = nil
     var jobID: Int? = nil
+    var restoreReason: RestoreIncidentReason? = nil
+
+    var restoreTestPairName: String? { restoreReason == nil ? nil : pairName }
 
     var color: Color { severity == "error" ? .red : .orange }
     var symbol: String { severity == "error" ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill" }
@@ -17,10 +64,12 @@ extension ProtectionIncident {
     static func collect(overview: OverviewResponse, storage: StorageOverview?) -> [ProtectionIncident] {
         var incidents: [ProtectionIncident] = []
 
-        func append(message: String, severity: String, pairName: String? = nil, jobID: Int? = nil, recommendation: String? = nil) {
+        func append(message: String, severity: String, pairName: String? = nil, jobID: Int? = nil,
+                    recommendation: String? = nil, category: String? = nil, restoreReason: RestoreIncidentReason? = nil) {
             let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalized.isEmpty else { return }
             let classified = classify(normalized)
+            let incidentCategory = category ?? classified.category
             let exactMatches = incidents.indices.filter { position in
                 let existing = incidents[position]
                 return existing.message == normalized
@@ -33,7 +82,7 @@ extension ProtectionIncident {
             // Missing context may be filled only when the matching finding is unambiguous.
             let exactPosition = sameContext ?? (exactMatches.count == 1 ? exactMatches.first : nil)
             var relatedPosition: Int?
-            if severity == "warning", classified.category == "Prüfumfang", let jobID {
+            if severity == "warning", incidentCategory == "Prüfumfang", let jobID {
                 let matches = incidents.indices.filter { position in
                     let existing = incidents[position]
                     return existing.severity == "warning" && existing.category == "Prüfumfang"
@@ -50,20 +99,22 @@ extension ProtectionIncident {
                 incidents[position] = ProtectionIncident(
                     id: previous.id,
                     severity: previous.severity == "error" || severity == "error" ? "error" : "warning",
-                    category: classified.category, message: useDetailedMessage ? normalized : previous.message,
+                    category: incidentCategory, message: useDetailedMessage ? normalized : previous.message,
                     recommendation: recommendation ?? previous.recommendation,
-                    pairName: previous.pairName ?? pairName, jobID: previous.jobID ?? jobID
+                    pairName: previous.pairName ?? pairName, jobID: previous.jobID ?? jobID,
+                    restoreReason: restoreReason ?? previous.restoreReason
                 )
                 return
             }
             incidents.append(ProtectionIncident(
                 id: "\(incidents.count):\(normalized)",
                 severity: severity,
-                category: classified.category,
+                category: incidentCategory,
                 message: normalized,
                 recommendation: recommendation ?? classified.recommendation,
                 pairName: pairName,
-                jobID: jobID
+                jobID: jobID,
+                restoreReason: restoreReason
             ))
         }
 
@@ -91,19 +142,26 @@ extension ProtectionIncident {
         }
         for pair in storage?.pairs ?? [] where pair.restoreEvidence?.isCurrent != true {
             let evidence = pair.restoreEvidence
+            let reason = RestoreIncidentReason(evidence: evidence)
             if let scope = evidence?.sampleScope, scope.isPartial {
                 append(message: "\(pair.name): \(scope.message)", severity: "warning",
-                    pairName: pair.name, jobID: evidence?.jobID, recommendation: scope.recommendation)
+                    pairName: pair.name, jobID: evidence?.jobID, recommendation: scope.recommendation,
+                    category: "Prüfumfang", restoreReason: reason)
                 continue
             }
             let error = evidence?.error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let fallback = evidence?.state == "failed"
-                ? "Restore-Prüfung fehlgeschlagen. Prüfprotokoll öffnen."
-                : "Kein aktuell gültiger Restore-Nachweis. Stichprobe prüfen."
+            let failed = reason == .failed
+            let failureClassification = classify(error.isEmpty ? reason.message : error)
+            let failureRecommendation = failureClassification.category == "Betrieb"
+                ? "Restore-Protokoll öffnen und die Fehlerursache prüfen. Nach der Korrektur den Restore-Test für diesen Datenweg erneut starten."
+                : failureClassification.recommendation
             append(
-                message: "\(pair.name): \(error.isEmpty ? fallback : error)",
-                severity: evidence?.state == "failed" ? "error" : "warning",
-                pairName: pair.name, jobID: evidence?.jobID
+                message: "\(pair.name): \(failed && !error.isEmpty ? error : reason.message)",
+                severity: failed ? "error" : "warning",
+                pairName: pair.name, jobID: evidence?.jobID,
+                recommendation: failed ? failureRecommendation : reason.recommendation,
+                category: failed ? (failureClassification.category == "Betrieb" ? "Restore-Test" : failureClassification.category) : "Restore-Nachweis",
+                restoreReason: reason
             )
         }
         return incidents.sorted { ($0.severity == "error" ? 0 : 1) < ($1.severity == "error" ? 0 : 1) }
@@ -160,9 +218,14 @@ struct IncidentCenterView: View {
     @Environment(\.dismiss) private var dismiss
     let incidents: [ProtectionIncident]
 
+    private var currentIncidents: [ProtectionIncident] {
+        guard let overview = model.overview, let storage = model.storage else { return incidents }
+        return ProtectionIncident.collect(overview: overview, storage: storage)
+    }
+
     var body: some View {
         List {
-            if incidents.isEmpty {
+            if currentIncidents.isEmpty {
                 ContentUnavailableView(
                     "Keine offenen Vorfälle",
                     systemImage: "checkmark.shield.fill",
@@ -170,7 +233,7 @@ struct IncidentCenterView: View {
                 )
             } else {
                 Section {
-                    ForEach(incidents) { incident in
+                    ForEach(currentIncidents) { incident in
                         VStack(alignment: .leading, spacing: 9) {
                             Label(incident.category, systemImage: incident.symbol)
                                 .font(.headline)
@@ -184,8 +247,13 @@ struct IncidentCenterView: View {
                                 .foregroundStyle(.secondary)
                             Text(incident.recommendation)
                                 .font(.subheadline)
+                            if let name = incident.restoreTestPairName {
+                                IncidentRestoreTestButton(pairName: name)
+                            }
                             if let name = incident.pairName {
-                                NavigationLink("Betroffenen Datenweg prüfen") { IncidentDataPathView(pairName: name) }
+                                NavigationLink("Betroffenen Datenweg prüfen") {
+                                    IncidentDataPathView(pairName: name, isRestoreIncident: incident.restoreReason != nil)
+                                }
                             }
                             if let id = incident.jobID {
                                 Button("Zugehörigen Lauf öffnen") {
@@ -211,9 +279,48 @@ struct IncidentCenterView: View {
     }
 }
 
+private struct IncidentRestoreTestButton: View {
+    @EnvironmentObject private var model: AppModel
+    let pairName: String
+    @State private var confirm = false
+    @State private var isStarting = false
+    @State private var result: String?
+
+    private var isRestoreTesting: Bool { isStarting || model.isRestoreTestRunning(for: pairName) }
+    private var canStart: Bool {
+        !isRestoreTesting && model.activeRestoreTestPairs.isEmpty && !model.isDemoMode
+            && model.progress?.running != true && !model.batchIsRunning
+            && model.config?.backup.pairs.contains(where: { $0.name == pairName }) == true
+    }
+
+    var body: some View {
+        Button(isRestoreTesting ? "Restore-Test läuft …" : "Restore-Test starten") { confirm = true }
+            .disabled(!canStart)
+            .confirmationDialog("Restore-Test für \(pairName) starten?", isPresented: $confirm, titleVisibility: .visible) {
+                Button("Restore-Test starten") {
+                    // Recheck after confirmation: another action may have started in the meantime.
+                    guard canStart else { return }
+                    isStarting = true
+                    Task {
+                        defer { isStarting = false }
+                        let ok = await model.runRestoreTest(pair: pairName)
+                        result = ok
+                            ? "Restore-Test gestartet. Der Nachweis wird nach Abschluss aktualisiert."
+                            : "Restore-Test konnte nicht gestartet werden. Bitte die Fehlermeldung prüfen."
+                    }
+                }
+                Button("Abbrechen", role: .cancel) {}
+            } message: {
+                Text("Eine Stichprobe aus der Sicherung wird in ein temporäres Prüfverzeichnis zurückgeholt, per Prüfsumme geprüft und anschließend gelöscht. Die Originale bleiben unverändert.")
+            }
+        if let result { Text(result).font(.caption).foregroundStyle(.secondary) }
+    }
+}
+
 private struct IncidentDataPathView: View {
     @EnvironmentObject private var model: AppModel
     let pairName: String
+    let isRestoreIncident: Bool
     @State private var confirm = false
     @State private var busy = false
     @State private var result: String?
@@ -229,7 +336,11 @@ private struct IncidentDataPathView: View {
                     LabeledContent("Löschen erlaubt", value: pair.allowDelete ? "Ja" : "Nein")
                 }
                 Section {
-                    Button(busy ? "Startet …" : "Sicheren Probelauf starten") { confirm = true }.disabled(busy || model.isDemoMode)
+                    if isRestoreIncident {
+                        IncidentRestoreTestButton(pairName: pairName)
+                    } else {
+                        Button(busy ? "Startet …" : "Sicheren Probelauf starten") { confirm = true }.disabled(busy || model.isDemoMode)
+                    }
                     NavigationLink("Restore-Nachweis und Notfallübung") { RecoveryCenterView() }
                     NavigationLink("Datenwege bearbeiten") { DataPathsScreen(showingSettings: $showingSettings) }
                     NavigationLink("Läufe & Protokolle") { RunsScreen(showingSettings: $showingSettings) }

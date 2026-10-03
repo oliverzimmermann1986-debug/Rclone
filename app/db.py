@@ -2557,6 +2557,38 @@ class Database:
             }
         return result
 
+    def restore_test_schedule_history(
+        self, history_key: str
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Read the automatic drill cursor, including pre-separation history.
+
+        Older manual drills shared the global key. Filtering the owning job
+        preserves an earlier scheduled failure even after such a manual success.
+        This does not alter pair evidence or promote partial checks to success.
+        """
+        with self.conn() as connection:
+            base = (
+                "SELECT pr.* FROM pair_runs pr JOIN jobs j ON j.id=pr.job_id "
+                "WHERE pr.history_key=? AND j.kind='restoretest' "
+                "AND j.trigger='scheduler' AND pr.dry_run=0 "
+            )
+            last_row = connection.execute(
+                base
+                + "ORDER BY COALESCE(pr.ended_at, pr.started_at) DESC, pr.id DESC LIMIT 1",
+                (history_key,),
+            ).fetchone()
+            success_row = connection.execute(
+                base
+                + "AND pr.ok=1 ORDER BY COALESCE(pr.ended_at, pr.started_at) DESC, pr.id DESC LIMIT 1",
+                (history_key,),
+            ).fetchone()
+        return {
+            "last_result": self._pair_row_to_result(last_row) if last_row else None,
+            "last_success": self._pair_row_to_result(success_row)
+            if success_row
+            else None,
+        }
+
     def pair_last_results(self) -> Dict[str, Dict[str, Any]]:
         """Letztes Ergebnis je Pair über eine indexierte Abfrage."""
         with self.conn() as connection:
