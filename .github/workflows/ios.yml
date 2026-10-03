@@ -19,6 +19,8 @@ on:
       - "tests/test_native_read_contract.py"
       - "tests/test_ios_release_version.py"
       - "scripts/ios_release_version.py"
+      - "scripts/ios_simulator_destination.py"
+      - "tests/test_ios_simulator_destination.py"
       - "codemagic.yaml"
       - ".github/workflows/ios.yml"
   pull_request:
@@ -39,6 +41,8 @@ on:
       - "tests/test_native_read_contract.py"
       - "tests/test_ios_release_version.py"
       - "scripts/ios_release_version.py"
+      - "scripts/ios_simulator_destination.py"
+      - "tests/test_ios_simulator_destination.py"
       - "codemagic.yaml"
       - ".github/workflows/ios.yml"
 
@@ -64,7 +68,7 @@ jobs:
       - name: Install backend contract test dependencies
         run: python3 -m pip install -r requirements-dev.txt
       - name: Validate shared native API contracts and release version tooling
-        run: python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_version.py
+        run: python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_version.py tests/test_ios_simulator_destination.py
       - name: Install verified pinned XcodeGen
         run: python3 scripts/install_pinned_xcodegen.py --destination "$GITHUB_WORKSPACE/.tools"
       - name: Generate Xcode project
@@ -79,10 +83,12 @@ jobs:
       - name: Build and run unit tests
         run: |
           set -o pipefail
+          SIMULATOR_ID="$(python3 scripts/ios_simulator_destination.py)"
           xcodebuild test \
             -project ios/RcloneMobile.xcodeproj \
             -scheme RcloneMobile \
-            -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -parallel-testing-enabled NO \
             -derivedDataPath "$RUNNER_TEMP/ios-build" \
             -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"
@@ -104,6 +110,9 @@ jobs:
               "$RUNNER_TEMP/ios-artifacts/Sicherpfad-$VERSION-simulator.zip"
           fi
           if test -d "$RUNNER_TEMP/ios-tests.xcresult"; then
+            xcrun xcresulttool export attachments \
+              --path "$RUNNER_TEMP/ios-tests.xcresult" \
+              --output-path "$RUNNER_TEMP/ios-artifacts/ui-screenshots"
             ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/ios-tests.xcresult" \
               "$RUNNER_TEMP/ios-artifacts/ios-tests.xcresult.zip"
           fi
@@ -112,6 +121,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sicherpfad-ios-simulator-${{ github.run_number }}
-          path: ${{ runner.temp }}/ios-artifacts/*.zip
+          path: ${{ runner.temp }}/ios-artifacts/
           if-no-files-found: warn
           retention-days: 14
