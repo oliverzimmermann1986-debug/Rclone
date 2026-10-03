@@ -146,15 +146,89 @@ final class VaultQueueTests: XCTestCase {
         XCTAssertEqual(URLComponents(url: try XCTUnwrap(chunk.url), resolvingAgainstBaseURL: false)?.query, "offset=4")
         XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
     }
+    @MainActor
+    func testCorruptFirstFileIsRetainedAndFollowingFileCompletes() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("file.txt")
+        try Data("0123456789".utf8).write(to: source)
+        let store = VaultQueueStore(root: folder.appendingPathComponent("queue"))
+        let bad = try store.stage(source, filename: "bad.txt", sourceType: "file", scope: scope())
+        var good = try store.stage(source, filename: "file.txt", sourceType: "file", scope: scope())
+        good.uploadID = "existing-upload"
+        try store.save(good)
+        try Data("corrupt".utf8).write(to: store.payload(for: bad))
+        let client = try queueClient(digest: good.sha256)
+        let transfer = VaultTransferModel(queueStore: store)
+        await transfer.resumeQueue(scope: scope(), using: client) { true }
+        let retained = try XCTUnwrap(store.entries(for: scope()).first)
+        XCTAssertEqual(retained.id, bad.id)
+        XCTAssertEqual(retained.state, "failed")
+        XCTAssertTrue(retained.requiresUserRetry)
+        XCTAssertNotNil(retained.lastError)
+        XCTAssertFalse(try store.entries(for: scope()).contains { $0.id == good.id })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try store.payload(for: retained).path))
+        let requestsAfterSuccess = VaultResumeURLProtocol.recordedRequests().count
+        await transfer.resumeQueue(scope: scope(), using: client) { true }
+        XCTAssertEqual(VaultResumeURLProtocol.recordedRequests().count, requestsAfterSuccess + 1,
+                       "Only library refresh is allowed; failed files do not immediately retry")
+        transfer.skipEntry(retained, scope: scope())
+        let skipped = try XCTUnwrap(store.entries(for: scope()).first)
+        XCTAssertEqual(skipped.state, "skipped")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try store.payload(for: skipped).path))
+        transfer.retryEntry(skipped, scope: scope())
+        let retried = try XCTUnwrap(store.entries(for: scope()).first)
+        XCTAssertEqual(retried.state, "waiting")
+        XCTAssertFalse(retried.requiresUserRetry)
+        XCTAssertNil(retried.lastError)
+    }
+
+    @MainActor
+    func testExpiredLoginPausesWholeQueueAndRetainsBothFilesForResume() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("file.txt")
+        try Data("0123456789".utf8).write(to: source)
+        let store = VaultQueueStore(root: folder.appendingPathComponent("queue"))
+        var first = try store.stage(source, filename: "first.txt", sourceType: "file", scope: scope())
+        let second = try store.stage(source, filename: "second.txt", sourceType: "file", scope: scope())
+        first.uploadID = "existing-upload"
+        try store.save(first)
+        let client = try queueClient(digest: first.sha256, failureStatus: 401)
+        let transfer = VaultTransferModel(queueStore: store)
+        await transfer.resumeQueue(scope: scope(), using: client) { true }
+        let retained = try store.entries(for: scope())
+        XCTAssertEqual(Set(retained.map(\.id)), Set([first.id, second.id]))
+        XCTAssertTrue(retained.allSatisfy { $0.state == "waiting" && !$0.requiresUserRetry })
+        XCTAssertEqual(VaultResumeURLProtocol.recordedRequests().count, 1)
+        XCTAssertNotNil(transfer.errorMessage)
+    }
+
+    private func queueClient(digest: String, failureStatus: Int? = nil) throws -> APIClient {
+        VaultResumeURLProtocol.reset(digest: digest, failureStatus: failureStatus)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [VaultResumeURLProtocol.self]
+        let cookies = try XCTUnwrap(configuration.httpCookieStorage)
+        cookies.setCookie(try XCTUnwrap(HTTPCookie(properties: [
+            .name: APIClient.csrfCookie, .value: "test", .domain: "backup.example", .path: "/"
+        ])))
+        return APIClient(baseURL: URL(string: "https://backup.example")!,
+                         session: URLSession(configuration: configuration), cookieStorage: cookies)
+    }
+
 }
 
 private final class VaultResumeURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var digest = ""
     private static var requests: [URLRequest] = []
-    static func reset(digest: String) {
+    private static var failureStatus: Int?
+    static func reset(digest: String, failureStatus: Int? = nil) {
         lock.lock(); defer { lock.unlock() }
         self.digest = digest
+        self.failureStatus = failureStatus
         requests = []
     }
     static func recordedRequests() -> [URLRequest] {
@@ -167,7 +241,16 @@ private final class VaultResumeURLProtocol: URLProtocol {
         Self.lock.lock()
         Self.requests.append(request)
         let digest = Self.digest
+        let failureStatus = Self.failureStatus
         Self.lock.unlock()
+        if let failureStatus {
+            let response = HTTPURLResponse(url: request.url!, statusCode: failureStatus,
+                                           httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(#"{"detail":"Session expired"}"#.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let ready = request.url?.path.hasSuffix("complete") == true || request.url?.path.hasSuffix("library") == true
         let uploaded = request.httpMethod == "PUT"
         let item: [String: Any] = [
