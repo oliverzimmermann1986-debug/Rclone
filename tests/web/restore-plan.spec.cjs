@@ -48,7 +48,26 @@ async function openPlan(page, { previewDelay = 0, conflict = false } = {}) {
   await page.locator('#settings-tab-scheduler').click();
   const section = page.locator('section[aria-labelledby="restore-plan-title"]');
   await expect(section.getByLabel('Rhythmus')).toHaveValue('weekly');
-  return { section, writes, errors, response };
+  return { section, writes, errors, response, config };
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function previewTwiceWeekly(section) {
+  await section.getByLabel('Rhythmus').selectOption('twice');
+  await section.getByRole('button', { name: 'Vorschau prüfen' }).click();
+  const save = section.getByRole('button', { name: 'Prüfplan übernehmen', exact: true });
+  await expect(save).toBeEnabled();
+  return save;
+}
+
+async function confirmPlan(page, save) {
+  await save.click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Prüfplan übernehmen', exact: true }).click();
 }
 
 test('preview and confirmation save only the restore plan', async ({ page }, testInfo) => {
@@ -150,4 +169,160 @@ test('dates use server timezone and an expired proof stays invalid despite the b
   await expect(section).toContainText('03.10.2026, 07:00');
   await expect(section).toContainText('Kein aktuell gültiger Nachweis');
   await expect(section).not.toContainText('Nachweis gültig bis');
+});
+
+test('a failed save retains the draft and retries only after a fresh preview', async ({ page }) => {
+  const { section, writes, response, errors } = await openPlan(page);
+  await page.route('**/api/recovery/restore-plan', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    const request = route.request().postDataJSON();
+    writes.push(request);
+    if (writes.length === 1) {
+      return route.fulfill({ status: 500, json: { detail: 'Der Server konnte den Prüfplan gerade nicht speichern.' } });
+    }
+    return route.fulfill({ json: { ...response(), revision: 'b'.repeat(64), settings: request.settings } });
+  });
+  await section.getByLabel('Rhythmus').selectOption('twice');
+  await section.getByLabel('Dateien je Datenweg').fill('31');
+  await section.getByLabel('Datenlimit je Datenweg (MiB)').fill('384');
+  const save = section.getByRole('button', { name: 'Prüfplan übernehmen', exact: true });
+  await section.getByRole('button', { name: 'Vorschau prüfen' }).click();
+  await expect(save).toBeEnabled();
+  await confirmPlan(page, save);
+  await expect(section.getByRole('alert')).toHaveText('Der Server konnte den Prüfplan gerade nicht speichern.');
+  await expect(section.getByLabel('Rhythmus')).toHaveValue('twice');
+  await expect(section.getByLabel('Dateien je Datenweg')).toHaveValue('31');
+  await expect(section.getByLabel('Datenlimit je Datenweg (MiB)')).toHaveValue('384');
+  await expect(save).toBeDisabled();
+  expect(writes).toHaveLength(1);
+
+  await section.getByRole('button', { name: 'Vorschau prüfen' }).click();
+  await expect(section.getByRole('alert')).toBeHidden();
+  await expect(save).toBeEnabled();
+  await confirmPlan(page, save);
+  await expect(page.getByText('Restore-Prüfplan gespeichert', { exact: true })).toBeVisible();
+  expect(writes).toHaveLength(2);
+  expect(writes[1]).toEqual(writes[0]);
+  expect(writes[1]).toEqual({ revision: 'a'.repeat(64), settings: {
+    enabled: true, schedule: '0 5 * * 0,3', sample_files: 31, max_total_mb: 384, max_scan_files: 20000,
+  } });
+  expect(errors).toEqual([]);
+});
+
+test('general edits made during a plan save survive and use its new revision when saved later', async ({ page }) => {
+  const { section, writes, response, config, errors } = await openPlan(page);
+  const started = deferred();
+  const release = deferred();
+  const configWrites = [];
+  await page.route('**/api/recovery/restore-plan', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    const request = route.request().postDataJSON();
+    writes.push(request);
+    started.resolve();
+    await release.promise;
+    config._revision = 'b'.repeat(64);
+    config.backup.restore_test = structuredClone(request.settings);
+    return route.fulfill({ json: { ...response(), settings: request.settings } });
+  });
+  await page.route('**/api/config', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    const request = route.request().postDataJSON();
+    configWrites.push(request);
+    Object.assign(config, request.config, { _revision: 'c'.repeat(64) });
+    return route.fulfill({ json: { ok: true, config, warnings: [] } });
+  });
+  const save = await previewTwiceWeekly(section);
+  await confirmPlan(page, save);
+  await started.promise;
+  await page.locator('#settings-tab-general').click();
+  const timezone = page.locator('#settings-panel-general').getByLabel('Zeitzone');
+  await timezone.fill('Europe/Paris');
+  await expect(page.locator('.save-state')).toContainText('Ungespeicherte Änderungen');
+  expect(configWrites).toHaveLength(0);
+  release.resolve();
+  await expect(page.getByText('Restore-Prüfplan gespeichert', { exact: true })).toBeVisible();
+  await expect(timezone).toHaveValue('Europe/Paris');
+  await expect(page.locator('.save-state')).toContainText('Ungespeicherte Änderungen');
+
+  await page.getByRole('button', { name: 'Änderungen speichern', exact: true }).click();
+  await expect(page.getByText('Einstellungen gespeichert', { exact: true })).toBeVisible();
+  expect(writes).toHaveLength(1);
+  expect(configWrites).toHaveLength(1);
+  expect(configWrites[0].config._revision).toBe('b'.repeat(64));
+  expect(configWrites[0].config.backup.timezone).toBe('Europe/Paris');
+  expect(configWrites[0].config.backup.restore_test).toEqual(writes[0].settings);
+  expect(errors).toEqual([]);
+});
+
+test('an unsaved scheduler edit blocks plan confirmation without losing either draft', async ({ page }) => {
+  const { section, writes, errors } = await openPlan(page);
+  const save = await previewTwiceWeekly(section);
+  const automaticBackups = page.getByLabel('Automatische Zeitpläne grundsätzlich aktivieren');
+  await automaticBackups.uncheck();
+  await expect(page.locator('.save-state')).toContainText('Ungespeicherte Änderungen');
+  await save.click();
+  await expect(page.getByText('Offene Konfigurationsänderungen zuerst speichern oder verwerfen.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog')).toBeHidden();
+  await expect(automaticBackups).not.toBeChecked();
+  await expect(section.getByLabel('Rhythmus')).toHaveValue('twice');
+  expect(writes).toHaveLength(0);
+  expect(errors).toEqual([]);
+});
+
+test('rapid repeated confirmation starts one plan write and locks editing until it finishes', async ({ page }) => {
+  const { section, writes, response, errors } = await openPlan(page);
+  const started = deferred();
+  const release = deferred();
+  await page.route('**/api/recovery/restore-plan', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    const request = route.request().postDataJSON();
+    writes.push(request);
+    started.resolve();
+    await release.promise;
+    return route.fulfill({ json: { ...response(), revision: 'b'.repeat(64), settings: request.settings } });
+  });
+  const save = await previewTwiceWeekly(section);
+  await save.click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Prüfplan übernehmen', exact: true }).dblclick();
+  await started.promise;
+  await expect(section.getByRole('button', { name: 'Speichert…', exact: true })).toBeDisabled();
+  await expect(section.getByLabel('Rhythmus')).toBeDisabled();
+  await expect(section.getByRole('button', { name: 'Plan neu laden' })).toBeDisabled();
+  expect(writes).toHaveLength(1);
+  release.resolve();
+  await expect(page.getByText('Restore-Prüfplan gespeichert', { exact: true })).toBeVisible();
+  await expect(section.getByLabel('Rhythmus')).toBeEnabled();
+  expect(writes).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+test('an obsolete preview error cannot replace evidence loaded with the same revision', async ({ page }) => {
+  const { section, response, writes, errors } = await openPlan(page);
+  const started = deferred();
+  const release = deferred();
+  await page.route('**/api/recovery/restore-plan/preview', async (route) => {
+    started.resolve();
+    await release.promise;
+    return route.fulfill({ status: 422, json: { detail: 'Veralteter Fehler aus der vorherigen Vorschau' } });
+  });
+  await section.getByRole('button', { name: 'Vorschau prüfen' }).click();
+  await started.promise;
+  await page.route('**/api/recovery/restore-plan', (route) => route.fulfill({
+    json: { ...response(), warnings: ['Aktueller Stand nach erfolgreicher Stichprobe'], data_paths: [{
+      id: 'photos', name: 'Fotos', evidence_state: 'passed', valid_until: 1900604800, coverage_gap: false,
+    }] },
+  }));
+  await section.getByRole('button', { name: 'Plan neu laden' }).click();
+  await expect(section).toContainText('Aktueller Stand nach erfolgreicher Stichprobe');
+  await expect(section).toContainText('Nachweis gültig bis');
+  const finished = page.waitForResponse('**/api/recovery/restore-plan/preview');
+  release.resolve();
+  await (await finished).finished();
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await expect(section.getByRole('alert')).toBeHidden();
+  await expect(section).not.toContainText('Veralteter Fehler aus der vorherigen Vorschau');
+  await expect(section).toContainText('Aktueller Stand nach erfolgreicher Stichprobe');
+  await expect(section.getByRole('button', { name: 'Prüfplan übernehmen', exact: true })).toBeEnabled();
+  expect(writes).toHaveLength(0);
+  expect(errors).toEqual([]);
 });
