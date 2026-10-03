@@ -12,16 +12,25 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Mapping
+from typing import Any, BinaryIO, Iterator, Mapping
 
 from .db import Database
+from .file_lock import acquire as acquire_file_lock
+from .file_lock import release as release_file_lock
+from .jobs.restore_workspace import (
+    cleanup_orphaned_workspaces,
+    create_workspace,
+    forget_workspace,
+)
 from .notifications import notify
 from .rclone_args import rclone_subprocess_env
 
@@ -45,7 +54,7 @@ def vault_root(config: Mapping[str, Any]) -> Path:
     if not root.is_absolute():
         raise VaultError("paths.device_vault_dir muss absolut sein")
     root.mkdir(parents=True, exist_ok=True)
-    for name in ("uploads", "records", "blobs"):
+    for name in ("uploads", "records", "blobs", "locks"):
         (root / name).mkdir(mode=0o700, exist_ok=True)
     try:
         root.chmod(0o700)
@@ -92,6 +101,59 @@ def _record_path(root: Path, upload_id: str) -> Path:
 
 def _part_path(root: Path, upload_id: str) -> Path:
     return root / "uploads" / f"{_safe_upload_id(upload_id)}.part"
+
+
+@contextmanager
+def _upload_record_lock(root: Path, upload_id: str) -> Iterator[None]:
+    """Serialize chunk bytes and their receipt across service processes.
+
+    Lock files must remain in place: deleting one could let a new process lock
+    another inode while the original owner still writes this upload.
+    """
+    path = root / "locks" / f"{_safe_upload_id(upload_id)}.lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    with _LOCK:
+        fd = os.open(path, flags, 0o600)
+        acquired = False
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise VaultError("Upload-Lock ist keine reguläre Datei")
+            acquire_file_lock(fd)
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                release_file_lock(fd)
+            os.close(fd)
+
+
+def _reconcile_received(root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    """Keep only acknowledged bytes after a crash before receipt persistence.
+
+    The client can safely resend the discarded suffix. Never infer that
+    unacknowledged bytes are valid or discard a resumable upload wholesale.
+    Caller holds the upload record lock.
+    """
+    if record.get("status") != "receiving":
+        return record
+    expected = int(record.get("size") or 0)
+    received = int(record.get("received") or 0)
+    if not 0 <= received <= expected or expected < 1:
+        raise VaultError("Upload-Status ist beschädigt")
+    part = _part_path(root, str(record["id"]))
+    current = part.stat().st_size if part.exists() else 0
+    if current > received:
+        with part.open("rb+") as handle:
+            handle.truncate(received)
+            handle.flush()
+            os.fsync(handle.fileno())
+        current = received
+    changed = current != received
+    record["received"] = current
+    if current == expected:
+        record["status"] = "uploaded"
+        changed = True
+    return _save_record(root, record) if changed else record
 
 
 def _blob_path(root: Path, sha256: str) -> Path:
@@ -260,8 +322,8 @@ def append_chunk(
             f"Ein Upload-Block darf höchstens {MAX_CHUNK_BYTES} Bytes enthalten"
         )
     root = vault_root(config)
-    with _LOCK:
-        record = _load_record(root, upload_id)
+    with _upload_record_lock(root, upload_id):
+        record = _reconcile_received(root, _load_record(root, upload_id))
         if record.get("status") != "receiving":
             raise VaultError("Dieser Upload nimmt keine weiteren Daten an")
         part = _part_path(root, upload_id)
@@ -286,8 +348,8 @@ def append_chunk(
 
 def queue_completion(config: Mapping[str, Any], upload_id: str) -> dict[str, Any]:
     root = vault_root(config)
-    with _LOCK:
-        record = _load_record(root, upload_id)
+    with _upload_record_lock(root, upload_id):
+        record = _reconcile_received(root, _load_record(root, upload_id))
         if record.get("status") in {"queued", "transferring", "ready"}:
             return _public_record(record)
         if record.get("status") != "uploaded":
@@ -412,7 +474,7 @@ def _complete_upload_locked(
     upload_id: str,
     root: Path,
 ) -> dict[str, Any]:
-    with _LOCK:
+    with _upload_record_lock(root, upload_id):
         record = _load_record(root, upload_id)
         if record.get("status") == "ready":
             return _public_record(record)
@@ -435,7 +497,7 @@ def _complete_upload_locked(
             )
         else:
             _copy_and_verify_local(blob, target, str(record["sha256"]))
-        with _LOCK:
+        with _upload_record_lock(root, upload_id):
             record["status"] = "ready"
             record["verified"] = True
             record["received"] = int(record["size"])
@@ -462,7 +524,7 @@ def _complete_upload_locked(
             vault_id=upload_id,
         )
     except Exception as exc:
-        with _LOCK:
+        with _upload_record_lock(root, upload_id):
             record["status"] = "error"
             record["verified"] = False
             record["error"] = str(exc)[:1000]
@@ -487,7 +549,23 @@ def _complete_upload_locked(
 
 
 def upload_status(config: Mapping[str, Any], upload_id: str) -> dict[str, Any]:
-    return _public_record(_load_record(vault_root(config), upload_id))
+    root = vault_root(config)
+    with _upload_record_lock(root, upload_id):
+        return _public_record(_reconcile_received(root, _load_record(root, upload_id)))
+
+
+def cleanup_vault_scratch(config: Mapping[str, Any]) -> dict[str, int]:
+    paths = config.get("paths") or {}
+    root = Path(
+        str(
+            paths.get("device_vault_dir")
+            or Path(str(paths.get("data_dir") or "/opt/rclone-sync/data"))
+            / "device-vault"
+        )
+    ).expanduser()
+    if not root.is_absolute():
+        raise VaultError("paths.device_vault_dir muss absolut sein")
+    return cleanup_orphaned_workspaces(root / "uploads")
 
 
 def library(
@@ -552,7 +630,10 @@ def _restore_missing_blob(
     if shutil.disk_usage(root).free < size + 64 * 1024 * 1024:
         raise VaultError("Nicht genügend Speicher für die Wiederherstellung")
     target = _join_target(str(record["target_root"]), relative)
-    temporary = root / "uploads" / f"rescue-{uuid.uuid4().hex}.part"
+    workspace, workspace_lease = create_workspace(
+        root / "uploads", "restore-vault-rescue-", kind="vault-rescue"
+    )
+    temporary = workspace / "data.part"
     process = None
     watchdog = None
     timed_out = threading.Event()
@@ -629,12 +710,18 @@ def _restore_missing_blob(
             "Datei konnte nicht aus dem Sicherungsziel zurückgeholt werden"
         ) from exc
     finally:
-        if watchdog is not None:
-            watchdog.cancel()
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait(timeout=10)
-        temporary.unlink(missing_ok=True)
+        try:
+            if watchdog is not None:
+                watchdog.cancel()
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+        finally:
+            try:
+                shutil.rmtree(workspace)
+                forget_workspace(workspace)
+            finally:
+                workspace_lease.release()
 
 
 def download_blob(config: Mapping[str, Any], upload_id: str) -> tuple[Path, str]:

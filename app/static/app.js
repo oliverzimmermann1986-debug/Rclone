@@ -92,7 +92,7 @@ function app() {
     configValidation: { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true },
     scheduleEditor: { mode: 'daily', time: '03:00', intervalHours: 6, intervalMinutes: 30, weekday: '0' },
     schedulePreview: { loading: false, valid: null, error: '', nextRuns: [], timer: null },
-    restorePlan: { loading: false, saving: false, generation: 0, receivedAt: 0, error: '', revision: '', settings: null, preview: null, previewKey: '', rhythm: 'custom', time: '05:00', weekday: '0' },
+    restorePlan: { loading: false, saving: false, generation: 0, receivedAt: 0, error: '', revision: '', settings: null, baselineKey: '', conflict: false, serverVersion: null, preview: null, previewKey: '', rhythm: 'custom', time: '05:00', weekday: '0' },
     performancePreset: 'balanced',
 
     plan: { loading: false, data: null, dry_run: true, definitionId: null },
@@ -179,7 +179,7 @@ function app() {
         }
       });
       window.addEventListener('beforeunload', (event) => {
-        if (this.configDirty || this.filterFile.dirty) {
+        if (this.configDirty || this.filterFile.dirty || this.restorePlanDirty() || this.restorePlan.saving) {
           event.preventDefault();
           event.returnValue = '';
         }
@@ -1365,6 +1365,24 @@ function app() {
       return JSON.stringify(this.restorePlan.settings);
     },
 
+    restorePlanDirty() {
+      return !!this.restorePlan.settings && this.restorePlanKey() !== this.restorePlan.baselineKey;
+    },
+
+    restorePlanComparison() {
+      const current = this.restorePlan.serverVersion?.settings;
+      if (!current) return [];
+      return [
+        ['enabled', 'Automatische Prüfung'], ['schedule', 'Zeitplan (Cron)'],
+        ['sample_files', 'Dateien je Datenweg'], ['max_total_mb', 'Datenlimit je Datenweg (MiB)'],
+        ['max_scan_files', 'Maximal durchsuchte Dateien'],
+      ].map(([key, label]) => ({ key, label, draft: this.restorePlan.settings[key], current: current[key] }));
+    },
+
+    restorePlanValue(value) {
+      return typeof value === 'boolean' ? (value ? 'Aktiv' : 'Aus') : String(value ?? '–');
+    },
+
     restorePlanDate(timestamp) {
       return new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium', timeStyle: 'short', timeZone: this.restorePlan.preview?.timezone || 'Europe/Berlin' }).format(new Date(timestamp * 1000));
     },
@@ -1377,8 +1395,22 @@ function app() {
         : 'Kein aktuell gültiger Nachweis';
     },
 
-    async loadRestorePlan() {
+    async reloadRestorePlan() {
       if (this.restorePlan.loading || this.restorePlan.saving) return;
+      if (this.restorePlanDirty() || this.restorePlan.conflict) {
+        const confirmed = await this.requestConfirmation(
+          'Den lokalen Prüfplan-Entwurf verwerfen und den gespeicherten Serverstand laden?',
+          { title: 'Prüfplan-Entwurf verwerfen?', confirmLabel: 'Verwerfen und neu laden' },
+        );
+        if (!confirmed) return;
+      }
+      await this.loadRestorePlan(true);
+    },
+
+    async loadRestorePlan(discardDraft = false) {
+      if (this.restorePlan.loading || this.restorePlan.saving) return;
+      // Internal navigation must not replace an unsaved or conflicting draft.
+      if (!discardDraft && (this.restorePlanDirty() || this.restorePlan.conflict)) return;
       this.restorePlan.generation += 1;
       this.restorePlan.previewKey = '';
       this.restorePlan.loading = true;
@@ -1391,17 +1423,45 @@ function app() {
       }
       this.restorePlan.revision = result.revision;
       this.restorePlan.settings = { ...result.settings };
+      this.restorePlan.baselineKey = this.restorePlanKey();
+      this.restorePlan.conflict = false;
+      this.restorePlan.serverVersion = null;
       this.restorePlan.preview = result;
       this.restorePlan.receivedAt = performance.now();
       this.restorePlan.previewKey = this.restorePlanKey();
       this.restorePlan.error = '';
-      const fields = result.settings.schedule.split(/\s+/);
+      this.syncRestorePlanControls();
+    },
+
+    syncRestorePlanControls() {
+      const fields = this.restorePlan.settings.schedule.split(/\s+/);
       this.restorePlan.rhythm = 'custom';
       if (fields.length === 5 && /^\d+$/.test(fields[0]) && /^\d+$/.test(fields[1]) && fields[2] === '*' && fields[3] === '*') {
         this.restorePlan.time = `${fields[1].padStart(2, '0')}:${fields[0].padStart(2, '0')}`;
         if (fields[4] === '*') this.restorePlan.rhythm = 'daily';
         else if (fields[4] === '0,3') this.restorePlan.rhythm = 'twice';
         else if (/^[0-6]$/.test(fields[4])) { this.restorePlan.rhythm = 'weekly'; this.restorePlan.weekday = fields[4]; }
+      }
+    },
+
+    async loadRestorePlanConflict() {
+      this.restorePlan.conflict = true;
+      this.restorePlan.serverVersion = null;
+      this.restorePlan.previewKey = '';
+      const generation = ++this.restorePlan.generation;
+      this.restorePlan.loading = true;
+      try {
+        const result = await this.api('GET', '/api/recovery/restore-plan', undefined, { captureError: true, silent: true, requestKey: 'restore-plan' });
+        if (generation !== this.restorePlan.generation || this.isStale(result)) return;
+        if (!result || result.__error) {
+          this.restorePlan.error = 'Konfiguration wurde parallel geändert. Der aktuelle Serverstand konnte nicht geladen werden. Dein Entwurf bleibt erhalten.';
+          return;
+        }
+        // Keep the draft AND its old revision until the user explicitly previews
+        // it against the displayed current server version.
+        this.restorePlan.serverVersion = result;
+      } finally {
+        if (generation === this.restorePlan.generation) this.restorePlan.loading = false;
       }
     },
 
@@ -1413,32 +1473,52 @@ function app() {
         this.restorePlan.settings.schedule = `${minute} ${hour} * * ${weekday}`;
       }
       this.restorePlan.previewKey = '';
-      this.restorePlan.error = '';
+      if (!this.restorePlan.conflict) this.restorePlan.error = '';
     },
 
-    async previewRestorePlan() {
+    async previewRestorePlan(useServerVersion = false) {
       if (!this.restorePlan.settings || this.restorePlan.saving || this.restorePlan.loading) return false;
+      const serverVersion = useServerVersion ? this.restorePlan.serverVersion : null;
+      if (this.restorePlan.conflict && !serverVersion) return false;
       const key = this.restorePlanKey();
       const revision = this.restorePlan.revision;
       const generation = this.restorePlan.generation;
+      let settings = { ...this.restorePlan.settings };
+      if (serverVersion) {
+        const baseline = JSON.parse(this.restorePlan.baselineKey);
+        const merged = { ...serverVersion.settings };
+        for (const field of Object.keys(settings)) {
+          if (settings[field] !== baseline[field]) merged[field] = settings[field];
+        }
+        settings = merged;
+      }
       const result = await this.api('POST', '/api/recovery/restore-plan/preview', {
-        revision, settings: { ...this.restorePlan.settings },
+        revision: serverVersion?.revision || revision, settings,
       }, { captureError: true, silent: true, requestKey: 'restore-plan-preview' });
       if (this.isStale(result) || key !== this.restorePlanKey() || revision !== this.restorePlan.revision || generation !== this.restorePlan.generation) return false;
       if (!result || result.__error) {
         this.restorePlan.error = typeof result?.detail === 'string' ? result.detail : 'Prüfplan konnte nicht geprüft werden';
         this.restorePlan.previewKey = '';
+        if (result?.status === 409) await this.loadRestorePlanConflict();
         return false;
+      }
+      if (serverVersion) {
+        this.restorePlan.revision = result.revision;
+        this.restorePlan.settings = settings;
+        this.restorePlan.baselineKey = JSON.stringify(serverVersion.settings);
+        this.restorePlan.conflict = false;
+        this.restorePlan.serverVersion = null;
+        this.syncRestorePlanControls();
       }
       this.restorePlan.preview = result;
       this.restorePlan.receivedAt = performance.now();
-      this.restorePlan.previewKey = key;
+      this.restorePlan.previewKey = this.restorePlanKey();
       this.restorePlan.error = '';
       return true;
     },
 
     async saveRestorePlan() {
-      if (this.restorePlan.saving || this.restorePlan.loading || !this.restorePlan.settings || this.restorePlan.previewKey !== this.restorePlanKey()) return;
+      if (this.restorePlan.saving || this.restorePlan.loading || this.restorePlan.conflict || !this.restorePlan.settings || this.restorePlan.previewKey !== this.restorePlanKey()) return;
       if (this.configDirty || this.filterFile.dirty) {
         this.showToast('Offene Konfigurationsänderungen zuerst speichern oder verwerfen.', 'err');
         return;
@@ -1452,17 +1532,21 @@ function app() {
         `Prüfplan für alle aktiven Datenwege übernehmen?\n\n${names}\nZeitplan: ${settings.schedule}\n${settings.sample_files} Dateien, höchstens ${settings.max_total_mb} MiB je Datenweg.`,
         { title: 'Restore-Prüfplan übernehmen', confirmLabel: 'Prüfplan übernehmen', tone: 'normal' },
       );
-      if (!confirmed || key !== this.restorePlanKey() || revision !== this.restorePlan.revision || generation !== this.restorePlan.generation || this.restorePlan.loading || this.configDirty || this.filterFile.dirty) return;
+      if (!confirmed || key !== this.restorePlanKey() || revision !== this.restorePlan.revision || generation !== this.restorePlan.generation || this.restorePlan.loading || this.restorePlan.conflict || this.configDirty || this.filterFile.dirty) return;
       this.restorePlan.saving = true;
       try {
         const result = await this.api('PUT', '/api/recovery/restore-plan', { revision, settings }, { captureError: true });
         if (!result || result.__error) {
           this.restorePlan.error = typeof result?.detail === 'string' ? result.detail : 'Prüfplan konnte nicht gespeichert werden';
           this.restorePlan.previewKey = '';
+          if (result?.status === 409) await this.loadRestorePlanConflict();
           return;
         }
         this.restorePlan.revision = result.revision;
         this.restorePlan.settings = { ...result.settings };
+        this.restorePlan.baselineKey = this.restorePlanKey();
+        this.restorePlan.conflict = false;
+        this.restorePlan.serverVersion = null;
         this.restorePlan.preview = result;
         this.restorePlan.receivedAt = performance.now();
         this.restorePlan.previewKey = this.restorePlanKey();
@@ -2347,7 +2431,7 @@ function app() {
     },
 
     async logout() {
-      if ((this.configDirty || this.filterFile.dirty) && !(await this.requestConfirmation(
+      if ((this.configDirty || this.filterFile.dirty || this.restorePlanDirty() || this.restorePlan.saving) && !(await this.requestConfirmation(
         'Ungespeicherte Änderungen verwerfen und abmelden?',
         { title: 'Abmelden', confirmLabel: 'Verwerfen und abmelden' },
       ))) return;
