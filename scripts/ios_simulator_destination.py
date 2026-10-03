@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 
 
 def select_iphone(inventory):
@@ -36,6 +37,25 @@ def command(*args):
     ).stdout.strip()
 
 
+def diagnostic_inventory(inventory):
+    """Keep diagnostics limited to simulator metadata, never the environment."""
+    runtime_keys = ("identifier", "name", "version", "buildversion", "isAvailable")
+    device_keys = ("udid", "name", "state", "isAvailable")
+    return {
+        "runtimes": [
+            {key: runtime[key] for key in runtime_keys if key in runtime}
+            for runtime in inventory.get("runtimes", [])
+        ],
+        "devices": {
+            runtime_id: [
+                {key: device[key] for key in device_keys if key in device}
+                for device in devices
+            ]
+            for runtime_id, devices in inventory.get("devices", {}).items()
+        },
+    }
+
+
 def main():
     inventory = json.loads(command("list", "--json"))
     device = select_iphone(inventory)
@@ -59,16 +79,56 @@ def main():
         )
         device_type = next((d for d in types if d["name"] == "iPhone 17"), types[-1])
         device = {
+            "name": "Sicherpfad CI",
             "udid": command(
                 "create",
                 "Sicherpfad CI",
                 device_type["identifier"],
                 runtime["identifier"],
-            )
+            ),
         }
-    if device.get("state") != "Booted":
-        command("boot", device["udid"])
-    command("bootstatus", device["udid"], "-b")
+    else:
+        runtime_id = next(
+            runtime_id
+            for runtime_id, devices in inventory.get("devices", {}).items()
+            if any(item.get("udid") == device["udid"] for item in devices)
+        )
+        runtime = next(
+            item for item in inventory["runtimes"] if item["identifier"] == runtime_id
+        )
+    selected = {
+        "udid": device["udid"],
+        "name": device.get("name"),
+        "state": device.get("state"),
+        "runtime": runtime["identifier"],
+        "runtime_version": runtime["version"],
+    }
+    print(
+        f"Selected iOS simulator: {json.dumps(selected)}", file=sys.stderr, flush=True
+    )
+    stage = "boot"
+    try:
+        if device.get("state") != "Booted":
+            command("boot", device["udid"])
+        stage = "bootstatus"
+        command("bootstatus", device["udid"], "-b")
+    except (subprocess.CalledProcessError, OSError) as error:
+        print(f"simctl {stage} failed: {error}", file=sys.stderr)
+        if isinstance(error, subprocess.CalledProcessError) and error.stderr:
+            print(error.stderr.strip(), file=sys.stderr)
+        try:
+            inventory = json.loads(command("list", "--json"))
+        except (subprocess.CalledProcessError, OSError, ValueError) as diagnostic_error:
+            print(
+                f"Could not refresh simulator inventory; using initial inventory: {diagnostic_error}",
+                file=sys.stderr,
+            )
+        print(
+            f"Simulator inventory: {json.dumps(diagnostic_inventory(inventory))}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
     print(device["udid"])
 
 

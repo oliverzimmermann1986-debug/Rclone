@@ -120,7 +120,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sicherpfad-ios-simulator-${{ github.run_number }}
+          name: sicherpfad-ios-simulator-${{ github.run_number }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ios-artifacts/
           if-no-files-found: warn
           retention-days: 14
