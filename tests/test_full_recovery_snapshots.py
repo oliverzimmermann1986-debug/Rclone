@@ -1,11 +1,11 @@
 from pathlib import Path
-import io
 import json
 
 import pytest
 
 from app.db import Database
 from app import recovery_snapshots as snapshots
+from app.jobs import recovery_lifecycle
 from app.recovery_points import compare_points, list_points, point_target
 
 
@@ -141,14 +141,18 @@ def test_remote_snapshot_checks_all_bytes_and_labels_unknown_live_hashes(
     class Process:
         def __init__(self, command, **kwargs):
             assert command[:3] == ["rclone", "lsjson", "--recursive"]
-            self.stdout = io.BytesIO(json.dumps(listing).encode())
-            self.returncode = None
+            kwargs["stdout"].write(json.dumps(listing).encode())
+            self.returncode = 0
+            self.pid = 99999999
 
         def wait(self, timeout):
             self.returncode = 0
 
         def poll(self):
             return self.returncode
+
+        def terminate(self):
+            self.kill()
 
         def kill(self):
             self.returncode = -1
@@ -160,7 +164,13 @@ def test_remote_snapshot_checks_all_bytes_and_labels_unknown_live_hashes(
         if command[1] == "copy":
             (Path(command[-1]) / "proof.txt").write_bytes(b"proof")
 
-    monkeypatch.setattr(snapshots.subprocess, "Popen", Process)
+    monkeypatch.setattr(recovery_lifecycle.subprocess, "Popen", Process)
+    monkeypatch.setattr(
+        recovery_lifecycle.rclone_sync, "_register_proc", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        recovery_lifecycle.rclone_sync, "_unregister_proc", lambda *a, **k: True
+    )
     monkeypatch.setattr(snapshots, "_run", transfer)
 
     point = snapshots.capture_snapshot(config, pair, max_total_mb=1)
@@ -180,7 +190,8 @@ def test_oversize_remote_inventory_is_killed_before_publication(tmp_path, monkey
 
     class Process:
         def __init__(self, command, **kwargs):
-            self.stdout = io.BytesIO(b"x" * 1024)
+            kwargs["stdout"].write(b"x" * 1024)
+            self.pid = 99999999
             self.returncode = None
             self.killed = False
             processes.append(self)
@@ -191,15 +202,27 @@ def test_oversize_remote_inventory_is_killed_before_publication(tmp_path, monkey
         def poll(self):
             return self.returncode
 
+        def terminate(self):
+            self.kill()
+
         def kill(self):
             self.killed = True
             self.returncode = -1
 
     monkeypatch.setattr(snapshots, "MAX_MANIFEST_BYTES", 100)
-    monkeypatch.setattr(snapshots.subprocess, "Popen", Process)
+    monkeypatch.setattr(recovery_lifecycle.subprocess, "Popen", Process)
+    monkeypatch.setattr(
+        recovery_lifecycle.rclone_sync, "_register_proc", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        recovery_lifecycle.rclone_sync, "_unregister_proc", lambda *a, **k: True
+    )
 
     with pytest.raises(snapshots.SnapshotError, match="Manifestlimit"):
         snapshots.capture_snapshot(config, pair, max_total_mb=1)
 
     assert processes[0].killed
-    assert list(snapshots.snapshot_root(config).iterdir()) == []
+    root = snapshots.snapshot_root(config)
+    assert list(root.glob("full-*")) == []
+    assert list(root.glob("restore-snapshot-capture-*")) == []
+    assert list((root / ".restore-workspaces").glob("*.json")) == []

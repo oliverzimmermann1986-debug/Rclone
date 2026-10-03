@@ -21,7 +21,6 @@ import queue
 import random
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 import uuid
@@ -56,6 +55,7 @@ from .rclone_sync import (
     reset_cancel,
 )
 from .restore_sampling import select_budgeted_sample
+from .restore_workspace import create_workspace, forget_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -395,20 +395,23 @@ def run_pair_restore_test(
         result.update({"ok": False, "error": f"Temp-Verzeichnis nicht nutzbar: {exc}"})
         return result
 
-    workdir = Path(
-        tempfile.mkdtemp(prefix=f"restore-{_safe_name(name)}-", dir=str(temp_root))
-    )
+    try:
+        workdir, workspace_lease = create_workspace(
+            temp_root, prefix=f"restore-{_safe_name(name)}-"
+        )
+    except OSError as exc:
+        result.update({"ok": False, "error": f"Temp-Verzeichnis nicht nutzbar: {exc}"})
+        return result
     try:
         workdir.chmod(0o700)
     except OSError:
         pass
     restored = workdir / "data"
-    restored.mkdir(parents=True, exist_ok=True)
-
-    timeout_sec = max(300, int(float(backup.get("timeout_hours", 4) or 4) * 3600))
-    max_total_bytes = int(settings["max_total_mb"]) * 1024 * 1024
-    result["budget_bytes"] = max_total_bytes
     try:
+        restored.mkdir(parents=True, exist_ok=True)
+        timeout_sec = max(300, int(float(backup.get("timeout_hours", 4) or 4) * 3600))
+        max_total_bytes = int(settings["max_total_mb"]) * 1024 * 1024
+        result["budget_bytes"] = max_total_bytes
         result["sample_status"] = "listing"
         sample = _sample_paths(
             copy_target,
@@ -697,8 +700,11 @@ def run_pair_restore_test(
         cleanup_error = ""
         try:
             shutil.rmtree(workdir)
+            forget_workspace(workdir)
         except Exception as exc:
             cleanup_error = str(exc).strip() or type(exc).__name__
+        finally:
+            workspace_lease.release()
         if cleanup_error or workdir.exists():
             if not cleanup_error:
                 cleanup_error = "Temp-Verzeichnis besteht nach der Bereinigung weiter"
