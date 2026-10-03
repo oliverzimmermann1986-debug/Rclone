@@ -1,8 +1,11 @@
 import copy
+import os
 import re
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import bcrypt
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 
@@ -10,6 +13,15 @@ from app import __version__ as app_version, config_store, db
 from app.config_store import Config
 from app.db import Database
 from app.jobs import runtime_state
+from app.static_assets import WEB_CACHE_ASSETS, AllowlistedStaticFiles
+
+
+def _web_asset_urls(html: str) -> dict[str, str]:
+    return {
+        Path(urlsplit(url).path).name: url
+        for url in re.findall(r'(?:href|src)="(/static/[^"]+)"', html)
+        if Path(urlsplit(url).path).name in WEB_CACHE_ASSETS
+    }
 
 
 def _config(password: str) -> dict:
@@ -29,6 +41,85 @@ def _config(password: str) -> dict:
         "backup": {"enabled": True, "pairs": [], "default_schedule": "manual"},
         "notifications": {"custom_delivery": {"api_key": "private-api-key-canary"}},
     }
+
+
+@pytest.mark.parametrize("changed_asset", WEB_CACHE_ASSETS)
+def test_index_asset_urls_track_bytes_with_unchanged_version_and_mtime(
+    tmp_path: Path, monkeypatch, changed_asset: str
+):
+    from app import main
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(_config("test-password")), encoding="utf-8")
+    monkeypatch.setattr(config_store, "_config", Config(config_path))
+    monkeypatch.setattr(
+        main, "session_user", lambda token: "admin" if token == "test-session" else None
+    )
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_bytes(
+        (main.STATIC_DIR / "index.html").read_bytes()
+    )
+    for name in WEB_CACHE_ASSETS:
+        (static_dir / name).write_bytes(f"old:{name}".encode())
+    monkeypatch.setattr(main, "STATIC_DIR", static_dir)
+    static_mount = next(
+        route for route in main.app.routes if getattr(route, "name", None) == "static"
+    )
+    monkeypatch.setattr(
+        static_mount,
+        "app",
+        AllowlistedStaticFiles(
+            directory=static_dir, allowed_files=main.STATIC_ASSET_ALLOWLIST
+        ),
+    )
+    version = main.__version__
+    # No lifespan is needed: this exercises the real index/static routes and
+    # security middleware without launching maintenance workers.
+    client = TestClient(main.app, base_url="http://testserver")
+    client.cookies.set("rclone_sync_session", "test-session")
+    original = client.get("/")
+    assert original.status_code == 200
+    assert original.headers["cache-control"] == "no-store"
+    assert "__APP_VERSION__" not in original.text
+    original_urls = _web_asset_urls(original.text)
+    assert set(original_urls) == set(WEB_CACHE_ASSETS)
+    for url in original_urls.values():
+        revision = parse_qs(urlsplit(url).query)["v"][0]
+        assert re.fullmatch(re.escape(version) + r"-[0-9a-f]{16}", revision)
+    assert _web_asset_urls(client.get("/").text) == original_urls
+    old_asset = client.get(original_urls[changed_asset])
+    assert old_asset.status_code == 200
+    assert old_asset.headers["cache-control"] == "public, max-age=86400"
+
+    asset_path = static_dir / changed_asset
+    original_stat = asset_path.stat()
+    os.utime(
+        asset_path,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000_000),
+    )
+    assert _web_asset_urls(client.get("/").text) == original_urls
+    before = asset_path.stat()
+    changed_bytes = bytes([old_asset.content[0] ^ 1]) + old_asset.content[1:]
+    asset_path.write_bytes(changed_bytes)
+    os.utime(asset_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = asset_path.stat()
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_size == before.st_size
+    assert main.__version__ == version
+
+    updated = client.get("/")
+    assert updated.status_code == 200
+    assert updated.headers["cache-control"] == "no-store"
+    assert "__APP_VERSION__" not in updated.text
+    updated_urls = _web_asset_urls(updated.text)
+    assert set(updated_urls) == set(WEB_CACHE_ASSETS)
+    assert all(updated_urls[name] != original_urls[name] for name in WEB_CACHE_ASSETS)
+    assert _web_asset_urls(client.get("/").text) == updated_urls
+    new_asset = client.get(updated_urls[changed_asset])
+    assert new_asset.status_code == 200
+    assert new_asset.content == changed_bytes
+    assert new_asset.headers["cache-control"] == "public, max-age=86400"
 
 
 def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeypatch):
@@ -98,6 +189,14 @@ def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeyp
         index_page = client.get("/")
         assert index_page.status_code == 200
         assert app_version == "2.4.0"
+        asset_urls = _web_asset_urls(index_page.text)
+        assert set(asset_urls) == set(WEB_CACHE_ASSETS)
+        revisions = {
+            parse_qs(urlsplit(url).query)["v"][0] for url in asset_urls.values()
+        }
+        assert len(revisions) == 1
+        revision = revisions.pop()
+        assert re.fullmatch(re.escape(app_version) + r"-[0-9a-f]{16}", revision)
         for asset in (
             "manifest.json",
             "style.css",
@@ -106,7 +205,7 @@ def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeyp
             "app.js",
             "app-icon-1024.png",
         ):
-            assert f"/static/{asset}?v={app_version}" in index_page.text
+            assert f"/static/{asset}?v={revision}" in index_page.text
         assert "__APP_VERSION__" not in index_page.text
 
         filter_response = client.get("/api/config/filter-file")
