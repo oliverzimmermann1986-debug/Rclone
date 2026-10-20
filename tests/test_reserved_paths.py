@@ -41,6 +41,17 @@ def test_include_flags_are_converted_to_one_reserved_first_stream():
     assert args.index("- /Sicherpfad/**") < args.index("+ **")
 
 
+def test_explicit_excludes_cannot_be_bypassed_by_broad_include(tmp_path):
+    excludes = tmp_path / "excluded.txt"
+    excludes.write_text("*.secret\n", encoding="utf-8")
+    args = _protected_filter_args(
+        ["--include", "**", "--exclude", "*.private", "--exclude-from", str(excludes)]
+    )
+    assert args.index("- *.private") < args.index("+ **")
+    assert args.index("- *.secret") < args.index("+ **")
+    assert args[-2:] == ["--filter", "- **"]
+
+
 @pytest.mark.skipif(not shutil.which("rclone"), reason="rclone binary not installed")
 @pytest.mark.parametrize("direction", ["push", "bisync"])
 def test_real_sync_preserves_vault_and_recovery_subtrees(

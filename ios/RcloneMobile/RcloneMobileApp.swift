@@ -1,5 +1,39 @@
 import SwiftUI
 
+enum AppNavigationDestination: Equatable {
+    case recovery, vault
+
+    init?(url: URL) {
+        guard ["rclonesync", "sicherpfad"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+        switch url.host?.lowercased() {
+        case "recovery": self = .recovery
+        case "vault": self = .vault
+        default: return nil
+        }
+    }
+
+    var notificationName: Notification.Name {
+        switch self {
+        case .recovery: .pushRecoveryNavigationRequested
+        case .vault: .deviceVaultNavigationRequested
+        }
+    }
+}
+
+struct PendingAppNavigation: Equatable {
+    private(set) var destination: AppNavigationDestination?
+
+    mutating func request(_ destination: AppNavigationDestination) {
+        self.destination = destination
+    }
+
+    mutating func consume(isSignedIn: Bool) -> Notification.Name? {
+        guard isSignedIn, let destination else { return nil }
+        self.destination = nil
+        return destination.notificationName
+    }
+}
+
 @main
 struct RcloneMobileApp: App {
     @UIApplicationDelegateAdaptor(PushNotificationCoordinator.self) private var pushDelegate
@@ -19,7 +53,7 @@ private struct AppRootView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("pushPrimerDecision") private var pushPrimerDecision = "notAsked"
     @State private var showPushPrimer = false
-    @State private var pendingRecoveryNavigation = false
+    @State private var pendingNavigation = PendingAppNavigation()
     let pushCoordinator: PushNotificationCoordinator
 
     var body: some View {
@@ -30,10 +64,20 @@ private struct AppRootView: View {
             case .signedOut:
                 LoginView()
             case .signedIn:
-                if StorePreviewMode.opensDeviceVault {
-                    NavigationStack { DeviceVaultView() }
-                } else {
-                    RootTabView()
+                Group {
+                    if StorePreviewMode.opensDeviceVault {
+                        NavigationStack { DeviceVaultView() }
+                    } else {
+                        RootTabView()
+                    }
+                }
+                .task(id: pendingNavigation) {
+                    // Wait until the signed-in navigation observers are mounted.
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                    if let name = pendingNavigation.consume(isSignedIn: model.phase == .signedIn) {
+                        NotificationCenter.default.post(name: name, object: nil)
+                    }
                 }
             }
         }
@@ -43,7 +87,7 @@ private struct AppRootView: View {
                 model.requestRunNavigation(id: jobID)
             }
             if pushCoordinator.consumePendingRecoveryNavigation() {
-                pendingRecoveryNavigation = true
+                pendingNavigation.request(.recovery)
             }
             guard model.phase == .signedIn else {
                 if model.phase == .signedOut {
@@ -77,30 +121,11 @@ private struct AppRootView: View {
             Task {
                 await model.pauseScheduler(minutes: 60)
                 model.actionMessage = "Zeitpläne wurden für eine Stunde pausiert."
-                if pendingRecoveryNavigation {
-                    pendingRecoveryNavigation = false
-                    await Task.yield()
-                    NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
-                }
             }
         }
         .onOpenURL { url in
-            if ["rclonesync", "sicherpfad"].contains(url.scheme ?? ""), url.host == "vault" {
-                if model.phase == .signedIn {
-                    Task { @MainActor in
-                        await Task.yield()
-                        NotificationCenter.default.post(name: .deviceVaultNavigationRequested, object: nil)
-                    }
-                }
-            } else if ["rclonesync", "sicherpfad"].contains(url.scheme ?? ""), url.host == "recovery" {
-                if model.phase == .signedIn {
-                    Task { @MainActor in
-                        await Task.yield()
-                        NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
-                    }
-                } else {
-                    pendingRecoveryNavigation = true
-                }
+            if let destination = AppNavigationDestination(url: url) {
+                pendingNavigation.request(destination)
             }
         }
         .alert("Bei Sicherungsfehlern informieren?", isPresented: $showPushPrimer) {

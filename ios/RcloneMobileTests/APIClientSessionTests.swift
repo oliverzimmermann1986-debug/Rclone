@@ -3,6 +3,36 @@ import XCTest
 @testable import RcloneMobile
 
 final class APIClientSessionTests: XCTestCase {
+    func testLoginPersistenceRequiresHTTPSForNativeLegacyAndWebAuthnFlows() async throws {
+        for scheme in ["http", "https"] {
+            for flow in ["native", "legacy", "webauthn"] {
+                let baseURL = try XCTUnwrap(URL(string: "\(scheme)://login.example"))
+                let jar = URLSessionConfiguration.ephemeral.httpCookieStorage!
+                let configuration = URLSessionConfiguration.ephemeral
+                if flow == "legacy" {
+                    LegacyLoginURLProtocol.reset(cookieStorage: jar)
+                    configuration.protocolClasses = [LegacyLoginURLProtocol.self]
+                } else {
+                    RecordingLoginURLProtocol.reset(cookieStorage: jar)
+                    configuration.protocolClasses = [RecordingLoginURLProtocol.self]
+                }
+                configuration.httpCookieStorage = jar
+                let session = URLSession(configuration: configuration)
+                defer { session.invalidateAndCancel() }
+                let store = LoginPersistenceSpy()
+                let client = APIClient(baseURL: baseURL, session: session, cookieStorage: jar, sessionPersistence: store)
+                if flow == "webauthn" {
+                    try await client.exchangeWebAuthnToken("fixture-token", verifier: "fixture-verifier")
+                } else {
+                    try await client.login(username: "fixture", password: "fixture-password")
+                }
+                XCTAssertTrue(jar.cookies(for: baseURL)?.contains { $0.name == APIClient.sessionCookie } == true)
+                XCTAssertEqual(store.saveCount, scheme == "https" ? 1 : 0, "\(scheme) \(flow)")
+                XCTAssertEqual(store.loadCount, scheme == "https" ? 1 : 0)
+            }
+        }
+    }
+
     func testUserFacingConnectionErrorsAreRecoveryOriented() {
         XCTAssertEqual(
             APIError.invalidResponse.errorDescription,
@@ -455,6 +485,14 @@ final class APIClientSessionTests: XCTestCase {
             "false"
         )
     }
+}
+
+private final class LoginPersistenceSpy: SessionPersisting {
+    var saveCount = 0
+    var loadCount = 0
+    func load(for server: URL) -> [HTTPCookie] { loadCount += 1; return [] }
+    func save(_ cookies: [HTTPCookie], for server: URL) { saveCount += 1 }
+    func remove(for server: URL) {}
 }
 
 private final class LegacyLoginURLProtocol: URLProtocol {

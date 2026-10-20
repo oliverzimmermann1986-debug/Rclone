@@ -11,6 +11,7 @@ struct LoginView: View {
     @State private var loginTask: Task<Void, Never>?
     @State private var showHTTPWarning = false
     @State private var showingOfflineCard = false
+    @State private var showingLegalInformation = false
     @FocusState private var focusedField: LoginFieldID?
 
     var body: some View {
@@ -40,7 +41,7 @@ struct LoginView: View {
                     connectionForm
                     Toggle("Angemeldet bleiben", isOn: $rememberSession)
                         .padding(.top, 16)
-                    Text("Die Sitzung wird geschützt auf diesem Gerät gespeichert – auch bei HTTP. Dein Passwort wird nicht gespeichert.")
+                    Text("Nur HTTPS-Sitzungen werden geschützt auf diesem Gerät gespeichert. Bei HTTP ist nach einem App-Neustart eine neue Anmeldung nötig. Dein Passwort wird nicht gespeichert.")
                         .font(.caption).foregroundStyle(.secondary)
 
                     if let error = model.errorMessage {
@@ -83,6 +84,12 @@ struct LoginView: View {
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.top, 18)
+                    Button("Impressum") {
+                        focusedField = nil
+                        showingLegalInformation = true
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .padding(.top, 8)
                 }
                 .frame(maxWidth: 440)
                 .padding(.horizontal, 24)
@@ -102,11 +109,13 @@ struct LoginView: View {
             server = model.serverAddress
             username = model.savedUsername
         }
+        .sheet(isPresented: $showingLegalInformation) { LegalInformationSheet() }
+        .sheet(isPresented: $showingOfflineCard) { OfflineRecoveryCardView() }
         .alert("Passwort unverschlüsselt senden?", isPresented: $showHTTPWarning) {
             Button("Abbrechen", role: .cancel) {}
             Button("Über HTTP anmelden", role: .destructive, action: performLogin)
         } message: {
-            Text("HTTP ist unverschlüsselt. Zugangsdaten und Sitzungen können im Netzwerk mitgelesen werden. Mit Angemeldet bleiben wird die bestätigte Verbindung bei späteren App-Starts wieder verwendet.")
+            Text("HTTP ist unverschlüsselt. Zugangsdaten und Sitzungen können im Netzwerk mitgelesen werden. Diese Sitzung wird auch mit Angemeldet bleiben nicht gespeichert. Nach einem App-Neustart musst du dich erneut anmelden.")
         }
     }
 
@@ -236,7 +245,7 @@ struct LoginView: View {
                 }
             }
         }
-        .sheet(isPresented: $showingOfflineCard) { OfflineRecoveryCardView() }
+
     }
 
     private var secureLoginButtons: some View {

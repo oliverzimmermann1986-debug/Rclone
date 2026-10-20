@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
@@ -16,6 +18,8 @@ from .rclone_args import rclone_subprocess_env
 MAX_POINTS = 180
 MAX_DIFF_FILES = 20_000
 MAX_DIFF_RESULTS = 750
+MAX_BROWSE_ITEMS = 500
+MAX_BROWSE_SCAN = 10_000
 
 
 class RecoveryPointError(ValueError):
@@ -38,15 +42,107 @@ def _join(root: str, relative: str) -> str:
 
 
 def _safe_relative(value: str) -> str:
-    raw = str(value or "").replace("\\", "/").strip().strip("/")
+    raw = str(value or "").replace("\\", "/").strip()
     candidate = PurePosixPath(raw)
     if (
         candidate.is_absolute()
         or ".." in candidate.parts
+        or ":" in raw
         or any(char in raw for char in ("\x00", "\r", "\n"))
     ):
         raise RecoveryPointError("Ungültiger relativer Pfad")
     return "" if raw in {"", "."} else candidate.as_posix()
+
+
+def _local_browse(root: str, relative: str) -> tuple[list[dict[str, Any]], bool]:
+    """Read bounded metadata once, never following an entry's symlink.
+
+    POSIX traversal and scanning stay anchored to no-follow directory handles.
+    Other platforms reject links/reparse points and check directory identities;
+    they do not provide the same descriptor-relative race guarantee.
+    """
+    relative = _safe_relative(relative)
+    # Do not resolve a root that may have been replaced since point_target().
+    # Every component, including the root itself, must pass the no-follow walk.
+    base = Path(root).expanduser().absolute()
+    items = []
+    truncated = False
+    try:
+        with ExitStack() as stack:
+            anchored = (
+                os.open in os.supports_dir_fd
+                and os.scandir in os.supports_fd
+                and hasattr(os, "O_NOFOLLOW")
+                and hasattr(os, "O_DIRECTORY")
+            )
+            if anchored:
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                flags |= getattr(os, "O_CLOEXEC", 0)
+                directory = os.open(base.anchor, flags)
+                stack.callback(os.close, directory)
+                for part in (*base.parts[1:], *PurePosixPath(relative).parts):
+                    directory = os.open(part, flags, dir_fd=directory)
+                    stack.callback(os.close, directory)
+                scan_target = directory
+                identities = []
+            else:
+                directory = Path(base.anchor)
+                identities = []
+                for part in (None, *base.parts[1:], *PurePosixPath(relative).parts):
+                    if part is not None:
+                        directory = directory / part
+                    info = directory.lstat()
+                    if not stat.S_ISDIR(info.st_mode) or _is_link_stat(info):
+                        raise RecoveryPointError("Unsicherer Ordner im Recovery-Punkt")
+                    identities.append((directory, info))
+                scan_target = directory
+            entries = stack.enter_context(os.scandir(scan_target))
+            for index, entry in enumerate(entries):
+                if index >= MAX_BROWSE_SCAN:
+                    truncated = True
+                    break
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                is_dir = stat.S_ISDIR(info.st_mode)
+                is_file = stat.S_ISREG(info.st_mode)
+                if _is_link_stat(info) or not (is_dir or is_file):
+                    continue
+                items.append(
+                    {
+                        "name": entry.name,
+                        "path": f"{relative}/{entry.name}" if relative else entry.name,
+                        "is_dir": is_dir,
+                        "size": info.st_size if is_file else None,
+                        "modified_at": info.st_mtime,
+                    }
+                )
+            for directory, previous in identities:
+                current = directory.lstat()
+                if _is_link_stat(current) or (
+                    current.st_dev,
+                    current.st_ino,
+                    current.st_mode,
+                ) != (previous.st_dev, previous.st_ino, previous.st_mode):
+                    raise RecoveryPointError(
+                        "Recovery-Ordner wurde während des Lesens geändert"
+                    )
+    except FileNotFoundError as exc:
+        raise RecoveryPointError("Ordner nicht gefunden") from exc
+    except OSError as exc:
+        raise RecoveryPointError(
+            "Recovery-Ordner konnte nicht sicher gelesen werden"
+        ) from exc
+    items.sort(key=lambda item: (not item["is_dir"], item["name"].casefold()))
+    return items[:MAX_BROWSE_ITEMS], truncated or len(items) > MAX_BROWSE_ITEMS
+
+
+def _is_link_stat(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
 
 
 def _resolve_spec(target: str, spec: str) -> str:
@@ -233,6 +329,7 @@ def browse_point(
     root = point_target(config, pair, point_id)
     relative = _safe_relative(relative_path)
     target = _join(root, relative)
+    truncated = False
     if _is_remote(target):
         result = subprocess.run(
             ["rclone", "lsjson", "--max-depth", "1", "--", target],
@@ -248,6 +345,9 @@ def browse_point(
             entries = json.loads(result.stdout or "[]")
         except json.JSONDecodeError as exc:
             raise RecoveryPointError("Recovery-Punkt lieferte ungültige Daten") from exc
+        if not isinstance(entries, list):
+            raise RecoveryPointError("Recovery-Punkt lieferte ungültige Daten")
+        truncated = len(entries) > MAX_BROWSE_ITEMS
         items = [
             {
                 "name": str(item.get("Name") or ""),
@@ -256,33 +356,18 @@ def browse_point(
                 "size": item.get("Size"),
                 "modified_at": item.get("ModTime"),
             }
-            for item in entries
+            for item in entries[:MAX_BROWSE_ITEMS]
             if isinstance(item, Mapping)
             and str(item.get("Name") or "") not in {"", ".", ".."}
         ]
     else:
-        base = Path(root).expanduser().resolve()
-        directory = (base / relative).resolve()
-        if directory != base and not directory.is_relative_to(base):
-            raise RecoveryPointError("Pfad liegt außerhalb des Recovery-Punkts")
-        if not directory.is_dir():
-            raise RecoveryPointError("Ordner nicht gefunden")
-        items = []
-        for item in sorted(
-            directory.iterdir(),
-            key=lambda entry: (not entry.is_dir(), entry.name.casefold()),
-        )[:500]:
-            stat = item.stat()
-            items.append(
-                {
-                    "name": item.name,
-                    "path": _join(relative, item.name),
-                    "is_dir": item.is_dir(),
-                    "size": stat.st_size if item.is_file() else None,
-                    "modified_at": stat.st_mtime,
-                }
-            )
-    return {"point_id": point_id, "path": relative, "items": items}
+        items, truncated = _local_browse(root, relative)
+    return {
+        "point_id": point_id,
+        "path": relative,
+        "items": items,
+        "truncated": truncated,
+    }
 
 
 def _local_inventory(root: str) -> tuple[dict[str, tuple[int, str]], bool]:

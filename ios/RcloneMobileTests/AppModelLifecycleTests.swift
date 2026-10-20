@@ -89,14 +89,14 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertTrue(model.errorMessage?.contains("noch nicht gespeichert") == true)
     }
 
-    func testRememberedHTTPLoginRestoresAfterNewAppModel() async throws {
+    func testRememberedHTTPSLoginRestoresAfterNewAppModel() async throws {
         let defaults = makeDefaults()
         let original = StubAPIClient()
         let login = AppModel(defaults: defaults) { _ in original }
-        await login.login(server: "http://192.168.50.20:8001/", username: "owner", password: "fixture-password", rememberSession: true)
-        let server = try APIClient.normalizedServerURL("http://192.168.50.20:8001").absoluteString
+        await login.login(server: "https://backup.example.de/", username: "owner", password: "fixture-password", rememberSession: true)
+        let server = try APIClient.normalizedServerURL("https://backup.example.de").absoluteString
         XCTAssertEqual(original.persistenceChoices, [true])
-        XCTAssertTrue((defaults.stringArray(forKey: "rememberedHTTPServers") ?? []).contains(server))
+        XCTAssertFalse((defaults.stringArray(forKey: "rememberedHTTPServers") ?? []).contains(server))
 
         let restored = StubAPIClient()
         let relaunched = AppModel(defaults: defaults) { _ in restored }
@@ -147,12 +147,11 @@ final class AppModelLifecycleTests: XCTestCase {
         }
     }
 
-    func testHTTPRestoreKeepsTransientFailureButClearsRejectedSession() async {
-        let server = "http://192.168.50.20:8001"
+    func testHTTPSRestoreKeepsTransientFailureButClearsRejectedSession() async {
+        let server = "https://backup.example.de"
         for rejected in [false, true] {
             let defaults = makeDefaults()
             defaults.set(server, forKey: "serverAddress")
-            defaults.set([server], forKey: "rememberedHTTPServers")
             let client = StubAPIClient()
             if rejected { client.configError = APIError.unauthenticated }
             else { client.configError = URLError(.notConnectedToInternet) }

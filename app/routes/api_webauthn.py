@@ -28,7 +28,12 @@ from ..auth import (
 )
 from ..config_store import get_config
 from ..db import get_db
-from ..security import CSRF_COOKIE, new_csrf_token, require_csrf
+from ..security import (
+    CSRF_COOKIE,
+    cookie_secure_for_request,
+    new_csrf_token,
+    require_csrf,
+)
 from ..webauthn_service import (
     WebAuthnUnavailable,
     authentication_options,
@@ -83,10 +88,8 @@ class NativeRegistrationOptionsRequest(BaseModel):
 
 
 def _cookie_secure(request: Request) -> bool:
-    configured = get_config().get("web", "secure_cookie", default=False)
-    if configured is True:
-        return True
-    return str(configured).lower() == "auto" and request.url.scheme == "https"
+    configured = get_config().get("web", "secure_cookie", default="auto")
+    return cookie_secure_for_request(request, configured)
 
 
 def _set_authenticated_session(

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from app.config_validation import (
     ConfigValidationError,
@@ -21,6 +22,35 @@ def _base(tmp_path: Path) -> dict:
         "backup": {"pairs": [], "default_schedule": "manual"},
         "notifications": {"webhooks": []},
     }
+
+
+def test_default_and_installer_example_use_consistent_security_policy(tmp_path: Path):
+    defaults, _ = validate_config(_base(tmp_path))
+    assert defaults["web"]["secure_cookie"] == "auto"
+    assert Path(defaults["paths"]["recovery_dir"]) == tmp_path / "recovery"
+    assert set(defaults["web"]["allowed_hosts"]) == {"localhost", "127.0.0.1", "::1"}
+    example = Path(__file__).resolve().parents[1] / "config" / "config.example.yaml"
+    normalized, _ = validate_config(yaml.safe_load(example.read_text(encoding="utf-8")))
+    assert normalized["web"]["secure_cookie"] == "auto"
+    assert "127.0.0.1" in normalized["web"]["allowed_hosts"]
+    assert "*" not in normalized["web"]["allowed_hosts"]
+    assert normalized["paths"]["recovery_dir"] == "/opt/rclone-sync/data/recovery"
+
+
+@pytest.mark.parametrize("value", [None, " auto ", "AUTO"])
+def test_auto_cookie_modes_cannot_silently_disable_https_cookies(tmp_path, value):
+    config = _base(tmp_path)
+    config["web"]["secure_cookie"] = value
+    normalized, _ = validate_config(config)
+    assert normalized["web"]["secure_cookie"] == "auto"
+
+
+@pytest.mark.parametrize("value", ["typo", "", [], {}, 2])
+def test_invalid_cookie_modes_are_rejected(tmp_path, value):
+    config = _base(tmp_path)
+    config["web"]["secure_cookie"] = value
+    with pytest.raises(ConfigValidationError, match="secure_cookie"):
+        validate_config(config)
 
 
 @pytest.mark.parametrize(

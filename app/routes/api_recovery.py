@@ -5,10 +5,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any, Mapping
 
 from cryptography.hazmat.primitives import hashes
@@ -30,6 +31,8 @@ from ..auth import require_auth, require_reauthentication
 from ..config_store import get_config
 from ..db import JobAlreadyRunningError, get_db
 from ..jobs.restore_test import _endpoints
+from ..jobs import runtime_state
+from ..jobs.locks import HeldFileLock, try_file_lock
 from ..jobs.selective_restore import (
     JOB_KIND,
     list_staging,
@@ -40,6 +43,8 @@ from ..jobs.selective_restore import (
 from ..rclone_args import rclone_subprocess_env
 from ..recovery_points import (
     RecoveryPointError,
+    _is_remote,
+    _local_browse,
     browse_point,
     compare_points,
     list_points,
@@ -67,6 +72,7 @@ router = APIRouter(
     tags=["recovery"],
     dependencies=[Depends(require_auth), Depends(require_csrf)],
 )
+logger = logging.getLogger(__name__)
 
 
 def _pairs(config: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -329,15 +335,116 @@ class SnapshotRequest(BaseModel):
     max_total_mb: int = Field(default=5120, ge=1, le=51_200)
 
 
-def _start_recovery_job() -> tuple[Any, int]:
-    database = get_db()
+def _finish_failed_recovery(database, job_id: int, error: BaseException) -> None:
     try:
+        database.job_finish(job_id, "error", {"ok": False, "error": str(error)[:500]})
+    except Exception:
+        logger.exception("Recovery-Job %s konnte nicht abgeschlossen werden", job_id)
+
+
+def _release_recovery(lease: HeldFileLock, run_id: str, status: str) -> None:
+    try:
+        runtime_state.finish_run(run_id, status)
+    except Exception:
+        logger.exception(
+            "Recovery-Runtime %s konnte nicht abgeschlossen werden", run_id
+        )
+    finally:
+        lease.release()
+
+
+def _run_recovery_locked(lease, run_id, function, database, *args, job_id, **kwargs):
+    status = "error"
+    try:
+        result = function(database, *args, job_id=job_id, **kwargs)
+        job = database.job_get(job_id) or {}
+        status = str(job.get("status") or "error")
+        if status == "running":
+            raise RuntimeError("Recovery-Worker hat den Job nicht abgeschlossen")
+        return result
+    except BaseException as exc:
+        status = "error"
+        _finish_failed_recovery(database, job_id, exc)
+        try:
+            current = database.job_get(job_id) or {}
+            if current.get("status") and current["status"] != "running":
+                status = str(current["status"])
+        except Exception:
+            logger.exception(
+                "Recovery-Jobstatus %s konnte nicht gelesen werden", job_id
+            )
+        raise
+    finally:
+        _release_recovery(lease, run_id, status)
+
+
+def _start_recovery_job(pair) -> tuple[Any, int, HeldFileLock, str]:
+    lease = try_file_lock(runtime_state.DEFAULT_CANCEL_SCOPE)
+    if lease is None:
+        raise HTTPException(
+            409,
+            "Während einer Sicherung oder Recovery läuft bereits ein anderer Prozess",
+        )
+    database = None
+    job_id = None
+    try:
+        database = get_db()
+        if runtime_state.active_processes(runtime_state.DEFAULT_CANCEL_SCOPE):
+            raise HTTPException(
+                409, "Ein registrierter Sync-Unterprozess ist noch aktiv"
+            )
         job_id = database.job_start(JOB_KIND, trigger="manual", exclusive_scope=True)
+        run_id = runtime_state.begin_run(
+            [str(pair.get("name") or "")], dry_run=False, kind=JOB_KIND, job_id=job_id
+        )
     except JobAlreadyRunningError as exc:
+        lease.release()
         raise HTTPException(
             409, "Während einer Sicherung oder Recovery kann kein weiterer Lauf starten"
         ) from exc
-    return database, job_id
+    except BaseException as exc:
+        try:
+            if database is not None and job_id is not None:
+                _finish_failed_recovery(database, job_id, exc)
+        finally:
+            lease.release()
+        raise
+    return database, job_id, lease, run_id
+
+
+def _queue_recovery(background, function, config, pair, *args, **kwargs) -> int:
+    database, job_id, lease, run_id = _start_recovery_job(pair)
+    try:
+        if function is run_selective_restore:
+            database.audit_add(
+                "selective_recovery_started",
+                actor="web",
+                details={
+                    "job_id": job_id,
+                    "pair": str(pair.get("name") or ""),
+                    "items": len(args[0]),
+                    "recovery_point": kwargs["recovery_point"],
+                },
+            )
+        background.add_task(
+            _run_recovery_locked,
+            lease,
+            run_id,
+            function,
+            database,
+            config,
+            pair,
+            *args,
+            job_id=job_id,
+            **kwargs,
+        )
+    except BaseException as exc:
+        try:
+            _finish_failed_recovery(database, job_id, exc)
+        finally:
+            _release_recovery(lease, run_id, "error")
+        raise
+    return job_id
 
 
 @router.post("/snapshots", status_code=202)
@@ -346,14 +453,12 @@ def start_snapshot(
 ) -> dict[str, Any]:
     config = get_config().snapshot()
     pair = _find_pair(config, body.identity)
-    database, job_id = _start_recovery_job()
-    background.add_task(
+    job_id = _queue_recovery(
+        background,
         run_snapshot_capture,
-        database,
         config,
         pair,
         max_total_mb=body.max_total_mb,
-        job_id=job_id,
     )
     return {"ok": True, "job_id": job_id, "status": "running", "operation": "snapshot"}
 
@@ -368,15 +473,13 @@ def restore_full_snapshot(
         load_manifest(config, pair, point_id)
     except SnapshotError as exc:
         raise HTTPException(400, str(exc)) from exc
-    database, job_id = _start_recovery_job()
-    background.add_task(
+    job_id = _queue_recovery(
+        background,
         run_snapshot_restore,
-        database,
         config,
         pair,
         point_id=point_id,
         max_total_mb=body.max_total_mb,
-        job_id=job_id,
     )
     return {
         "ok": True,
@@ -395,6 +498,7 @@ def _relative_path(value: str) -> str:
     if (
         path.is_absolute()
         or ".." in path.parts
+        or ":" in raw
         or any(char in raw for char in ("\x00", "\r", "\n"))
     ):
         raise HTTPException(400, "Ungültiger relativer Pfad")
@@ -409,7 +513,8 @@ def browse_backup(
     pair = _find_pair(config, identity)
     _source, backup_target = _endpoints(pair)
     relative = _relative_path(path)
-    if ":" in backup_target.split("/", 1)[0]:
+    truncated = False
+    if _is_remote(backup_target):
         target = backup_target.rstrip("/") + (f"/{relative}" if relative else "")
         result = subprocess.run(
             ["rclone", "lsjson", "--max-depth", "1", "--", target],
@@ -427,6 +532,11 @@ def browse_backup(
             raise HTTPException(
                 502, "Sicherungsziel hat eine ungültige Antwort geliefert"
             ) from exc
+        if not isinstance(entries, list):
+            raise HTTPException(
+                502, "Sicherungsziel hat eine ungültige Antwort geliefert"
+            )
+        truncated = len(entries) > 500
         items = [
             {
                 "name": str(item.get("Name") or ""),
@@ -436,33 +546,22 @@ def browse_backup(
                 "size": item.get("Size"),
                 "modified_at": item.get("ModTime"),
             }
-            for item in entries
+            for item in entries[:500]
             if isinstance(item, Mapping)
-            and str(item.get("Name") or "") not in {".", ".."}
+            and str(item.get("Name") or "") not in {"", ".", ".."}
         ]
     else:
-        root = Path(backup_target).expanduser().resolve()
-        target = (root / relative).resolve()
-        if target != root and not target.is_relative_to(root):
-            raise HTTPException(400, "Pfad liegt außerhalb des Sicherungsziels")
-        if not target.is_dir():
-            raise HTTPException(404, "Ordner nicht gefunden")
-        items = []
-        for item in sorted(
-            target.iterdir(),
-            key=lambda entry: (not entry.is_dir(), entry.name.casefold()),
-        )[:500]:
-            stat = item.stat()
-            items.append(
-                {
-                    "name": item.name,
-                    "path": (f"{relative}/" if relative else "") + item.name,
-                    "is_dir": item.is_dir(),
-                    "size": stat.st_size if item.is_file() else None,
-                    "modified_at": stat.st_mtime,
-                }
-            )
-    return {"pair": str(pair.get("name") or ""), "path": relative, "items": items}
+        try:
+            items, truncated = _local_browse(backup_target, relative)
+        except RecoveryPointError as exc:
+            status = 404 if "nicht gefunden" in str(exc).lower() else 400
+            raise HTTPException(status, str(exc)) from exc
+    return {
+        "pair": str(pair.get("name") or ""),
+        "path": relative,
+        "items": items,
+        "truncated": truncated,
+    }
 
 
 @router.get("/points")
@@ -530,33 +629,13 @@ def start_selective_restore(
         recovery_source = point_target(config, pair, body.point_id)
     except RecoveryPointError as exc:
         raise HTTPException(404, str(exc)) from exc
-    database = get_db()
-    try:
-        job_id = database.job_start(JOB_KIND, trigger="manual", exclusive_scope=True)
-    except JobAlreadyRunningError as exc:
-        raise HTTPException(
-            409,
-            "Während einer Sicherung, Prüfung oder anderen Recovery kann keine "
-            "selektive Wiederherstellung starten",
-        ) from exc
-    database.audit_add(
-        "selective_recovery_started",
-        actor="web",
-        details={
-            "job_id": job_id,
-            "pair": str(pair.get("name") or ""),
-            "items": len(selection),
-            "recovery_point": body.point_id,
-        },
-    )
-    background.add_task(
+    job_id = _queue_recovery(
+        background,
         run_selective_restore,
-        database,
         config,
         pair,
         selection,
         max_total_mb=body.max_total_mb,
-        job_id=job_id,
         source_override=recovery_source,
         recovery_point=body.point_id,
     )

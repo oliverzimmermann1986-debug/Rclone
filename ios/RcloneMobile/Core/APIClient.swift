@@ -363,7 +363,12 @@ final class APIClient: APIClientProtocol {
             recoveryConfiguration.waitsForConnectivity = false
             self.vaultDownloadSession = URLSession(configuration: recoveryConfiguration)
         }
-        self.sessionPersistence?.load(for: baseURL).forEach(cookieStorage.setCookie)
+        if baseURL.scheme?.lowercased() == "https" {
+            self.sessionPersistence?.load(for: baseURL).forEach(cookieStorage.setCookie)
+        } else {
+            // Remove credentials saved by older versions before any request.
+            clearCookies()
+        }
     }
 
     static func normalizedServerURL(_ rawValue: String) throws -> URL {
@@ -986,6 +991,10 @@ final class APIClient: APIClientProtocol {
     }
 
     private func persistSession() {
+        guard baseURL.scheme?.lowercased() == "https" else {
+            sessionPersistence?.remove(for: baseURL)
+            return
+        }
         guard remembersSession else { return }
         let names = Set([Self.sessionCookie, Self.csrfCookie])
         let cookies = (cookieStorage.cookies(for: baseURL) ?? []).filter { names.contains($0.name) }
@@ -1028,15 +1037,16 @@ final class APIClient: APIClientProtocol {
         request.httpMethod = "GET"
         if let timeout { request.timeoutInterval = timeout }
         let (temporary, response) = try await (requestSession ?? session).download(for: request)
+        defer { try? FileManager.default.removeItem(at: temporary) }
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         if http.statusCode == 401 { clearCookies(); throw APIError.unauthenticated }
         if !(200..<300).contains(http.statusCode) {
             let errorData = (try? Data(contentsOf: temporary)) ?? Data()
             try validate(response, data: errorData, allowed: 200..<300)
         }
-        let target = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        try FileManager.default.moveItem(at: temporary, to: target)
-        return target
+        return try Self.writeExport(filename: filename) { target in
+            try FileManager.default.moveItem(at: temporary, to: target)
+        }
     }
 
     private func postDownload<Body: Encodable>(
@@ -1052,10 +1062,42 @@ final class APIClient: APIClientProtocol {
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await session.data(for: request)
         try validate(response, data: data, allowed: 200..<300)
-        let target = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        try? FileManager.default.removeItem(at: target)
-        try data.write(to: target, options: [.atomic, .completeFileProtection])
-        return target
+        return try Self.writeExport(filename: filename) { target in
+            try data.write(to: target, options: [.atomic, .completeFileProtection])
+        }
+    }
+
+    static func sanitizedExportFilename(_ filename: String) -> String {
+        let forbidden = CharacterSet(charactersIn: "/\\:").union(.controlCharacters)
+        let sanitized = filename.components(separatedBy: forbidden)
+            .joined(separator: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Bound the UTF-8 length, including multi-byte filenames, below NAME_MAX.
+        let bounded = String(decoding: sanitized.utf8.prefix(180), as: UTF8.self)
+        return bounded.isEmpty || bounded == "." || bounded == ".." ? "download" : bounded
+    }
+
+    static func writeExport(filename: String, write: (URL) throws -> Void) throws -> URL {
+        let files = FileManager.default
+        let directory = files.temporaryDirectory.appendingPathComponent(
+            "sicherpfad-export-\(UUID().uuidString)", isDirectory: true
+        )
+        try files.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [
+            .posixPermissions: 0o700,
+            .protectionKey: FileProtectionType.complete
+        ])
+        do {
+            let target = directory.appendingPathComponent(sanitizedExportFilename(filename), isDirectory: false)
+            try write(target)
+            try files.setAttributes([
+                .posixPermissions: 0o600,
+                .protectionKey: FileProtectionType.complete
+            ], ofItemAtPath: target.path)
+            return target
+        } catch {
+            try? files.removeItem(at: directory)
+            throw error
+        }
     }
 
     private func put<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {

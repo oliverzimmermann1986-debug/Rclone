@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from .db import Database
 from .jobs.scheduler import rclone_history_key
 from .rclone_args import rclone_subprocess_env
+from .restore_evidence import is_partial_restore_summary
 
 _ANOMALY_STATE_KEY = "anomaly_guard:v1"
 _MAX_QUARANTINES = 256
@@ -22,10 +23,10 @@ POLICY_PRESETS: tuple[dict[str, Any], ...] = (
     {
         "id": "family_photos",
         "name": "Familienfotos",
-        "description": "Tägliche Kopie ohne automatische Löschungen und mit monatlichem Restore-Nachweis.",
+        "description": "Tägliche Kopie ohne automatische Löschungen und mit wöchentlicher Restore-Stichprobe.",
         "pair": {"mode": "copy", "allow_delete": False, "min_local_files": 1},
         "job": {"schedule": "0 3 * * *", "retry_minutes": 60},
-        "restore": {"schedule": "0 5 1 * *", "sample_files": 20},
+        "restore": {"schedule": "0 5 * * 0", "sample_files": 20},
     },
     {
         "id": "documents",
@@ -44,10 +45,10 @@ POLICY_PRESETS: tuple[dict[str, Any], ...] = (
     {
         "id": "archive",
         "name": "Archiv",
-        "description": "Wöchentliche, bandbreitenschonende Kopie für große unveränderliche Bestände.",
+        "description": "Wöchentliche, bandbreitenschonende Kopie mit Restore-Stichprobe für große unveränderliche Bestände.",
         "pair": {"mode": "copy", "allow_delete": False, "min_local_files": 1},
         "job": {"schedule": "0 1 * * 0", "retry_minutes": 180},
-        "restore": {"schedule": "0 6 1 * *", "sample_files": 10},
+        "restore": {"schedule": "0 6 * * 0", "sample_files": 10},
     },
     {
         "id": "critical",
@@ -100,7 +101,10 @@ def _state_key(pair: Mapping[str, Any]) -> str:
 
 
 def _load_state(database: Database) -> dict[str, Any]:
-    raw = database.runtime_get(_ANOMALY_STATE_KEY, {})
+    return _normalize_state(database.runtime_get(_ANOMALY_STATE_KEY, {}))
+
+
+def _normalize_state(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {"baselines": {}, "quarantines": {}}
     baselines = raw.get("baselines")
@@ -111,7 +115,7 @@ def _load_state(database: Database) -> dict[str, Any]:
     }
 
 
-def _save_state(database: Database, state: Mapping[str, Any]) -> None:
+def _bounded_state(state: Mapping[str, Any]) -> dict[str, Any]:
     baselines = dict(state.get("baselines") or {})
     quarantines = dict(state.get("quarantines") or {})
     if len(baselines) > _MAX_QUARANTINES:
@@ -128,10 +132,7 @@ def _save_state(database: Database, state: Mapping[str, Any]) -> None:
             reverse=True,
         )[:_MAX_QUARANTINES]
         quarantines = dict(ordered)
-    database.runtime_set(
-        _ANOMALY_STATE_KEY,
-        {"baselines": baselines, "quarantines": quarantines},
-    )
+    return {"baselines": baselines, "quarantines": quarantines}
 
 
 def measure_path(
@@ -227,9 +228,9 @@ def preflight_anomaly_guard(
     settings = guard_settings(backup, pair)
     if not settings["enabled"] or not is_destructive(pair):
         return {"blocked": False, "enabled": False}
-    state = _load_state(database)
     key = _state_key(pair)
-    existing = (state["quarantines"] or {}).get(key)
+    state = _load_state(database)
+    existing = state["quarantines"].get(key)
     if isinstance(existing, dict):
         return {**existing, "blocked": True, "enabled": True, "quarantine": existing}
     measurement = measure_path(
@@ -237,36 +238,52 @@ def preflight_anomaly_guard(
         filter_args=filter_args,
         timeout_seconds=settings["measurement_timeout_seconds"],
     )
-    finding = evaluate_anomaly(
-        (state["baselines"] or {}).get(key), measurement, settings
-    )
-    finding.update(
-        {
-            "enabled": True,
-            "pair": str(pair.get("name") or ""),
-            "history_key": rclone_history_key(dict(pair)),
-            "source": source,
-            "measurement": measurement,
-        }
-    )
-    if finding.get("blocked"):
-        quarantine = {
-            **{
-                key: value
-                for key, value in finding.items()
-                if key not in {"source", "measurement"}
-            },
-            "detected_at": time.time(),
-            "acknowledged": False,
-        }
-        state["quarantines"][key] = quarantine
-        _save_state(database, state)
+    finding: dict[str, Any] = {}
+    created_quarantine = False
+
+    def update(raw: Any) -> dict[str, Any]:
+        nonlocal created_quarantine
+        state = _normalize_state(raw)
+        existing = (state["quarantines"] or {}).get(key)
+        if isinstance(existing, dict):
+            finding.update(
+                {**existing, "blocked": True, "enabled": True, "quarantine": existing}
+            )
+            return state
+        finding.update(
+            evaluate_anomaly((state["baselines"] or {}).get(key), measurement, settings)
+        )
+        finding.update(
+            {
+                "enabled": True,
+                "pair": str(pair.get("name") or ""),
+                "history_key": rclone_history_key(dict(pair)),
+                "source": source,
+                "measurement": measurement,
+            }
+        )
+        if finding.get("blocked"):
+            quarantine = {
+                **{
+                    key: value
+                    for key, value in finding.items()
+                    if key not in {"source", "measurement"}
+                },
+                "detected_at": time.time(),
+                "acknowledged": False,
+            }
+            state["quarantines"][key] = quarantine
+            created_quarantine = True
+            finding["quarantine"] = quarantine
+        return _bounded_state(state)
+
+    database.runtime_update(_ANOMALY_STATE_KEY, update, default={})
+    if created_quarantine:
         database.audit_add(
             "anomaly_quarantined",
             actor="system",
-            details={k: v for k, v in quarantine.items() if k != "source"},
+            details={k: v for k, v in finding["quarantine"].items() if k != "source"},
         )
-        finding["quarantine"] = quarantine
     return finding
 
 
@@ -278,16 +295,21 @@ def record_anomaly_baseline(
 ) -> None:
     if not measurement or not measurement.get("ok"):
         return
-    state = _load_state(database)
     key = _state_key(pair)
-    state["baselines"][key] = {
+    baseline = {
         "pair": str(pair.get("name") or ""),
         "history_key": rclone_history_key(dict(pair)),
         "count": int(measurement.get("count") or 0),
         "bytes": int(measurement.get("bytes") or 0),
         "measured_at": float(measurement.get("measured_at") or time.time()),
     }
-    _save_state(database, state)
+
+    def update(raw: Any) -> dict[str, Any]:
+        state = _normalize_state(raw)
+        state["baselines"][key] = baseline
+        return _bounded_state(state)
+
+    database.runtime_update(_ANOMALY_STATE_KEY, update, default={})
 
 
 def anomaly_status(
@@ -311,11 +333,17 @@ def anomaly_status(
 
 
 def acknowledge_quarantine(database: Database, pair: Mapping[str, Any]) -> bool:
-    state = _load_state(database)
-    removed = state["quarantines"].pop(_state_key(pair), None)
+    removed = None
+
+    def update(raw: Any) -> dict[str, Any]:
+        nonlocal removed
+        state = _normalize_state(raw)
+        removed = state["quarantines"].pop(_state_key(pair), None)
+        return _bounded_state(state)
+
+    database.runtime_update(_ANOMALY_STATE_KEY, update, default={})
     if removed is None:
         return False
-    _save_state(database, state)
     database.audit_add(
         "anomaly_quarantine_acknowledged",
         actor="web",
@@ -347,16 +375,25 @@ def protection_calendar(
                 "successful": 0,
                 "failed": 0,
                 "cancelled": 0,
+                "warnings": 0,
                 "restore_tests": 0,
                 "state": "empty",
             },
         )
         bucket["total"] += 1
         status = str(job.get("status") or "").casefold()
+        if (
+            job.get("kind") == "restoretest"
+            and status in {"error", "warning"}
+            and is_partial_restore_summary(job.get("summary") or {})
+        ):
+            status = "warning"
         if status == "ok":
             bucket["successful"] += 1
         elif status == "cancelled":
             bucket["cancelled"] += 1
+        elif status == "warning":
+            bucket["warnings"] += 1
         elif status != "running":
             bucket["failed"] += 1
         if str(job.get("kind") or "") == "restoretest":
@@ -364,7 +401,7 @@ def protection_calendar(
     for bucket in buckets.values():
         if bucket["failed"]:
             bucket["state"] = "error"
-        elif bucket["cancelled"]:
+        elif bucket["cancelled"] or bucket["warnings"]:
             bucket["state"] = "warning"
         elif bucket["successful"]:
             bucket["state"] = "ok"

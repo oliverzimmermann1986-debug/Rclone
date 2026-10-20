@@ -190,12 +190,20 @@ def normalize_selection(paths: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(clean))
 
 
-def staging_root(config: Mapping[str, Any]) -> Path:
+def _staging_path(config: Mapping[str, Any]) -> Path:
     paths = config.get("paths") if isinstance(config.get("paths"), Mapping) else {}
-    raw = str((paths or {}).get("recovery_dir") or "/opt/rclone-sync/recovery")
+    data = Path(
+        str((paths or {}).get("data_dir") or Path("/opt/rclone-sync/data").resolve())
+    )
+    raw = str((paths or {}).get("recovery_dir") or data / "recovery")
     root = Path(raw).expanduser()
     if not root.is_absolute():
         raise ValueError("paths.recovery_dir muss absolut sein")
+    return root
+
+
+def staging_root(config: Mapping[str, Any]) -> Path:
+    root = _staging_path(config)
     root.mkdir(parents=True, exist_ok=True)
     try:
         root.chmod(0o700)
@@ -278,26 +286,28 @@ def run_selective_restore(
     recovery_point: str = "current",
 ) -> dict[str, Any]:
     started = time.monotonic()
-    selection = normalize_selection(paths)
-    limit_bytes = max(1, min(int(max_total_mb), 51_200)) * 1024 * 1024
-    _live_source, configured_target = _endpoints(pair)
-    backup_target = str(source_override or configured_target)
     recovery_id = f"recovery-{job_id}"
-    work = staging_root(config) / recovery_id
-    data = work / "data"
+    work = None
+    created = False
     record: dict[str, Any] = {
         "id": recovery_id,
         "job_id": job_id,
         "pair": str(pair.get("name") or ""),
         "status": "running",
         "created_at": time.time(),
-        "requested_items": len(selection),
-        "limit_bytes": limit_bytes,
         "recovery_point": recovery_point,
         "evidence_binding": pair_binding(pair),
     }
     try:
+        selection = normalize_selection(paths)
+        limit_bytes = max(1, min(int(max_total_mb), 51_200)) * 1024 * 1024
+        _live_source, configured_target = _endpoints(pair)
+        backup_target = str(source_override or configured_target)
+        record.update(requested_items=len(selection), limit_bytes=limit_bytes)
+        work = staging_root(config) / recovery_id
+        data = work / "data"
         work.mkdir(mode=0o700)
+        created = True
         data.mkdir(mode=0o700)
         listing = work / "selection.txt"
         listing.write_text("\n".join(selection) + "\n", encoding="utf-8")
@@ -374,24 +384,10 @@ def run_selective_restore(
                 "verification_scope": "complete_selection",
             }
         )
-        database.job_finish(job_id, "ok", {"ok": True, **record})
-        database.audit_add(
-            "selective_recovery_ready",
-            actor="system",
-            details={
-                key: record[key] for key in ("id", "job_id", "pair", "files", "bytes")
-            },
-        )
-        notify(
-            "recovery_ready",
-            f"{record['pair']}: Recovery bereit",
-            f"{selected_count} Dateien wurden getrennt wiederhergestellt und geprüft.",
-            job_id=job_id,
-            pair=record["pair"],
-        )
     except Exception as exc:
         logger.exception("Selektive Recovery %s fehlgeschlagen", recovery_id)
-        shutil.rmtree(work, ignore_errors=True)
+        if created:
+            shutil.rmtree(work, ignore_errors=True)
         record.update(
             {
                 "status": "error",
@@ -399,15 +395,35 @@ def run_selective_restore(
                 "duration_sec": round(time.monotonic() - started, 2),
             }
         )
-        database.job_finish(job_id, "error", {"ok": False, **record})
+    _save_record(database, record)
+    ready = record["status"] == "ready"
+    database.job_finish(job_id, "ok" if ready else "error", {"ok": ready, **record})
+    if ready:
+        try:
+            database.audit_add(
+                "selective_recovery_ready",
+                actor="system",
+                details={
+                    key: record[key]
+                    for key in ("id", "job_id", "pair", "files", "bytes")
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Recovery-Audit %s konnte nicht gespeichert werden", recovery_id
+            )
+    try:
         notify(
-            "recovery_error",
-            f"{record['pair']}: Recovery fehlgeschlagen",
-            str(exc),
+            "recovery_ready" if ready else "recovery_error",
+            f"{record['pair']}: Recovery {'bereit' if ready else 'fehlgeschlagen'}",
+            f"{record['files']} Dateien wurden getrennt wiederhergestellt und geprüft."
+            if ready
+            else record["error"],
             job_id=job_id,
             pair=record["pair"],
         )
-    _save_record(database, record)
+    except Exception:
+        logger.exception("Recovery-Benachrichtigung %s fehlgeschlagen", recovery_id)
     return record
 
 

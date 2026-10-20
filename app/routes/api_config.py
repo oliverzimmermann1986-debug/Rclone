@@ -130,6 +130,31 @@ def _preserve_sensitive(new_data: dict[str, Any], old_data: dict[str, Any]) -> N
         return
     for key in _SERVER_OWNED_WEB_FIELDS:
         new_web[key] = copy.deepcopy(old_web.get(key, ""))
+    # Older clients omit newer security fields. Preserve those values rather
+    # than silently resetting them to validation defaults during a PUT.
+    for key in (
+        *_SENSITIVE_WEB_SCALARS,
+        "allowed_hosts",
+        "local_browse_roots",
+        "trusted_proxy_ips",
+    ):
+        if key not in new_web and key in old_web:
+            new_web[key] = copy.deepcopy(old_web[key])
+    old_paths = old_data.get("paths")
+    new_paths = new_data.setdefault("paths", {})
+    if isinstance(old_paths, dict) and isinstance(new_paths, dict):
+        for key, value in old_paths.items():
+            new_paths.setdefault(key, copy.deepcopy(value))
+    old_notifications = old_data.get("notifications") or {}
+    old_apns = (
+        old_notifications.get("apns") if isinstance(old_notifications, dict) else None
+    )
+    if isinstance(old_apns, dict) and "key_file" in old_apns:
+        new_notifications = new_data.setdefault("notifications", {})
+        if isinstance(new_notifications, dict):
+            new_apns = new_notifications.setdefault("apns", {})
+            if isinstance(new_apns, dict):
+                new_apns.setdefault("key_file", copy.deepcopy(old_apns["key_file"]))
 
 
 def _audit_best_effort(event: str, *, actor: str, details: dict[str, Any]) -> bool:
@@ -173,7 +198,7 @@ def _scalar(value: Any) -> str:
 # config_validation passen: ein Feld, das der Client gar nicht mitschickt, ist
 # keine Änderung gegenüber dem normalisierten Stand auf der Platte.
 _SENSITIVE_WEB_SCALARS = {
-    "secure_cookie": False,
+    "secure_cookie": "auto",
     "hsts_seconds": 0,
     "login_max_failures": 10,
     "login_lock_seconds": 900,
@@ -192,13 +217,51 @@ def _sensitive_config_changed(
         != str(new_web.get("username") or "").casefold()
     ):
         return True
-    if old_web.get("local_browse_roots") != new_web.get("local_browse_roots"):
-        return True
     if old_web.get("trusted_proxy_ips", []) != new_web.get("trusted_proxy_ips", []):
         return True
+    for key in ("allowed_hosts", "local_browse_roots"):
+        if old_web.get(key) != new_web.get(key):
+            return True
+    if "notifications" in new_data and isinstance(new_data["notifications"], dict):
+        new_notifications = new_data["notifications"]
+        if "apns" in new_notifications and isinstance(new_notifications["apns"], dict):
+            new_apns = new_notifications["apns"]
+            if "key_file" in new_apns:
+                old_notifications = (
+                    old_data.get("notifications")
+                    if isinstance(old_data.get("notifications"), dict)
+                    else {}
+                )
+                old_apns = (
+                    old_notifications.get("apns")
+                    if isinstance(old_notifications.get("apns"), dict)
+                    else {}
+                )
+                if str(old_apns.get("key_file") or "") != str(
+                    new_apns.get("key_file") or ""
+                ):
+                    return True
+    if "paths" in new_data and isinstance(new_data["paths"], dict):
+        old_paths = (
+            old_data.get("paths") if isinstance(old_data.get("paths"), dict) else {}
+        )
+        new_paths = new_data["paths"]
+        for key in (
+            "data_dir",
+            "logs_dir",
+            "temp_dir",
+            "recovery_dir",
+            "device_vault_dir",
+        ):
+            if key in new_paths and str(old_paths.get(key) or "") != str(
+                new_paths.get(key) or ""
+            ):
+                return True
     for key, fallback in _SENSITIVE_WEB_SCALARS.items():
+        if key not in new_web:
+            continue
         old_value = old_web.get(key, fallback)
-        new_value = new_web.get(key, fallback)
+        new_value = new_web[key]
         if _scalar(old_value if old_value is not None else fallback) != _scalar(
             new_value if new_value is not None else fallback
         ):
@@ -235,6 +298,10 @@ def _sensitive_config_changed(
     new_backup = (
         new_data.get("backup") if isinstance(new_data.get("backup"), dict) else {}
     )
+    if str(old_backup.get("filter_file") or "") != str(
+        new_backup.get("filter_file") or ""
+    ):
+        return True
     for key in ("allow_unsafe_rclone_args", "allow_external_filter_files"):
         if not _semantic_bool(old_backup.get(key), default=False) and _semantic_bool(
             new_backup.get(key), default=False

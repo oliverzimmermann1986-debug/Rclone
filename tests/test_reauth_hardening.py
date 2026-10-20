@@ -194,6 +194,78 @@ def test_config_update_stays_successful_when_post_audit_fails(
     assert any("Audit-Protokoll" in warning for warning in result["warnings"])
 
 
+@pytest.mark.parametrize(
+    "section,key,value",
+    [
+        ("paths", "data_dir", "alternate-data"),
+        ("paths", "recovery_dir", "alternate-recovery"),
+        ("backup", "filter_file", "alternate-filters.txt"),
+    ],
+)
+def test_path_changes_require_password(tmp_path, monkeypatch, section, key, value):
+    store, _ = _setup(tmp_path, monkeypatch)
+    candidate, revision = store.snapshot_with_revision()
+    candidate[section][key] = str(
+        (tmp_path / "data" if section == "backup" else tmp_path) / value
+    )
+    candidate["_revision"] = revision
+    with pytest.raises(HTTPException) as denied:
+        api_config.update_config(
+            _request("path-change"),
+            api_config.ConfigUpdate(config=candidate),
+            user="admin",
+        )
+    assert denied.value.status_code == 403
+    assert store.revision == revision
+
+
+def test_omitted_sensitive_fields_are_preserved_in_saved_config(tmp_path, monkeypatch):
+    store, _ = _setup(tmp_path, monkeypatch)
+
+    def customize(data):
+        data["web"].update({"secure_cookie": True, "hsts_seconds": 1234})
+        data["paths"]["recovery_dir"] = str(tmp_path / "private-recovery")
+        data["notifications"]["apns"] = {"key_file": str(tmp_path / "data" / "key.p8")}
+
+    store.update(customize)
+    candidate, revision = store.snapshot_with_revision()
+    candidate["web"].pop("secure_cookie")
+    candidate["web"].pop("hsts_seconds")
+    candidate["paths"].pop("recovery_dir")
+    candidate["notifications"].pop("apns")
+    candidate["backup"]["max_parallel"] = 3
+    candidate["_revision"] = revision
+    result = api_config.update_config(
+        _request("legacy-client"),
+        api_config.ConfigUpdate(config=candidate),
+        user="admin",
+    )
+    assert result["ok"]
+    assert store.get("web", "secure_cookie") is True
+    assert store.get("web", "hsts_seconds") == 1234
+    assert store.get("paths", "recovery_dir") == str(tmp_path / "private-recovery")
+    assert store.get("notifications", "apns", "key_file") == str(
+        tmp_path / "data" / "key.p8"
+    )
+
+
+def test_apns_key_change_requires_password(tmp_path, monkeypatch):
+    store, _ = _setup(tmp_path, monkeypatch)
+    candidate, revision = store.snapshot_with_revision()
+    candidate["notifications"]["apns"] = {
+        "key_file": str(tmp_path / "data" / "other.p8")
+    }
+    candidate["_revision"] = revision
+    with pytest.raises(HTTPException) as denied:
+        api_config.update_config(
+            _request("key-change"),
+            api_config.ConfigUpdate(config=candidate),
+            user="admin",
+        )
+    assert denied.value.status_code == 403
+    assert store.revision == revision
+
+
 def test_snapshot_restore_stays_successful_when_post_audit_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

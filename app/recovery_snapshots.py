@@ -469,7 +469,7 @@ def run_snapshot_capture(
 def run_snapshot_restore(
     database, config, pair, *, point_id: str, max_total_mb: int, job_id: int
 ) -> dict:
-    from .jobs.selective_restore import _save_record, staging_root
+    from .jobs.selective_restore import _save_record, _staging_path, staging_root
 
     root: Path | None = None
     work: Path | None = None
@@ -485,16 +485,7 @@ def run_snapshot_restore(
     }
     created = False
     try:
-        proposed = (
-            Path(
-                str(
-                    (config.get("paths") or {}).get("recovery_dir")
-                    or "/opt/rclone-sync/recovery"
-                )
-            )
-            .expanduser()
-            .resolve()
-        )
+        proposed = _staging_path(config).resolve()
         endpoints = [snapshot_root(config)]
         for configured in [*((config.get("backup") or {}).get("pairs") or []), pair]:
             if isinstance(configured, Mapping):

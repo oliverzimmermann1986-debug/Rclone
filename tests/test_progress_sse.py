@@ -52,14 +52,24 @@ def test_slow_client_queue_keeps_only_latest_snapshot_and_shutdown_unblocks_it()
 
     async def scenario() -> None:
         broadcaster = _ProgressBroadcaster(snapshot, interval=0.01)
-        queue = await broadcaster.subscribe()
-        await asyncio.sleep(0.08)
+        published = asyncio.Event()
+        original_publish = broadcaster._publish
 
-        assert call_count > 1
+        def observe_publish(payload):
+            original_publish(payload)
+            if json.loads(payload)["sequence"] >= 3:
+                published.set()
+
+        broadcaster._publish = observe_publish
+        queue = await broadcaster.subscribe()
+        await asyncio.wait_for(published.wait(), timeout=10)
+
+        assert call_count >= 3
         assert queue.maxsize == 1
         assert queue.qsize() == 1
         latest = json.loads(queue.get_nowait())
-        assert latest["sequence"] == call_count
+        assert latest == json.loads(broadcaster._last_payload)
+        assert latest["sequence"] >= 3
 
         waiting = asyncio.create_task(queue.get())
         await broadcaster.stop()

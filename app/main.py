@@ -41,7 +41,12 @@ from .auth_contract import (
 from .config_store import get_config
 from .db import check_database_readonly, database_path, get_db
 from .rclone_args import rclone_subprocess_env
-from .security import CSRF_COOKIE, new_csrf_token, require_csrf
+from .security import (
+    CSRF_COOKIE,
+    cookie_secure_for_request,
+    new_csrf_token,
+    require_csrf,
+)
 from .static_assets import AllowlistedStaticFiles
 from .utils import bounded_number as _bounded_number
 from .routes import (
@@ -91,12 +96,8 @@ def _sd_notify(message: str) -> None:
 
 
 def _cookie_secure(request: Request) -> bool:
-    configured = get_config().get("web", "secure_cookie", default=False)
-    if configured is True:
-        return True
-    if str(configured).lower() == "auto":
-        return request.url.scheme == "https"
-    return False
+    configured = get_config().get("web", "secure_cookie", default="auto")
+    return cookie_secure_for_request(request, configured)
 
 
 def _set_csrf_cookie(response, request: Request, token: str) -> None:
@@ -155,12 +156,16 @@ def _production_security_warnings() -> list[str]:
     """Erkennt riskante Web-Defaults, ohne lokale HTTP-Installationen zu blockieren."""
     web = get_config().get("web", default={}) or {}
     warnings: list[str] = []
-    allowed_hosts = web.get("allowed_hosts", ["*"]) or ["*"]
+    allowed_hosts = web.get("allowed_hosts", ["localhost", "127.0.0.1", "::1"]) or [
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ]
     if isinstance(allowed_hosts, str):
         allowed_hosts = [allowed_hosts]
     if "*" in {str(item).strip() for item in allowed_hosts}:
         warnings.append("web.allowed_hosts enthält den Wildcard-Eintrag '*'")
-    if web.get("secure_cookie", False) is False:
+    if web.get("secure_cookie", "auto") is False:
         warnings.append("web.secure_cookie ist deaktiviert")
     try:
         hsts_seconds = int(web.get("hsts_seconds", 0) or 0)
@@ -331,7 +336,9 @@ def _host_allowed(request: Request) -> bool:
                 return True
         except ValueError:
             pass
-    configured = get_config().get("web", "allowed_hosts", default=["*"]) or ["*"]
+    configured = get_config().get(
+        "web", "allowed_hosts", default=["localhost", "127.0.0.1", "::1"]
+    ) or ["localhost", "127.0.0.1", "::1"]
     if isinstance(configured, str):
         configured = [configured]
     allowed = {str(item).casefold().strip() for item in configured if str(item).strip()}
@@ -382,7 +389,9 @@ def _same_origin(request: Request) -> bool:
     # konfigurierte allowed_hosts gelten dann als vertrauenswürdige Origins —
     # der Wildcard-Default "*" bewusst nicht.
     origin_host = str(parsed.hostname or "").casefold()
-    configured = get_config().get("web", "allowed_hosts", default=["*"]) or ["*"]
+    configured = get_config().get(
+        "web", "allowed_hosts", default=["localhost", "127.0.0.1", "::1"]
+    ) or ["localhost", "127.0.0.1", "::1"]
     if isinstance(configured, str):
         configured = [configured]
     explicit = {
@@ -436,11 +445,17 @@ def _apply_security_headers(response, request: Request, request_id: str):
         response.headers.setdefault(
             "Strict-Transport-Security", f"max-age={hsts_seconds}"
         )
-    if request.url.path.startswith("/api/") or request.url.path in {
-        "/",
-        "/login",
-        "/logout",
-    }:
+    if (
+        request.url.path.startswith("/api/")
+        or request.url.path
+        in {
+            "/",
+            "/login",
+            "/logout",
+            "/security",
+        }
+        or request.url.path.startswith("/webauthn/")
+    ):
         response.headers.setdefault("Cache-Control", "no-store")
     elif request.url.path.startswith("/static/"):
         response.headers.setdefault("Cache-Control", "public, max-age=86400")

@@ -3,21 +3,21 @@ import XCTest
 @testable import RcloneMobile
 
 final class SessionPersistenceTests: XCTestCase {
-    func testKeychainHTTPRoundTripKeepsInsecureCookieUsableAfterRelaunch() throws {
+    func testClientDiscardsLegacyHTTPKeychainCookiesBeforeRelaunch() throws {
         let server = try XCTUnwrap(URL(string: "http://session-\(UUID().uuidString.lowercased()).local:8001/app"))
         let cookies = try sessionCookies(server: server, expires: Date().addingTimeInterval(600))
         let first = SessionCookieStore()
         defer { first.remove(for: server) }
 
         try first.saveChecked(cookies, for: server)
-        let loaded = try SessionCookieStore().loadChecked(for: server)
-
-        XCTAssertEqual(Set(loaded.map(\.name)), Set([APIClient.sessionCookie, APIClient.csrfCookie]))
-        XCTAssertEqual(Set(SessionCookieStore().load(for: server).map(\.name)), Set(loaded.map(\.name)))
-        XCTAssertTrue(loaded.allSatisfy { !$0.isSecure }, "An HTTP session must remain usable over the explicitly approved HTTP origin")
         let jar = URLSessionConfiguration.ephemeral.httpCookieStorage!
-        loaded.forEach(jar.setCookie)
-        XCTAssertEqual(jar.cookies(for: server)?.count, 2)
+        cookies.forEach(jar.setCookie)
+        let client = APIClient(baseURL: server, cookieStorage: jar, sessionPersistence: first)
+
+        XCTAssertTrue(try first.loadChecked(for: server).isEmpty)
+        XCTAssertTrue((jar.cookies(for: server) ?? []).isEmpty)
+        client.setSessionPersistence(true)
+        XCTAssertTrue(try first.loadChecked(for: server).isEmpty)
     }
 
     func testKeychainIsolationIncludesSchemePortAndProxyBasePath() throws {
@@ -83,6 +83,10 @@ final class SessionPersistenceTests: XCTestCase {
             store.save(try sessionCookies(server: server, expires: Date().addingTimeInterval(600)), for: server)
             let jar = URLSessionConfiguration.ephemeral.httpCookieStorage!
             let client = APIClient(baseURL: server, cookieStorage: jar, sessionPersistence: store)
+            // HTTP credentials can exist only after a fresh manual login.
+            if scheme == "http" {
+                try sessionCookies(server: server, expires: Date().addingTimeInterval(600)).forEach(jar.setCookie)
+            }
 
             client.setSessionPersistence(false)
 
@@ -96,8 +100,8 @@ final class SessionPersistenceTests: XCTestCase {
     }
 
     func testServer401ClearsKeychainAndOnlyCurrentCookieJar() async throws {
-        let server = try XCTUnwrap(URL(string: "http://session.local:8001"))
-        let otherServer = try XCTUnwrap(URL(string: "http://session.local:8002"))
+        let server = try XCTUnwrap(URL(string: "https://session.local:8001"))
+        let otherServer = try XCTUnwrap(URL(string: "https://session.local:8002"))
         let store = MemorySessionStore()
         let cookies = try sessionCookies(server: server, expires: Date().addingTimeInterval(600))
         store.save(cookies, for: server)
@@ -120,6 +124,53 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(store.load(for: otherServer).count, 2)
     }
 
+    func testHTTPNeverLoadsOrSavesCookiesAndRemovesStaleRecordsWithoutEndingManualSession() throws {
+        let server = try XCTUnwrap(URL(string: "http://session.local:8001/app"))
+        let other = try XCTUnwrap(URL(string: "https://session.local:8001/app"))
+        let store = MemorySessionStore()
+        let cookies = try sessionCookies(server: server, expires: Date().addingTimeInterval(600))
+        store.save(cookies, for: server)
+        store.save(try sessionCookies(server: other, expires: Date().addingTimeInterval(600)), for: other)
+        store.loadCount = 0
+        store.saveCount = 0
+        let jar = URLSessionConfiguration.ephemeral.httpCookieStorage!
+        let client = APIClient(baseURL: server, cookieStorage: jar, sessionPersistence: store)
+        XCTAssertEqual(store.loadCount, 0)
+        XCTAssertTrue((jar.cookies(for: server) ?? []).isEmpty)
+        XCTAssertTrue(store.load(for: server).isEmpty)
+
+        cookies.forEach(jar.setCookie)
+        // Model an old writer recreating the record while a manual session runs.
+        store.save(cookies, for: server)
+        store.saveCount = 0
+        client.setSessionPersistence(true)
+        XCTAssertEqual(store.saveCount, 0)
+        XCTAssertTrue(store.load(for: server).isEmpty)
+        XCTAssertEqual(jar.cookies(for: server)?.count, 2)
+        XCTAssertEqual(store.load(for: other).count, 2)
+
+        let relaunchedJar = URLSessionConfiguration.ephemeral.httpCookieStorage!
+        _ = APIClient(baseURL: server, cookieStorage: relaunchedJar, sessionPersistence: store)
+        XCTAssertTrue((relaunchedJar.cookies(for: server) ?? []).isEmpty)
+    }
+
+    func testHTTPSRestoresAndPersistsSessionAndCSRFCookiesOnly() throws {
+        let server = try XCTUnwrap(URL(string: "https://session.local:8001/app"))
+        let store = MemorySessionStore()
+        let cookies = try sessionCookies(server: server, expires: Date().addingTimeInterval(600))
+        store.save(cookies, for: server)
+        let jar = URLSessionConfiguration.ephemeral.httpCookieStorage!
+        let client = APIClient(baseURL: server, cookieStorage: jar, sessionPersistence: store)
+        XCTAssertEqual(jar.cookies(for: server)?.count, 2)
+        jar.setCookie(try XCTUnwrap(HTTPCookie(properties: [
+            .domain: "session.local", .path: "/", .name: "unrelated", .value: "fixture"
+        ])))
+
+        client.setSessionPersistence(true)
+
+        XCTAssertEqual(Set(store.load(for: server).map(\.name)), Set([APIClient.sessionCookie, APIClient.csrfCookie]))
+    }
+
     private func sessionCookies(server: URL, expires: Date) throws -> [HTTPCookie] {
         try [APIClient.sessionCookie, APIClient.csrfCookie].map { name in
             var properties: [HTTPCookiePropertyKey: Any] = [
@@ -134,9 +185,17 @@ final class SessionPersistenceTests: XCTestCase {
 
 private final class MemorySessionStore: SessionPersisting {
     private var records: [String: [HTTPCookie]] = [:]
+    var loadCount = 0
+    var saveCount = 0
 
-    func load(for server: URL) -> [HTTPCookie] { records[server.absoluteString] ?? [] }
-    func save(_ cookies: [HTTPCookie], for server: URL) { records[server.absoluteString] = cookies }
+    func load(for server: URL) -> [HTTPCookie] {
+        loadCount += 1
+        return records[server.absoluteString] ?? []
+    }
+    func save(_ cookies: [HTTPCookie], for server: URL) {
+        saveCount += 1
+        records[server.absoluteString] = cookies
+    }
     func remove(for server: URL) { records.removeValue(forKey: server.absoluteString) }
 }
 

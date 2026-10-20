@@ -1,11 +1,13 @@
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.auth import require_auth
 from app.db import Database
+from app.jobs import runtime_state
 from app.routes import api_recovery
 from app.security import CSRF_COOKIE
 
@@ -39,6 +41,11 @@ def fixture(tmp_path, monkeypatch):
     database = Database(tmp_path / "state.db")
     monkeypatch.setattr(api_recovery, "get_config", lambda: Config(config))
     monkeypatch.setattr(api_recovery, "get_db", lambda: database)
+    # Exercise the API against dummy files only; never touch host runtime/locks.
+    monkeypatch.setattr(api_recovery, "try_file_lock", lambda scope: Mock())
+    monkeypatch.setattr(runtime_state, "STATE_DIR", tmp_path / "runtime")
+    monkeypatch.setattr(runtime_state, "RUN_FILE", tmp_path / "runtime" / "run.json")
+    monkeypatch.setattr(runtime_state, "PROCS_DIR", tmp_path / "runtime" / "processes")
     app = FastAPI()
     app.include_router(api_recovery.router)
     app.dependency_overrides[require_auth] = lambda: "owner"

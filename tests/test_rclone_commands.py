@@ -284,12 +284,31 @@ def test_cancel_after_safety_recheck_still_blocks_process_creation(
     assert rc == 130
 
 
-def test_active_process_may_run_longer_than_inactivity_timeout(tmp_path: Path):
+def _wait_for_child_output(monkeypatch):
+    """Keep interpreter startup out of the sub-second progress watchdog test."""
+    original = rclone_sync._register_proc
+
+    def register(proc, **kwargs):
+        original(proc, **kwargs)
+        deadline = time.monotonic() + 5
+        path = Path(kwargs["log_file"])
+        while path.stat().st_size == 0 and proc.poll() is None:
+            if time.monotonic() >= deadline:
+                raise AssertionError("dummy child did not start in time")
+            time.sleep(0.005)
+
+    monkeypatch.setattr(rclone_sync, "_register_proc", register)
+
+
+def test_active_process_may_run_longer_than_inactivity_timeout(
+    tmp_path: Path, monkeypatch
+):
+    _wait_for_child_output(monkeypatch)
     rclone_sync.reset_cancel()
     log_file = tmp_path / "active.log"
     script = (
         "import sys,time\n"
-        "for index in range(8):\n"
+        "for index in range(40):\n"
         " print(f'progress {index}', flush=True)\n"
         " time.sleep(0.04)\n"
     )
@@ -298,12 +317,12 @@ def test_active_process_may_run_longer_than_inactivity_timeout(tmp_path: Path):
     rc = rclone_sync._run_rclone_command(
         [sys.executable, "-c", script],
         log_file,
-        timeout_sec=0.12,
+        timeout_sec=0.5,
     )
 
     assert rc == 0
-    assert time.monotonic() - started > 0.12
-    assert "progress 7" in log_file.read_text(encoding="utf-8")
+    assert time.monotonic() - started > 0.5
+    assert "progress 39" in log_file.read_text(encoding="utf-8")
 
 
 def test_silent_process_hits_inactivity_timeout(tmp_path: Path):
@@ -338,20 +357,21 @@ def test_repeated_stats_heartbeat_does_not_hide_stalled_process(tmp_path: Path):
     assert caught.value.watchdog_reason == "stalled"
 
 
-def test_changed_transfer_stats_count_as_real_progress(tmp_path: Path):
+def test_changed_transfer_stats_count_as_real_progress(tmp_path: Path, monkeypatch):
+    _wait_for_child_output(monkeypatch)
     rclone_sync.reset_cancel()
     log_file = tmp_path / "transfer-progress.log"
     script = (
         "import time\n"
-        "for index in range(8):\n"
-        " print(f'Transferred: {index} B / 8 B, {index * 12.5}%, 1 B/s, ETA 1s', flush=True)\n"
+        "for index in range(40):\n"
+        " print(f'Transferred: {index} B / 40 B, {index * 2.5}%, 1 B/s, ETA 1s', flush=True)\n"
         " time.sleep(0.04)\n"
     )
 
     rc = rclone_sync._run_rclone_command(
         [sys.executable, "-c", script],
         log_file,
-        timeout_sec=0.12,
+        timeout_sec=0.5,
     )
 
     assert rc == 0

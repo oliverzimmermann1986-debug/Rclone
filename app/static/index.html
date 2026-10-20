@@ -58,6 +58,7 @@
           <span x-text="overview.data?.system?.virtualization || '—'"></span>
           <span x-text="'v' + (overview.data?.app?.version || '2.3.0')"></span>
         </div>
+        <p><a href="https://github.com/oliverzimmermann1986-debug/Rclone/issues" rel="noreferrer">Supportformular</a> · <a href="https://oliverzimmermann1986-debug.github.io/Rclone/impressum.html" rel="noreferrer">Impressum zur App</a></p>
       </div>
     </aside>
 
@@ -144,7 +145,7 @@
             </article>
             <article class="metric-card">
               <div class="metric-head"><span>Letzter Job</span><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></span></div>
-              <strong class="metric-value text" x-text="statusLabel(overview.data?.jobs?.last?.status)"></strong>
+              <strong class="metric-value text" x-text="statusLabel(overview.data?.jobs?.last?.display_status || overview.data?.jobs?.last?.status)"></strong>
               <span class="metric-sub" x-text="formatTs(overview.data?.jobs?.last?.started_at)"></span>
             </article>
             <article class="metric-card">
@@ -317,10 +318,10 @@
             <div class="job-list compact-list">
               <template x-for="job in recentJobs" :key="job.id">
                 <button class="job-row" @click="showJob(job)">
-                  <span class="job-status-icon" :class="job.status"><span></span></span>
+                  <span class="job-status-icon" :class="job.display_status || job.status"><span></span></span>
                   <span class="job-main"><strong x-text="kindLabel(job.kind)"></strong><small x-text="summaryShort(job.summary)"></small></span>
                   <span class="job-time"><strong x-text="formatTs(job.started_at)"></strong><small x-text="job.ended_at ? formatDur(job.ended_at-job.started_at) : 'läuft'"></small></span>
-                  <span class="badge compact" :class="job.status" x-text="statusLabel(job.status)"></span>
+                  <span class="badge compact" :class="job.display_status || job.status" x-text="statusLabel(job.display_status || job.status)"></span>
                   <span class="chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
                 </button>
               </template>
@@ -565,7 +566,7 @@
           <div class="toolbar panel slim jobs-toolbar">
             <label class="search-field job-search"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg></span><input id="job-search" x-model="jobs.q" @input.debounce.350ms="loadJobs(true)" placeholder="Job, Datenweg, Fehler oder Lauf-ID" aria-label="Läufe durchsuchen"></label>
             <select x-model="jobs.kind" @change="loadJobs(true)" aria-label="Jobtyp filtern"><option value="">Alle Typen</option><option value="backup">Backup</option><option value="check">Check</option><option value="quicksync">Quick-Sync</option><option value="pbs">PBS-Backup</option><option value="restoretest">Restore-Drill</option></select>
-            <select x-model="jobs.status" @change="loadJobs(true)" aria-label="Jobstatus filtern"><option value="">Alle Status</option><option value="running">Läuft</option><option value="ok">Erfolgreich</option><option value="error">Fehler</option><option value="skipped">Übersprungen</option><option value="cancelled">Abgebrochen</option><option value="stale">Verwaist</option></select>
+            <select x-model="jobs.status" @change="loadJobs(true)" aria-label="Jobstatus filtern"><option value="">Alle Status</option><option value="running">Läuft</option><option value="ok">Erfolgreich</option><option value="warning">Mit Hinweis</option><option value="error">Fehler</option><option value="skipped">Übersprungen</option><option value="cancelled">Abgebrochen</option><option value="stale">Verwaist</option></select>
             <select x-model.number="jobs.limit" @change="loadJobs(true)" aria-label="Jobs pro Seite"><option :value="25">25 pro Seite</option><option :value="50">50 pro Seite</option><option :value="100">100 pro Seite</option></select>
             <div class="toolbar-meta">Seite <span x-text="jobPage()"></span> von <span x-text="jobPages()"></span></div>
           </div>
@@ -574,11 +575,11 @@
             <div class="job-list" :aria-busy="jobs.loading">
               <template x-for="job in jobs.items" :key="job.id">
                 <button class="job-row detailed" @click="showJob(job)">
-                  <span class="job-status-icon" :class="job.status"><span></span></span>
+                  <span class="job-status-icon" :class="job.display_status || job.status"><span></span></span>
                   <span class="job-main"><strong><span x-text="job.definition_name || kindLabel(job.kind)"></span> <em x-text="'#' + job.id"></em></strong><small x-text="summaryShort(job.summary)"></small></span>
                   <span class="job-column"><small>Gestartet</small><strong x-text="formatTs(job.started_at)"></strong></span>
                   <span class="job-column"><small>Dauer</small><strong x-text="job.ended_at ? formatDur(job.ended_at-job.started_at) : 'läuft'"></strong></span>
-                  <span class="badge compact" :class="job.status" x-text="statusLabel(job.status)"></span><span class="chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+                  <span class="badge compact" :class="job.display_status || job.status" x-text="statusLabel(job.display_status || job.status)"></span><span class="chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
                 </button>
               </template>
             </div>
@@ -864,7 +865,7 @@
                   <label class="check-row"><input type="checkbox" x-model="config.backup.require_delete_confirmation"><span><strong>Löschfreigabe pro Pair erzwingen</strong><small>Produktive Sync-/Bi-Sync-Läufe müssen je Pair bewusst freigegeben werden.</small></span></label>
                   <label class="check-row"><input type="checkbox" x-model="config.backup.require_max_delete_for_sync"><span><strong>Begrenztes max_delete erzwingen</strong><small>Verhindert produktive Mirror-Läufe ohne feste Löschobergrenze.</small></span></label>
                   <label class="check-row warning"><input type="checkbox" x-model="config.backup.allow_unsafe_rclone_args"><span><strong>Unsichere freie rclone-Flags erlauben</strong><small>Expertenmodus. Interne Schutzparameter könnten überschrieben werden.</small></span></label>
-                  <label class="field"><span>Secure-Cookie</span><select x-model="config.web.secure_cookie"><option :value="false">Aus · direktes HTTP</option><option value="auto">Automatisch · vertrauenswürdiger Proxy</option><option :value="true">Erzwingen · ausschließlich HTTPS</option></select><small>„Automatisch“ nur mit korrekt konfiguriertem Reverse-Proxy verwenden.</small></label>
+                  <label class="field"><span>Secure-Cookie</span><select x-model="config.web.secure_cookie"><option :value="false">Aus · direktes HTTP</option><option value="auto">Automatisch · HTTP/HTTPS</option><option :value="true">Erzwingen · ausschließlich HTTPS</option></select><small>Standard: automatisch. Hinter TLS-Proxys „Erzwingen“ wählen oder die HTTPS-Erkennung für die vertrauenswürdigen Proxy-Hops konfigurieren.</small></label>
                 </div>
                 <div class="form-grid two"><label class="field"><span>HSTS-Sekunden</span><input type="number" min="0" max="63072000" x-model.number="config.web.hsts_seconds"><small>Bei direktem HTTP auf 0 belassen.</small></label><label class="field"><span>Session-Laufzeit (Sekunden)</span><input type="number" min="300" x-model.number="config.web.session_max_age_seconds"></label></div>
                 <div class="panel-head"><div><span class="section-kicker">WebAuthn</span><h3>Passkeys und physische Sicherheitsschlüssel</h3><p>Trage die öffentliche HTTPS-Adresse deines Reverse-Proxys ein. Secure-Cookie muss dabei auf „Erzwingen“ stehen.</p></div><a class="button secondary" href="/security">Schlüssel verwalten</a></div>
@@ -989,7 +990,7 @@
   <!-- Job Details -->
   <div class="modal" x-show="jobModal.show" @click.self="closeJob()" x-cloak>
     <div class="modal-dialog extra-wide" x-ref="jobDialog" role="dialog" aria-modal="true" aria-labelledby="job-dialog-title" tabindex="-1">
-      <div class="modal-head"><div><span class="section-kicker" x-text="kindLabel(jobModal.job?.kind)"></span><h3 id="job-dialog-title">Job <span x-text="'#' + (jobModal.job?.id || '')"></span></h3></div><div class="modal-head-actions"><span class="badge" :class="jobModal.job?.status" x-text="statusLabel(jobModal.job?.status)"></span><button class="icon-button" @click="closeJob()" aria-label="Jobdetails schließen">×</button></div></div>
+        <div class="modal-head"><div><span class="section-kicker" x-text="kindLabel(jobModal.job?.kind)"></span><h3 id="job-dialog-title">Job <span x-text="'#' + (jobModal.job?.id || '')"></span></h3></div><div class="modal-head-actions"><span class="badge" :class="jobModal.job?.display_status || jobModal.job?.status" x-text="statusLabel(jobModal.job?.display_status || jobModal.job?.status)"></span><button class="icon-button" @click="closeJob()" aria-label="Jobdetails schließen">×</button></div></div>
       <div class="modal-content job-detail-content">
         <div class="loading-state modal-loading" x-show="jobModal.loading" role="status" aria-live="polite">Jobdetails werden geladen…</div>
         <div class="job-detail-facts"><div><small>Jobdefinition</small><strong x-text="jobModal.job?.definition_name || 'Manueller Lauf'"></strong></div><div><small>Konfigurationsstand</small><strong class="mono" x-text="jobModal.job?.config_revision || '—'"></strong></div><div><small>Gestartet</small><strong x-text="formatDateTime(jobModal.job?.started_at)"></strong></div><div><small>Beendet</small><strong x-text="formatDateTime(jobModal.job?.ended_at)"></strong></div><div><small>Dauer</small><strong x-text="jobModal.job?.ended_at ? formatDur(jobModal.job.ended_at-jobModal.job.started_at) : 'Läuft'"></strong></div><div><small>Log</small><strong x-text="jobModal.job?.log_file ? 'Vorhanden' : 'Kein Log'"></strong></div></div>

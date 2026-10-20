@@ -627,7 +627,18 @@ def _protected_filter_args(args: list[str]) -> list[str]:
             groups[group].append(value.strip())
         index += 1
     rules = [f"- /{name}/**" for name in RESERVED_SUBTREES]
-    for group, values in groups.items():
+    # Ausschlüsse müssen vor Einschlüssen stehen: rclone verwendet die erste
+    # passende Regel. Sonst kann ein Include geschützte Inhalte wieder öffnen.
+    ordered_groups = (
+        "--exclude",
+        "--exclude-from",
+        "--filter",
+        "--filter-from",
+        "--include",
+        "--include-from",
+    )
+    for group in ordered_groups:
+        values = groups[group]
         for value in values:
             if group.startswith("--filter"):
                 if value == "!":
@@ -798,6 +809,10 @@ def _run_rclone_command(
                 )
         if is_cancelled(normalized_scope):
             return 130
+        # Capture the existing prefix before the child can emit output. Reading
+        # the offset after registration would discard early progress messages.
+        handle.flush()
+        log_offset = os.fstat(handle.fileno()).st_size
         proc = subprocess.Popen(
             cmd,
             stdout=handle,
@@ -826,10 +841,6 @@ def _run_rclone_command(
         inactivity_timeout = max(0.01, float(timeout_sec))
         now = time.monotonic()
         deadline = now + inactivity_timeout
-        try:
-            log_offset = log_file.stat().st_size
-        except OSError:
-            log_offset = 0
         progress_tracker = _LogProgressTracker()
         hard_deadline = (
             now + float(max_runtime_sec)
