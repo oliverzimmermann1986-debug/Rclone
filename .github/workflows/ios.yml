@@ -84,7 +84,16 @@ jobs:
             -scheme RcloneMobile \
             -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
             -derivedDataPath "$RUNNER_TEMP/ios-build" \
+            -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"
+      - name: Save native test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ios-xcresult-${{ github.sha }}
+          path: ${{ runner.temp }}/ios-tests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Inspect simulator signing for Keychain tests
         if: always()
         run: |

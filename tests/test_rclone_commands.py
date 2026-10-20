@@ -162,7 +162,7 @@ def test_production_bisync_requires_delete_confirmation(monkeypatch, tmp_path):
                 "require_delete_confirmation": True,
                 "require_max_delete_for_sync": True,
                 "tuning": {"stats_interval": "10s", "max_delete": 100},
-            }
+            },
         }
     )
     monkeypatch.setattr(rclone_sync, "get_config", lambda: cfg)
