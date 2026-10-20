@@ -24,9 +24,10 @@ final class APIClientExportTests: XCTestCase {
     }
 
     func testSameNameExportsAreIndependentAndProtected() throws {
-        let first = try APIClient.writeExport(filename: "receipt.json") { try Data("first".utf8).write(to: $0) }
+        let files = RecordingExportFileManager()
+        let first = try APIClient.writeExport(filename: "receipt.json", fileManager: files) { try Data("first".utf8).write(to: $0) }
         defer { try? FileManager.default.removeItem(at: first.deletingLastPathComponent()) }
-        let second = try APIClient.writeExport(filename: "receipt.json") { try Data("second".utf8).write(to: $0) }
+        let second = try APIClient.writeExport(filename: "receipt.json", fileManager: files) { try Data("second".utf8).write(to: $0) }
         defer { try? FileManager.default.removeItem(at: second.deletingLastPathComponent()) }
         XCTAssertNotEqual(first.deletingLastPathComponent(), second.deletingLastPathComponent())
         XCTAssertEqual(first.lastPathComponent, "receipt.json")
@@ -37,9 +38,30 @@ final class APIClientExportTests: XCTestCase {
             let directory = try FileManager.default.attributesOfItem(atPath: target.deletingLastPathComponent().path)
             XCTAssertEqual((file[.posixPermissions] as? NSNumber)?.intValue, 0o600)
             XCTAssertEqual((directory[.posixPermissions] as? NSNumber)?.intValue, 0o700)
-            XCTAssertEqual(file[.protectionKey] as? FileProtectionType, .complete)
-            XCTAssertEqual(directory[.protectionKey] as? FileProtectionType, .complete)
+            // FileManager does not expose Data Protection attributes in Simulator.
+            // Verify the requested policy here, and read it back on physical devices.
+            XCTAssertEqual(files.fileAttributes[target.path]?[.protectionKey] as? FileProtectionType, .complete)
+            XCTAssertEqual(files.directoryAttributes[target.deletingLastPathComponent().path]?[.protectionKey] as? FileProtectionType, .complete)
+            #if !targetEnvironment(simulator)
+            XCTAssertEqual(file[.protectionKey] as? String, FileProtectionType.complete.rawValue)
+            XCTAssertEqual(directory[.protectionKey] as? String, FileProtectionType.complete.rawValue)
+            #endif
         }
+    }
+
+    func testProtectionFailureRemovesExportInsteadOfReturningUnprotectedFile() throws {
+        let files = RecordingExportFileManager()
+        files.rejectFileProtection = true
+        var partial: URL?
+        XCTAssertThrowsError(try APIClient.writeExport(filename: "private.json", fileManager: files) { url in
+            partial = url
+            try Data("fixture".utf8).write(to: url)
+        }) { error in
+            XCTAssertEqual((error as NSError).code, NSFileWriteNoPermissionError)
+        }
+        let target = try XCTUnwrap(partial)
+        XCTAssertEqual(files.fileAttributes[target.path]?[.protectionKey] as? FileProtectionType, .complete)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.deletingLastPathComponent().path))
     }
 
     func testFailedExportRemovesPartialFileAndItsDirectory() throws {
@@ -75,9 +97,32 @@ final class APIClientExportTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: target), Data("fixture-export".utf8))
             XCTAssertTrue(target.deletingLastPathComponent().lastPathComponent.hasPrefix("sicherpfad-export-"))
             let attributes = try FileManager.default.attributesOfItem(atPath: target.path)
-            XCTAssertEqual(attributes[.protectionKey] as? FileProtectionType, .complete)
+            let directory = try FileManager.default.attributesOfItem(atPath: target.deletingLastPathComponent().path)
+            XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+            XCTAssertEqual((directory[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+            #if !targetEnvironment(simulator)
+            XCTAssertEqual(attributes[.protectionKey] as? String, FileProtectionType.complete.rawValue)
+            #endif
         }
         XCTAssertNotEqual(get.deletingLastPathComponent(), post.deletingLastPathComponent())
+    }
+}
+
+private final class RecordingExportFileManager: FileManager, @unchecked Sendable {
+    var directoryAttributes: [String: [FileAttributeKey: Any]] = [:]
+    var fileAttributes: [String: [FileAttributeKey: Any]] = [:]
+    var rejectFileProtection = false
+
+    override func createDirectory(at url: URL, withIntermediateDirectories createIntermediates: Bool,
+                                  attributes: [FileAttributeKey: Any]? = nil) throws {
+        directoryAttributes[url.path] = attributes ?? [:]
+        try super.createDirectory(at: url, withIntermediateDirectories: createIntermediates, attributes: attributes)
+    }
+
+    override func setAttributes(_ attributes: [FileAttributeKey: Any], ofItemAtPath path: String) throws {
+        fileAttributes[path] = attributes
+        if rejectFileProtection { throw CocoaError(.fileWriteNoPermission) }
+        try super.setAttributes(attributes, ofItemAtPath: path)
     }
 }
 

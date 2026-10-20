@@ -44,6 +44,8 @@ Die Datei [`../codemagic.yaml`](../codemagic.yaml) erzeugt das Xcode-Projekt auf
 
 Jeder Tag im Format `ios-vX.Y.Z`, beispielsweise `ios-v1.0.0`, startet danach automatisch einen Release. Pull Requests und vertragsrelevante Backend-/iOS-Änderungen werden zusätzlich über GitHub Actions mit Xcode 26 kompiliert und getestet, jedoch nicht veröffentlicht.
 
+Die Exporttests prüfen im Simulator echte Dateiinhalte, getrennte temporäre Ordner, POSIX-Rechte sowie die angeforderte Schutzklasse und das Aufräumen bei Schutzfehlern. `FileManager` liefert im Simulator kein verlässliches Data-Protection-Attribut zurück ([Apple DTS](https://developer.apple.com/forums/thread/780632)); die Rückleseprüfung der Schutzklasse läuft deshalb nur auf physischen Geräten. Ein grüner Simulatorlauf belegt nicht die Verschlüsselung und den Zugriffsschutz bei gesperrtem iPhone.
+
 ## Verbindung
 
 Die Serveradresse muss auf den von außen erreichbaren Reverse Proxy des Sicherpfad-Servers zeigen, zum Beispiel `https://backup.example.de`. Eine lokale IP-Adresse ohne Schema, etwa `192.168.50.10`, wird automatisch als `http://192.168.50.10` über den HTTP-Standardport 80 verwendet. Abweichende Ports können explizit angegeben werden. Der interne Uvicorn-Port 8001 ist bei der Standardinstallation nur an `127.0.0.1` gebunden und vom iPhone nicht direkt erreichbar. HTTPS ist für produktive Installationen vorgesehen. Lokale Netzwerkverbindungen sind erlaubt; unsichere beliebige HTTP-Verbindungen werden durch App Transport Security nicht global freigegeben.

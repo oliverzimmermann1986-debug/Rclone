@@ -1077,8 +1077,11 @@ final class APIClient: APIClientProtocol {
         return bounded.isEmpty || bounded == "." || bounded == ".." ? "download" : bounded
     }
 
-    static func writeExport(filename: String, write: (URL) throws -> Void) throws -> URL {
-        let files = FileManager.default
+    static func writeExport(
+        filename: String,
+        fileManager files: FileManager = .default,
+        write: (URL) throws -> Void
+    ) throws -> URL {
         let directory = files.temporaryDirectory.appendingPathComponent(
             "sicherpfad-export-\(UUID().uuidString)", isDirectory: true
         )
