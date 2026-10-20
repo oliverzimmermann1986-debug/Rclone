@@ -1067,23 +1067,8 @@ def _build_pair_command(
     else:
         raise ValueError(f"Unbekannte direction: {direction}")
 
-    allow_unsafe = bool(backup.get("allow_unsafe_rclone_args", False))
-    effective_args = validate_parsed_rclone_args(
-        list(base_args), allow_unsafe=allow_unsafe
-    )
-    effective_args += _global_verb_args(cfg, verb)
-    effective_args += _structured_rclone_args(backup.get("tuning") or {}, verb=verb)
-    effective_args += _structured_rclone_args(pair, verb=verb)
-    effective_args += _filter_args(cfg, pair, verb)
-    effective_args += _parse_rclone_args(
-        pair.get("rclone_args"), allow_unsafe=allow_unsafe
-    )
-    effective_args += _backup_dir_args(cfg, pair, verb, src, dst)
-    effective_args = _dedupe_single_value_rclone_args(effective_args)
-    effective_args = _protected_filter_args(effective_args)
-    if verb == "bisync":
-        effective_args = _bisync_filter_snapshot(effective_args, cfg)
-
+    # Reject destructive commands before reading filters or creating bisync's
+    # on-disk filter snapshot. A denied run must have no preparation side effects.
     if verb in {"sync", "bisync"} and not dry_run:
         if backup.get("require_delete_confirmation", True) and not pair.get(
             "allow_delete", False
@@ -1103,6 +1088,23 @@ def _build_pair_command(
             raise ValueError(
                 f"Produktiver {verb} ist gesperrt: begrenztes max_delete fehlt"
             )
+
+    allow_unsafe = bool(backup.get("allow_unsafe_rclone_args", False))
+    effective_args = validate_parsed_rclone_args(
+        list(base_args), allow_unsafe=allow_unsafe
+    )
+    effective_args += _global_verb_args(cfg, verb)
+    effective_args += _structured_rclone_args(backup.get("tuning") or {}, verb=verb)
+    effective_args += _structured_rclone_args(pair, verb=verb)
+    effective_args += _filter_args(cfg, pair, verb)
+    effective_args += _parse_rclone_args(
+        pair.get("rclone_args"), allow_unsafe=allow_unsafe
+    )
+    effective_args += _backup_dir_args(cfg, pair, verb, src, dst)
+    effective_args = _dedupe_single_value_rclone_args(effective_args)
+    effective_args = _protected_filter_args(effective_args)
+    if verb == "bisync":
+        effective_args = _bisync_filter_snapshot(effective_args, cfg)
 
     stats_interval = str((backup.get("tuning") or {}).get("stats_interval") or "10s")
     cmd = [
