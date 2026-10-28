@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from ..auth import require_auth
 from ..config_store import get_config
 from ..db import get_db
-from ..push_notifications import send_push_notifications
+from ..push_notifications import push_server_id, send_push_notifications
 from ..security import require_csrf
 
 router = APIRouter(
@@ -95,7 +95,7 @@ def register_push_device(
             "app_version": body.app_version.strip(),
         },
     )
-    return {"ok": True, "registered": True}
+    return {"ok": True, "registered": True, "server_id": push_server_id()}
 
 
 @router.delete("/devices")

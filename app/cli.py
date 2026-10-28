@@ -232,6 +232,11 @@ def cmd_restore_config_backup(args) -> int:
             raw = backup.read_bytes()
             parsed = yaml.safe_load(raw.decode("utf-8")) or {}
             normalized, _warnings = validate_config(parsed)
+            # A rollback restores operational settings, never old bearer authority.
+            # A fresh secret also invalidates tokens from a previously restored copy.
+            web = normalized.setdefault("web", {})
+            web["secret_key"] = secrets.token_urlsafe(48)
+            _rotate_sessions(normalized)
             restored_raw = yaml.safe_dump(
                 normalized, allow_unicode=True, sort_keys=False
             ).encode("utf-8")

@@ -17,7 +17,8 @@ def test_logout_warning_survives_local_session_clear():
 
     assert "func logout() async throws -> LogoutResult" in api
     assert "partial.localSessionCleared" in api
-    assert "defer { clearCookies() }" in api
+    assert "defer { clearLocalSession() }" in api
+    assert "remove(for: baseURL, matchingSession: value)" in api
     assert "!result.globalRevocation" in model
     assert "warnings.append(result.detail" in model
     assert "if let error = model.errorMessage" in login
@@ -227,7 +228,11 @@ def test_failed_run_retry_and_push_deep_link_are_revision_safe():
     assert "pushNavigationRequested" in push
     assert 'userInfo["job_id"]' in push
     assert "consumePendingNavigationJobID" in push
-    assert "pendingNavigationJobID = jobID" in push
+    assert "pendingNavigation = (jobID, serverID)" in push
+    assert 'userInfo: ["job_id": jobID, "server_id": serverID]' in push
+    assert "pendingNavigation.serverID == serverID" in push
+    assert "consumePendingNavigationJobID(forServerID: serverID)" in app
+    assert "model.canHandlePush(serverID: serverID)" in app
     assert "model.requestRunNavigation(id: jobID)" in app
     assert "selectedTab = 3" in root
     assert "await openRequestedRun()" in runs

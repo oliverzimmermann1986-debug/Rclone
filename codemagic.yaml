@@ -38,12 +38,16 @@ workflows:
           }
       - name: Verify signed release provenance
         script: |
+          set -euo pipefail
           test -n "${CM_TAG:-}" || { echo "TestFlight-Build benötigt einen ios-vX.Y.Z-Tag" >&2; exit 1; }
           test -n "${IOS_RELEASE_GPG_PUBLIC_KEY_B64:-}" || { echo "Öffentlicher iOS-Release-Signierschlüssel fehlt" >&2; exit 1; }
-          export GNUPGHOME="$CM_BUILD_DIR/.tools/release-gnupg"
+          PROVENANCE_DIR="$(mktemp -d "/tmp/sicherpfad-release.XXXXXX")"
+          trap 'rm -rf -- "$PROVENANCE_DIR"' EXIT
+          chmod 700 "$PROVENANCE_DIR"
+          export GNUPGHOME="$PROVENANCE_DIR/gnupg"
           mkdir -p "$GNUPGHOME"
           chmod 700 "$GNUPGHOME"
-          python3 -c 'import base64, os, pathlib; pathlib.Path(os.environ["GNUPGHOME"], "release-key.asc").write_bytes(base64.b64decode(os.environ["IOS_RELEASE_GPG_PUBLIC_KEY_B64"], validate=True))'
+          python3 -I -c 'import base64, os, pathlib; pathlib.Path(os.environ["GNUPGHOME"], "release-key.asc").write_bytes(base64.b64decode(os.environ["IOS_RELEASE_GPG_PUBLIC_KEY_B64"], validate=True))'
           chmod 600 "$GNUPGHOME/release-key.asc"
           gpg --batch --quiet --import "$GNUPGHOME/release-key.asc" >/dev/null 2>&1
           IMPORTED_FINGERPRINT="$(gpg --batch --with-colons --fingerprint "$IOS_RELEASE_GPG_FINGERPRINT" | awk -F: '$1 == "fpr" { print $10; exit }')"
@@ -59,8 +63,17 @@ workflows:
           fi
           git -C "$CM_BUILD_DIR" fetch --force --no-tags origin \
             "+refs/tags/$CM_TAG:refs/tags/$CM_TAG"
-          python3 "$CM_BUILD_DIR/scripts/ios_release_preflight.py" \
-            "$CM_TAG" --repository "$CM_BUILD_DIR"
+          TRUSTED_MAIN_COMMIT="$(git -C "$CM_BUILD_DIR" rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+          git -C "$CM_BUILD_DIR" show --no-textconv \
+            "$TRUSTED_MAIN_COMMIT:scripts/ios_release_preflight.py" \
+            > "$PROVENANCE_DIR/ios_release_preflight.py"
+          git -C "$CM_BUILD_DIR" show --no-textconv \
+            "$TRUSTED_MAIN_COMMIT:scripts/ios_release_version.py" \
+            > "$PROVENANCE_DIR/ios_release_version.py"
+          python3 -I "$PROVENANCE_DIR/ios_release_preflight.py" \
+            "$CM_TAG" --repository "$CM_BUILD_DIR" \
+            --trusted-main-commit "$TRUSTED_MAIN_COMMIT" \
+            --expected-fingerprint "$IOS_RELEASE_GPG_FINGERPRINT"
       - name: Validate release tag and set marketing version
         script: |
           test -n "${CM_TAG:-}" || { echo "TestFlight-Build benötigt einen ios-vX.Y.Z-Tag" >&2; exit 1; }
@@ -72,7 +85,7 @@ workflows:
       - name: Validate shared native API contracts and release version tooling
         script: |
           cd "$CM_BUILD_DIR"
-          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_install_pinned_xcodegen.py tests/test_ios_release_preflight.py tests/test_ios_release_version.py tests/test_ios_simulator_destination.py tests/test_ios_app_store_release.py
+          python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_install_pinned_xcodegen.py tests/test_ios_*.py
       - name: Install verified pinned XcodeGen
         script: |
           python3 "$CM_BUILD_DIR/scripts/install_pinned_xcodegen.py" \

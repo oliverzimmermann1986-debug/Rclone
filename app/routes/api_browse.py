@@ -320,9 +320,11 @@ def create_directory(payload: CreateDirectoryPayload) -> dict[str, Any]:
                 503, "Keine vorhandenen lokalen Browser-Roots konfiguriert"
             )
         parent = ensure_within(Path(payload.parent), roots)
-        if not parent.is_dir():
+        if parent.is_symlink() or not parent.is_dir():
             raise HTTPException(404, "Übergeordneter Ordner wurde nicht gefunden")
         target = ensure_within(parent / name, roots)
+        if target.exists() or target.is_symlink():
+            raise HTTPException(409, "Ein Ordner mit diesem Namen existiert bereits")
         try:
             target.mkdir(mode=0o750)
         except FileExistsError as exc:

@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence
 
 from ..db import Database
 from ..notifications import notify
+from ..recovery_paths import recovery_path, validated_staging_path
 from ..restore_evidence import pair_binding
 from .recovery_lifecycle import (
     RecoveryBusy,
@@ -200,12 +201,14 @@ def normalize_selection(paths: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(clean))
 
 
-def staging_root(config: Mapping[str, Any]) -> Path:
-    paths = config.get("paths") if isinstance(config.get("paths"), Mapping) else {}
-    raw = str((paths or {}).get("recovery_dir") or "/opt/rclone-sync/recovery")
-    root = Path(raw).expanduser()
-    if not root.is_absolute():
-        raise ValueError("paths.recovery_dir muss absolut sein")
+def _staging_path(config: Mapping[str, Any]) -> Path:
+    return recovery_path(config, "recovery_dir", "recovery")
+
+
+def staging_root(
+    config: Mapping[str, Any], *, pair: Mapping[str, Any] | None = None
+) -> Path:
+    root = validated_staging_path(config, pair=pair)
     root.mkdir(parents=True, exist_ok=True)
     try:
         root.chmod(0o700)
@@ -236,7 +239,7 @@ def _save_record(database: Database, record: Mapping[str, Any]) -> None:
 
 
 def list_staging(database: Database, config: Mapping[str, Any]) -> list[dict[str, Any]]:
-    root = staging_root(config)
+    root = validated_staging_path(config)
     result = []
     for record in _load_state(database):
         candidate = (root / str(record.get("id") or "")).resolve()
@@ -276,7 +279,7 @@ def remove_staging(
 def _remove_staging_locked(
     database: Database, config: Mapping[str, Any], recovery_id: str
 ) -> bool:
-    root = staging_root(config)
+    root = validated_staging_path(config)
     if not recovery_id or any(
         char not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
         for char in recovery_id.lower()
@@ -301,6 +304,13 @@ def _remove_staging_locked(
     return existed
 
 
+def _notify_best_effort(*args, **kwargs) -> None:
+    try:
+        notify(*args, **kwargs)
+    except Exception:
+        logger.exception("Recovery-Benachrichtigung fehlgeschlagen")
+
+
 def run_selective_restore(
     database: Database,
     config: Mapping[str, Any],
@@ -313,30 +323,32 @@ def run_selective_restore(
     recovery_point: str = "current",
 ) -> dict[str, Any]:
     started = time.monotonic()
-    selection = normalize_selection(paths)
-    limit_bytes = max(1, min(int(max_total_mb), 51_200)) * 1024 * 1024
-    _live_source, configured_target = _endpoints(pair)
-    backup_target = str(source_override or configured_target)
     recovery_id = f"recovery-{job_id}"
-    work = staging_root(config) / recovery_id
-    data = work / "data"
+    work = None
+    created = False
     record: dict[str, Any] = {
         "id": recovery_id,
         "job_id": job_id,
         "pair": str(pair.get("name") or ""),
         "status": "running",
         "verified": False,
-        "staging_path": str(data),
         "created_at": time.time(),
-        "requested_items": len(selection),
-        "limit_bytes": limit_bytes,
         "recovery_point": recovery_point,
         "evidence_binding": pair_binding(pair),
     }
     try:
         check_cancelled()
+        selection = normalize_selection(paths)
+        limit_bytes = max(1, min(int(max_total_mb), 51_200)) * 1024 * 1024
+        _live_source, configured_target = _endpoints(pair)
+        backup_target = str(source_override or configured_target)
+        record.update(requested_items=len(selection), limit_bytes=limit_bytes)
+        work = staging_root(config, pair=pair) / recovery_id
+        data = work / "data"
+        record["staging_path"] = str(data)
         _save_record(database, record)
         work.mkdir(mode=0o700)
+        created = True
         data.mkdir(mode=0o700)
         listing = work / "selection.txt"
         listing.write_text("\n".join(selection) + "\n", encoding="utf-8")
@@ -419,7 +431,7 @@ def run_selective_restore(
     except Exception as exc:
         logger.exception("Selektive Recovery %s fehlgeschlagen", recovery_id)
         try:
-            if work.exists():
+            if created and work is not None and work.exists():
                 ensure_cleanup_safe()
                 shutil.rmtree(work)
         except (OSError, RecoveryBusy) as cleanup_error:
@@ -449,7 +461,7 @@ def run_selective_restore(
             )
         except Exception:
             logger.exception("Recovery-Audit konnte nicht gespeichert werden")
-        notify(
+        _notify_best_effort(
             "recovery_ready",
             f"{record['pair']}: Recovery bereit",
             f"{record['files']} Dateien wurden getrennt wiederhergestellt und geprüft.",
@@ -457,7 +469,7 @@ def run_selective_restore(
             pair=record["pair"],
         )
     elif status != "cancelled":
-        notify(
+        _notify_best_effort(
             "recovery_error",
             f"{record['pair']}: Recovery fehlgeschlagen",
             record["error"],

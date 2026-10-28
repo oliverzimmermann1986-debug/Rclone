@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import io
 
 import pytest
 
@@ -29,6 +30,21 @@ def fixture(tmp_path):
         "backup": {"pairs": [pair]},
     }
     return config, pair, target
+
+
+def test_full_restore_uses_data_recovery_fallback(tmp_path):
+    config, pair, target = fixture(tmp_path)
+    del config["paths"]["recovery_dir"]
+    (target / "dummy.txt").write_bytes(b"dummy snapshot")
+    snapshot = snapshots.capture_snapshot(config, pair, max_total_mb=1)
+    database = Database(tmp_path / "fallback.db")
+    job_id = database.job_start("recovery")
+    result = snapshots.run_snapshot_restore(
+        database, config, pair, point_id=snapshot["id"], max_total_mb=1, job_id=job_id
+    )
+    expected = tmp_path / "server" / "recovery" / f"recovery-{job_id}" / "data"
+    assert result["verified"] and Path(result["staging_path"]) == expected
+    assert (expected / "dummy.txt").read_bytes() == b"dummy snapshot"
 
 
 def test_full_point_preserves_unchanged_deleted_and_changed_files(tmp_path):
@@ -141,7 +157,8 @@ def test_remote_snapshot_checks_all_bytes_and_labels_unknown_live_hashes(
     class Process:
         def __init__(self, command, **kwargs):
             assert command[:3] == ["rclone", "lsjson", "--recursive"]
-            kwargs["stdout"].write(json.dumps(listing).encode())
+            self.stdout = io.BytesIO(json.dumps(listing).encode())
+            self.stderr = io.BytesIO()
             self.returncode = 0
             self.pid = 99999999
 
@@ -190,7 +207,8 @@ def test_oversize_remote_inventory_is_killed_before_publication(tmp_path, monkey
 
     class Process:
         def __init__(self, command, **kwargs):
-            kwargs["stdout"].write(b"x" * 1024)
+            self.stdout = io.BytesIO(b"x" * 1024)
+            self.stderr = io.BytesIO()
             self.pid = 99999999
             self.returncode = None
             self.killed = False

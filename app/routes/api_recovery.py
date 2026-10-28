@@ -9,7 +9,7 @@ import logging
 import os
 import subprocess
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any, Mapping
 
 from cryptography.hazmat.primitives import hashes
@@ -51,6 +51,8 @@ from ..jobs.selective_restore import (
 from ..rclone_args import rclone_subprocess_env
 from ..recovery_points import (
     RecoveryPointError,
+    _is_remote,
+    _local_browse,
     browse_point,
     compare_points,
     list_points,
@@ -342,11 +344,11 @@ class SnapshotRequest(BaseModel):
 
 
 def _start_recovery_job() -> tuple[Any, int, HeldFileLock]:
-    database = get_db()
     lease = try_file_lock("backup")
     if lease is None:
         raise HTTPException(409, "Eine Sicherung oder Recovery hält den Prozess-Lock")
     try:
+        database = get_db()
         if database.job_terminal_recover_pending().get("failed"):
             raise HTTPException(
                 503, "Ein vorheriger Jobabschluss ist noch nicht gespeichert"
@@ -373,7 +375,10 @@ def _start_recovery_job() -> tuple[Any, int, HeldFileLock]:
 def _run_recovery_job(database, job_id, lease, operation, *args, **kwargs):
     try:
         check_cancelled()
-        return operation(database, *args, job_id=job_id, **kwargs)
+        result = operation(database, *args, job_id=job_id, **kwargs)
+        if (database.job_get(job_id) or {}).get("status") == "running":
+            raise RuntimeError("Recovery-Worker hat den Job nicht abgeschlossen")
+        return result
     except RecoveryPersistenceError:
         # A durable intent may still await replay. Do not replace the external
         # result with a synthetic error or announce success before confirmation.
@@ -381,7 +386,8 @@ def _run_recovery_job(database, job_id, lease, operation, *args, **kwargs):
     except Exception as exc:
         status = "cancelled" if isinstance(exc, RecoveryCancelled) else "error"
         try:
-            finish_job(database, job_id, status, {"ok": False, "error": str(exc)})
+            if (database.job_get(job_id) or {}).get("status") == "running":
+                finish_job(database, job_id, status, {"ok": False, "error": str(exc)})
         except RecoveryPersistenceError:
             logger.exception("Recovery #%s konnte nicht abgeschlossen werden", job_id)
     finally:
@@ -472,6 +478,7 @@ def _relative_path(value: str) -> str:
     if (
         path.is_absolute()
         or ".." in path.parts
+        or ":" in raw
         or any(char in raw for char in ("\x00", "\r", "\n"))
     ):
         raise HTTPException(400, "Ungültiger relativer Pfad")
@@ -486,7 +493,8 @@ def browse_backup(
     pair = _find_pair(config, identity)
     _source, backup_target = _endpoints(pair)
     relative = _relative_path(path)
-    if ":" in backup_target.split("/", 1)[0]:
+    truncated = False
+    if _is_remote(backup_target):
         target = backup_target.rstrip("/") + (f"/{relative}" if relative else "")
         result = subprocess.run(
             ["rclone", "lsjson", "--max-depth", "1", "--", target],
@@ -504,6 +512,11 @@ def browse_backup(
             raise HTTPException(
                 502, "Sicherungsziel hat eine ungültige Antwort geliefert"
             ) from exc
+        if not isinstance(entries, list):
+            raise HTTPException(
+                502, "Sicherungsziel hat eine ungültige Antwort geliefert"
+            )
+        truncated = len(entries) > 500
         items = [
             {
                 "name": str(item.get("Name") or ""),
@@ -513,33 +526,22 @@ def browse_backup(
                 "size": item.get("Size"),
                 "modified_at": item.get("ModTime"),
             }
-            for item in entries
+            for item in entries[:500]
             if isinstance(item, Mapping)
-            and str(item.get("Name") or "") not in {".", ".."}
+            and str(item.get("Name") or "") not in {"", ".", ".."}
         ]
     else:
-        root = Path(backup_target).expanduser().resolve()
-        target = (root / relative).resolve()
-        if target != root and not target.is_relative_to(root):
-            raise HTTPException(400, "Pfad liegt außerhalb des Sicherungsziels")
-        if not target.is_dir():
-            raise HTTPException(404, "Ordner nicht gefunden")
-        items = []
-        for item in sorted(
-            target.iterdir(),
-            key=lambda entry: (not entry.is_dir(), entry.name.casefold()),
-        )[:500]:
-            stat = item.stat()
-            items.append(
-                {
-                    "name": item.name,
-                    "path": (f"{relative}/" if relative else "") + item.name,
-                    "is_dir": item.is_dir(),
-                    "size": stat.st_size if item.is_file() else None,
-                    "modified_at": stat.st_mtime,
-                }
-            )
-    return {"pair": str(pair.get("name") or ""), "path": relative, "items": items}
+        try:
+            items, truncated = _local_browse(backup_target, relative)
+        except RecoveryPointError as exc:
+            status = 404 if "nicht gefunden" in str(exc).lower() else 400
+            raise HTTPException(status, str(exc)) from exc
+    return {
+        "pair": str(pair.get("name") or ""),
+        "path": relative,
+        "items": items,
+        "truncated": truncated,
+    }
 
 
 @router.get("/points")
@@ -626,7 +628,10 @@ def start_selective_restore(
 
 @router.get("/staging")
 def staging_items() -> dict[str, Any]:
-    return {"items": list_staging(get_db(), get_config().snapshot())}
+    try:
+        return {"items": list_staging(get_db(), get_config().snapshot())}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 class RemoveStagingRequest(ReauthenticationBody):

@@ -245,15 +245,15 @@ def test_confirmed_job_recovers_ready_projection_after_staging_save_failure(
 
 def test_snapshot_restore_observes_cancel_between_files(env, monkeypatch):
     point = recovery_snapshots.capture_snapshot(env.config, env.pair, max_total_mb=1)
-    original = recovery_snapshots.copy_file
+    original = recovery_snapshots._copy_verified_file
     copied = []
 
-    def copy(source, target):
-        original(source, target)
+    def copy(source, target, expected):
+        original(source, target, expected)
         copied.append(source)
         runtime_state.request_cancel_marker()
 
-    monkeypatch.setattr(recovery_snapshots, "copy_file", copy)
+    monkeypatch.setattr(recovery_snapshots, "_copy_verified_file", copy)
     job_id = env.db.job_start("recovery")
     result = recovery_snapshots.run_snapshot_restore(
         env.db,
@@ -411,7 +411,10 @@ def unkillable_child(monkeypatch, *, on_spawn):
 
     class Process:
         def __init__(self, args, **kwargs):
+            from io import BytesIO
+
             self.args, self.pid, self.returncode = args, 99999999, None
+            self.stdout, self.stderr = BytesIO(), BytesIO()
             processes.append(self)
             on_spawn(args)
 
