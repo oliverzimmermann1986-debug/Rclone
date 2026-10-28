@@ -113,10 +113,6 @@ final class APIClientRedirectSecurityTests: XCTestCase {
             defer { origin.stop() }
             let baseURL = origin.baseURL
             let jar = URLSessionConfiguration.ephemeral.httpCookieStorage!
-            jar.setCookie(try XCTUnwrap(HTTPCookie(properties: [
-                .name: APIClient.csrfCookie, .value: "fixture-csrf",
-                .domain: "127.0.0.1", .path: "/"
-            ])))
             let configuration = URLSessionConfiguration.ephemeral
             configuration.httpCookieStorage = jar
             // The caller's permissive session delegate must never override the
@@ -124,6 +120,11 @@ final class APIClientRedirectSecurityTests: XCTestCase {
             let session = URLSession(configuration: configuration, delegate: AllowAllRedirects(), delegateQueue: nil)
             defer { session.invalidateAndCancel() }
             let client = APIClient(baseURL: baseURL, session: session, loginSession: session, cookieStorage: jar)
+            // HTTP starts without persisted cookies; model a fresh manual session.
+            jar.setCookie(try XCTUnwrap(HTTPCookie(properties: [
+                .name: APIClient.csrfCookie, .value: "fixture-csrf",
+                .domain: "127.0.0.1", .path: "/"
+            ])))
             do {
                 switch flow {
                 case "login": try await client.login(username: "fixture", password: "fixture-password")
