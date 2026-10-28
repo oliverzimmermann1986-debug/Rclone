@@ -39,6 +39,9 @@ MAX_CHUNK_BYTES = 1024 * 1024
 MAX_LIBRARY_ITEMS = 500
 _LOCK = threading.RLock()
 _TRANSFER_LOCKS: dict[str, threading.Lock] = {}
+# Bounded stripes also coordinate different upload IDs with identical content.
+_BLOB_LOCKS = tuple(threading.RLock() for _ in range(64))
+_TARGET_LOCKS = tuple(threading.Lock() for _ in range(64))
 _UPLOAD_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")
 
 
@@ -410,6 +413,23 @@ def queue_completion(config: Mapping[str, Any], upload_id: str) -> dict[str, Any
 
 
 def _prepare_blob(root: Path, record: dict[str, Any]) -> Path:
+    with _blob_lock(str(record["sha256"])):
+        return _prepare_blob_locked(root, record)
+
+
+def _blob_lock(digest: str):
+    return _BLOB_LOCKS[int(digest[:8], 16) % len(_BLOB_LOCKS)]
+
+
+def _target_lock(target: str):
+    identity = (
+        target if _is_remote(target) else os.path.normcase(str(Path(target).resolve()))
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return _TARGET_LOCKS[int(digest[:8], 16) % len(_TARGET_LOCKS)]
+
+
+def _prepare_blob_locked(root: Path, record: dict[str, Any]) -> Path:
     digest = str(record["sha256"])
     blob = _blob_path(root, digest)
     if blob.is_file():
@@ -459,6 +479,11 @@ def _copy_and_verify_remote(
         env=rclone_subprocess_env(),
     )
     copy_error = (copied.stderr or copied.stdout or "").strip()[:500]
+    if copied.returncode != 0:
+        raise RuntimeError(
+            "Übertragung zum Datenweg fehlgeschlagen: "
+            f"{copy_error or copied.returncode}"
+        )
     process = subprocess.Popen(
         ["rclone", "cat", "--", target],
         stdout=subprocess.PIPE,
@@ -491,11 +516,6 @@ def _copy_and_verify_remote(
         raise RuntimeError("Prüfung der Zielkopie hat das Zeitlimit überschritten")
     if process.returncode != 0:
         detail = (stderr or b"").decode("utf-8", errors="replace").strip()[:500]
-        if copied.returncode != 0:
-            raise RuntimeError(
-                "Übertragung zum Datenweg fehlgeschlagen: "
-                f"{copy_error or copied.returncode}"
-            )
         raise RuntimeError(
             f"Zielkopie konnte nicht geprüft werden: {detail or process.returncode}"
         )
@@ -513,14 +533,17 @@ def complete_upload(
     root = vault_root(config)
     with _LOCK:
         transfer_lock = _TRANSFER_LOCKS.setdefault(upload_id, threading.Lock())
-    if not transfer_lock.acquire(blocking=False):
-        return _public_record(_load_record(root, upload_id))
+        if not transfer_lock.acquire(blocking=False):
+            return _public_record(_load_record(root, upload_id))
     try:
         return _complete_upload_locked(
             database, config, upload_id, root, config_provider=config_provider
         )
     finally:
-        transfer_lock.release()
+        with _LOCK:
+            transfer_lock.release()
+            if _TRANSFER_LOCKS.get(upload_id) is transfer_lock:
+                _TRANSFER_LOCKS.pop(upload_id, None)
 
 
 def _complete_upload_locked(
@@ -556,12 +579,15 @@ def _complete_upload_locked(
                 * 3600
             ),
         )
-        if _is_remote(target):
-            _copy_and_verify_remote(
-                blob, target, str(record["sha256"]), timeout=timeout
-            )
-        else:
-            _copy_and_verify_local(blob, target, str(record["sha256"]))
+        # Identical uploads share the timestamp/hash-based destination as well
+        # as the local blob. Publish and verify that destination serially.
+        with _target_lock(target):
+            if _is_remote(target):
+                _copy_and_verify_remote(
+                    blob, target, str(record["sha256"]), timeout=timeout
+                )
+            else:
+                _copy_and_verify_local(blob, target, str(record["sha256"]))
         with _upload_record_lock(root, upload_id):
             record["status"] = "ready"
             record["verified"] = True
@@ -786,12 +812,16 @@ def download_blob(config: Mapping[str, Any], upload_id: str) -> tuple[Path, str]
     if not blob.is_file() or remote_receipt:
         with _LOCK:
             transfer_lock = _TRANSFER_LOCKS.setdefault(upload_id, threading.Lock())
-        if not transfer_lock.acquire(blocking=False):
-            raise VaultError("Diese Datei wird bereits zurückgeholt")
+            if not transfer_lock.acquire(blocking=False):
+                raise VaultError("Diese Datei wird bereits zurückgeholt")
         try:
-            blob = _restore_missing_blob(root, config, record)
+            with _blob_lock(str(record["sha256"])):
+                blob = _restore_missing_blob(root, config, record)
         finally:
-            transfer_lock.release()
+            with _LOCK:
+                transfer_lock.release()
+                if _TRANSFER_LOCKS.get(upload_id) is transfer_lock:
+                    _TRANSFER_LOCKS.pop(upload_id, None)
     if blob.stat().st_size != int(record.get("size") or -1):
         raise VaultError("Der lokale Wiederherstellungs-Blob ist beschädigt")
     if _hash_file(blob) != str(record.get("sha256") or ""):

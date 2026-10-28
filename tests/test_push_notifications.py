@@ -198,7 +198,11 @@ def test_push_route_validates_and_registers_device(monkeypatch, tmp_path: Path):
         )
     )
 
-    assert result == {"ok": True, "registered": True}
+    assert result == {
+        "ok": True,
+        "registered": True,
+        "server_id": push_notifications.push_server_id(),
+    }
     assert database.push_devices()[0]["token"] == TOKEN
     with pytest.raises(Exception) as raised:
         api_push.unregister_push_device(api_push.PushDeviceRemoval(token="g" * 64))

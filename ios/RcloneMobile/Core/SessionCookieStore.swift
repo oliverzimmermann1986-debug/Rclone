@@ -6,6 +6,21 @@ protocol SessionPersisting {
     func load(for server: URL) -> [HTTPCookie]
     func save(_ cookies: [HTTPCookie], for server: URL)
     func remove(for server: URL)
+    func save(_ cookies: [HTTPCookie], for server: URL, replacingSession expected: String?) -> Bool
+    func remove(for server: URL, matchingSession expected: String)
+}
+
+extension SessionPersisting {
+    func save(_ cookies: [HTTPCookie], for server: URL, replacingSession expected: String?) -> Bool {
+        guard load(for: server).first(where: { $0.name == APIClient.sessionCookie })?.value == expected else { return false }
+        save(cookies, for: server)
+        return true
+    }
+
+    func remove(for server: URL, matchingSession expected: String) {
+        guard load(for: server).first(where: { $0.name == APIClient.sessionCookie })?.value == expected else { return }
+        remove(for: server)
+    }
 }
 
 /// Session credentials remain on this device; passwords are never persisted.
@@ -25,6 +40,9 @@ struct SessionCookieStore: SessionPersisting {
     }
 
     private static let logger = Logger(subsystem: "de.sicherpfad.server-session", category: "Keychain")
+    // All instances in the app share this synchronous boundary. Conditional
+    // compare/delete and compare/save must never race another client's write.
+    private static let storageLock = NSLock()
 
     private struct Record: Codable {
         let name: String
@@ -61,7 +79,16 @@ struct SessionCookieStore: SessionPersisting {
     }
 
     func load(for server: URL) -> [HTTPCookie] {
-        do { return try loadChecked(for: server) }
+        Self.storageLock.lock()
+        defer { Self.storageLock.unlock() }
+        do { return try loadUnlocked(for: server) }
+        catch let error as StorageError where error == .invalidCookieData {
+            // Remove the exact corrupt state observed under the same lock.
+            // A newer client's valid save must never be deleted during repair.
+            SecItemDelete(query(server) as CFDictionary)
+            Self.logger.error("\(error.localizedDescription, privacy: .public)")
+            return []
+        }
         catch {
             // No cookie values, account addresses or credential data enter logs.
             Self.logger.error("\(error.localizedDescription, privacy: .public)")
@@ -70,6 +97,12 @@ struct SessionCookieStore: SessionPersisting {
     }
 
     func loadChecked(for server: URL) throws -> [HTTPCookie] {
+        Self.storageLock.lock()
+        defer { Self.storageLock.unlock() }
+        return try loadUnlocked(for: server)
+    }
+
+    private func loadUnlocked(for server: URL) throws -> [HTTPCookie] {
         var request = query(server)
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -102,6 +135,12 @@ struct SessionCookieStore: SessionPersisting {
     }
 
     func saveChecked(_ cookies: [HTTPCookie], for server: URL) throws {
+        Self.storageLock.lock()
+        defer { Self.storageLock.unlock() }
+        try saveUnlocked(cookies, for: server)
+    }
+
+    private func saveUnlocked(_ cookies: [HTTPCookie], for server: URL) throws {
         guard cookies.contains(where: { $0.name == APIClient.sessionCookie }) else { return }
         let data = try Self.encodeCookies(cookies)
         let key = query(server)
@@ -122,6 +161,33 @@ struct SessionCookieStore: SessionPersisting {
     }
 
     func remove(for server: URL) {
+        Self.storageLock.lock()
+        defer { Self.storageLock.unlock() }
         SecItemDelete(query(server) as CFDictionary)
+    }
+
+    func save(_ cookies: [HTTPCookie], for server: URL, replacingSession expected: String?) -> Bool {
+        Self.storageLock.lock()
+        defer { Self.storageLock.unlock() }
+        do {
+            guard try loadUnlocked(for: server).first(where: { $0.name == APIClient.sessionCookie })?.value == expected else { return false }
+            guard cookies.contains(where: { $0.name == APIClient.sessionCookie }) else { return false }
+            try saveUnlocked(cookies, for: server)
+            return true
+        } catch {
+            Self.logger.error("\(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    func remove(for server: URL, matchingSession expected: String) {
+        Self.storageLock.lock()
+        defer { Self.storageLock.unlock() }
+        do {
+            guard try loadUnlocked(for: server).first(where: { $0.name == APIClient.sessionCookie })?.value == expected else { return }
+            SecItemDelete(query(server) as CFDictionary)
+        } catch {
+            Self.logger.error("\(error.localizedDescription, privacy: .public)")
+        }
     }
 }

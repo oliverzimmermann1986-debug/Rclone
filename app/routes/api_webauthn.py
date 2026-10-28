@@ -16,6 +16,7 @@ from webauthn.helpers.exceptions import WebAuthnException
 
 from ..auth import (
     SESSION_COOKIE,
+    account_generation_guard,
     clear_login_failures,
     create_session,
     login_key,
@@ -28,7 +29,12 @@ from ..auth import (
 )
 from ..config_store import get_config
 from ..db import get_db
-from ..security import CSRF_COOKIE, new_csrf_token, require_csrf
+from ..security import (
+    CSRF_COOKIE,
+    cookie_secure_for_request,
+    new_csrf_token,
+    require_csrf,
+)
 from ..webauthn_service import (
     WebAuthnUnavailable,
     authentication_options,
@@ -72,6 +78,7 @@ class ExchangeRequest(BaseModel):
 class NativeRegistrationTicketRequest(BaseModel):
     method: Method
     label: str = Field(default="", max_length=80)
+    current_password: str = Field(min_length=1, max_length=1024)
     app_challenge: str = Field(
         min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]+$"
     )
@@ -83,10 +90,8 @@ class NativeRegistrationOptionsRequest(BaseModel):
 
 
 def _cookie_secure(request: Request) -> bool:
-    configured = get_config().get("web", "secure_cookie", default=False)
-    if configured is True:
-        return True
-    return str(configured).lower() == "auto" and request.url.scheme == "https"
+    configured = get_config().get("web", "secure_cookie", default="auto")
+    return cookie_secure_for_request(request, configured)
 
 
 def _set_authenticated_session(
@@ -201,30 +206,50 @@ def complete_authentication(body: CeremonyResponse, request: Request):
     )
     if result["native"]:
         token = secrets.token_urlsafe(48)
-        database.native_auth_exchange_create(
-            hashlib.sha256(token.encode("ascii")).hexdigest(),
-            result["app_binding"],
-            result["username"],
-        )
+        try:
+            with account_generation_guard(result["account_generation"]) as generation:
+                created = database.native_auth_exchange_create(
+                    hashlib.sha256(token.encode("ascii")).hexdigest(),
+                    result["app_binding"],
+                    result["username"],
+                    account_generation=generation,
+                    credential_id=result["credential_id"],
+                    credential_generation=result["credential_generation"],
+                )
+                if not created:
+                    raise ValueError("Dieser Schlüssel wurde inzwischen widerrufen.")
+        except ValueError as exc:
+            raise _ceremony_error(exc) from exc
         return {"ok": True, "native_exchange_token": token}
     response = JSONResponse(content={"ok": True})
-    _set_authenticated_session(response, request, result["username"])
+    try:
+        with account_generation_guard(result["account_generation"]):
+            if not database.webauthn_credential_matches(
+                result["credential_id"], result["credential_generation"]
+            ):
+                raise ValueError("Dieser Schlüssel wurde inzwischen widerrufen.")
+            _set_authenticated_session(response, request, result["username"])
+    except ValueError as exc:
+        raise _ceremony_error(exc) from exc
     return response
 
 
 @router.post("/api/webauthn/native/exchange")
 def exchange_native_session(body: ExchangeRequest, request: Request):
     token_hash = hashlib.sha256(body.token.encode("ascii", errors="ignore")).hexdigest()
-    username = get_db().native_auth_exchange_consume(
-        token_hash, _pkce_challenge(body.verifier)
-    )
-    if not username:
-        raise HTTPException(
-            status_code=401,
-            detail="Der einmalige Anmeldecode ist abgelaufen oder ungültig.",
+    with account_generation_guard() as generation:
+        username = get_db().native_auth_exchange_consume(
+            token_hash,
+            _pkce_challenge(body.verifier),
+            account_generation=generation,
         )
-    response = JSONResponse(content={"status": "success"})
-    _set_authenticated_session(response, request, username)
+        if not username:
+            raise HTTPException(
+                status_code=401,
+                detail="Der einmalige Anmeldecode ist abgelaufen oder ungültig.",
+            )
+        response = JSONResponse(content={"status": "success"})
+        _set_authenticated_session(response, request, username)
     return response
 
 
@@ -234,6 +259,7 @@ def exchange_native_session(body: ExchangeRequest, request: Request):
 )
 def create_native_registration_ticket(
     body: NativeRegistrationTicketRequest,
+    request: Request,
     user: str = Depends(require_auth),
 ) -> dict[str, Any]:
     if not status().get("enabled"):
@@ -241,16 +267,28 @@ def create_native_registration_ticket(
             status_code=503,
             detail="Passkeys sind auf diesem Server noch nicht konfiguriert.",
         )
+    generation = require_reauthentication(request, user, body.current_password)
     token = secrets.token_urlsafe(48)
     database = get_db()
-    database.native_webauthn_registration_create(
-        hashlib.sha256(token.encode("ascii")).hexdigest(),
-        body.app_challenge,
-        user,
-        body.method,
-        body.label.strip(),
-        ttl_seconds=300,
-    )
+    try:
+        with account_generation_guard(generation):
+            if session_user(request.cookies.get(SESSION_COOKIE, "")) != user:
+                raise HTTPException(
+                    status_code=401, detail="Die Sitzung wurde widerrufen."
+                )
+            database.native_webauthn_registration_create(
+                hashlib.sha256(token.encode("ascii")).hexdigest(),
+                body.app_challenge,
+                user,
+                body.method,
+                body.label.strip(),
+                account_generation=generation,
+                ttl_seconds=300,
+            )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=401, detail="Die Freigabe wurde widerrufen."
+        ) from exc
     database.audit_add(
         "webauthn_native_registration_started",
         actor=user,
@@ -262,9 +300,12 @@ def create_native_registration_ticket(
 @router.post("/api/webauthn/native/registration/options")
 def begin_native_registration(body: NativeRegistrationOptionsRequest):
     token_hash = hashlib.sha256(body.token.encode("ascii", errors="ignore")).hexdigest()
-    ticket = get_db().native_webauthn_registration_consume(
-        token_hash, _pkce_challenge(body.verifier)
-    )
+    with account_generation_guard() as generation:
+        ticket = get_db().native_webauthn_registration_consume(
+            token_hash,
+            _pkce_challenge(body.verifier),
+            account_generation=generation,
+        )
     if not ticket:
         raise HTTPException(
             status_code=401,
@@ -276,6 +317,7 @@ def begin_native_registration(body: NativeRegistrationOptionsRequest):
             ticket["label"],
             native=True,
             app_binding=ticket["username"],
+            authorization_generation=ticket["account_generation"],
         )
     except Exception as exc:
         raise _ceremony_error(exc) from exc
@@ -365,9 +407,11 @@ def begin_registration(
     request: Request,
     user: str = Depends(require_auth),
 ):
-    require_reauthentication(request, user, body.current_password)
+    generation = require_reauthentication(request, user, body.current_password)
     try:
-        return registration_options(body.method, body.label.strip())
+        return registration_options(
+            body.method, body.label.strip(), authorization_generation=generation
+        )
     except Exception as exc:
         raise _ceremony_error(exc) from exc
 
@@ -403,14 +447,21 @@ def delete_credential(
     request: Request,
     user: str = Depends(require_auth),
 ) -> dict[str, bool]:
-    require_reauthentication(request, user, body.current_password)
-    existing = get_db().webauthn_credential_get(credential_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Schlüssel nicht gefunden")
-    get_db().webauthn_credential_delete(credential_id)
-    get_db().audit_add(
-        "webauthn_credential_deleted",
-        actor=user,
-        details={"method": existing["method"], "credential_id": credential_id},
-    )
+    generation = require_reauthentication(request, user, body.current_password)
+    try:
+        with account_generation_guard(generation, exclusive=True):
+            database = get_db()
+            existing = database.webauthn_credential_get(credential_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="Schlüssel nicht gefunden")
+            database.webauthn_credential_delete(credential_id)
+            database.audit_add(
+                "webauthn_credential_deleted",
+                actor=user,
+                details={"method": existing["method"], "credential_id": credential_id},
+            )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=401, detail="Die Passwortbestätigung wurde widerrufen."
+        ) from exc
     return {"ok": True}

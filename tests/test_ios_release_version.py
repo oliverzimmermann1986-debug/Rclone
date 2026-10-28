@@ -1,4 +1,5 @@
 from pathlib import Path
+from fnmatch import fnmatchcase
 
 import pytest
 import yaml
@@ -78,7 +79,7 @@ def test_codemagic_verifies_fetched_main_and_exact_signed_tag_before_release_cha
     assert config.index("IMPORTED_FINGERPRINT") < provenance
     assert config.index("gpg --batch --quiet --import") < provenance
     assert provenance < version_write
-    assert "tests/test_ios_release_preflight.py" in config
+    assert "tests/test_ios_*.py" in config
 
 
 def test_codemagic_validates_live_backend_contracts_before_xcode_build():
@@ -91,7 +92,7 @@ def test_codemagic_validates_live_backend_contracts_before_xcode_build():
     contract_test_run = (
         "python3 -m pytest tests/test_native_login_contract.py "
         "tests/test_native_read_contract.py tests/test_install_pinned_xcodegen.py "
-        "tests/test_ios_release_preflight.py tests/test_ios_release_version.py"
+        "tests/test_ios_*.py"
     )
 
     assert dependency_install in normalized
@@ -123,7 +124,7 @@ def test_codemagic_pins_xcode_and_selects_an_available_simulator_by_id():
         in config
     )
     assert '-destination "platform=iOS Simulator,id=$SIMULATOR_ID"' in config
-    assert "tests/test_ios_simulator_destination.py" in config
+    assert "tests/test_ios_*.py" in config
 
 
 def test_ios_ci_selects_an_available_simulator_by_id():
@@ -149,19 +150,27 @@ def test_codemagic_uses_checksum_verified_exact_xcodegen_before_generation():
 
 def test_ios_ci_tracks_native_contract_sources():
     root = Path(__file__).parents[1]
-    workflow = (root / ".github" / "workflows" / "ios.yml").read_text(encoding="utf-8")
+    workflow = yaml.load(
+        (root / ".github/workflows/ios.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
     for expected_path in (
-        '"app/main.py"',
-        '"app/auth_contract.py"',
-        '"app/config_store.py"',
-        '"app/config_validation.py"',
-        '"app/db.py"',
-        '"app/job_definitions.py"',
-        '"app/jobs/**"',
-        '"app/routes/**"',
-        '"contracts/**"',
+        "app/main.py",
+        "app/auth_contract.py",
+        "app/config_store.py",
+        "app/config_validation.py",
+        "app/db.py",
+        "app/job_definitions.py",
+        "app/jobs/rclone_sync.py",
+        "app/routes/api_webauthn.py",
+        "contracts/native_read_contract_v1.json",
     ):
-        assert workflow.count(expected_path) == 2
+        for event in ("push", "pull_request"):
+            trigger = workflow["on"][event]
+            patterns = trigger.get("paths") if isinstance(trigger, dict) else None
+            assert patterns is None or any(
+                fnmatchcase(expected_path, pattern) for pattern in patterns
+            ), (event, expected_path)
 
 
 def test_shared_contracts_are_copied_into_ios_test_bundle():

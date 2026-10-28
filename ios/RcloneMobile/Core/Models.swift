@@ -1276,6 +1276,40 @@ struct PushDeviceRemoval: Encodable {
 
 struct PushRegistrationResponse: Decodable {
     let ok: Bool
+    let serverID: String?
+
+    init(ok: Bool, serverID: String? = nil) {
+        self.ok = ok
+        self.serverID = serverID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case serverID = "server_id"
+    }
+}
+
+struct PushServerBinding: Equatable {
+    let serverID: String
+    let origin: String
+    let session: Int
+
+    init?(serverID: String?, origin: String, session: Int) {
+        guard let serverID = Self.validatedServerID(serverID), !origin.isEmpty else { return nil }
+        self.serverID = serverID
+        self.origin = origin
+        self.session = session
+    }
+
+    static func validatedServerID(_ value: String?) -> String? {
+        guard let value, value.utf8.count == 64,
+              value.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
+        return value
+    }
+
+    func matches(serverID: String?, origin: String, session: Int) -> Bool {
+        Self.validatedServerID(serverID) == self.serverID && self.origin == origin && self.session == session
+    }
 }
 
 struct PushStatus: Decodable {

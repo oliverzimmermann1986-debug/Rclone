@@ -59,6 +59,11 @@ struct SystemView: View {
                     LoadingSection(label: "Systemdaten werden geladen …")
                 }
             }
+            Section("Informationen") {
+                NavigationLink { LegalInformationView() } label: {
+                    Label("Impressum", systemImage: "info.circle")
+                }
+            }
         }
         .navigationTitle("System")
         .toolbar {
@@ -145,12 +150,14 @@ struct WebAuthnSecurityView: View {
     @State private var credentials: [WebAuthnCredential] = []
     @State private var isLoading = false
     @State private var isRegistering = false
+    @State private var showPasswordConfirmation = false
+    @State private var currentPassword = ""
     @State private var message: SecurityMessage?
 
     var body: some View {
         List {
             Section {
-                Button { Task { await createPasskey() } } label: {
+                Button { showPasswordConfirmation = true } label: {
                     HStack(spacing: 12) {
                         if isRegistering { ProgressView() }
                         Label("Passkey in der App erstellen", systemImage: "person.badge.key.fill")
@@ -161,7 +168,7 @@ struct WebAuthnSecurityView: View {
             } header: {
                 Text("Neuer Zugang")
             } footer: {
-                Text("iOS bestätigt die Anlage mit Face ID oder deinem Gerätecode. Der private Schlüssel verlässt den Apple-Schlüsselbund nicht.")
+                Text("Bestätige zuerst dein aktuelles Serverpasswort. Danach bestätigt iOS die Anlage mit Face ID oder deinem Gerätecode. Der private Schlüssel verlässt den Apple-Schlüsselbund nicht.")
             }
 
             Section("Registrierte Zugänge") {
@@ -214,6 +221,20 @@ struct WebAuthnSecurityView: View {
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await loadCredentials() }
         .task { await loadCredentials() }
+        .onDisappear { currentPassword = "" }
+        .alert("Passkey erstellen", isPresented: $showPasswordConfirmation) {
+            SecureField("Aktuelles Serverpasswort", text: $currentPassword)
+                .textContentType(.password)
+            Button("Abbrechen", role: .cancel) { currentPassword = "" }
+            Button("Bestätigen") {
+                let password = currentPassword
+                currentPassword = ""
+                Task { await createPasskey(currentPassword: password) }
+            }
+            .disabled(currentPassword.isEmpty)
+        } message: {
+            Text("Bestätige dein aktuelles Serverpasswort, um einen neuen Zugang anzulegen.")
+        }
         .alert(item: $message) { item in
             Alert(title: Text(item.title), message: Text(item.text), dismissButton: .default(Text("OK")))
         }
@@ -252,14 +273,15 @@ struct WebAuthnSecurityView: View {
         }
     }
 
-    private func createPasskey() async {
+    private func createPasskey(currentPassword: String) async {
         guard !isRegistering else { return }
         isRegistering = true
         defer { isRegistering = false }
         do {
             try await model.registerWebAuthnCredential(
                 method: "passkey",
-                label: "Sicherpfad iPhone"
+                label: "Sicherpfad iPhone",
+                currentPassword: currentPassword
             )
             credentials = try await model.webAuthnCredentials()
             message = SecurityMessage(

@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..auth import require_auth
+from ..auth import SESSION_COOKIE, require_auth, session_user
 from ..config_store import get_config
 from ..db import JobAlreadyRunningError, get_db
 from ..job_definitions import definition_pairs, effective_job_definitions
@@ -1328,10 +1328,13 @@ async def progress_stream(request: Request) -> StreamingResponse:
     """
 
     async def event_generator():
+        token = request.cookies.get(SESSION_COOKIE, "")
+        if not session_user(token):
+            return
         queue = await _progress_broadcaster.subscribe()
         try:
             while True:
-                if await request.is_disconnected():
+                if not session_user(token) or await request.is_disconnected():
                     break
                 try:
                     payload = await asyncio.wait_for(queue.get(), timeout=1.5)
@@ -1339,6 +1342,8 @@ async def progress_stream(request: Request) -> StreamingResponse:
                     yield ": keep-alive\n\n"
                     continue
                 if payload is None:
+                    break
+                if not session_user(token):
                     break
                 yield f"data: {payload}\n\n"
         finally:

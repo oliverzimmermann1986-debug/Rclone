@@ -57,8 +57,10 @@ def test_signed_in_ios_app_can_start_passkey_registration():
     assert "/webauthn/native/register" in browser
     assert "appChallenge" in browser
     assert 'callbackURL.host == "webauthn-registration"' in browser
-    assert "CheckedContinuation<WebAuthnExchange, Error>" in browser
-    assert "CheckedContinuation<Void, Error>" in browser
+    assert "CheckedContinuation<URL, Error>" in browser
+    assert "try await openBrowser(" in browser
+    assert "operation.id == id" in browser
+    assert "operation.continuation.resume(throwing: CancellationError())" in browser
     assert "registerWebAuthnCredential" in model
     assert "Passkey in der App erstellen" in system
     assert 'method: "passkey"' in system
