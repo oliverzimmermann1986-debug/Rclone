@@ -17,6 +17,18 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 DEFAULT_HIDDEN_REMOTE_PATHS = ("pcloud:/Crypto Folder",)
 
 
+def cookie_secure_for_request(request: Request, configured: object = "auto") -> bool:
+    """Use one transport policy for login, session, CSRF and WebAuthn cookies."""
+    mode = str(configured).strip().lower()
+    if configured is None or mode == "auto":
+        # Proxy headers are interpreted by the trusted ASGI server, never here.
+        return request.url.scheme == "https"
+    if mode in {"false", "0", "no", "off", "nein"}:
+        return False
+    # Valid true aliases and invalid manually edited values fail closed.
+    return True
+
+
 def normalize_remote_path(path: str) -> str:
     """Kanonisiert ``remote:pfad`` inklusive ``.``, ``..`` und Doppel-Slashes."""
     text = str(path or "")

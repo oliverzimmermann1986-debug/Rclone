@@ -9,7 +9,7 @@ import logging
 import os
 import subprocess
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any, Mapping
 
 from cryptography.hazmat.primitives import hashes
@@ -51,6 +51,8 @@ from ..jobs.selective_restore import (
 from ..rclone_args import rclone_subprocess_env
 from ..recovery_points import (
     RecoveryPointError,
+    _is_remote,
+    _local_browse,
     browse_point,
     compare_points,
     list_points,
@@ -472,6 +474,7 @@ def _relative_path(value: str) -> str:
     if (
         path.is_absolute()
         or ".." in path.parts
+        or ":" in raw
         or any(char in raw for char in ("\x00", "\r", "\n"))
     ):
         raise HTTPException(400, "Ungültiger relativer Pfad")
@@ -486,7 +489,8 @@ def browse_backup(
     pair = _find_pair(config, identity)
     _source, backup_target = _endpoints(pair)
     relative = _relative_path(path)
-    if ":" in backup_target.split("/", 1)[0]:
+    truncated = False
+    if _is_remote(backup_target):
         target = backup_target.rstrip("/") + (f"/{relative}" if relative else "")
         result = subprocess.run(
             ["rclone", "lsjson", "--max-depth", "1", "--", target],
@@ -504,6 +508,11 @@ def browse_backup(
             raise HTTPException(
                 502, "Sicherungsziel hat eine ungültige Antwort geliefert"
             ) from exc
+        if not isinstance(entries, list):
+            raise HTTPException(
+                502, "Sicherungsziel hat eine ungültige Antwort geliefert"
+            )
+        truncated = len(entries) > 500
         items = [
             {
                 "name": str(item.get("Name") or ""),
@@ -513,33 +522,22 @@ def browse_backup(
                 "size": item.get("Size"),
                 "modified_at": item.get("ModTime"),
             }
-            for item in entries
+            for item in entries[:500]
             if isinstance(item, Mapping)
-            and str(item.get("Name") or "") not in {".", ".."}
+            and str(item.get("Name") or "") not in {"", ".", ".."}
         ]
     else:
-        root = Path(backup_target).expanduser().resolve()
-        target = (root / relative).resolve()
-        if target != root and not target.is_relative_to(root):
-            raise HTTPException(400, "Pfad liegt außerhalb des Sicherungsziels")
-        if not target.is_dir():
-            raise HTTPException(404, "Ordner nicht gefunden")
-        items = []
-        for item in sorted(
-            target.iterdir(),
-            key=lambda entry: (not entry.is_dir(), entry.name.casefold()),
-        )[:500]:
-            stat = item.stat()
-            items.append(
-                {
-                    "name": item.name,
-                    "path": (f"{relative}/" if relative else "") + item.name,
-                    "is_dir": item.is_dir(),
-                    "size": stat.st_size if item.is_file() else None,
-                    "modified_at": stat.st_mtime,
-                }
-            )
-    return {"pair": str(pair.get("name") or ""), "path": relative, "items": items}
+        try:
+            items, truncated = _local_browse(backup_target, relative)
+        except RecoveryPointError as exc:
+            status = 404 if "nicht gefunden" in str(exc).lower() else 400
+            raise HTTPException(status, str(exc)) from exc
+    return {
+        "pair": str(pair.get("name") or ""),
+        "path": relative,
+        "items": items,
+        "truncated": truncated,
+    }
 
 
 @router.get("/points")
@@ -626,7 +624,10 @@ def start_selective_restore(
 
 @router.get("/staging")
 def staging_items() -> dict[str, Any]:
-    return {"items": list_staging(get_db(), get_config().snapshot())}
+    try:
+        return {"items": list_staging(get_db(), get_config().snapshot())}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 class RemoveStagingRequest(ReauthenticationBody):

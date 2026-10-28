@@ -122,6 +122,87 @@ def test_index_asset_urls_track_bytes_with_unchanged_version_and_mtime(
     assert new_asset.headers["cache-control"] == "public, max-age=86400"
 
 
+@pytest.mark.parametrize(
+    "scheme,mode,expected_secure",
+    [
+        ("http", None, False),
+        ("https", None, True),
+        ("http", "auto", False),
+        ("https", "auto", True),
+        ("http", True, True),
+        ("https", False, False),
+        ("https", "true", True),
+        ("http", "true", True),
+        ("https", "false", False),
+        ("http", "invalid", True),
+    ],
+)
+def test_cookie_modes_and_login_round_trip(
+    tmp_path, monkeypatch, scheme, mode, expected_secure
+):
+    from app import main
+    from app.routes import api_webauthn
+
+    config_data = _config("test-cookie-password")
+    if mode is not None:
+        config_data["web"]["secure_cookie"] = mode
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+    monkeypatch.setattr(config_store, "_config", Config(path))
+    monkeypatch.setattr(db, "_db", Database(tmp_path / "cookie.db"))
+    client = TestClient(main.app, base_url=f"{scheme}://testserver")
+    # Forwarded headers from arbitrary clients must not change the scheme.
+    page = client.get("/login", headers={"X-Forwarded-Proto": "https"})
+    assert page.status_code == 200
+    assert ("; secure" in page.headers["set-cookie"].lower()) is expected_secure
+    request = main.Request(
+        {
+            "type": "http",
+            "scheme": scheme,
+            "server": ("testserver", 443),
+            "headers": [],
+            "path": "/",
+        }
+    )
+    assert api_webauthn._cookie_secure(request) is expected_secure
+    if scheme == "http" and expected_secure:
+        return  # Explicit HTTPS-only mode deliberately blocks HTTP login.
+    token = re.search(r'name="login_csrf" value="([^"]+)"', page.text).group(1)
+    response = client.post(
+        "/login",
+        data={
+            "username": "admin",
+            "password": "test-cookie-password",
+            "login_csrf": token,
+        },
+        follow_redirects=False,
+    )
+    assert response.headers["location"] == "/"
+    assert client.get("/api/config").status_code == 200
+    session_cookie = next(
+        c for c in client.cookies.jar if c.name == "rclone_sync_session"
+    )
+    assert session_cookie.secure is expected_secure
+
+
+def test_security_pages_and_error_responses_are_not_cached(tmp_path, monkeypatch):
+    from app import main
+
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(_config("test-password")), encoding="utf-8")
+    monkeypatch.setattr(config_store, "_config", Config(path))
+    client = TestClient(main.app)
+    for path in (
+        "/security",
+        "/webauthn/native?method=passkey&app_challenge=" + "A" * 43,
+        "/webauthn/native/register?method=passkey&token=" + "A" * 32,
+        "/webauthn/native?method=passkey&app_challenge=invalid",
+    ):
+        response = client.get(path, follow_redirects=False)
+        assert response.status_code in {200, 303, 422}
+        assert response.headers["cache-control"] == "no-store"
+
+
 def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     config_data = _config("very-secure-password")

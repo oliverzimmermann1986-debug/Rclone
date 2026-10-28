@@ -227,8 +227,39 @@
       loginActions.hidden = !result.enabled || (!result.passkey && !result.security_key);
       loginActions.querySelector('[data-method="passkey"]').hidden = !result.passkey;
       loginActions.querySelector('[data-method="security_key"]').hidden = !result.security_key;
+      if (result.enabled && result.passkey) startConditionalLogin();
     }).catch(() => { loginActions.hidden = true; });
   }
+
+  let conditionalController = null;
+  async function startConditionalLogin() {
+    if (!window.PublicKeyCredential?.isConditionalMediationAvailable || !navigator.credentials?.get) return;
+    try {
+      if (!(await PublicKeyCredential.isConditionalMediationAvailable())) return;
+      conditionalController = new AbortController();
+      const start = await request("/api/webauthn/authentication/options", {
+        method: "POST",
+        body: JSON.stringify({method: "passkey", native: false, native_challenge: ""})
+      });
+      const credential = await navigator.credentials.get({
+        publicKey: decodeRequestOptions(start.publicKey),
+        mediation: "conditional",
+        signal: conditionalController.signal
+      });
+      if (!credential) return;
+      const result = await request("/api/webauthn/authentication/verify", {
+        method: "POST",
+        body: JSON.stringify({challenge_id: start.challenge_id, credential: credentialJSON(credential)})
+      });
+      if (result?.ok) window.location.assign("/");
+    } catch (error) {
+      if (error?.name !== "AbortError" && error?.name !== "NotAllowedError") showError(error?.message || "Passkey-Anmeldung fehlgeschlagen.");
+    }
+  }
+  document.querySelector('.login')?.addEventListener("submit", () => conditionalController?.abort());
+  document.querySelectorAll('[data-webauthn-action="login"]').forEach(button => {
+    button.addEventListener("click", () => conditionalController?.abort());
+  });
   if (document.body.hasAttribute("data-webauthn-security")) {
     loadCredentials().catch(error => showError(error.message));
   }

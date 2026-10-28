@@ -12,13 +12,13 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional
 
 from .restore_evidence import is_partial_restore_summary, is_verified_partial
 
 _DB_PATH = Path(os.getenv("RCLONE_SYNC_DB", "/opt/rclone-sync/data/rclone-sync.db"))
 _singleton_lock = threading.Lock()
-_SCHEMA_VERSION = 14
+_SCHEMA_VERSION = 16
 _MAX_JOB_SUMMARY_BYTES = 256 * 1024
 _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
@@ -696,6 +696,47 @@ class Database:
             )
             connection.execute("PRAGMA user_version=14")
             version = 14
+        if version < 15:
+            for table in (
+                "webauthn_challenges",
+                "native_auth_exchanges",
+                "native_webauthn_registrations",
+            ):
+                columns = {
+                    row["name"]
+                    for row in connection.execute(f"PRAGMA table_info({table})")
+                }
+                if "account_generation" not in columns:
+                    connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN account_generation "
+                        "TEXT NOT NULL DEFAULT ''"
+                    )
+            connection.execute("PRAGMA user_version=15")
+            version = 15
+        if version < 16:
+            for table, name in (
+                ("webauthn_credentials", "generation"),
+                ("native_auth_exchanges", "credential_id"),
+                ("native_auth_exchanges", "credential_generation"),
+            ):
+                columns = {
+                    row["name"]
+                    for row in connection.execute(f"PRAGMA table_info({table})")
+                }
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                    )
+            rows = connection.execute(
+                "SELECT credential_id FROM webauthn_credentials WHERE generation=''"
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    "UPDATE webauthn_credentials SET generation=? WHERE credential_id=?",
+                    (secrets.token_hex(32), row["credential_id"]),
+                )
+            connection.execute("PRAGMA user_version=16")
+            version = 16
 
     @staticmethod
     def _record_job_definition_schedule_state(
@@ -3223,7 +3264,7 @@ class Database:
         with self.conn() as connection:
             row = connection.execute(
                 "SELECT credential_id, method, public_key, sign_count, transports_json, "
-                "device_type, backed_up, label, created_at, last_used_at "
+                "device_type, backed_up, label, created_at, last_used_at, generation "
                 "FROM webauthn_credentials WHERE credential_id=?",
                 (credential_id,),
             ).fetchone()
@@ -3236,6 +3277,18 @@ class Database:
             item["transports"] = []
         item["backed_up"] = bool(item["backed_up"])
         return item
+
+    def webauthn_credential_matches(self, credential_id: str, generation: str) -> bool:
+        if not credential_id or not generation:
+            return False
+        with self.conn() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM webauthn_credentials WHERE credential_id=? AND generation=?",
+                    (credential_id, generation),
+                ).fetchone()
+                is not None
+            )
 
     def webauthn_credential_add(
         self,
@@ -3255,8 +3308,8 @@ class Database:
         with self.conn() as connection:
             connection.execute(
                 "INSERT INTO webauthn_credentials(credential_id, method, public_key, "
-                "sign_count, transports_json, device_type, backed_up, label, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "sign_count, transports_json, device_type, backed_up, label, created_at, generation) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     credential_id,
                     method,
@@ -3267,24 +3320,44 @@ class Database:
                     1 if backed_up else 0,
                     str(label or "")[:80],
                     time.time(),
+                    secrets.token_hex(32),
                 ),
             )
 
     def webauthn_credential_used(
-        self, credential_id: str, *, sign_count: int, device_type: str, backed_up: bool
-    ) -> None:
+        self,
+        credential_id: str,
+        *,
+        expected_generation: str,
+        expected_sign_count: int,
+        sign_count: int,
+        device_type: str,
+        backed_up: bool,
+    ) -> bool:
+        new_count = int(sign_count)
+        observed_count = int(expected_sign_count)
+        if (
+            not expected_generation
+            or new_count < observed_count
+            or (observed_count > 0 and new_count == observed_count)
+        ):
+            return False
         with self.conn() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 "UPDATE webauthn_credentials SET sign_count=?, device_type=?, "
-                "backed_up=?, last_used_at=? WHERE credential_id=?",
+                "backed_up=?, last_used_at=? WHERE credential_id=? "
+                "AND generation=? AND sign_count=?",
                 (
                     max(0, int(sign_count)),
                     str(device_type or "")[:40],
                     1 if backed_up else 0,
                     time.time(),
                     credential_id,
+                    expected_generation,
+                    observed_count,
                 ),
             )
+            return cursor.rowcount == 1
 
     def webauthn_credential_delete(self, credential_id: str) -> bool:
         with self.conn() as connection:
@@ -3304,6 +3377,7 @@ class Database:
         label: str = "",
         native: bool = False,
         app_binding: str = "",
+        account_generation: str = "",
         ttl_seconds: int = 300,
     ) -> None:
         now = time.time()
@@ -3317,8 +3391,8 @@ class Database:
             )
             connection.execute(
                 "INSERT INTO webauthn_challenges(id, challenge, purpose, method, label, "
-                "native, app_binding, expires_at, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "native, app_binding, account_generation, expires_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     challenge_id,
                     sqlite3.Binary(challenge),
@@ -3327,13 +3401,18 @@ class Database:
                     str(label or "")[:80],
                     1 if native else 0,
                     str(app_binding or "")[:128],
+                    account_generation,
                     now + max(30, min(int(ttl_seconds), 600)),
                     now,
                 ),
             )
 
     def webauthn_challenge_consume(
-        self, challenge_id: str, *, purpose: str
+        self,
+        challenge_id: str,
+        *,
+        purpose: str,
+        account_generation: str = "",
     ) -> Optional[Dict[str, Any]]:
         now = time.time()
         with self.conn() as connection:
@@ -3346,6 +3425,10 @@ class Database:
             )
         if not row or str(row["purpose"]) != purpose or float(row["expires_at"]) < now:
             return None
+        if not account_generation or not secrets.compare_digest(
+            str(row["account_generation"]), account_generation
+        ):
+            return None
         item = dict(row)
         item["native"] = bool(item["native"])
         return item
@@ -3356,10 +3439,16 @@ class Database:
         verifier_hash: str,
         username: str,
         *,
+        account_generation: str = "",
+        credential_id: str = "",
+        credential_generation: str = "",
         ttl_seconds: int = 60,
-    ) -> None:
+    ) -> bool:
+        if not account_generation or not credential_id or not credential_generation:
+            return False
         now = time.time()
         with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "DELETE FROM native_auth_exchanges WHERE expires_at < ?", (now,)
             )
@@ -3368,35 +3457,64 @@ class Database:
                 "SELECT token_hash FROM native_auth_exchanges "
                 "ORDER BY created_at DESC LIMIT -1 OFFSET 1023)"
             )
-            connection.execute(
+            cursor = connection.execute(
                 "INSERT INTO native_auth_exchanges(token_hash, verifier_hash, username, "
-                "expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+                "account_generation, credential_id, credential_generation, expires_at, created_at) "
+                "SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM webauthn_credentials "
+                "WHERE credential_id=? AND generation=? AND generation<>''",
                 (
                     token_hash,
                     verifier_hash,
                     username,
+                    account_generation,
+                    credential_id,
+                    credential_generation,
                     now + max(15, min(int(ttl_seconds), 120)),
                     now,
+                    credential_id,
+                    credential_generation,
                 ),
             )
+            return cursor.rowcount == 1
 
     def native_auth_exchange_consume(
-        self, token_hash: str, verifier_hash: str
+        self,
+        token_hash: str,
+        verifier_hash: str,
+        *,
+        account_generation: str = "",
     ) -> Optional[str]:
         now = time.time()
         with self.conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT username, verifier_hash, expires_at FROM native_auth_exchanges "
+                "SELECT username, verifier_hash, account_generation, credential_id, "
+                "credential_generation, expires_at "
+                "FROM native_auth_exchanges "
                 "WHERE token_hash=?",
                 (token_hash,),
             ).fetchone()
+            credential_valid = bool(
+                row
+                and row["credential_generation"]
+                and connection.execute(
+                    "SELECT 1 FROM webauthn_credentials WHERE credential_id=? AND generation=?",
+                    (row["credential_id"], row["credential_generation"]),
+                ).fetchone()
+            )
             valid = bool(
                 row
+                and credential_valid
                 and float(row["expires_at"]) >= now
                 and secrets.compare_digest(str(row["verifier_hash"]), verifier_hash)
+                and bool(account_generation)
+                and secrets.compare_digest(
+                    str(row["account_generation"]), account_generation
+                )
             )
-            if valid or (row and float(row["expires_at"]) < now):
+            if valid or (
+                row and (float(row["expires_at"]) < now or not credential_valid)
+            ):
                 connection.execute(
                     "DELETE FROM native_auth_exchanges WHERE token_hash=?",
                     (token_hash,),
@@ -3413,6 +3531,7 @@ class Database:
         method: str,
         label: str,
         *,
+        account_generation: str = "",
         ttl_seconds: int = 300,
     ) -> None:
         if method not in {"passkey", "security_key"}:
@@ -3430,27 +3549,32 @@ class Database:
             )
             connection.execute(
                 "INSERT INTO native_webauthn_registrations("
-                "token_hash, verifier_hash, username, method, label, expires_at, created_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "token_hash, verifier_hash, username, method, label, account_generation, "
+                "expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     token_hash,
                     verifier_hash,
                     str(username or "")[:128],
                     method,
                     str(label or "")[:80],
+                    account_generation,
                     now + max(30, min(int(ttl_seconds), 600)),
                     now,
                 ),
             )
 
     def native_webauthn_registration_consume(
-        self, token_hash: str, verifier_hash: str
+        self,
+        token_hash: str,
+        verifier_hash: str,
+        *,
+        account_generation: str = "",
     ) -> Optional[Dict[str, str]]:
         now = time.time()
         with self.conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT username, method, label, verifier_hash, expires_at "
+                "SELECT username, method, label, verifier_hash, account_generation, expires_at "
                 "FROM native_webauthn_registrations WHERE token_hash=?",
                 (token_hash,),
             ).fetchone()
@@ -3458,6 +3582,10 @@ class Database:
                 row
                 and float(row["expires_at"]) >= now
                 and secrets.compare_digest(str(row["verifier_hash"]), verifier_hash)
+                and bool(account_generation)
+                and secrets.compare_digest(
+                    str(row["account_generation"]), account_generation
+                )
             )
             if valid or (row and float(row["expires_at"]) < now):
                 connection.execute(
@@ -3470,6 +3598,7 @@ class Database:
             "username": str(row["username"]),
             "method": str(row["method"]),
             "label": str(row["label"]),
+            "account_generation": str(row["account_generation"]),
         }
 
     def runtime_get(self, key: str, default: Any = None) -> Any:
@@ -3490,7 +3619,7 @@ class Database:
         if not key or len(key) > 128:
             raise ValueError("Ungültiger Runtime-Key")
         payload = json.dumps(value, ensure_ascii=False, default=str)
-        if len(payload.encode("utf-8")) > 64 * 1024:
+        if len(payload.encode("utf-8")) > 512 * 1024:
             raise ValueError("Runtime-Wert ist zu groß")
         now = time.time()
         with self.conn() as connection:
@@ -3499,6 +3628,38 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
                 (key, payload, now),
             )
+
+    def runtime_update(
+        self, key: str, update: Callable[[Any], Any], *, default: Any = None
+    ) -> Any:
+        """Read/modify/write atomically across threads and database connections.
+
+        The callback runs in a short write transaction; it must not perform I/O
+        or open another database connection.
+        """
+        if not key or len(key) > 128:
+            raise ValueError("Ungültiger Runtime-Key")
+        with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT value_json FROM runtime_settings WHERE key=?", (key,)
+            ).fetchone()
+            value = default
+            if row:
+                try:
+                    value = json.loads(row["value_json"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            value = update(value)
+            payload = json.dumps(value, ensure_ascii=False, default=str)
+            if len(payload.encode("utf-8")) > 512 * 1024:
+                raise ValueError("Runtime-Wert ist zu groß")
+            connection.execute(
+                "INSERT INTO runtime_settings(key, value_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
+                (key, payload, time.time()),
+            )
+        return value
 
     def runtime_delete(self, key: str) -> None:
         with self.conn() as connection:

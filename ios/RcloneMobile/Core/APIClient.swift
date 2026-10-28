@@ -1,4 +1,61 @@
 import Foundation
+import Darwin
+
+struct APIServerOrigin: Equatable, Sendable {
+    let scheme: String
+    let host: String
+    let port: Int
+
+    init?(_ url: URL) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = components.host?.lowercased(), !host.isEmpty,
+              host.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil,
+              !host.contains("/"), !host.contains("\\"),
+              components.user == nil, components.password == nil else { return nil }
+        let port = components.port ?? (scheme == "https" ? 443 : 80)
+        guard (1...65535).contains(port) else { return nil }
+        self.scheme = scheme
+        self.host = host
+        self.port = port
+    }
+}
+
+/// The same delegate also runs per task, so injected URLSessions cannot bypass it.
+final class APIOriginPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let origin: APIServerOrigin?
+
+    init(baseURL: URL) {
+        origin = APIServerOrigin(baseURL)
+        super.init()
+    }
+
+    func allows(_ url: URL?) -> Bool {
+        guard let origin, let url, let candidate = APIServerOrigin(url) else { return false }
+        return candidate == origin
+    }
+
+    func validateRequest(_ request: URLRequest) throws {
+        guard allows(request.url) else { throw APIError.invalidServer }
+    }
+
+    func validateResponse(_ response: URLResponse) throws {
+        guard allows(response.url) else { throw APIError.invalidResponse }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        // Reject before URLSession can replay a password body or attach cookies
+        // to another host, port or scheme. Proxy path changes remain supported.
+        completionHandler(allows(response.url) && allows(request.url) ? request : nil)
+    }
+}
 
 enum APIError: LocalizedError, Equatable {
     case invalidServer
@@ -59,7 +116,8 @@ protocol APIClientProtocol: AnyObject {
     func createNativeWebAuthnRegistration(
         method: String,
         label: String,
-        appChallenge: String
+        appChallenge: String,
+        currentPassword: String
     ) async throws -> NativeWebAuthnRegistrationTicket
     func getOverview() async throws -> OverviewResponse
     func getStorage(includeSizes: Bool, forceRefresh: Bool) async throws -> StorageOverview
@@ -135,6 +193,7 @@ protocol APIClientProtocol: AnyObject {
     func logout() async throws -> LogoutResult
     func clearLocalSession()
     func setSessionPersistence(_ enabled: Bool)
+    func deferSessionPersistenceUntilAccepted()
 }
 
 extension APIClientProtocol {
@@ -148,6 +207,7 @@ extension APIClientProtocol {
         throw APIError.serverFeatureUnavailable(feature: "Restore-Prüfplan")
     }
     func setSessionPersistence(_ enabled: Bool) {}
+    func deferSessionPersistenceUntilAccepted() {}
     func exchangeWebAuthnToken(_ token: String, verifier: String) async throws {
         throw APIError.loginSecurityFailed
     }
@@ -159,7 +219,8 @@ extension APIClientProtocol {
     func createNativeWebAuthnRegistration(
         method: String,
         label: String,
-        appChallenge: String
+        appChallenge: String,
+        currentPassword: String
     ) async throws -> NativeWebAuthnRegistrationTicket {
         throw APIError.serverFeatureUnavailable(feature: "Passkey-Erstellung in der App")
     }
@@ -282,10 +343,12 @@ private struct NativeWebAuthnRegistrationRequest: Encodable {
     let method: String
     let label: String
     let appChallenge: String
+    let currentPassword: String
 
     private enum CodingKeys: String, CodingKey {
         case method, label
         case appChallenge = "app_challenge"
+        case currentPassword = "current_password"
     }
 }
 
@@ -298,10 +361,13 @@ final class APIClient: APIClientProtocol {
     private let loginSession: URLSession
     private let lifecycleSession: URLSession
     private let vaultDownloadSession: URLSession
+    private let originPolicy: APIOriginPolicy
     private let cookieStorage: HTTPCookieStorage
     private let decoder: JSONDecoder
     private let sessionPersistence: (any SessionPersisting)?
+    private let persistenceLock = NSRecursiveLock()
     private var remembersSession = true
+    private var persistedSessionValue: String?
 
     init(
         baseURL: URL,
@@ -311,6 +377,8 @@ final class APIClient: APIClientProtocol {
         sessionPersistence: (any SessionPersisting)? = nil
     ) {
         self.baseURL = baseURL
+        let originPolicy = APIOriginPolicy(baseURL: baseURL)
+        self.originPolicy = originPolicy
         // Cookies have no port isolation. Never share a production jar across
         // servers; persist only under the complete normalized server URL.
         let cookieStorage = cookieStorage ?? URLSessionConfiguration.ephemeral.httpCookieStorage!
@@ -327,13 +395,13 @@ final class APIClient: APIClientProtocol {
         configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 90
-        self.session = session ?? URLSession(configuration: configuration)
+        self.session = session ?? URLSession(configuration: configuration, delegate: originPolicy, delegateQueue: nil)
 
         if let loginSession {
             self.loginSession = loginSession
         } else if let session {
-            // Tests and embedders that inject a session keep full control over
-            // transport behavior. Production uses the bounded configuration below.
+            // Injected sessions retain their transport settings; every task
+            // still receives the same origin policy as production sessions.
             self.loginSession = session
         } else {
             let loginConfiguration = URLSessionConfiguration.ephemeral
@@ -346,7 +414,7 @@ final class APIClient: APIClientProtocol {
             loginConfiguration.waitsForConnectivity = false
             loginConfiguration.timeoutIntervalForRequest = 8
             loginConfiguration.timeoutIntervalForResource = 12
-            self.loginSession = URLSession(configuration: loginConfiguration)
+            self.loginSession = URLSession(configuration: loginConfiguration, delegate: originPolicy, delegateQueue: nil)
         }
         if let session {
             self.lifecycleSession = session
@@ -358,7 +426,7 @@ final class APIClient: APIClientProtocol {
             lifecycleConfiguration.waitsForConnectivity = false
             lifecycleConfiguration.timeoutIntervalForRequest = 4
             lifecycleConfiguration.timeoutIntervalForResource = 6
-            self.lifecycleSession = URLSession(configuration: lifecycleConfiguration)
+            self.lifecycleSession = URLSession(configuration: lifecycleConfiguration, delegate: originPolicy, delegateQueue: nil)
         }
         self.decoder = JSONDecoder()
         if let session {
@@ -373,9 +441,17 @@ final class APIClient: APIClientProtocol {
             recoveryConfiguration.timeoutIntervalForRequest = 960
             recoveryConfiguration.timeoutIntervalForResource = 1800
             recoveryConfiguration.waitsForConnectivity = false
-            self.vaultDownloadSession = URLSession(configuration: recoveryConfiguration)
+            self.vaultDownloadSession = URLSession(configuration: recoveryConfiguration, delegate: originPolicy, delegateQueue: nil)
         }
-        self.sessionPersistence?.load(for: baseURL).forEach(cookieStorage.setCookie)
+        if baseURL.scheme?.lowercased() == "https" {
+            let restored = self.sessionPersistence?.load(for: baseURL) ?? []
+            persistedSessionValue = restored.first(where: { $0.name == Self.sessionCookie })?.value
+            restored.forEach(cookieStorage.setCookie)
+        } else {
+            // Remove credentials saved by older versions before any request.
+            self.sessionPersistence?.remove(for: baseURL)
+            clearCookies()
+        }
     }
 
     static func normalizedServerURL(_ rawValue: String) throws -> URL {
@@ -401,7 +477,8 @@ final class APIClient: APIClientProtocol {
         components.percentEncodedPath = normalizedPath.isEmpty ? "" : "/" + normalizedPath
         components.query = nil
         components.fragment = nil
-        guard let url = components.url else { throw APIError.invalidServer }
+        components.scheme = scheme
+        guard let url = components.url, APIServerOrigin(url) != nil else { throw APIError.invalidServer }
         return url
     }
 
@@ -411,21 +488,29 @@ final class APIClient: APIClientProtocol {
 
     private static func isLocalHost(_ host: String) -> Bool {
         let normalized = host.lowercased()
+        if normalized.contains(":") {
+            let literal = normalized.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            let address = String(literal.split(separator: "%", maxSplits: 1)[0])
+            var parsed = in6_addr()
+            guard address.withCString({ inet_pton(AF_INET6, $0, &parsed) }) == 1 else { return false }
+            let bytes = withUnsafeBytes(of: &parsed) { Array($0) }
+            return bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+                || bytes[0] & 0xfe == 0xfc
+                || (bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80)
+        }
         if normalized == "localhost" || normalized.hasSuffix(".local") || !normalized.contains(".") {
             return true
         }
-        let octets = normalized.split(separator: ".", omittingEmptySubsequences: false).compactMap { UInt8($0) }
-        if octets.count == 4 {
+        let parts = normalized.split(separator: ".", omittingEmptySubsequences: false)
+        let octets = parts.compactMap { UInt8($0) }
+        if parts.count == 4 && octets.count == 4 {
             return octets[0] == 10
                 || octets[0] == 127
                 || (octets[0] == 169 && octets[1] == 254)
                 || (octets[0] == 172 && (16...31).contains(octets[1]))
                 || (octets[0] == 192 && octets[1] == 168)
         }
-        return normalized == "::1"
-            || normalized.hasPrefix("fc")
-            || normalized.hasPrefix("fd")
-            || ["fe8", "fe9", "fea", "feb"].contains { normalized.hasPrefix($0) }
+        return false
     }
 
     func login(username: String, password: String) async throws {
@@ -459,7 +544,7 @@ final class APIClient: APIClientProtocol {
             )
         )
 
-        let (data, response) = try await loginSession.data(for: request)
+        let (data, response) = try await performDataRequest(request, using: loginSession)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard let result = try? decoder.decode(NativeLoginResponse.self, from: data) else {
             throw APIError.incompatibleResponse(resource: "Anmeldung")
@@ -497,7 +582,7 @@ final class APIClient: APIClientProtocol {
         request.httpBody = try JSONEncoder().encode(
             NativeWebAuthnExchangeRequest(token: token, verifier: verifier)
         )
-        let (data, response) = try await loginSession.data(for: request)
+        let (data, response) = try await performDataRequest(request, using: loginSession)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard let result = try? decoder.decode(NativeLoginResponse.self, from: data),
               result.status == "success",
@@ -518,7 +603,8 @@ final class APIClient: APIClientProtocol {
     func createNativeWebAuthnRegistration(
         method: String,
         label: String,
-        appChallenge: String
+        appChallenge: String,
+        currentPassword: String
     ) async throws -> NativeWebAuthnRegistrationTicket {
         do {
             return try await post(
@@ -526,7 +612,8 @@ final class APIClient: APIClientProtocol {
                 body: NativeWebAuthnRegistrationRequest(
                     method: method,
                     label: label,
-                    appChallenge: appChallenge
+                    appChallenge: appChallenge,
+                    currentPassword: currentPassword
                 )
             )
         } catch APIError.server(let status, _) where status == 404 || status == 405 {
@@ -538,7 +625,7 @@ final class APIClient: APIClientProtocol {
         var challengeRequest = URLRequest(url: url(for: "/login"))
         challengeRequest.httpMethod = "GET"
         challengeRequest.timeoutInterval = 8
-        let (challengeData, challengeResponse) = try await loginSession.data(for: challengeRequest)
+        let (challengeData, challengeResponse) = try await performDataRequest(challengeRequest, using: loginSession)
         guard let challengeHTTP = challengeResponse as? HTTPURLResponse,
               (200..<300).contains(challengeHTTP.statusCode),
               let loginCSRF = Self.loginCSRFToken(from: challengeData) else {
@@ -559,7 +646,7 @@ final class APIClient: APIClientProtocol {
             ].joined(separator: "&").utf8
         )
 
-        let (_, response) = try await loginSession.data(for: request)
+        let (_, response) = try await performDataRequest(request, using: loginSession)
         guard let http = response as? HTTPURLResponse,
               (200..<400).contains(http.statusCode),
               cookie(named: Self.sessionCookie) != nil else {
@@ -980,14 +1067,14 @@ final class APIClient: APIClientProtocol {
     }
 
     func logout() async throws -> LogoutResult {
-        defer { clearCookies() }
+        defer { clearLocalSession() }
         var request = URLRequest(url: url(for: "/logout"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(origin, forHTTPHeaderField: "Origin")
         request.timeoutInterval = 4
         try addCSRF(to: &request)
-        let (data, response) = try await lifecycleSession.data(for: request)
+        let (data, response) = try await performDataRequest(request, using: lifecycleSession)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         if (200..<400).contains(http.statusCode) {
             return LogoutResult(
@@ -1005,19 +1092,39 @@ final class APIClient: APIClientProtocol {
     }
 
     func clearLocalSession() {
+        persistenceLock.lock()
+        defer { persistenceLock.unlock() }
+        remembersSession = false
         clearCookies()
     }
 
     func setSessionPersistence(_ enabled: Bool) {
+        persistenceLock.lock()
+        defer { persistenceLock.unlock() }
         remembersSession = enabled
-        if enabled { persistSession() } else { sessionPersistence?.remove(for: baseURL) }
+        if enabled { persistSession() } else { removeOwnedPersistentSession() }
+    }
+
+    func deferSessionPersistenceUntilAccepted() {
+        persistenceLock.lock()
+        defer { persistenceLock.unlock() }
+        remembersSession = false
     }
 
     private func persistSession() {
+        persistenceLock.lock()
+        defer { persistenceLock.unlock() }
+        guard baseURL.scheme?.lowercased() == "https" else {
+            sessionPersistence?.remove(for: baseURL)
+            return
+        }
         guard remembersSession else { return }
         let names = Set([Self.sessionCookie, Self.csrfCookie])
         let cookies = (cookieStorage.cookies(for: baseURL) ?? []).filter { names.contains($0.name) }
-        sessionPersistence?.save(cookies, for: baseURL)
+        guard let value = cookies.first(where: { $0.name == Self.sessionCookie })?.value, !value.isEmpty else { return }
+        if sessionPersistence?.save(cookies, for: baseURL, replacingSession: persistedSessionValue) == true {
+            persistedSessionValue = value
+        }
     }
 
     private func get<T: Decodable>(_ path: String, timeout: TimeInterval? = nil) async throws -> T {
@@ -1055,16 +1162,17 @@ final class APIClient: APIClientProtocol {
         var request = URLRequest(url: url(for: path))
         request.httpMethod = "GET"
         if let timeout { request.timeoutInterval = timeout }
-        let (temporary, response) = try await (requestSession ?? session).download(for: request)
+        let (temporary, response) = try await performDownloadRequest(request, using: requestSession ?? session)
+        defer { try? FileManager.default.removeItem(at: temporary) }
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
-        if http.statusCode == 401 { clearCookies(); throw APIError.unauthenticated }
+        if http.statusCode == 401 { clearLocalSession(); throw APIError.unauthenticated }
         if !(200..<300).contains(http.statusCode) {
             let errorData = (try? Data(contentsOf: temporary)) ?? Data()
             try validate(response, data: errorData, allowed: 200..<300)
         }
-        let target = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        try FileManager.default.moveItem(at: temporary, to: target)
-        return target
+        return try Self.writeExport(filename: filename) { target in
+            try FileManager.default.moveItem(at: temporary, to: target)
+        }
     }
 
     private func postDownload<Body: Encodable>(
@@ -1078,12 +1186,47 @@ final class APIClient: APIClientProtocol {
         request.setValue(origin, forHTTPHeaderField: "Origin")
         try addCSRF(to: &request)
         request.httpBody = try JSONEncoder().encode(body)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await performDataRequest(request)
         try validate(response, data: data, allowed: 200..<300)
-        let target = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        try? FileManager.default.removeItem(at: target)
-        try data.write(to: target, options: [.atomic, .completeFileProtection])
-        return target
+        return try Self.writeExport(filename: filename) { target in
+            try data.write(to: target, options: [.atomic, .completeFileProtection])
+        }
+    }
+
+    static func sanitizedExportFilename(_ filename: String) -> String {
+        let forbidden = CharacterSet(charactersIn: "/\\:").union(.controlCharacters)
+        let sanitized = filename.components(separatedBy: forbidden)
+            .joined(separator: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Bound the UTF-8 length, including multi-byte filenames, below NAME_MAX.
+        let bounded = String(decoding: sanitized.utf8.prefix(180), as: UTF8.self)
+        return bounded.isEmpty || bounded == "." || bounded == ".." ? "download" : bounded
+    }
+
+    static func writeExport(
+        filename: String,
+        fileManager files: FileManager = .default,
+        write: (URL) throws -> Void
+    ) throws -> URL {
+        let directory = files.temporaryDirectory.appendingPathComponent(
+            "sicherpfad-export-\(UUID().uuidString)", isDirectory: true
+        )
+        try files.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [
+            .posixPermissions: 0o700,
+            .protectionKey: FileProtectionType.complete
+        ])
+        do {
+            let target = directory.appendingPathComponent(sanitizedExportFilename(filename), isDirectory: false)
+            try write(target)
+            try files.setAttributes([
+                .posixPermissions: 0o600,
+                .protectionKey: FileProtectionType.complete
+            ], ofItemAtPath: target.path)
+            return target
+        } catch {
+            try? files.removeItem(at: directory)
+            throw error
+        }
     }
 
     private func put<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
@@ -1116,9 +1259,9 @@ final class APIClient: APIClientProtocol {
         _ request: URLRequest,
         using requestSession: URLSession? = nil
     ) async throws -> T {
-        let (data, response) = try await (requestSession ?? session).data(for: request)
+        let (data, response) = try await performDataRequest(request, using: requestSession ?? session)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
-        if http.statusCode == 401 { clearCookies(); throw APIError.unauthenticated }
+        if http.statusCode == 401 { clearLocalSession(); throw APIError.unauthenticated }
         if !(200..<300).contains(http.statusCode) {
             if let structured = Self.structuredError(
                 status: http.statusCode,
@@ -1150,7 +1293,7 @@ final class APIClient: APIClientProtocol {
     }
 
     private func sendLogin<T: Decodable>(_ request: URLRequest) async throws -> T {
-        let (data, response) = try await loginSession.data(for: request)
+        let (data, response) = try await performDataRequest(request, using: loginSession)
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
             throw APIError.server(
@@ -1177,11 +1320,20 @@ final class APIClient: APIClientProtocol {
     }
 
     private func clearCookies() {
-        sessionPersistence?.remove(for: baseURL)
+        persistenceLock.lock()
+        defer { persistenceLock.unlock() }
+        removeOwnedPersistentSession()
         let appCookieNames = Set([Self.sessionCookie, Self.csrfCookie])
         cookieStorage.cookies(for: baseURL)?
             .filter { appCookieNames.contains($0.name) }
             .forEach(cookieStorage.deleteCookie)
+    }
+
+    private func removeOwnedPersistentSession() {
+        if let value = persistedSessionValue {
+            sessionPersistence?.remove(for: baseURL, matchingSession: value)
+        }
+        persistedSessionValue = nil
     }
 
     private var origin: String {
@@ -1195,6 +1347,31 @@ final class APIClient: APIClientProtocol {
     private func url(for path: String) -> URL {
         let prefix = baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         return URL(string: prefix + (path.hasPrefix("/") ? path : "/" + path))!
+    }
+
+    private func performDataRequest(
+        _ request: URLRequest,
+        using requestSession: URLSession? = nil
+    ) async throws -> (Data, URLResponse) {
+        try originPolicy.validateRequest(request)
+        let result = try await (requestSession ?? session).data(for: request, delegate: originPolicy)
+        try originPolicy.validateResponse(result.1)
+        return result
+    }
+
+    private func performDownloadRequest(
+        _ request: URLRequest,
+        using requestSession: URLSession
+    ) async throws -> (URL, URLResponse) {
+        try originPolicy.validateRequest(request)
+        let result = try await requestSession.download(for: request, delegate: originPolicy)
+        do {
+            try originPolicy.validateResponse(result.1)
+            return result
+        } catch {
+            try? FileManager.default.removeItem(at: result.0)
+            throw error
+        }
     }
 
     private func validate(_ response: URLResponse, data: Data, allowed: Range<Int>) throws {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import httpx
 import jwt
 
 from .config_store import get_config
+from .config_validation import SESSION_SECRET_PLACEHOLDER, session_secret_strength_error
 from .db import Database, get_db
 from .rclone_args import redact_command_text
 
@@ -40,6 +42,22 @@ _INVALID_TOKEN_REASONS = {
     "DeviceTokenNotForTopic",
     "Unregistered",
 }
+
+
+def push_server_id() -> str | None:
+    """Opaque installation identity; never transmit the underlying session secret."""
+    secret = str(get_config().get("web", "secret_key", default="") or "")
+    if (
+        not secret
+        or secret == SESSION_SECRET_PLACEHOLDER
+        or session_secret_strength_error(secret)
+    ):
+        return None
+    return hmac.new(
+        secret.encode("utf-8"),
+        b"sicherpfad-apns-server-identity-v1",
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def revoke_all_push_devices(*, db: Database | None = None) -> int:
@@ -229,6 +247,8 @@ def _push_context(extra: Mapping[str, Any]) -> dict[str, Any]:
         value = source.get(key, extra.get(key))
         if value not in (None, "", []):
             context[key] = _safe_context(value)
+    # Extra/summary data cannot select the server authorized for a native action.
+    context["server_id"] = push_server_id()
     return context
 
 
@@ -270,7 +290,14 @@ def notification_dedupe_key(
 
 def _payload(row: Mapping[str, Any]) -> bytes:
     context = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
-    event = str(row.get("event") or "")
+    server_id = context.get("server_id")
+    if (
+        not isinstance(server_id, str)
+        or len(server_id) != 64
+        or any(char not in "0123456789abcdef" for char in server_id)
+    ):
+        server_id = None
+    event = str(row.get("event") or "")[:80]
     incident_events = {
         "sync_error",
         "mount_check_failed",
@@ -279,6 +306,7 @@ def _payload(row: Mapping[str, Any]) -> bytes:
         "recovery_error",
     }
     payload = {
+        **dict(context),
         "aps": {
             "alert": {
                 "title": str(row.get("title") or "")[:120],
@@ -291,17 +319,28 @@ def _payload(row: Mapping[str, Any]) -> bytes:
             **({"category": "RCLONE_INCIDENT"} if event in incident_events else {}),
         },
         "event": event,
-        **dict(context),
+        "server_id": server_id,
     }
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
     if len(body) <= 4_096:
         return body
-    payload = {"aps": payload["aps"], "event": payload["event"]}
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+    payload = {
+        "aps": payload["aps"],
+        "event": payload["event"],
+        "server_id": server_id,
+    }
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
+    while len(body) > 4_096:
+        alert = payload["aps"]["alert"]
+        alert["body"] = alert["body"][: len(alert["body"]) // 2]
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    return body
 
 
 def _response_reason(response: Any) -> str:
@@ -595,6 +634,7 @@ __all__ = [
     "DEFAULT_ERROR_EVENTS",
     "dispatch_pending_pushes",
     "notification_dedupe_key",
+    "push_server_id",
     "queue_push_notification",
     "send_push_notifications",
 ]

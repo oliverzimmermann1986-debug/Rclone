@@ -31,6 +31,21 @@ def fixture(tmp_path):
     return config, pair, target
 
 
+def test_full_restore_uses_data_recovery_fallback(tmp_path):
+    config, pair, target = fixture(tmp_path)
+    del config["paths"]["recovery_dir"]
+    (target / "dummy.txt").write_bytes(b"dummy snapshot")
+    snapshot = snapshots.capture_snapshot(config, pair, max_total_mb=1)
+    database = Database(tmp_path / "fallback.db")
+    job_id = database.job_start("recovery")
+    result = snapshots.run_snapshot_restore(
+        database, config, pair, point_id=snapshot["id"], max_total_mb=1, job_id=job_id
+    )
+    expected = tmp_path / "server" / "recovery" / f"recovery-{job_id}" / "data"
+    assert result["verified"] and Path(result["staging_path"]) == expected
+    assert (expected / "dummy.txt").read_bytes() == b"dummy snapshot"
+
+
 def test_full_point_preserves_unchanged_deleted_and_changed_files(tmp_path):
     config, pair, target = fixture(tmp_path)
     (target / "empty").mkdir()

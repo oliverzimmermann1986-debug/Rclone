@@ -262,7 +262,7 @@ def test_dialog_focus_accessibility_and_loading_contracts():
         "jobDialog",
     ):
         assert f'x-ref="{ref_name}"' in html
-    assert html.count('aria-modal="true"') == 6
+    assert html.count('aria-modal="true"') == 7
     assert "focusableElements(dialog)" in javascript
     assert "restoreDialogFocus()" in javascript
     assert "dialogFocusStack.push(document.activeElement)" in javascript

@@ -155,14 +155,15 @@ def test_production_sync_requires_delete_confirmation(monkeypatch):
     assert "--max-delete=100" in cmd
 
 
-def test_production_bisync_requires_delete_confirmation(monkeypatch):
+def test_production_bisync_requires_delete_confirmation(monkeypatch, tmp_path):
     cfg = FakeConfig(
         {
+            "paths": {"data_dir": str(tmp_path / "data")},
             "backup": {
                 "require_delete_confirmation": True,
                 "require_max_delete_for_sync": True,
                 "tuning": {"stats_interval": "10s", "max_delete": 100},
-            }
+            },
         }
     )
     monkeypatch.setattr(rclone_sync, "get_config", lambda: cfg)
@@ -176,6 +177,7 @@ def test_production_bisync_requires_delete_confirmation(monkeypatch):
     with pytest.raises(ValueError, match="allow_delete"):
         rclone_sync._build_pair_command(pair, [], False)
 
+    assert not (tmp_path / "data").exists()
     pair["allow_delete"] = True
     cmd, verb, *_ = rclone_sync._build_pair_command(pair, [], False)
     assert verb == "bisync"

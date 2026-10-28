@@ -29,14 +29,18 @@ web:
   webauthn_rp_id: ""
   webauthn_origin: ""
 
-  # Bei direktem HTTP false. Hinter HTTPS-Reverse-Proxy true setzen.
-  # "auto" funktioniert nur mit korrekt vertrautem Proxy.
-  secure_cookie: false
+  # Automatisch Secure-Cookies bei HTTPS; direktes HTTP bleibt lokal nutzbar.
+  # Hinter TLS-Proxys muss uvicorn nur den tatsächlichen Proxy-Hops vertrauen.
+  # Bei festem HTTPS-Betrieb true setzen; für WebAuthn ist true erforderlich.
+  secure_cookie: auto
   # Nur hinter HTTPS aktivieren, z. B. 31536000. Bei HTTP bleibt HSTS aus.
   hsts_seconds: 0
-  # In Produktion besser konkrete DNS-Namen/IPs statt "*" verwenden.
+  # Konkrete DNS-Namen/IPs eintragen; Wildcard niemals produktiv verwenden.
   allowed_hosts:
-    - "*"
+    - "backup.example.de"
+    - "localhost"
+    - "127.0.0.1"
+    - "::1"
   # Nur diese direkten Proxy-Hops dürfen X-Forwarded-For liefern. Leer bedeutet:
   # Forwarding ignorieren und ausschließlich den Socket-Peer verwenden.
   trusted_proxy_ips: []
@@ -53,7 +57,7 @@ paths:
   logs_dir: /opt/rclone-sync/logs
   temp_dir: /opt/rclone-sync/temp
   # Getrennte, private Ablage für ausdrücklich ausgewählte Wiederherstellungen.
-  recovery_dir: /opt/rclone-sync/recovery
+  recovery_dir: /opt/rclone-sync/data/recovery
 
 backup:
   enabled: true
