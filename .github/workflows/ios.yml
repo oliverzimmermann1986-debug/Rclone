@@ -66,6 +66,13 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/ios-build" \
             -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"
+      - name: Summarize native test results
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/ios-tests.xcresult/Info.plist"; then
+            xcrun xcresulttool get test-results summary \
+              --path "$RUNNER_TEMP/ios-tests.xcresult" || true
+          fi
       - name: Save native test results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

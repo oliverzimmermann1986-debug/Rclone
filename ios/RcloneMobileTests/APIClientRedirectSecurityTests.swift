@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import RcloneMobile
 
@@ -97,17 +98,26 @@ final class APIClientRedirectSecurityTests: XCTestCase {
     }
 
     func testInjectedSessionCannotFollowCrossOriginRedirectsForSensitiveAndDownloadRequests() async throws {
-        let baseURL = try XCTUnwrap(URL(string: "https://redirect.example"))
         for flow in ["general", "login", "registration", "logout", "vault"] {
-            RedirectFixtureURLProtocol.visitedForeignOrigin = false
-            RedirectFixtureURLProtocol.requests = []
+            let foreign = try RedirectLoopbackHTTPServer { _ in
+                RedirectLoopbackHTTPServer.json("{}")
+            }
+            defer { foreign.stop() }
+            let location = foreign.baseURL.appendingPathComponent("collect").absoluteString
+            let origin = try RedirectLoopbackHTTPServer { request in
+                if request.hasPrefix("GET /api/auth/login ") {
+                    return RedirectLoopbackHTTPServer.json(#"{"status":"csrf_ready","login_csrf":"fixture"}"#)
+                }
+                return "HTTP/1.1 307 Temporary Redirect\r\nLocation: \(location)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            }
+            defer { origin.stop() }
+            let baseURL = origin.baseURL
             let jar = URLSessionConfiguration.ephemeral.httpCookieStorage!
             jar.setCookie(try XCTUnwrap(HTTPCookie(properties: [
                 .name: APIClient.csrfCookie, .value: "fixture-csrf",
-                .domain: "redirect.example", .path: "/", .secure: "TRUE"
+                .domain: "127.0.0.1", .path: "/"
             ])))
             let configuration = URLSessionConfiguration.ephemeral
-            configuration.protocolClasses = [RedirectFixtureURLProtocol.self]
             configuration.httpCookieStorage = jar
             // The caller's permissive session delegate must never override the
             // per-task policy installed by APIClient, including download tasks.
@@ -130,7 +140,7 @@ final class APIClientRedirectSecurityTests: XCTestCase {
                 // A blocked redirect can remain a 307 response or cause a
                 // transport error; neither may initiate the foreign request.
             }
-            XCTAssertFalse(RedirectFixtureURLProtocol.visitedForeignOrigin, flow)
+            XCTAssertTrue(foreign.requests.isEmpty, "The different-port origin received \(flow): \(foreign.requests)")
             let endpoint = switch flow {
             case "login": "POST /api/auth/login"
             case "registration": "POST /api/webauthn/native/registration/ticket"
@@ -138,7 +148,7 @@ final class APIClientRedirectSecurityTests: XCTestCase {
             case "vault": "GET /api/vault/library/fixture/download"
             default: "GET /api/diagnostics/overview"
             }
-            XCTAssertTrue(RedirectFixtureURLProtocol.requests.contains(endpoint), flow)
+            XCTAssertTrue(origin.requests.contains(endpoint), flow)
         }
     }
 
@@ -166,35 +176,112 @@ private final class AllowAllRedirects: NSObject, URLSessionTaskDelegate {
     }
 }
 
-private final class RedirectFixtureURLProtocol: URLProtocol {
-    nonisolated(unsafe) static var visitedForeignOrigin = false
-    nonisolated(unsafe) static var requests: [String] = []
+/// Real HTTP redirects exercise CFNetwork, including the per-task delegate on
+/// injected sessions. Synthetic URLProtocol redirects cannot model that lifecycle.
+private final class RedirectLoopbackHTTPServer: @unchecked Sendable {
+    let baseURL: URL
+    private let descriptor: Int32
+    private let response: @Sendable (String) -> String
+    private let lock = NSLock()
+    private var running = true
+    private var received: [String] = []
 
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-    override func startLoading() {
-        Self.requests.append("\(request.httpMethod ?? "GET") \(request.url?.path ?? "")")
-        if request.url?.host != "redirect.example" {
-            Self.visitedForeignOrigin = true
-            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-            return
-        }
-        if request.url?.path == "/api/auth/login", request.httpMethod == "GET" {
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
-                                           headerFields: ["Content-Type": "application/json"])!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Data(#"{"status":"csrf_ready","login_csrf":"fixture"}"#.utf8))
-            client?.urlProtocolDidFinishLoading(self)
-            return
-        }
-        var redirected = request
-        redirected.url = URL(string: "https://foreign.example/collect")!
-        let response = HTTPURLResponse(url: request.url!, statusCode: 307, httpVersion: nil,
-                                       headerFields: ["Location": redirected.url!.absoluteString])!
-        client?.urlProtocol(self, wasRedirectedTo: redirected, redirectResponse: response)
-        client?.urlProtocolDidFinishLoading(self)
+    var requests: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return received
     }
-    override func stopLoading() {}
+
+    init(response: @escaping @Sendable (String) -> String) throws {
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw URLError(.cannotConnectToHost) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.getsockname(fd, $0, &length)
+            }
+        }
+        guard bound == 0, named == 0, Darwin.listen(fd, 8) == 0,
+              Darwin.fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else {
+            Darwin.close(fd)
+            throw URLError(.cannotConnectToHost)
+        }
+        descriptor = fd
+        baseURL = URL(string: "http://127.0.0.1:\(UInt16(bigEndian: address.sin_port))")!
+        self.response = response
+        DispatchQueue(label: "fixture.redirect.\(fd)").async { self.serve() }
+    }
+
+    func stop() {
+        lock.lock()
+        running = false
+        lock.unlock()
+    }
+
+    private func serve() {
+        defer { Darwin.close(descriptor) }
+        while true {
+            lock.lock()
+            let active = running
+            lock.unlock()
+            guard active else { return }
+            var readiness = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            guard Darwin.poll(&readiness, 1, 100) > 0 else { continue }
+            let connection = Darwin.accept(descriptor, nil, nil)
+            guard connection >= 0 else { continue }
+            handle(connection)
+            Darwin.close(connection)
+        }
+    }
+
+    private func handle(_ connection: Int32) {
+        _ = Darwin.fcntl(connection, F_SETFL, 0)
+        var enabled: Int32 = 1
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(connection, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var bytes = Data()
+        while bytes.count < 64 * 1024 {
+            var chunk = [UInt8](repeating: 0, count: 4096)
+            let count = chunk.withUnsafeMutableBytes { Darwin.recv(connection, $0.baseAddress, $0.count, 0) }
+            guard count > 0 else { return }
+            bytes.append(contentsOf: chunk.prefix(count))
+            if let end = bytes.range(of: Data("\r\n\r\n".utf8)) {
+                let headers = String(decoding: bytes[..<end.lowerBound], as: UTF8.self)
+                let line = headers.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("content-length:") }
+                let size = line.flatMap { Int($0.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)[1].trimmingCharacters(in: .whitespaces)) } ?? 0
+                if bytes.count >= end.upperBound + size { break }
+            }
+        }
+        let request = String(decoding: bytes, as: UTF8.self)
+        let first = request.components(separatedBy: "\r\n")[0].split(separator: " ").prefix(2).joined(separator: " ")
+        lock.lock()
+        received.append(first)
+        lock.unlock()
+        let reply = Data(response(request).utf8)
+        reply.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                let count = Darwin.send(connection, raw.baseAddress!.advanced(by: offset), raw.count - offset, 0)
+                guard count > 0 else { return }
+                offset += count
+            }
+        }
+    }
+
+    static func json(_ body: String) -> String {
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+    }
 }
 
 private final class ForeignFinalResponseURLProtocol: URLProtocol {
