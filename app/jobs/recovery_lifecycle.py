@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import subprocess
 import hashlib
-import tempfile
+import os
+import signal
+import threading
 import time
 from pathlib import Path
 
@@ -66,49 +68,99 @@ def run_command(
     max_output_bytes: int = 32 * 1024 * 1024,
     cancellable: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a registered child with bounded output and cancellable waits."""
+    """Drain both pipes into one shared byte budget and keep child ownership."""
+    if max_output_bytes < 1:
+        raise ValueError("Recovery-Ausgabelimit muss positiv sein")
     if cancellable:
         check_cancelled()
-    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(
-            command,
-            stdout=output,
-            stderr=errors,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-            env=rclone_subprocess_env(),
-        )
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+        env=rclone_subprocess_env(),
+    )
+    buffers = [bytearray(), bytearray()]
+    budget_lock = threading.Lock()
+    overflow = threading.Event()
+    read_errors = []
+    readers = []
+    pipes = [process.stdout, process.stderr]
+
+    def drain(index, pipe):
         try:
+            # read1 returns available pipe bytes without waiting to fill a chunk.
+            read = getattr(pipe, "read1", pipe.read)
+            while block := read(64 * 1024):
+                with budget_lock:
+                    if sum(map(len, buffers)) + len(block) > max_output_bytes:
+                        overflow.set()
+                        return
+                    buffers[index].extend(block)
+        except Exception as exc:
+            with budget_lock:
+                read_errors.append(exc)
+        finally:
+            pipe.close()
+
+    try:
+        if cancellable:
+            rclone_sync._register_proc(process, pair_name="recovery")
+        deadline = time.monotonic() + timeout
+        for index, pipe in enumerate(pipes):
+            reader = threading.Thread(target=drain, args=(index, pipe), daemon=True)
+            reader.start()
+            readers.append(reader)
+        while True:
             if cancellable:
-                rclone_sync._register_proc(process, pair_name="recovery")
-            deadline = time.monotonic() + timeout
-            while True:
-                if cancellable:
-                    check_cancelled()
-                if output.tell() > max_output_bytes or errors.tell() > max_output_bytes:
+                check_cancelled()
+            if overflow.is_set():
+                raise RuntimeError("Recovery-Ausgabe überschreitet das Manifestlimit")
+            if read_errors:
+                raise RuntimeError(
+                    "Recovery-Ausgabe konnte nicht gelesen werden"
+                ) from read_errors[0]
+            code = process.poll()
+            if code is not None and not any(reader.is_alive() for reader in readers):
+                # Both pipes reached EOF. Late output cannot bypass this check.
+                if overflow.is_set():
                     raise RuntimeError(
                         "Recovery-Ausgabe überschreitet das Manifestlimit"
                     )
-                code = process.poll()
-                if code is not None:
-                    break
-                if time.monotonic() >= deadline:
-                    raise subprocess.TimeoutExpired(command, timeout)
-                time.sleep(0.05)
-            if cancellable:
-                check_cancelled()
-            output.seek(0)
-            errors.seek(0)
-            return subprocess.CompletedProcess(
-                command,
-                code,
-                output.read(max_output_bytes).decode("utf-8", errors="replace"),
-                errors.read(max_output_bytes).decode("utf-8", errors="replace"),
-            )
-        finally:
+                if read_errors:
+                    raise RuntimeError(
+                        "Recovery-Ausgabe konnte nicht gelesen werden"
+                    ) from read_errors[0]
+                break
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            time.sleep(0.01)
+        if cancellable:
+            check_cancelled()
+        return subprocess.CompletedProcess(
+            command,
+            code,
+            buffers[0].decode("utf-8", errors="replace"),
+            buffers[1].decode("utf-8", errors="replace"),
+        )
+    finally:
+        try:
             if process.poll() is None:
                 rclone_sync._terminate_proc(process, graceful_sec=2)
+            elif os.name == "posix" and any(reader.is_alive() for reader in readers):
+                # A descendant can retain a pipe after its session leader exits.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        finally:
+            for pipe in pipes[len(readers) :]:
+                pipe.close()
+            join_deadline = time.monotonic() + 2
+            for reader in readers:
+                reader.join(max(0, join_deadline - time.monotonic()))
             if cancellable:
                 rclone_sync._unregister_proc(process)
 
