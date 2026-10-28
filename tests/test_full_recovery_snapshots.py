@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import io
 
 import pytest
 
@@ -156,7 +157,8 @@ def test_remote_snapshot_checks_all_bytes_and_labels_unknown_live_hashes(
     class Process:
         def __init__(self, command, **kwargs):
             assert command[:3] == ["rclone", "lsjson", "--recursive"]
-            kwargs["stdout"].write(json.dumps(listing).encode())
+            self.stdout = io.BytesIO(json.dumps(listing).encode())
+            self.stderr = io.BytesIO()
             self.returncode = 0
             self.pid = 99999999
 
@@ -205,7 +207,8 @@ def test_oversize_remote_inventory_is_killed_before_publication(tmp_path, monkey
 
     class Process:
         def __init__(self, command, **kwargs):
-            kwargs["stdout"].write(b"x" * 1024)
+            self.stdout = io.BytesIO(b"x" * 1024)
+            self.stderr = io.BytesIO()
             self.pid = 99999999
             self.returncode = None
             self.killed = False

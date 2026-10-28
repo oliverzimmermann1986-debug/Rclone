@@ -344,11 +344,11 @@ class SnapshotRequest(BaseModel):
 
 
 def _start_recovery_job() -> tuple[Any, int, HeldFileLock]:
-    database = get_db()
     lease = try_file_lock("backup")
     if lease is None:
         raise HTTPException(409, "Eine Sicherung oder Recovery hält den Prozess-Lock")
     try:
+        database = get_db()
         if database.job_terminal_recover_pending().get("failed"):
             raise HTTPException(
                 503, "Ein vorheriger Jobabschluss ist noch nicht gespeichert"
@@ -375,7 +375,10 @@ def _start_recovery_job() -> tuple[Any, int, HeldFileLock]:
 def _run_recovery_job(database, job_id, lease, operation, *args, **kwargs):
     try:
         check_cancelled()
-        return operation(database, *args, job_id=job_id, **kwargs)
+        result = operation(database, *args, job_id=job_id, **kwargs)
+        if (database.job_get(job_id) or {}).get("status") == "running":
+            raise RuntimeError("Recovery-Worker hat den Job nicht abgeschlossen")
+        return result
     except RecoveryPersistenceError:
         # A durable intent may still await replay. Do not replace the external
         # result with a synthetic error or announce success before confirmation.
@@ -383,7 +386,8 @@ def _run_recovery_job(database, job_id, lease, operation, *args, **kwargs):
     except Exception as exc:
         status = "cancelled" if isinstance(exc, RecoveryCancelled) else "error"
         try:
-            finish_job(database, job_id, status, {"ok": False, "error": str(exc)})
+            if (database.job_get(job_id) or {}).get("status") == "running":
+                finish_job(database, job_id, status, {"ok": False, "error": str(exc)})
         except RecoveryPersistenceError:
             logger.exception("Recovery #%s konnte nicht abgeschlossen werden", job_id)
     finally:
