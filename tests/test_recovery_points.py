@@ -25,7 +25,14 @@ def _fixture(tmp_path: Path) -> tuple[dict, dict, Path]:
         "remote": "cloud:/Dokumente",
         "backup_dir": str(versions / "{date}"),
     }
-    return {"backup": {"timezone": "Europe/Berlin"}}, pair, versions
+    return (
+        {
+            "backup": {"timezone": "Europe/Berlin"},
+            "paths": {"data_dir": str(tmp_path / "data")},
+        },
+        pair,
+        versions,
+    )
 
 
 def test_lists_and_resolves_version_points(tmp_path: Path):

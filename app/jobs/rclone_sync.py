@@ -24,6 +24,7 @@ from ..config_store import get_config
 from ..db import get_db
 from .. import protection
 from ..rclone_args import (
+    normalize_filter_aliases,
     redact_command_text,
     rclone_subprocess_env,
     validate_parsed_rclone_args,
@@ -578,6 +579,7 @@ def _protected_filter_args(args: list[str]) -> list[str]:
     from bypassing the Vault exclusions. Filter resets and files-from overrides
     cannot coexist with these mandatory protections, including expert mode.
     """
+    args = normalize_filter_aliases(args)
     groups: dict[str, list[str]] = {
         key: []
         for key in (
@@ -627,7 +629,18 @@ def _protected_filter_args(args: list[str]) -> list[str]:
             groups[group].append(value.strip())
         index += 1
     rules = [f"- /{name}/**" for name in RESERVED_SUBTREES]
-    for group, values in groups.items():
+    # Ausschlüsse müssen vor Einschlüssen stehen: rclone verwendet die erste
+    # passende Regel. Sonst kann ein Include geschützte Inhalte wieder öffnen.
+    ordered_groups = (
+        "--exclude",
+        "--exclude-from",
+        "--filter",
+        "--filter-from",
+        "--include",
+        "--include-from",
+    )
+    for group in ordered_groups:
+        values = groups[group]
         for value in values:
             if group.startswith("--filter"):
                 if value == "!":
@@ -798,6 +811,10 @@ def _run_rclone_command(
                 )
         if is_cancelled(normalized_scope):
             return 130
+        # Capture the existing prefix before the child can emit output. Reading
+        # the offset after registration would discard early progress messages.
+        handle.flush()
+        log_offset = os.fstat(handle.fileno()).st_size
         proc = subprocess.Popen(
             cmd,
             stdout=handle,
@@ -826,10 +843,6 @@ def _run_rclone_command(
         inactivity_timeout = max(0.01, float(timeout_sec))
         now = time.monotonic()
         deadline = now + inactivity_timeout
-        try:
-            log_offset = log_file.stat().st_size
-        except OSError:
-            log_offset = 0
         progress_tracker = _LogProgressTracker()
         hard_deadline = (
             now + float(max_runtime_sec)
@@ -1056,23 +1069,8 @@ def _build_pair_command(
     else:
         raise ValueError(f"Unbekannte direction: {direction}")
 
-    allow_unsafe = bool(backup.get("allow_unsafe_rclone_args", False))
-    effective_args = validate_parsed_rclone_args(
-        list(base_args), allow_unsafe=allow_unsafe
-    )
-    effective_args += _global_verb_args(cfg, verb)
-    effective_args += _structured_rclone_args(backup.get("tuning") or {}, verb=verb)
-    effective_args += _structured_rclone_args(pair, verb=verb)
-    effective_args += _filter_args(cfg, pair, verb)
-    effective_args += _parse_rclone_args(
-        pair.get("rclone_args"), allow_unsafe=allow_unsafe
-    )
-    effective_args += _backup_dir_args(cfg, pair, verb, src, dst)
-    effective_args = _dedupe_single_value_rclone_args(effective_args)
-    effective_args = _protected_filter_args(effective_args)
-    if verb == "bisync":
-        effective_args = _bisync_filter_snapshot(effective_args, cfg)
-
+    # Reject destructive commands before reading filters or creating bisync's
+    # on-disk filter snapshot. A denied run must have no preparation side effects.
     if verb in {"sync", "bisync"} and not dry_run:
         if backup.get("require_delete_confirmation", True) and not pair.get(
             "allow_delete", False
@@ -1092,6 +1090,23 @@ def _build_pair_command(
             raise ValueError(
                 f"Produktiver {verb} ist gesperrt: begrenztes max_delete fehlt"
             )
+
+    allow_unsafe = bool(backup.get("allow_unsafe_rclone_args", False))
+    effective_args = validate_parsed_rclone_args(
+        list(base_args), allow_unsafe=allow_unsafe
+    )
+    effective_args += _global_verb_args(cfg, verb)
+    effective_args += _structured_rclone_args(backup.get("tuning") or {}, verb=verb)
+    effective_args += _structured_rclone_args(pair, verb=verb)
+    effective_args += _filter_args(cfg, pair, verb)
+    effective_args += _parse_rclone_args(
+        pair.get("rclone_args"), allow_unsafe=allow_unsafe
+    )
+    effective_args += _backup_dir_args(cfg, pair, verb, src, dst)
+    effective_args = _dedupe_single_value_rclone_args(effective_args)
+    effective_args = _protected_filter_args(effective_args)
+    if verb == "bisync":
+        effective_args = _bisync_filter_snapshot(effective_args, cfg)
 
     stats_interval = str((backup.get("tuning") or {}).get("stats_interval") or "10s")
     cmd = [
@@ -2190,6 +2205,15 @@ def run_quick(
         "allow_delete": bool(allow_delete),
         "max_delete": max_delete,
     }
+    backup = cfg.get("backup", default={}) or {}
+
+    def current_quarantine() -> dict[str, Any] | None:
+        if dry_run or not protection.is_destructive(pair):
+            return None
+        return protection.active_quarantine(
+            get_db(), pair=pair, configured_pairs=backup.get("pairs") or ()
+        )
+
     roots = [
         Path(str(value)).expanduser().resolve()
         for value in (
@@ -2219,6 +2243,17 @@ def run_quick(
             "ok": False,
             "error": str(exc),
             "skipped": True,
+            "remote": remote_path,
+            "local": local_path,
+        }
+    quarantine = current_quarantine()
+    if quarantine is not None:
+        return {
+            "ok": False,
+            "skipped": True,
+            "quarantined": True,
+            "anomaly": quarantine,
+            "error": "Datenweg ist quarantänisiert und muss ausdrücklich freigegeben werden.",
             "remote": remote_path,
             "local": local_path,
         }
@@ -2253,7 +2288,6 @@ def run_quick(
     log_dir.mkdir(parents=True, exist_ok=True)
     safe = _safe_name(f"{remote_path}-{local_path}", "quick")
     log_file = log_dir / f"quick-{safe}-{datetime.now():%Y%m%d-%H%M%S-%f}.log"
-    backup = cfg.get("backup", default={}) or {}
     allow_unsafe = bool(backup.get("allow_unsafe_rclone_args", False))
     base_args = _parse_rclone_args(
         backup.get("rclone_args", []), allow_unsafe=allow_unsafe
@@ -2268,6 +2302,14 @@ def run_quick(
         "dry_run": dry_run,
         "log_file": str(log_file),
     }
+
+    def pre_spawn_check() -> tuple[bool, str]:
+        quarantine = current_quarantine()
+        if quarantine is not None:
+            summary.update(quarantined=True, anomaly=quarantine)
+            return False, "Datenweg wurde vor dem Prozessstart quarantänisiert"
+        return _recheck_local_endpoint_guards(pair, endpoint_guards)
+
     try:
         cmd, verb, direction, mode = _build_pair_command(
             pair,
@@ -2303,9 +2345,7 @@ def run_quick(
                 max(1, int(max_runtime_hours * 3600)) if max_runtime_hours > 0 else None
             ),
             pair_name="quick",
-            pre_spawn_check=lambda: _recheck_local_endpoint_guards(
-                pair, endpoint_guards
-            ),
+            pre_spawn_check=pre_spawn_check,
         )
         tail = read_log_tail(log_file)
         needs_resync = verb == "bisync" and rc != 0 and bool(_RESYNC_RE.search(tail))

@@ -10,9 +10,44 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from app import config_store, db, webauthn_service
+from app import auth, config_store, db, webauthn_service
 from app.config_store import Config
 from app.db import Database
+
+
+@pytest.fixture(autouse=True)
+def isolated_account_generation(tmp_path: Path, monkeypatch):
+    path = tmp_path / "account-generation.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "web": {
+                    "username": "admin",
+                    "secret_key": "isolated-webauthn-account-secret-1234567890",
+                    "session_version": 1,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_store, "_config", Config(path))
+
+
+def _exchange_credential(database: Database) -> dict:
+    credential_id = (
+        base64.urlsafe_b64encode(b"exchange-fixture-key").rstrip(b"=").decode()
+    )
+    database.webauthn_credential_add(
+        credential_id=credential_id,
+        method="security_key",
+        public_key=b"fixture-public-key",
+        sign_count=0,
+        transports=[],
+        device_type="single_device",
+        backed_up=False,
+        label="Exchange fixture",
+    )
+    return database.webauthn_credential_get(credential_id)
 
 
 def test_webauthn_schema_and_one_time_challenges(tmp_path: Path):
@@ -23,17 +58,22 @@ def test_webauthn_schema_and_one_time_challenges(tmp_path: Path):
         purpose="authenticate",
         method="passkey",
         native=True,
+        account_generation=auth.account_generation(),
     )
 
     consumed = database.webauthn_challenge_consume(
-        "challenge-12345678901234567890", purpose="authenticate"
+        "challenge-12345678901234567890",
+        purpose="authenticate",
+        account_generation=auth.account_generation(),
     )
     assert consumed is not None
     assert bytes(consumed["challenge"]) == b"random-challenge"
     assert consumed["native"] is True
     assert (
         database.webauthn_challenge_consume(
-            "challenge-12345678901234567890", purpose="authenticate"
+            "challenge-12345678901234567890",
+            purpose="authenticate",
+            account_generation=auth.account_generation(),
         )
         is None
     )
@@ -49,11 +89,35 @@ def test_native_exchange_is_hashed_and_single_use(tmp_path: Path):
         .decode()
     )
     token_hash = hashlib.sha256(token.encode()).hexdigest()
-    database.native_auth_exchange_create(token_hash, verifier_hash, "admin")
+    generation = auth.account_generation()
+    credential = _exchange_credential(database)
+    database.native_auth_exchange_create(
+        token_hash,
+        verifier_hash,
+        "admin",
+        account_generation=generation,
+        credential_id=credential["credential_id"],
+        credential_generation=credential["generation"],
+    )
 
-    assert database.native_auth_exchange_consume(token_hash, "wrong") is None
-    assert database.native_auth_exchange_consume(token_hash, verifier_hash) == "admin"
-    assert database.native_auth_exchange_consume(token_hash, verifier_hash) is None
+    assert (
+        database.native_auth_exchange_consume(
+            token_hash, "wrong", account_generation=generation
+        )
+        is None
+    )
+    assert (
+        database.native_auth_exchange_consume(
+            token_hash, verifier_hash, account_generation=generation
+        )
+        == "admin"
+    )
+    assert (
+        database.native_auth_exchange_consume(
+            token_hash, verifier_hash, account_generation=generation
+        )
+        is None
+    )
 
 
 def test_native_registration_ticket_is_bound_and_single_use(tmp_path: Path):
@@ -66,22 +130,35 @@ def test_native_registration_ticket_is_bound_and_single_use(tmp_path: Path):
         .decode()
     )
     token_hash = hashlib.sha256(token.encode()).hexdigest()
+    generation = auth.account_generation()
     database.native_webauthn_registration_create(
         token_hash,
         verifier_hash,
         "admin",
         "passkey",
         "Sicherpfad iPhone",
+        account_generation=generation,
     )
 
-    assert database.native_webauthn_registration_consume(token_hash, "wrong") is None
-    assert database.native_webauthn_registration_consume(token_hash, verifier_hash) == {
+    assert (
+        database.native_webauthn_registration_consume(
+            token_hash, "wrong", account_generation=generation
+        )
+        is None
+    )
+    assert database.native_webauthn_registration_consume(
+        token_hash, verifier_hash, account_generation=generation
+    ) == {
         "username": "admin",
         "method": "passkey",
         "label": "Sicherpfad iPhone",
+        "account_generation": generation,
     }
     assert (
-        database.native_webauthn_registration_consume(token_hash, verifier_hash) is None
+        database.native_webauthn_registration_consume(
+            token_hash, verifier_hash, account_generation=generation
+        )
+        is None
     )
 
 
@@ -132,6 +209,7 @@ def test_authentication_is_bound_to_selected_method(tmp_path: Path, monkeypatch)
         challenge=b"challenge",
         purpose="authenticate",
         method="passkey",
+        account_generation=auth.account_generation(),
     )
     monkeypatch.setattr(
         webauthn_service,
@@ -157,6 +235,7 @@ def test_verified_registration_persists_only_public_credential_data(
         purpose="register",
         method="passkey",
         label="Mein iPhone",
+        account_generation=auth.account_generation(),
     )
     monkeypatch.setattr(
         webauthn_service,
@@ -233,8 +312,14 @@ def test_native_exchange_endpoint_sets_session_once_and_security_page_redirects(
         .rstrip(b"=")
         .decode()
     )
+    credential = _exchange_credential(database)
     database.native_auth_exchange_create(
-        hashlib.sha256(token.encode()).hexdigest(), verifier_hash, "admin"
+        hashlib.sha256(token.encode()).hexdigest(),
+        verifier_hash,
+        "admin",
+        account_generation=auth.account_generation(),
+        credential_id=credential["credential_id"],
+        credential_generation=credential["generation"],
     )
     with TestClient(main.app, base_url="https://backup.example.de") as client:
         redirect = client.get("/security", follow_redirects=False)
@@ -311,10 +396,14 @@ def test_authenticated_app_can_register_passkey_through_one_time_browser_ticket(
         .rstrip(b"=")
         .decode()
     )
+    credential = _exchange_credential(database)
     database.native_auth_exchange_create(
         hashlib.sha256(login_token.encode()).hexdigest(),
         login_verifier_hash,
         "admin",
+        account_generation=auth.account_generation(),
+        credential_id=credential["credential_id"],
+        credential_generation=credential["generation"],
     )
     registration_verifier = "R" * 43
     registration_challenge = (
@@ -341,10 +430,29 @@ def test_authenticated_app_can_register_passkey_through_one_time_browser_ticket(
                 "method": "passkey",
                 "label": "Sicherpfad iPhone",
                 "app_challenge": registration_challenge,
+                "current_password": "very-secure-password",
             },
             headers={"Origin": "https://backup.example.de"},
         )
         assert missing_csrf.status_code == 403
+
+        for password, expected_status in ((None, 422), ("wrong-password", 403)):
+            candidate = {
+                "method": "passkey",
+                "label": "Sicherpfad iPhone",
+                "app_challenge": registration_challenge,
+            }
+            if password is not None:
+                candidate["current_password"] = password
+            rejected = client.post(
+                "/api/webauthn/native/registration/ticket",
+                json=candidate,
+                headers={
+                    "Origin": "https://backup.example.de",
+                    "X-CSRF-Token": csrf,
+                },
+            )
+            assert rejected.status_code == expected_status
 
         issued = client.post(
             "/api/webauthn/native/registration/ticket",
@@ -352,6 +460,7 @@ def test_authenticated_app_can_register_passkey_through_one_time_browser_ticket(
                 "method": "passkey",
                 "label": "Sicherpfad iPhone",
                 "app_challenge": registration_challenge,
+                "current_password": "very-secure-password",
             },
             headers={
                 "Origin": "https://backup.example.de",

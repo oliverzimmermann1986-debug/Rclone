@@ -16,6 +16,7 @@ from typing import Any
 from croniter import croniter
 
 from .job_definitions import legacy_job_definitions, stable_job_id
+from .pbs_identity import canonical_pbs_backup_id
 from .rclone_args import UnsafeRcloneArgument, validate_rclone_args
 from .security import (
     DEFAULT_HIDDEN_REMOTE_PATHS,
@@ -229,10 +230,27 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     if secret_error:
         errors.append(secret_error)
     web["secret_key"] = secret_key
-    secure_cookie = web.get("secure_cookie", False)
+    secure_cookie = web.get("secure_cookie", "auto")
+    if secure_cookie is None:
+        secure_cookie = "auto"
     if isinstance(secure_cookie, str) and secure_cookie.strip().lower() == "auto":
         web["secure_cookie"] = "auto"
     else:
+        if not isinstance(secure_cookie, bool) and str(
+            secure_cookie
+        ).strip().lower() not in {
+            "1",
+            "0",
+            "true",
+            "false",
+            "yes",
+            "no",
+            "on",
+            "off",
+            "ja",
+            "nein",
+        }:
+            errors.append("web.secure_cookie muss true, false oder auto sein")
         web["secure_cookie"] = _boolean(secure_cookie, default=False)
     web["session_version"] = int(
         _number(
@@ -289,17 +307,21 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         )
     )
     try:
-        allowed_hosts = _normalize_string_list(web.get("allowed_hosts", ["*"]))
+        allowed_hosts = _normalize_string_list(
+            web.get("allowed_hosts", ["localhost", "127.0.0.1", "::1"])
+        )
     except ValueError:
         errors.append("web.allowed_hosts muss Text oder Liste sein")
-        allowed_hosts = ["*"]
+        allowed_hosts = ["localhost", "127.0.0.1", "::1"]
     clean_hosts: list[str] = []
     for host in allowed_hosts:
         if len(host) > 255 or any(ch in host for ch in ("/", "\\", "\x00", "\r", "\n")):
             errors.append(f"Ungültiger Host in web.allowed_hosts: {host}")
         else:
             clean_hosts.append(host.casefold())
-    web["allowed_hosts"] = list(dict.fromkeys(clean_hosts or ["*"]))
+    web["allowed_hosts"] = list(
+        dict.fromkeys(clean_hosts or ["localhost", "127.0.0.1", "::1"])
+    )
     webauthn_rp_id = str(web.get("webauthn_rp_id") or "").strip().casefold()
     webauthn_origin = str(web.get("webauthn_origin") or "").strip().rstrip("/")
     if bool(webauthn_rp_id) != bool(webauthn_origin):
@@ -405,10 +427,15 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         ("data_dir", "/opt/rclone-sync/data"),
         ("logs_dir", "/opt/rclone-sync/logs"),
         ("temp_dir", "/opt/rclone-sync/temp"),
-        ("recovery_dir", "/opt/rclone-sync/recovery"),
+        ("recovery_dir", "/opt/rclone-sync/data/recovery"),
         ("device_vault_dir", "/opt/rclone-sync/data/device-vault"),
     ):
         try:
+            if key == "recovery_dir":
+                default = (
+                    Path(str(paths.get("data_dir") or "/opt/rclone-sync/data"))
+                    / "recovery"
+                ).as_posix()
             value = _clean_path(paths.get(key, default)) or default
             if not _is_absolute_local(value):
                 errors.append(f"paths.{key} muss absolut sein")
@@ -1591,7 +1618,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
                     "erforderlich"
                 )
                 continue
-            folded_backup_id = backup_id.casefold()
+            folded_backup_id = canonical_pbs_backup_id(backup_id).casefold()
             if folded_backup_id in seen_backup_ids:
                 errors.append(
                     f"{label}.backup_id ist bei mehreren PBS-Targets nicht eindeutig: "

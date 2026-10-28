@@ -1,5 +1,43 @@
 import SwiftUI
 
+enum AppNavigationDestination: Equatable {
+    case recovery, vault
+
+    init?(url: URL) {
+        guard ["rclonesync", "sicherpfad"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+        switch url.host?.lowercased() {
+        case "recovery": self = .recovery
+        case "vault": self = .vault
+        default: return nil
+        }
+    }
+
+    var notificationName: Notification.Name {
+        switch self {
+        case .recovery: .pushRecoveryNavigationRequested
+        case .vault: .deviceVaultNavigationRequested
+        }
+    }
+}
+
+struct PendingAppNavigation: Equatable {
+    private(set) var destination: AppNavigationDestination?
+    private(set) var serverID: String?
+
+    mutating func request(_ destination: AppNavigationDestination, serverID: String? = nil) {
+        self.destination = destination
+        self.serverID = serverID
+    }
+
+    mutating func consume(isSignedIn: Bool, currentServerID: String? = nil) -> Notification.Name? {
+        guard isSignedIn, let destination else { return nil }
+        self.destination = nil
+        defer { self.serverID = nil }
+        if let serverID, serverID != currentServerID { return nil }
+        return destination.notificationName
+    }
+}
+
 @main
 struct RcloneMobileApp: App {
     @Environment(\.scenePhase) private var scenePhase
@@ -21,7 +59,7 @@ private struct AppRootView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("pushPrimerDecision") private var pushPrimerDecision = "notAsked"
     @State private var showPushPrimer = false
-    @State private var pendingRecoveryNavigation = false
+    @State private var pendingNavigation = PendingAppNavigation()
     let pushCoordinator: PushNotificationCoordinator
 
     var body: some View {
@@ -32,21 +70,28 @@ private struct AppRootView: View {
             case .signedOut:
                 LoginView()
             case .signedIn:
-                if StorePreviewMode.opensDeviceVault {
-                    NavigationStack { DeviceVaultView() }
-                } else {
-                    RootTabView()
+                Group {
+                    if StorePreviewMode.opensDeviceVault {
+                        NavigationStack { DeviceVaultView() }
+                    } else {
+                        RootTabView()
+                    }
+                }
+                .task(id: pendingNavigation) {
+                    // Wait until the signed-in navigation observers are mounted.
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                    if let name = pendingNavigation.consume(
+                        isSignedIn: model.phase == .signedIn,
+                        currentServerID: model.currentPushServerID
+                    ) {
+                        NotificationCenter.default.post(name: name, object: nil)
+                    }
                 }
             }
         }
         .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: model.phase)
         .task(id: model.phase) {
-            if let jobID = pushCoordinator.consumePendingNavigationJobID() {
-                model.requestRunNavigation(id: jobID)
-            }
-            if pushCoordinator.consumePendingRecoveryNavigation() {
-                pendingRecoveryNavigation = true
-            }
             guard model.phase == .signedIn else {
                 if model.phase == .signedOut {
                     pushCoordinator.unregisterLocally()
@@ -59,50 +104,39 @@ private struct AppRootView: View {
             } else if pushPrimerDecision == "notAsked" {
                 showPushPrimer = true
             }
+            consumePushNavigation()
         }
         .onReceive(NotificationCenter.default.publisher(for: .pushDeviceTokenReady)) { notification in
             guard let token = notification.userInfo?["token"] as? String,
                   let environment = notification.userInfo?["environment"] as? String else { return }
-            Task { await model.registerPushDevice(token: token, environment: environment) }
+            Task {
+                await model.registerPushDevice(token: token, environment: environment)
+                consumePushNavigation()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pushNavigationRequested)) { notification in
-            guard let jobID = notification.userInfo?["job_id"] as? Int else { return }
+            guard let jobID = notification.userInfo?["job_id"] as? Int,
+                  let serverID = notification.userInfo?["server_id"] as? String,
+                  model.canHandlePush(serverID: serverID) else { return }
             model.requestRunNavigation(id: jobID)
-            _ = pushCoordinator.consumePendingNavigationJobID()
+            _ = pushCoordinator.consumePendingNavigationJobID(forServerID: serverID)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pushRecoveryNavigationReceived)) { notification in
+            guard let serverID = notification.userInfo?["server_id"] as? String,
+                  model.canHandlePush(serverID: serverID) else { return }
+            pendingNavigation.request(.recovery, serverID: serverID)
+            _ = pushCoordinator.consumePendingRecoveryNavigation(forServerID: serverID)
         }
         .onReceive(NotificationCenter.default.publisher(for: .pushAuthorizationRequested)) { _ in
             guard model.phase == .signedIn else { return }
             showPushPrimer = true
         }
-        .onReceive(NotificationCenter.default.publisher(for: .pushPauseRequested)) { _ in
-            guard model.phase == .signedIn, !model.isDemoMode else { return }
-            Task {
-                await model.pauseScheduler(minutes: 60)
-                model.actionMessage = "Zeitpläne wurden für eine Stunde pausiert."
-                if pendingRecoveryNavigation {
-                    pendingRecoveryNavigation = false
-                    await Task.yield()
-                    NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
-                }
-            }
+        .onReceive(NotificationCenter.default.publisher(for: .pushPauseRequested)) { notification in
+            model.pauseSchedulerFromPush(serverID: notification.userInfo?["server_id"] as? String)
         }
         .onOpenURL { url in
-            if ["rclonesync", "sicherpfad"].contains(url.scheme ?? ""), url.host == "vault" {
-                if model.phase == .signedIn {
-                    Task { @MainActor in
-                        await Task.yield()
-                        NotificationCenter.default.post(name: .deviceVaultNavigationRequested, object: nil)
-                    }
-                }
-            } else if ["rclonesync", "sicherpfad"].contains(url.scheme ?? ""), url.host == "recovery" {
-                if model.phase == .signedIn {
-                    Task { @MainActor in
-                        await Task.yield()
-                        NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
-                    }
-                } else {
-                    pendingRecoveryNavigation = true
-                }
+            if let destination = AppNavigationDestination(url: url) {
+                pendingNavigation.request(destination)
             }
         }
         .alert("Bei Sicherungsfehlern informieren?", isPresented: $showPushPrimer) {
@@ -131,6 +165,17 @@ private struct AppRootView: View {
             token: registration.token,
             environment: registration.environment
         )
+        consumePushNavigation()
+    }
+
+    private func consumePushNavigation() {
+        guard let serverID = model.currentPushServerID else { return }
+        if let jobID = pushCoordinator.consumePendingNavigationJobID(forServerID: serverID) {
+            model.requestRunNavigation(id: jobID)
+        }
+        if pushCoordinator.consumePendingRecoveryNavigation(forServerID: serverID) {
+            pendingNavigation.request(.recovery, serverID: serverID)
+        }
     }
 }
 

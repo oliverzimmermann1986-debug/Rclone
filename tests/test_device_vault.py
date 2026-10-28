@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import multiprocessing
+
+import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -262,3 +266,72 @@ def test_vault_restart_cleanup_preserves_resumable_upload_and_live_rescue(
         assert device_vault.upload_status(config, upload["id"])["received"] == 4
     finally:
         live_lease.release()
+
+
+def test_remote_copy_failure_does_not_start_download(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        device_vault.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, "", "disk full"),
+    )
+
+    def unexpected_download(*_args, **_kwargs):
+        pytest.fail("failed uploads must not trigger a cloud download")
+
+    monkeypatch.setattr(device_vault.subprocess, "Popen", unexpected_download)
+    with pytest.raises(RuntimeError, match="disk full"):
+        device_vault._copy_and_verify_remote(
+            tmp_path / "blob", "cloud:/file", "a" * 64, timeout=1
+        )
+
+
+def test_identical_concurrent_uploads_both_finish(tmp_path: Path, monkeypatch):
+    payload = b"same-photo-two-devices"
+    config, first = _create(tmp_path, payload)
+    _, second = _create(tmp_path, payload)
+    root = device_vault.vault_root(config)
+    # Exercise the same destination even if the two fixtures cross a second.
+    second_record = device_vault._load_record(root, second["id"])
+    second_record["target_relative"] = device_vault._load_record(root, first["id"])[
+        "target_relative"
+    ]
+    device_vault._save_record(root, second_record)
+    for record in (first, second):
+        device_vault.append_chunk(config, record["id"], offset=0, payload=payload)
+        device_vault.queue_completion(config, record["id"])
+    monkeypatch.setattr(device_vault, "notify", lambda *_args, **_kwargs: None)
+    arrived = threading.Barrier(2)
+    original = device_vault._prepare_blob
+
+    def prepare(*args):
+        arrived.wait(timeout=5)
+        return original(*args)
+
+    monkeypatch.setattr(device_vault, "_prepare_blob", prepare)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                device_vault.complete_upload, AuditDatabase(), config, record["id"]
+            )
+            for record in (first, second)
+        ]
+        results = [future.result(timeout=10) for future in futures]
+    assert all(result["status"] == "ready" for result in results), results
+    assert sum(bool(result["deduplicated"]) for result in results) == 1
+    assert not device_vault._TRANSFER_LOCKS
+    for record in (first, second):
+        blob, _ = device_vault.download_blob(config, record["id"])
+        assert blob.read_bytes() == payload
+
+
+def test_transfer_exception_releases_lock(tmp_path: Path, monkeypatch):
+    config, record = _create(tmp_path, b"dummy")
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("dummy failure")
+
+    monkeypatch.setattr(device_vault, "_complete_upload_locked", fail)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="dummy failure"):
+            device_vault.complete_upload(AuditDatabase(), config, record["id"])
+        assert record["id"] not in device_vault._TRANSFER_LOCKS

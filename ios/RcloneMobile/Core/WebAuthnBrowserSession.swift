@@ -14,7 +14,15 @@ struct WebAuthnRegistrationBinding {
 }
 
 @MainActor
-final class WebAuthnBrowserSession: NSObject, ASWebAuthenticationPresentationContextProviding {
+protocol WebAuthnBrowserSessionProtocol: AnyObject {
+    func makeRegistrationBinding() throws -> WebAuthnRegistrationBinding
+    func authenticate(baseURL: URL, method: String) async throws -> WebAuthnExchange
+    func register(baseURL: URL, method: String, token: String, binding: WebAuthnRegistrationBinding) async throws
+    func cancel()
+}
+
+@MainActor
+final class WebAuthnBrowserSession: NSObject, WebAuthnBrowserSessionProtocol, ASWebAuthenticationPresentationContextProviding {
     enum SessionError: LocalizedError {
         case invalidCallback
         case invalidRegistrationCallback
@@ -32,7 +40,13 @@ final class WebAuthnBrowserSession: NSObject, ASWebAuthenticationPresentationCon
         }
     }
 
-    private var session: ASWebAuthenticationSession?
+    private struct Operation {
+        let id: UUID
+        let session: ASWebAuthenticationSession
+        let continuation: CheckedContinuation<URL, Error>
+    }
+
+    private var operation: Operation?
 
     func makeRegistrationBinding() throws -> WebAuthnRegistrationBinding {
         let verifier = try makeVerifier()
@@ -58,41 +72,14 @@ final class WebAuthnBrowserSession: NSObject, ASWebAuthenticationPresentationCon
         ]
         guard let authenticationURL = components.url else { throw APIError.invalidServer }
 
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WebAuthnExchange, Error>) in
-                let browserSession = ASWebAuthenticationSession(
-                    url: authenticationURL,
-                    callbackURLScheme: "rclonesync"
-                ) { [weak self] callbackURL, error in
-                    defer { self?.session = nil }
-                    if let error {
-                        continuation.resume(throwing: error)
-                        return
-                    }
-                    guard let callbackURL,
-                          callbackURL.scheme == "rclonesync",
-                          callbackURL.host == "webauthn",
-                          let token = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
-                            .queryItems?.first(where: { $0.name == "token" })?.value,
-                          !token.isEmpty else {
-                        continuation.resume(throwing: SessionError.invalidCallback)
-                        return
-                    }
-                    continuation.resume(returning: WebAuthnExchange(token: token, verifier: verifier))
-                }
-                browserSession.presentationContextProvider = self
-                browserSession.prefersEphemeralWebBrowserSession = true
-                session = browserSession
-                if !browserSession.start() {
-                    session = nil
-                    continuation.resume(throwing: SessionError.invalidCallback)
-                }
-            }
-        } onCancel: {
-            Task { @MainActor [weak self] in
-                self?.session?.cancel()
-            }
-        }
+        let callbackURL = try await openBrowser(authenticationURL)
+        try Task.checkCancellation()
+        guard callbackURL.scheme == "rclonesync",
+              callbackURL.host == "webauthn",
+              let token = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "token" })?.value,
+              !token.isEmpty else { throw SessionError.invalidCallback }
+        return WebAuthnExchange(token: token, verifier: verifier)
     }
 
     func register(
@@ -115,40 +102,63 @@ final class WebAuthnBrowserSession: NSObject, ASWebAuthenticationPresentationCon
         components.percentEncodedFragment = "verifier=" + binding.verifier
         guard let registrationURL = components.url else { throw APIError.invalidServer }
 
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        let callbackURL = try await openBrowser(registrationURL)
+        try Task.checkCancellation()
+        guard callbackURL.scheme == "rclonesync",
+              callbackURL.host == "webauthn-registration",
+              URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "status" })?.value == "success" else {
+            throw SessionError.invalidRegistrationCallback
+        }
+    }
+
+    private func openBrowser(_ url: URL) async throws -> URL {
+        let id = UUID()
+        try Task.checkCancellation()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+                cancel()
                 let browserSession = ASWebAuthenticationSession(
-                    url: registrationURL,
+                    url: url,
                     callbackURLScheme: "rclonesync"
                 ) { [weak self] callbackURL, error in
-                    defer { self?.session = nil }
-                    if let error {
-                        continuation.resume(throwing: error)
-                        return
+                    Task { @MainActor in
+                        if let error {
+                            self?.finish(id: id, result: .failure(error))
+                        } else if let callbackURL {
+                            self?.finish(id: id, result: .success(callbackURL))
+                        } else {
+                            self?.finish(id: id, result: .failure(SessionError.invalidCallback))
+                        }
                     }
-                    guard let callbackURL,
-                          callbackURL.scheme == "rclonesync",
-                          callbackURL.host == "webauthn-registration",
-                          URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
-                            .queryItems?.first(where: { $0.name == "status" })?.value == "success" else {
-                        continuation.resume(throwing: SessionError.invalidRegistrationCallback)
-                        return
-                    }
-                    continuation.resume(returning: ())
                 }
                 browserSession.presentationContextProvider = self
                 browserSession.prefersEphemeralWebBrowserSession = true
-                session = browserSession
+                operation = Operation(id: id, session: browserSession, continuation: continuation)
                 if !browserSession.start() {
-                    session = nil
-                    continuation.resume(throwing: SessionError.invalidRegistrationCallback)
+                    finish(id: id, result: .failure(SessionError.invalidCallback))
                 }
             }
         } onCancel: {
             Task { @MainActor [weak self] in
-                self?.session?.cancel()
+                guard self?.operation?.id == id else { return }
+                self?.cancel()
             }
         }
+    }
+
+    func cancel() {
+        guard let operation else { return }
+        self.operation = nil
+        operation.session.cancel()
+        operation.continuation.resume(throwing: CancellationError())
+    }
+
+    private func finish(id: UUID, result: Result<URL, Error>) {
+        guard let operation, operation.id == id else { return }
+        self.operation = nil
+        operation.continuation.resume(with: result)
     }
 
     private func makeVerifier() throws -> String {

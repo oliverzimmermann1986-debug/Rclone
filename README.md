@@ -181,17 +181,24 @@ Eine Expertenausnahme ist mit `backup.allow_unsafe_rclone_args: true` möglich, 
 - bcrypt-Passwörter mit mindestens 12 Zeichen
 - persistente, IP-basierte Login-Sperre in SQLite
 - optionale WebAuthn-Anmeldung mit getrennt registrierten Passkeys und physischen FIDO2-Sicherheitsschlüsseln; Challenges und native Übergabecodes sind kurzlebig und nur einmal verwendbar
+- neue Passkeys benötigen auch in der nativen App das aktuelle Serverpasswort; offene WebAuthn-Freigaben sind an die aktuelle Kontogeneration gebunden und werden bei deren Widerruf ungültig
+- das Entfernen eines Passkeys sperrt auch dessen noch laufende Anmeldungen und offene native Anmeldecodes; bereits ausgestellte Sitzungen bleiben bis zu ihrem eigenen Widerruf gültig
 - Session-Versionierung; Passwort-, Benutzer- oder Secret-Wechsel invalidiert bestehende Sessions
+- laufende Fortschrittsstreams prüfen den Sitzungswiderruf und Ablauf vor weiteren Daten; Konfigurations-Rollbacks erzeugen ein neues Session-Secret
 - Login-CSRF und Double-Submit-CSRF für alle schreibenden APIs
 - Same-Origin-Prüfung, Host-Allowlist und begrenzte reale Request-Größe, auch bei Chunked Requests
 - Sicherheitsheader, `no-store` für sensible Antworten und restriktive Cookies
 - Konfiguration und Filterdatei atomar, prozessgesperrt und mit Modus `0600`
 - Optimistische Revisionen verhindern stilles Überschreiben paralleler Änderungen
+- Änderungen an sämtlichen wirksamen Parametern des globalen oder datenwegspezifischen Anomalieschutzes benötigen das aktuelle Passwort
+- aktive Quarantänen binden die gespeicherten Endpunkte und gelten auch bei abgeschaltetem Anomalieschutz sowie für überlappende produktive Quick-Sync-Läufe; sie bleiben nach Neuanlage oder Entfernung eines Datenwegs bis zur ausdrücklichen Freigabe bestehen
+- aktive Quarantänen werden bei Historienlimits nicht verworfen; das Entfernen quarantänisierter Datenwege oder Ändern ihrer Endpunkte benötigt das aktuelle Passwort
 - `config.yaml.bak` enthält genau eine geschützte Vorversion
 - vollständige GUI-Snapshots verbleiben mit Modus `0600` im lokalen Datenverzeichnis; Wiederherstellungen prüfen Name, Größe, SHA-256, aktuelle Revision und Passwort
 - das herunterladbare Support-Bundle enthält nur eine redigierte Konfiguration, System-/DB-Diagnose und Log-Inventar, niemals Log-Inhalte, Passwörter, Session-Secrets, APNs-Schlüssel oder Gerätetokens
 - APNs-Schlüsseldateien müssen innerhalb des geschützten Datenverzeichnisses liegen; Gerätetokens laufen per Lease aus und endgültig abgewiesene Tokens werden entfernt
 - Push-Ereignisse werden vor dem Netzversuch persistent gespeichert, dedupliziert und mit begrenztem Backoff erneut zugestellt
+- native Push-Aktionen sind an Server und aktuelle App-Sitzung gebunden; Mitteilungen älterer Server ohne diese Bindung bleiben sichtbar, lösen aber keine Aktion aus
 - rclone-Unterprozesse erhalten `RCLONE_ASK_PASSWORD=false` und können keine Dienste blockierend nach einem Passwort fragen
 - systemd-Sandbox mit leerem Capability-Set, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectProc=invisible`, deaktiviertem Uvicorn-Serverheader und restriktiven Schreibpfaden
 
@@ -257,6 +264,15 @@ erfolgreichen Login oder beim Ändern des Passworts automatisch entfernt.
 
 ## Upgrade
 
+Voraussetzung ist ein vertrauenswürdiger Quellbaum im Eigentum von root,
+einschließlich `.git`, der für den Dienstbenutzer nicht beschreibbar ist.
+Altinstallationen mit einem durch den Dienstbenutzer beschreibbaren Checkout
+oder `.git` weist der Installer vor Git-Befehlen als root, Paketinstallation
+und Dienststeuerung zurück. Vor dem folgenden Aufruf solche Installationen
+außerhalb des Installers sichern und den Quellbaum aus einer unabhängig
+geprüften Quelle unter root neu bereitstellen. Ein bloßer Eigentümerwechsel
+belegt nicht die Vertrauenswürdigkeit bereits veränderbarer Quellen.
+
 Normaler Upgrade-Aufruf:
 
 ```bash
@@ -312,7 +328,7 @@ Wichtige globale Werte:
 - `backup.allow_unsafe_rclone_args`: Schutz interner rclone-Flags nur bewusst deaktivieren
 - `backup.auto_resync`: standardmäßig `false`; `bisync --resync` erst nach Log-/Planprüfung
 - `web.allowed_hosts`: in Produktion konkrete DNS-Namen/IPs statt `*`
-- `web.secure_cookie`: `false` bei direktem HTTP, `true` hinter festem HTTPS oder `auto` nur bei korrekt vertrautem Proxy
+- `web.secure_cookie`: standardmäßig `auto` (Secure-Cookies bei HTTPS, direktes lokales HTTP bleibt nutzbar); hinter festem HTTPS `true` verwenden. Bei TLS-Proxys muss uvicorn ausschließlich den tatsächlichen Proxy-Hops vertrauen.
 - `web.hsts_seconds`: erst bei dauerhaftem HTTPS aktivieren
 - `web.local_browse_roots`: erlaubte lokale Browser-/Quick-Sync-Wurzeln
 - `notifications.apns`: native Fehler-Pushs mit dauerhafter Outbox, Retry und Geräte-Lease

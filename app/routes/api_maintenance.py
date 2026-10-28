@@ -285,6 +285,86 @@ def list_config_snapshots() -> dict[str, Any]:
     }
 
 
+@router.get("/config/snapshots/{name}/diff")
+def diff_config_snapshot(name: str) -> dict[str, Any]:
+    """Compare a snapshot with the current config without exposing secrets."""
+    if not _SNAPSHOT_NAME_RE.fullmatch(name):
+        raise HTTPException(400, "Ungültiger Snapshot-Name")
+    path = _snapshot_dir() / name
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Snapshot nicht gefunden") from exc
+    except OSError as exc:
+        raise HTTPException(400, "Snapshot konnte nicht geöffnet werden") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_SNAPSHOT_BYTES:
+            raise HTTPException(400, "Snapshot ist keine gültige Konfigurationsdatei")
+        raw = b""
+        while len(raw) <= _MAX_SNAPSHOT_BYTES:
+            chunk = os.read(fd, min(65536, _MAX_SNAPSHOT_BYTES + 1 - len(raw)))
+            if not chunk:
+                break
+            raw += chunk
+    finally:
+        os.close(fd)
+    try:
+        old_config = yaml.safe_load(raw.decode("utf-8")) or {}
+        old_config, _ = validate_config(old_config)
+    except (UnicodeError, yaml.YAMLError, ConfigValidationError, ValueError) as exc:
+        raise HTTPException(
+            422, "Snapshot ist ungültig und kann nicht verglichen werden"
+        ) from exc
+    current_config, _revision = get_config().snapshot_with_revision()
+
+    secret_key = re.compile(
+        r"password|secret|token|credential|private.?key|api.?key", re.I
+    )
+    changes: list[dict[str, Any]] = []
+
+    def walk(old_value: Any, new_value: Any, prefix: tuple[str, ...] = ()) -> None:
+        if isinstance(old_value, dict) and isinstance(new_value, dict):
+            for key in sorted(set(old_value) | set(new_value)):
+                walk(old_value.get(key), new_value.get(key), (*prefix, str(key)))
+            return
+        if old_value == new_value:
+            return
+        path_label = ".".join(prefix) or "Konfiguration"
+        sensitive = any(secret_key.search(part) for part in prefix)
+        if sensitive:
+            old_display = "gesetzt" if old_value not in (None, "") else "nicht gesetzt"
+            new_display = "gesetzt" if new_value not in (None, "") else "nicht gesetzt"
+        else:
+
+            def safe_display(value: Any) -> str:
+                rendered = json.dumps(
+                    value, ensure_ascii=False, sort_keys=True, default=str
+                )
+                return rendered if len(rendered) <= 240 else rendered[:237] + "…"
+
+            old_display = safe_display(old_value)
+            new_display = safe_display(new_value)
+        changes.append(
+            {
+                "path": path_label,
+                "snapshot": old_display,
+                "current": new_display,
+                "sensitive": sensitive,
+            }
+        )
+
+    walk(old_config, current_config)
+    total = len(changes)
+    return {
+        "ok": True,
+        "snapshot": name,
+        "changes": changes[:500],
+        "total": total,
+        "truncated": total > 500,
+    }
+
+
 @router.post("/config/snapshots")
 def create_config_snapshot() -> dict[str, Any]:
     data, revision = get_config().snapshot_with_revision()

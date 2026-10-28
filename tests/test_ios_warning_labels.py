@@ -40,9 +40,20 @@ def test_warning_history_filter_and_push_notice_are_explicit():
 
 def test_limited_restore_push_opens_recovery_without_requiring_a_job_id():
     source = (IOS / "Core" / "PushNotifications.swift").read_text(encoding="utf-8")
+    app = (IOS / "RcloneMobileApp.swift").read_text(encoding="utf-8")
     recovery_branch = source.split('let event = userInfo["event"]', 1)[1].split(
         "if let jobID", 1
     )[0]
     assert '"restore_test_warning"' in recovery_branch
-    assert "pendingRecoveryNavigation = true" in recovery_branch
-    assert ".pushRecoveryNavigationRequested" in recovery_branch
+    assert "pendingRecoveryServerID = serverID" in recovery_branch
+    assert ".pushRecoveryNavigationReceived" in recovery_branch
+    assert 'userInfo: ["server_id": serverID]' in recovery_branch
+    assert source.index("PushServerBinding.validatedServerID") < source.index(
+        'let event = userInfo["event"]'
+    )
+    received = app.split("publisher(for: .pushRecoveryNavigationReceived)", 1)[1].split(
+        ".onReceive", 1
+    )[0]
+    assert "model.canHandlePush(serverID: serverID)" in received
+    assert "pendingNavigation.request(.recovery, serverID: serverID)" in received
+    assert '"job_id"' not in received

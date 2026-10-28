@@ -76,7 +76,7 @@ final class RecoveryNavigationUITests: XCTestCase {
         XCTAssertTrue(restore.exists)
         XCTAssertFalse(restore.isEnabled)
         XCTAssertTrue(restore.label.contains("Fotos"))
-        reveal(assessment, in: app)
+        reveal(assessment, in: app, requireHittable: true)
         XCTAssertTrue(assessment.isHittable)
         attachScreenshot(app, name: "Assessment label before center tap with largest text")
         // Exercise the label rectangle itself, not an icon or a selected glyph.
@@ -144,9 +144,34 @@ final class RecoveryNavigationUITests: XCTestCase {
 
     @MainActor
     private func reveal(_ element: XCUIElement, in app: XCUIApplication,
+                        requireHittable: Bool = false,
                         file: StaticString = #filePath, line: UInt = #line) {
         for _ in 0..<12 {
-            if element.exists && !element.frame.isEmpty && element.frame.intersects(app.frame) { break }
+            if !requireHittable {
+                if element.exists && !element.frame.isEmpty && element.frame.intersects(app.frame) { break }
+                app.swipeUp()
+                continue
+            }
+            // App bounds include navigation and tab bars. An element can
+            // intersect those bounds while its center is covered by a bar.
+            let bounds = app.frame
+            let navigation = app.navigationBars.firstMatch
+            let tabs = app.tabBars.firstMatch
+            let navigationFrame = navigation.exists ? navigation.frame : .zero
+            let tabFrame = tabs.exists ? tabs.frame : .zero
+            let top = navigationFrame.isEmpty ? bounds.minY + 8 : max(bounds.minY + 8, navigationFrame.maxY + 8)
+            let bottom = tabFrame.isEmpty ? bounds.maxY - 8 : min(bounds.maxY - 8, tabFrame.minY - 8)
+            let viewport = CGRect(x: bounds.minX + 8, y: top,
+                                  width: max(0, bounds.width - 16), height: max(0, bottom - top))
+            if element.exists && !element.frame.isEmpty {
+                let frame = element.frame
+                let center = CGPoint(x: frame.midX, y: frame.midY)
+                if viewport.contains(center) && (!requireHittable || element.isHittable) { break }
+                if center.y < viewport.minY {
+                    app.swipeDown()
+                    continue
+                }
+            }
             app.swipeUp()
         }
         XCTAssertTrue(element.exists, file: file, line: line)

@@ -152,6 +152,17 @@ class Config:
             self._maybe_reload_unlocked()
             return copy.deepcopy(self._data), self._revision
 
+    @contextmanager
+    def locked_snapshot(self, *, exclusive: bool = False) -> Iterator[dict[str, Any]]:
+        """Hold identity reads and their final effect against concurrent writers."""
+        with self._lock, self._file_lock(exclusive=exclusive):
+            if self._dirty_base_revision is not None:
+                raise ConfigConflictError(
+                    "Ungespeicherte Konfiguration kann nicht freigeben"
+                )
+            self._load_unlocked()
+            yield copy.deepcopy(self._data)
+
     @property
     def revision(self) -> str:
         with self._lock:

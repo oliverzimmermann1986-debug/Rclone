@@ -50,9 +50,11 @@ jobs:
       - name: Check dependency consistency
         run: python -m pip check
       - name: Lint
-        run: python -m ruff check app tests
+        run: python -m ruff check app tests scripts/runtime_files.py scripts/ios_release_preflight.py
       - name: Format check
-        run: python -m ruff format --check app tests
+        run: python -m ruff format --check app tests scripts/runtime_files.py scripts/ios_release_preflight.py
+      - name: Require POSIX security test capabilities
+        run: python -c "from scripts.runtime_files import supported; assert supported(), 'POSIX no-follow directory handles are required for the installer security tests'"
       - name: Tests
         run: python -m pytest -q
 

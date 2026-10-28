@@ -7,7 +7,7 @@
 - Kategorie: `Dienstprogramme`
 - Preis: `Kostenlos`
 - Verteilung: `Öffentlich`, alle Länder und Regionen
-- Support-URL: `https://oliverzimmermann1986-debug.github.io/Rclone/`
+- Support-URL: `https://github.com/oliverzimmermann1986-debug/Rclone/issues`
 - Datenschutz-URL: `https://oliverzimmermann1986-debug.github.io/Rclone/datenschutz.html`
 - Copyright: `2026 Sicherpfad Contributors`
 - Schlüsselwörter: `backup,sicherung,recovery,rclone,server,dateien,fotos,self-hosted,restore`
