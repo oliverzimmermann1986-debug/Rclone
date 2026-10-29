@@ -60,6 +60,7 @@ async function openPlan(page, { previewDelay = 0, conflict = false } = {}) {
   });
   await page.goto('/#settings');
   await page.locator('#settings-tab-scheduler').click();
+  await page.locator('.workspace-disclosure > summary').filter({ hasText: 'Restore-Prüfplan' }).click();
   const section = page.locator('section[aria-labelledby="restore-plan-title"]');
   await expect(section.getByLabel('Rhythmus')).toHaveValue('weekly');
   return { section, writes, errors, response, config, previews, updateServer, planLoads: () => planLoads };
