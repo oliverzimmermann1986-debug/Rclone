@@ -17,6 +17,16 @@ temp/
 .vscode/
 .pytest_cache/
 .ruff_cache/
+node_modules/
 graphify-out/
 app/static/_preview*.html
 app/static/_stub-methods.js
+# Local security-review material and operator secrets.
+.planning/
+deploy-backend*.sh
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.mobileprovision

@@ -158,11 +158,12 @@ def test_unsaved_pair_connection_test_uses_inline_draft(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(api_test.subprocess, "run", fake_run)
+    (tmp_path / "source").mkdir()
     draft = {
         "name": "Entwurf",
         "enabled": True,
         "remote": "pcloud:/noch-nicht-gespeichert",
-        "local": str(tmp_path),
+        "local": str(tmp_path / "source"),
         "direction": "push",
         "mode": "copy",
         "schedule": "manual",

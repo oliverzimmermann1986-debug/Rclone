@@ -29,14 +29,18 @@ web:
   webauthn_rp_id: ""
   webauthn_origin: ""
 
-  # Bei direktem HTTP false. Hinter HTTPS-Reverse-Proxy true setzen.
-  # "auto" funktioniert nur mit korrekt vertrautem Proxy.
-  secure_cookie: false
+  # Automatisch Secure-Cookies bei HTTPS; direktes HTTP bleibt lokal nutzbar.
+  # Hinter TLS-Proxys muss uvicorn nur den tatsächlichen Proxy-Hops vertrauen.
+  # Bei festem HTTPS-Betrieb true setzen; für WebAuthn ist true erforderlich.
+  secure_cookie: auto
   # Nur hinter HTTPS aktivieren, z. B. 31536000. Bei HTTP bleibt HSTS aus.
   hsts_seconds: 0
-  # In Produktion besser konkrete DNS-Namen/IPs statt "*" verwenden.
+  # Konkrete DNS-Namen/IPs eintragen; Wildcard niemals produktiv verwenden.
   allowed_hosts:
-    - "*"
+    - "backup.example.de"
+    - "localhost"
+    - "127.0.0.1"
+    - "::1"
   # Nur diese direkten Proxy-Hops dürfen X-Forwarded-For liefern. Leer bedeutet:
   # Forwarding ignorieren und ausschließlich den Socket-Peer verwenden.
   trusted_proxy_ips: []
@@ -53,7 +57,7 @@ paths:
   logs_dir: /opt/rclone-sync/logs
   temp_dir: /opt/rclone-sync/temp
   # Getrennte, private Ablage für ausdrücklich ausgewählte Wiederherstellungen.
-  recovery_dir: /opt/rclone-sync/recovery
+  recovery_dir: /opt/rclone-sync/data/recovery
 
 backup:
   enabled: true
@@ -62,6 +66,10 @@ backup:
   # Beendet nur echten Stillstand. Unveränderte Statistik-Herzschläge zählen
   # nicht als Fortschritt.
   timeout_hours: 4
+  # Alter bestätigter Vollstände; Bereinigung erst nach erfolgreichem neuem Stand.
+  recovery_snapshot_retention_days: 90
+  # Gesamtbudget aller aufbewahrten Restore-Staging-Daten (MiB).
+  recovery_staging_max_mb: 51200
   # Optionaler absoluter Not-Aus auch bei Fortschritt; 0 = deaktiviert.
   max_runtime_hours: 0
 
@@ -111,7 +119,7 @@ backup:
     enabled: false
     schedule: "manual"     # z. B. "0 5 * * 0" für sonntags 05:00
     sample_files: 20
-    max_total_mb: 256
+    max_total_mb: 256       # MiB pro Pair; bewusst erhöhen, falls das Datenlimit die Stichprobe begrenzt
     max_scan_files: 20000
 
   # Gefährliche freie rclone-Flags werden standardmäßig blockiert. Diese Ausnahme

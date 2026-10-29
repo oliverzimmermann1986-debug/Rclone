@@ -17,7 +17,9 @@ struct RestoreEvidenceBadge: View {
         switch evidence?.state {
         case "passed": return evidence?.isCurrent == true ? "Stichprobe geprüft" : "Nachweis erneuern"
         case "failed": return "Restore fehlgeschlagen"
-        case "never", "stale": return "Restore offen"
+        case "partial": return "Prüfumfang begrenzt"
+        case "stale": return "Nachweis veraltet"
+        case "never": return "Restore offen"
         default: return "Nachweis unbekannt"
         }
     }
@@ -27,6 +29,7 @@ struct RestoreEvidenceBadge: View {
         switch evidence?.state {
         case "passed": return evidence?.isCurrent == true ? "checkmark.seal.fill" : "clock.badge.exclamationmark"
         case "failed": return "xmark.octagon.fill"
+        case "partial": return "exclamationmark.triangle.fill"
         case "never": return "clock.badge.exclamationmark"
         default: return "questionmark.circle"
         }
@@ -38,7 +41,26 @@ struct RestoreEvidenceBadge: View {
         case "passed": return evidence?.isCurrent == true ? .green : .orange
         case "failed": return .red
         case "never", "stale": return .orange
+        case "partial": return .orange
         default: return .secondary
+        }
+    }
+}
+
+struct RestoreSampleScopeView: View {
+    let scope: RestoreSampleScope
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Prüfumfang begrenzt", systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
+            Text(scope.explanation).font(.subheadline)
+            if let budget = scope.budgetDescription {
+                LabeledContent("Datenlimit", value: budget).font(.subheadline)
+            }
+            Text("Kein vollständiger Nachweis für die angeforderte Stichprobe.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(scope.recommendation).font(.subheadline)
         }
     }
 }
@@ -110,10 +132,12 @@ struct ProtectionPathDetailView: View {
                     Label("Stichprobe wird zurückgeholt und geprüft.", systemImage: "hourglass")
                         .font(.subheadline)
                         .foregroundStyle(.blue)
-                } else if let error = pair.restoreEvidence?.error, !error.isEmpty {
+                } else if let scope = pair.restoreEvidence?.sampleScope, scope.isPartial {
+                    RestoreSampleScopeView(scope: scope)
+                } else if let error = pair.restoreEvidence?.error?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.subheadline)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(pair.restoreEvidence?.state == "failed" ? .red : .orange)
                 }
             }
 
@@ -158,8 +182,8 @@ struct ProtectionPathDetailView: View {
         .sensoryFeedback(.success, trigger: successFeedback)
     }
 
-    private var sourceIsLocal: Bool { pair.source == pair.local }
-    private var targetIsLocal: Bool { pair.target == pair.local }
+    private var sourceIsLocal: Bool { pair.source.hasPrefix("/") }
+    private var targetIsLocal: Bool { pair.target.hasPrefix("/") }
 
     private var assignedJobs: [String] {
         guard let configuredPair = model.config?.backup.pairs.first(where: { $0.name == pair.name }) else { return [] }
@@ -177,7 +201,7 @@ struct ProtectionPathDetailView: View {
         let destructive = configuredPair.direction.lowercased() == "bisync" || configuredPair.mode.lowercased() == "sync"
         if !destructive { return "Keine automatischen Löschungen" }
         if !configuredPair.allowDelete { return "Produktive Löschungen gesperrt" }
-        if configuredPair.maxDelete == nil { return "Löschlimit fehlt" }
+        if (configuredPair.maxDelete ?? -1) < 0 { return "Löschlimit fehlt" }
         if configuredPair.backupDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Löschungen begrenzt" }
         return "Begrenzt und versioniert"
     }
@@ -187,7 +211,7 @@ struct ProtectionPathDetailView: View {
         let destructive = configuredPair.direction.lowercased() == "bisync" || configuredPair.mode.lowercased() == "sync"
         if !destructive { return "Dieser Datenweg kopiert Dateien, ohne entfernte Quelldateien automatisch am Ziel zu löschen." }
         if !configuredPair.allowDelete { return "Der Server blockiert produktive Sync-Läufe, bis Löschungen ausdrücklich freigegeben werden." }
-        guard let maximum = configuredPair.maxDelete else { return "Vor dem nächsten produktiven Lauf ein festes maximales Löschlimit setzen." }
+        guard let maximum = configuredPair.maxDelete, maximum >= 0 else { return "Vor dem nächsten produktiven Lauf ein festes maximales Löschlimit setzen." }
         if configuredPair.backupDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Pro Lauf sind höchstens \(maximum) Löschungen erlaubt. Eine Versionsablage schützt zusätzlich vor Überschreiben."
         }
@@ -198,13 +222,13 @@ struct ProtectionPathDetailView: View {
         guard let configuredPair else { return .secondary }
         let destructive = configuredPair.direction.lowercased() == "bisync" || configuredPair.mode.lowercased() == "sync"
         if !destructive || !configuredPair.allowDelete { return .green }
-        return configuredPair.maxDelete == nil ? .red : configuredPair.backupDir.isEmpty ? .orange : .green
+        return (configuredPair.maxDelete ?? -1) < 0 ? .red : configuredPair.backupDir.isEmpty ? .orange : .green
     }
 
     private var shieldSymbol: String {
         guard let configuredPair else { return "questionmark.circle" }
         let destructive = configuredPair.direction.lowercased() == "bisync" || configuredPair.mode.lowercased() == "sync"
-        if destructive && configuredPair.allowDelete && configuredPair.maxDelete == nil {
+        if destructive && configuredPair.allowDelete && (configuredPair.maxDelete ?? -1) < 0 {
             return "exclamationmark.shield.fill"
         }
         if destructive && configuredPair.allowDelete && configuredPair.backupDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -218,6 +242,8 @@ struct ProtectionPathDetailView: View {
         switch pair.restoreEvidence?.state {
         case "passed": return pair.restoreEvidence?.isCurrent == true ? "Stichprobe bestätigt" : "Nachweis erneuern"
         case "failed": return "Prüfung fehlgeschlagen"
+        case "partial": return "Prüfumfang begrenzt"
+        case "stale": return "Nachweis veraltet"
         case "never": return "Noch nicht nachgewiesen"
         default: return "Nachweis nicht verfügbar"
         }
@@ -225,6 +251,7 @@ struct ProtectionPathDetailView: View {
 
     private var evidenceSubtitle: String {
         if isRestoreTestRunning { return "Stichprobe wird zurückgeholt und per Prüfsumme verglichen." }
+        if let scope = pair.restoreEvidence?.sampleScope, scope.isPartial { return "\(scope.countDescription) geprüft" }
         if let success = pair.restoreEvidence?.lastSuccessAt {
             return "Zuletzt bestätigt \(AppFormat.relative(success))"
         }
@@ -245,14 +272,13 @@ struct ProtectionPathDetailView: View {
         switch pair.restoreEvidence?.state {
         case "passed": return pair.restoreEvidence?.isCurrent == true ? "checkmark.seal.fill" : "clock.badge.exclamationmark"
         case "failed": return "xmark.octagon.fill"
+        case "partial": return "exclamationmark.triangle.fill"
         default: return "clock.badge.exclamationmark"
         }
     }
 
     private var sampleDescription: String {
-        guard let verified = pair.restoreEvidence?.verifiedFiles,
-              let sampled = pair.restoreEvidence?.sampleSize else { return "Noch kein Beleg" }
-        return "\(verified) von \(sampled) Dateien"
+        pair.restoreEvidence?.sampleScope.countDescription ?? "Noch kein Beleg"
     }
 
     private var isRestoreTestRunning: Bool {
@@ -472,7 +498,7 @@ private struct StorageStatisticsView: View {
     }
 
     private var sourceSymbol: String { pair.source == pair.local ? "folder.fill" : "icloud.fill" }
-    private var targetSymbol: String { pair.target == pair.local ? "folder.fill" : "icloud.fill" }
+    private var targetSymbol: String { pair.target.hasPrefix("/") ? "folder.fill" : "icloud.fill" }
 
     private func chartValue(_ bucket: StorageCompositionBucket) -> Double {
         bucket.bytes > 0 ? Double(bucket.bytes) : Double(bucket.count)

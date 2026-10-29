@@ -134,6 +134,7 @@ struct PathBrowserSheet: View {
     @State private var isCreating = false
     @State private var errorMessage: String?
     @State private var showingCreateFolder = false
+    @State private var showingRemoteSetup = false
     @State private var folderName = ""
 
     init(
@@ -161,6 +162,11 @@ struct PathBrowserSheet: View {
                         .pickerStyle(.segmented)
                     } footer: {
                         Text("Wechsle hier zwischen einem rclone-Cloudziel und einem lokalen Ordner.")
+                    }
+                }
+                if selectedKind == .remote {
+                    Button { showingRemoteSetup = true } label: {
+                        Label("Neues Remote einbinden", systemImage: "externaldrive.badge.plus")
                     }
                 }
                 if let errorMessage {
@@ -222,6 +228,9 @@ struct PathBrowserSheet: View {
             Button("Abbrechen", role: .cancel) {}
         } message: {
             Text("Der neue Ordner wird im aktuell geöffneten \(selectedKind == .local ? "lokalen" : "Cloud-")Ordner angelegt.")
+        }
+        .sheet(isPresented: $showingRemoteSetup, onDismiss: { Task { await load("") } }) {
+            RemoteSetupView()
         }
     }
 

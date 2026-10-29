@@ -7,7 +7,7 @@
 - Kategorie: `Dienstprogramme`
 - Preis: `Kostenlos`
 - Verteilung: `Öffentlich`, alle Länder und Regionen
-- Support-URL: `https://oliverzimmermann1986-debug.github.io/Rclone/`
+- Support-URL: `https://github.com/oliverzimmermann1986-debug/Rclone/issues`
 - Datenschutz-URL: `https://oliverzimmermann1986-debug.github.io/Rclone/datenschutz.html`
 - Copyright: `2026 Sicherpfad Contributors`
 - Schlüsselwörter: `backup,sicherung,recovery,rclone,server,dateien,fotos,self-hosted,restore`
@@ -75,3 +75,5 @@ Die App verbindet sich nur mit dem vom Benutzer angegebenen, selbst betriebenen 
 - Inhaltsrechte: Die App zeigt ausschließlich vom Benutzer konfigurierte Server- und Sicherungsdaten; keine fremden Medieninhalte werden bereitgestellt.
 - Altersfreigabe: Alle abgefragten Inhalts- und Interaktionskategorien `Nein` beziehungsweise `Keine`.
 - Verschlüsselung: `ITSAppUsesNonExemptEncryption = false`; ausschließlich von Apple bereitgestellte Standardverschlüsselung.
+
+Push-Zustellung: Apple erhält Geräte-Token, generische Titel/Texte und technische Kennungen; eine Verarbeitung in den USA ist möglich. Die App verwendet keine eigene Analyse oder Werbung. TestFlight-/App-Store-Feedback und freiwillig freigegebene Absturzdiagnosen unterliegen Apples Einstellungen. Die Store-Datenschutzangaben müssen vor Einreichung gegen den tatsächlichen Dienstbetrieb geprüft werden.

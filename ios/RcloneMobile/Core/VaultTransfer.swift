@@ -148,8 +148,7 @@ final class VaultTransferModel: ObservableObject {
             if let statusToResume {
                 status = statusToResume
             } else {
-                status = try await client.createVaultUpload(
-                VaultUploadRequest(
+                var request = VaultUploadRequest(
                     identity: scope.pairID,
                     filename: entry.filename,
                     size: size,
@@ -157,7 +156,8 @@ final class VaultTransferModel: ObservableObject {
                     sourceType: entry.sourceType,
                     deviceName: UIDevice.current.name
                 )
-            )
+                request.localOnly = scope.localOnly == true
+                status = try await client.createVaultUpload(request)
             }
             try validate(status, for: entry)
             try persist(status, entry: &entry)

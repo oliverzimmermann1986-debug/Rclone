@@ -92,7 +92,7 @@ _SENSITIVE_FLAG = (
 _SENSITIVE_FLAG_VALUE_RE = re.compile(
     rf"(?P<flag>{_SENSITIVE_FLAG})"
     rf"(?P<separator>\s*=\s*|\s+)"
-    rf"(?P<value>\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;\]\)}}\"']+)",
+    rf"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;\]\)}}\"']+)",
     re.IGNORECASE,
 )
 _SENSITIVE_FLAG_NAME_RE = re.compile(rf"^{_SENSITIVE_FLAG}$", re.IGNORECASE)
@@ -135,6 +135,43 @@ def rclone_subprocess_env() -> dict[str, str]:
 
 class UnsafeRcloneArgument(ValueError):
     pass
+
+
+def normalize_filter_aliases(args: list[str]) -> list[str]:
+    """Make the short filter flag pass through the same mandatory rule compiler."""
+    normalized: list[str] = []
+    value_flags = {
+        "--include",
+        "--include-from",
+        "--exclude",
+        "--exclude-from",
+        "--filter",
+        "--filter-from",
+        "--filters-file",
+        "--files-from",
+        "--files-from-raw",
+        "--files-from0",
+    }
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in value_flags or token == "-f":
+            normalized.append("--filter" if token == "-f" else token)
+            if index + 1 < len(args):
+                normalized.append(args[index + 1])
+                index += 1
+        elif token.startswith("-f="):
+            normalized.append("--filter=" + token[3:])
+        elif token.startswith("-f") and not token.startswith("--"):
+            normalized.append("--filter=" + token[2:])
+        elif re.match(r"^-[A-Za-z]*f", token) and not token.startswith("--"):
+            raise UnsafeRcloneArgument(
+                "Kombinierte kurze Filter-Flags sind nicht erlaubt; --filter verwenden"
+            )
+        else:
+            normalized.append(token)
+        index += 1
+    return normalized
 
 
 def parse_rclone_args(value: Any) -> list[str]:
@@ -186,7 +223,7 @@ def validate_parsed_rclone_args(
     """Validiert bereits tokenisierte Argumente, ohne Werte mit Leerzeichen neu zu splitten."""
     if len(args) > _MAX_ARGS:
         raise ValueError(f"Zu viele rclone-Argumente (maximal {_MAX_ARGS})")
-    normalized = [str(token) for token in args]
+    normalized = normalize_filter_aliases([str(token) for token in args])
     for token in normalized:
         if not token or len(token) > _MAX_ARG_LENGTH:
             raise ValueError("Leeres oder zu langes rclone-Argument")

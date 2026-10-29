@@ -27,7 +27,7 @@ struct RecoveryRescueView: View {
             Section("1 · Neuen Server vorbereiten") {
                 Text("Melde dich am Ersatzserver an und richte dort den bisherigen Cloud-Zugang und passende Datenwege ein. Die Notfallakte ersetzt keine Cloud-Schlüssel.")
                 LabeledContent("Verbunden mit", value: model.serverAddress)
-                Text("Rettbar sind die in der Akte aufgeführten Geräte-Vault-Dateien aus dem Cloud-Ziel. Lokale vollständige Stände sind nicht enthalten und schützen allein nicht gegen Serververlust.")
+                Text("Rettbar sind Geräte-Vault-Dateien aus einem weiterhin erreichbaren Ziel. Nur lokale Zielkopien können mit dem alten Server verloren sein. Lokale vollständige Stände sind nicht enthalten und schützen allein nicht gegen Serververlust.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("2 · Verschlüsselte Notfallakte") {
@@ -44,6 +44,11 @@ struct RecoveryRescueView: View {
             if let preview {
                 Section("3 · Ziele bewusst zuordnen") {
                     LabeledContent("Vault-Dateien", value: "\(preview.records)")
+                    LabeledContent("Cloud-Ziel belegt", value: "\(preview.cloudRecords ?? 0)")
+                    if (preview.localOnlyRecords ?? preview.records) > 0 {
+                        Label("\(preview.localOnlyRecords ?? preview.records) Einträge sind nur lokal abgelegt oder ohne Cloud-Beleg. Nach Serververlust sind sie nur bei weiterhin vorhandenem ursprünglichem Speicher rettbar.", systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                     LabeledContent("Datenmenge", value: AppFormat.bytes(preview.totalBytes))
                     ForEach(preview.dataPaths) { source in
                         Picker(source.name, selection: Binding(

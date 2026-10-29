@@ -17,7 +17,8 @@ function app() {
 
   return {
     page: 'dashboard',
-    pages: ['dashboard', 'pairs', 'definitions', 'runs', 'doctor', 'settings'],
+    remoteSetup: { show: false, busy: false, name: '', provider: '', providers: [], session: null, answer: '', error: '' },
+    pages: ['dashboard', 'pairs', 'definitions', 'runs', 'doctor', 'settings', 'recovery'],
     settingsTabs: ['general', 'scheduler', 'security', 'filters', 'account', 'pbs'],
     navOpen: false,
     liveMessage: '',
@@ -87,6 +88,7 @@ function app() {
     pairSelection: {},
     jobPathChoice: {},
     jobDefinitions: { loading: false, error: '' },
+    jobTimeline: { loading: false, rows: [], conflicts: [] },
     settingsTab: 'general',
     testResults: {},
     configValidation: { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true },
@@ -97,10 +99,16 @@ function app() {
     plan: { loading: false, data: null, dry_run: true, definitionId: null },
     doctor: { loading: false, data: null },
     copies: { loading: false, data: null },
+    recovery: {
+      loading: false, pair: '', points: [], pointId: '', path: '', items: [],
+      selectedPaths: [], diff: null, staging: [], quarantine: [], error: '',
+      maxTotalMb: 512, handover: { password: '', passphrase: '', repeat: '', includePaths: false, downloaded: false },
+    },
+    storageComposition: { loading: {}, data: {}, errors: {} },
     maintenance: { logs: [], loading: false, prune: null, database: null, logQuery: '' },
     filterFile: { content: '', path: '', revision: '', loading: false, dirty: false },
     pwChange: { current: '', new: '', confirm: '' },
-    snapshots: { loading: false, items: [], max: 30, restoreName: '', password: '' },
+    snapshots: { loading: false, items: [], max: 30, restoreName: '', password: '', diff: { loading: false, data: null, error: '' } },
     pbs: { loading: false, status: null },
     push: { loading: false, testing: false, status: null, error: '' },
     schedulerControl: { loading: false, paused: false, until: null, remaining_seconds: null, reason: '', enabled: true },
@@ -118,6 +126,8 @@ function app() {
       show: false, job: null, log: '', loading: false, logLoading: false,
       logSearch: '', autoRefresh: true,
     },
+    quickPromotion: null,
+    commandPalette: { show: false, query: '' },
     toast: { show: false, msg: '', type: 'ok', timer: null },
 
     async init() {
@@ -132,7 +142,7 @@ function app() {
       this.jobs.kind = safeStoredValue('rclone-sync-job-kind', ['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs'], '');
       this.jobs.status = safeStoredValue(
         'rclone-sync-job-status',
-        ['', 'running', 'ok', 'error', 'skipped', 'cancelled', 'stale'],
+        ['', 'running', 'ok', 'error', 'warning', 'skipped', 'cancelled', 'stale'],
         '',
       );
       this.applyTheme();
@@ -144,6 +154,11 @@ function app() {
       this.$watch('jobs.kind', (value) => store('rclone-sync-job-kind', value));
       this.$watch('jobs.status', (value) => store('rclone-sync-job-status', value));
       window.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+          event.preventDefault();
+          this.openCommandPalette();
+          return;
+        }
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
           event.preventDefault();
           if (this.settingsTab === 'filters' && this.filterFile.dirty) this.saveFilterFile();
@@ -185,7 +200,7 @@ function app() {
       });
       await this.loadConfig(true);
       await this.refreshAll(false);
-      if (this.page === 'dashboard') await this.loadStorage(false);
+      if (this.page === 'dashboard') { await this.loadStorage(false); await this.loadCopies(); }
       else this.loadPage(this.page, true);
       this.startPolling();
     },
@@ -199,7 +214,7 @@ function app() {
         // Bereiche aktualisieren ausschließlich die dort benötigten Daten.
         if (this.page === 'dashboard') {
           tasks.push(this.loadOverview(true));
-          tasks.push(this.loadRecent(true), this.loadSchedulerState(true));
+          tasks.push(this.loadRecent(true), this.loadSchedulerState(true), this.loadCopies());
           if (this.config.pbs?.enabled) tasks.push(this.loadPbsStatus(true));
         } else if (this.page === 'doctor' || this.page === 'settings') {
           tasks.push(this.loadSchedulerState(true));
@@ -318,7 +333,7 @@ function app() {
       this.$nextTick(() => document.getElementById('main-content')?.focus({ preventScroll: true }));
     },
 
-    loadPage(page, configAlreadyLoaded = false) {
+    async loadPage(page, configAlreadyLoaded = false) {
       if (page === 'dashboard') {
         this.loadOverview(true); this.loadRecent(true); this.loadStorage(false);
         if (!configAlreadyLoaded && !this.configLoaded) this.loadConfig(true);
@@ -332,13 +347,70 @@ function app() {
         this.loadJobs(true);
       } else if (page === 'doctor') {
         this.loadOverview(true); if (!configAlreadyLoaded) this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadCopies(); this.loadSchedulerState(true); this.loadPushStatus(true);
+      } else if (page === 'recovery') {
+        if (!configAlreadyLoaded) await this.loadConfig();
+        this.loadRecovery();
       } else if (page === 'settings') {
         if (!configAlreadyLoaded) this.loadConfig(); this.loadFilterFile(); this.loadSchedulerState(true);
       }
     },
 
     pageTitle() {
-      return ({ dashboard: 'Lagebild', pairs: 'Datenwege', definitions: 'Jobs', runs: 'Läufe', doctor: 'System', settings: 'Einstellungen' })[this.page] || 'Sicherpfad';
+      return ({ dashboard: 'Lagebild', pairs: 'Datenwege', definitions: 'Jobs', runs: 'Läufe', doctor: 'System', settings: 'Einstellungen', recovery: 'Wiederherstellung' })[this.page] || 'Sicherpfad';
+    },
+
+    openCommandPalette() {
+      if (this.commandPalette.show) return;
+      dialogFocusStack.push(document.activeElement);
+      this.commandPalette = { show: true, query: '' };
+      this.$nextTick(() => document.getElementById('command-palette-input')?.focus());
+    },
+
+    closeCommandPalette() {
+      if (!this.commandPalette.show) return;
+      this.commandPalette.show = false;
+      this.commandPalette.query = '';
+      this.restoreDialogFocus();
+    },
+
+    commandItems() {
+      const query = this.commandPalette.query.trim().toLowerCase();
+      const items = [
+        { label: 'Gehe zu Lagebild', keywords: 'dashboard status', run: () => this.navigate('dashboard') },
+        { label: 'Gehe zu Datenwegen', keywords: 'pairs datenwege', run: () => this.navigate('pairs') },
+        { label: 'Gehe zu Jobs', keywords: 'jobs plan', run: () => this.navigate('definitions') },
+        { label: 'Gehe zu Läufe', keywords: 'runs verlauf', run: () => this.navigate('runs') },
+        { label: 'Gehe zu System', keywords: 'system diagnose', run: () => this.navigate('doctor') },
+        { label: 'Quick-Sync öffnen', keywords: 'quick sync kopieren', run: () => this.openQuick() },
+        { label: 'Dry-Run starten', keywords: 'trockenlauf backup', run: () => this.runBackup(true) },
+        { label: 'Support-Bundle herunterladen', keywords: 'support diagnose export', run: () => this.downloadSupportBundle() },
+      ];
+      const matches = this.config.backup?.pairs || [];
+      for (const pair of matches) {
+        if (pair?.name) items.push({ label: `Datenweg: ${pair.name}`, keywords: `${pair.name} ${pair.local || ''} ${pair.remote || ''}`, run: () => { this.navigate('pairs'); this.pairSearch = pair.name; } });
+      }
+      return query ? items.filter((item) => `${item.label} ${item.keywords}`.toLowerCase().includes(query)) : items;
+    },
+
+    runCommand(item) {
+      if (!item) return;
+      this.closeCommandPalette();
+      item.run();
+    },
+
+    setJobFilter(kind, status) {
+      this.jobs.kind = kind;
+      this.jobs.status = status;
+      this.loadJobs(true);
+    },
+
+    canCancelCurrentJob() {
+      return Boolean(this.rcloneBusy() || this.progress?.running || this.pbs.status?.running);
+    },
+
+    cancelCurrentJob() {
+      if (this.pbs.status?.running && !this.rcloneBusy()) return this.cancelPbs();
+      return this.cancelBackup();
     },
 
     cookie(name) {
@@ -529,6 +601,9 @@ function app() {
       if (!this.online) return 'error';
       if (!data) return 'pending';
       if ((data.alerts || []).some((a) => a.level === 'error')) return 'error';
+      if ((data.pairs?.health || []).some((p) => ['error', 'failed', 'timeout', 'stale'].includes(p.last_status) || (p.error && !['ok', 'success', 'cancelled'].includes(p.last_status)))) return 'error';
+      if (this.storagePairs().some((p) => p.restore_evidence?.state === 'failed')) return 'error';
+      if (data.services?.scheduler?.configured_enabled === false || data.services?.scheduler?.control?.paused) return 'warn';
       if ((data.alerts || []).some((a) => ['warn', 'warning'].includes(a.level))) return 'warn';
       if (this.busy()) return 'running';
       return 'ok';
@@ -654,7 +729,39 @@ function app() {
         this.config.backup.jobs = result.map((job) => this.normalizeJobDefinition({ ...job }));
       }
       this.jobDefinitions = { loading: false, error: '' };
+      this.loadJobScheduleTimeline();
     },
+
+    async loadJobScheduleTimeline() {
+      const jobs = (this.config.backup?.jobs || []).filter((job) => job.enabled && job.schedule && job.schedule !== 'manual');
+      this.jobTimeline.loading = true;
+      const timezone = String(this.config.backup?.timezone || 'Europe/Berlin');
+      const now = Date.now() / 1000;
+      const horizon = now + 24 * 3600;
+      const previews = await Promise.all(jobs.map(async (job) => {
+        const result = await this.api('POST', '/api/config/schedule-preview', { expression: job.schedule, timezone, count: 10 }, { silent: true, captureError: true, requestKey: `timeline-${job.id || job.name}` });
+        if (this.isStale(result) || !result || result.__error) return { job, runs: [], error: result?.detail?.message || result?.detail || '' };
+        return { job, runs: (result.next_runs || []).filter((run) => Number(run.timestamp) >= now && Number(run.timestamp) < horizon) };
+      }));
+      const rows = previews.map(({ job, runs, error }) => ({
+        id: job.id || job.name,
+        name: job.name || 'Unbenannter Job',
+        error: String(error || ''),
+        runs: runs.map((run) => ({ ...run, minute: new Date(Number(run.timestamp) * 1000).getMinutes(), hour: new Date(Number(run.timestamp) * 1000).getHours(), position: Math.max(0, Math.min(100, (Number(run.timestamp) - now) / (24 * 3600) * 100)) })),
+      }));
+      const groups = new Map();
+      for (const row of rows) for (const run of row.runs) {
+        const key = new Date(Number(run.timestamp) * 1000).toISOString().slice(0, 16);
+        groups.set(key, [...(groups.get(key) || []), row.name]);
+      }
+      this.jobTimeline = {
+        loading: false,
+        rows,
+        conflicts: [...groups.entries()].filter(([, names]) => names.length > 1).map(([at, names]) => ({ at, names })),
+      };
+    },
+
+    timelineHourPosition(hour) { return hour / 24 * 100; },
 
     addJobDefinition() {
       this.config.backup ||= {};
@@ -686,6 +793,14 @@ function app() {
     availableDataPaths(job) {
       const assigned = new Set(job?.data_path_ids || []);
       return (this.config.backup?.pairs || []).filter((pair) => pair.id && !assigned.has(pair.id));
+    },
+
+    toggleJobPathAssignment(job, pathId, checked) {
+      const ids = job.data_path_ids || (job.data_path_ids = []);
+      const existing = ids.indexOf(pathId);
+      if (checked && existing < 0) ids.push(pathId);
+      else if (!checked && existing >= 0) ids.splice(existing, 1);
+      this.markConfigDirty();
     },
 
     addJobPath(job, jobIdx) {
@@ -903,10 +1018,12 @@ function app() {
       }
       const payload = { ...this.quick, min_local_files: this.quick.new_target ? 0 : 1 };
       delete payload.new_target;
+      const promotion = { ...this.quick };
       this.pending.quick = true;
       try {
         const result = await this.api('POST', '/api/jobs/backup/quick', payload);
         if (result?.ok) {
+          if (result.job_id) this.quickPromotion = { jobId: result.job_id, draft: promotion };
           this.showToast('Quick-Sync gestartet');
           this.closeQuick();
           setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
@@ -955,6 +1072,23 @@ function app() {
       const needle = this.jobModal.logSearch.trim().toLowerCase();
       if (!needle) return text;
       return text.split('\n').filter((line) => line.toLowerCase().includes(needle)).join('\n');
+    },
+
+    filteredLogLines() {
+      return this.filteredLog().split('\n').map((text) => {
+        const match = text.match(/\b(DEBUG|INFO|NOTICE|WARNING|WARN|ERROR|FATAL)\b/i);
+        const value = (match?.[1] || '').toUpperCase();
+        const level = ['ERROR', 'FATAL'].includes(value) ? 'error'
+          : (['WARNING', 'WARN', 'NOTICE'].includes(value) ? 'warn'
+            : (value === 'INFO' ? 'info' : (value === 'DEBUG' ? 'debug' : '')));
+        return { text, level };
+      });
+    },
+
+    jumpToLogError() {
+      const line = document.querySelector('.live-log-line.error');
+      if (line) line.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      else this.showToast('Im geladenen Log wurde kein Fehler gefunden.', 'warn');
     },
 
     async copyLog() {
@@ -1091,9 +1225,9 @@ function app() {
       }
       result.web ||= {};
       result.paths ||= {};
-      result.web.allowed_hosts ||= ['*'];
+      result.web.allowed_hosts ||= ['localhost', '127.0.0.1', '::1'];
       result.web.local_browse_roots ||= ['/mnt', '/media', '/srv', '/opt/rclone-sync/data'];
-      result.web.secure_cookie ??= false;
+      result.web.secure_cookie ??= 'auto';
       result.web.session_max_age_seconds ??= 604800;
       result.web.hsts_seconds ??= 0;
       result.backup ||= {};
@@ -1651,7 +1785,7 @@ function app() {
       if (src && dst && src.replace(/\/+$/, '') === dst.replace(/\/+$/, '')) issues.push('Quelle und Ziel identisch');
       const destructive = pair.two_way || pair.direction === 'bisync' || pair.mode === 'sync';
       if (destructive && pair.enabled && !pair.allow_delete) issues.push('Löschen nicht freigegeben');
-      if (destructive && pair.enabled && (pair.max_delete === '' || pair.max_delete === null || pair.max_delete === undefined)) issues.push('Löschlimit fehlt');
+      if (destructive && pair.enabled && (pair.max_delete === '' || pair.max_delete === null || pair.max_delete === undefined || Number(pair.max_delete) < 0)) issues.push('Löschlimit fehlt');
       if (pair.require_mountpoint && !String(pair.mountpoint || '').trim()) issues.push('Mountpoint fehlt');
       return issues;
     },
@@ -1684,7 +1818,7 @@ function app() {
       const health = this.pairLastRun(pair);
       if (!pair.enabled) return 'disabled';
       if (health?.last_status === 'error' || health?.last_status === 'stale') return 'error';
-      if (health?.overdue || this.pairIssues(pair).length) return 'warn';
+      if ((health?.last_status === 'skipped' && health?.error) || health?.overdue || this.pairIssues(pair).length) return 'warn';
       if (health?.last_status === 'ok') return 'ok';
       return 'pending';
     },
@@ -1808,6 +1942,41 @@ function app() {
       return '—';
     },
 
+    restoreEvidence(entry) {
+      const evidence = entry?.restore_evidence;
+      const state = evidence?.state || 'never';
+      const labels = {
+        passed: 'Stichprobe bestätigt', partial: 'Stichprobe unvollständig',
+        stale: 'Nachweis veraltet', failed: 'Letzter Restore-Test fehlgeschlagen',
+        never: 'Noch kein Restore-Nachweis',
+      };
+      const age = Number(evidence?.valid_until || 0) * 1000 - Date.now();
+      const fresh = state === 'passed' && age > 0;
+      const count = Number(evidence?.verified_files || 0);
+      const sample = Number(evidence?.sample_size || 0);
+      const effective = !fresh && state === 'passed' ? 'stale' : state;
+      return { state: fresh ? 'passed' : effective, text: fresh ? `${count}/${sample} geprüft` : (labels[effective] || labels.never), title: labels[effective] || labels.never };
+    },
+
+    restoreEvidenceLabel(entry) { return this.restoreEvidence(entry).text; },
+
+    copyDelta(entry) {
+      const source = entry?.source_size;
+      const target = entry?.target_size;
+      if (!source || !target || !Number.isFinite(Number(source.bytes)) || !Number.isFinite(Number(target.bytes))) return null;
+      const sourceBytes = Number(source.bytes);
+      const targetBytes = Number(target.bytes);
+      const max = Math.max(sourceBytes, targetBytes, 1);
+      return { source: sourceBytes, target: targetBytes, coverage: Math.min(100, Math.round(targetBytes / Math.max(sourceBytes, 1) * 100)), sourceWidth: sourceBytes / max * 100, targetWidth: targetBytes / max * 100 };
+    },
+
+    copyPathTitle(value) { return String(value || ''); },
+
+    async copyPath(value) {
+      try { await navigator.clipboard.writeText(String(value || '')); this.showToast('Pfad kopiert'); }
+      catch (_) { this.showToast('Pfad konnte nicht kopiert werden', 'err'); }
+    },
+
     async loadPairSizes() {
       if (this.storageLoading) return;
       this.storageLoading = true;
@@ -1863,6 +2032,50 @@ function app() {
     pairSizeError(name, side) {
       const size = this.pairSize(name)?.[`${side}_size`];
       return size?.measurement_error || size?.error || '';
+    },
+
+    async openRemoteSetup() {
+      this.remoteSetup = { show: true, busy: true, name: '', provider: '', providers: [], session: null, answer: '', error: '' };
+      this.openDialog('remoteSetupDialog');
+      const data = await this.api('GET', '/api/remotes/providers', undefined, { captureError: true });
+      this.remoteSetup.busy = false;
+      if (!data || data.__error) { this.remoteSetup.error = data?.detail || 'Anbieter konnten nicht geladen werden.'; return; }
+      this.remoteSetup.providers = data.providers;
+    },
+
+    async submitRemoteSetup() {
+      const state = this.remoteSetup;
+      if (state.busy) return;
+      state.busy = true;
+      state.error = '';
+      const session = state.session;
+      const url = !session ? '/api/remotes/setup' : `/api/remotes/setup/${session.id}/${session.ready ? 'save' : 'answer'}`;
+      const body = !session ? { name: state.name.trim(), provider: state.provider }
+        : session.ready ? {} : { step: session.step, answer: state.answer || session.option.default || '' };
+      const result = await this.api('POST', url, body, { captureError: true, timeoutMs: 70000 });
+      state.busy = false;
+      if (!result || result.__error) { state.error = result?.detail || 'Einrichtung fehlgeschlagen. Bitte erneut versuchen.'; return; }
+      if (session?.ready) {
+        state.session = null;
+        await this.closeRemoteSetup();
+        this.showToast(`Remote ${result.name} ist angelegt.`, 'ok');
+        if (this.picker.show && this.picker.kind === 'remote') await this.loadPicker('');
+      } else {
+        state.session = result;
+        state.answer = '';
+        state.error = result.error || '';
+        this.$nextTick(() => this.$refs.remoteAnswer?.focus());
+      }
+    },
+
+    async closeRemoteSetup() {
+      if (this.remoteSetup.busy) return;
+      const id = this.remoteSetup.session?.id;
+      this.remoteSetup.show = false;
+      this.remoteSetup.answer = '';
+      this.remoteSetup.session = null;
+      this.restoreDialogFocus();
+      if (id) await this.api('DELETE', `/api/remotes/setup/${id}`, undefined, { silent: true });
     },
 
     openPicker(mode, idx) {
@@ -1968,6 +2181,66 @@ function app() {
       return needle ? this.picker.entries.filter((entry) => String(entry.name || '').toLowerCase().includes(needle)) : this.picker.entries;
     },
 
+    pickerBreadcrumbs() {
+      const value = String(this.picker.current || '');
+      if (!value) return [{ label: 'Remotes', path: '' }];
+      const remote = value.match(/^([^/:]+):(.*)$/);
+      if (remote) {
+        const root = `${remote[1]}:`;
+        const segments = remote[2].split('/').filter(Boolean);
+        return [{ label: remote[1], path: root }, ...segments.map((segment, index) => ({
+          label: segment,
+          path: `${root}${segments.slice(0, index + 1).join('/')}`,
+        }))];
+      }
+      const absolute = value.startsWith('/');
+      const segments = value.split('/').filter(Boolean);
+      return [{ label: absolute ? '/' : 'Ordner', path: absolute ? '/' : '' }, ...segments.map((segment, index) => ({
+        label: segment,
+        path: `${absolute ? '/' : ''}${segments.slice(0, index + 1).join('/')}`,
+      }))];
+    },
+
+    swapQuickPaths() {
+      [this.quick.remote, this.quick.local] = [this.quick.local, this.quick.remote];
+      const direction = this.quick.direction === 'push' ? 'pull' : this.quick.direction === 'pull' ? 'push' : 'bisync';
+      this.quick.direction = direction;
+      this.quick.mode = direction === 'bisync' ? 'bisync' : (this.quick.mode === 'bisync' ? 'copy' : this.quick.mode);
+    },
+
+    promoteQuickSync() {
+      const promotion = this.quickPromotion;
+      if (!promotion?.draft || this.configDirty) {
+        this.showToast(this.configDirty ? 'Speichere oder verwerfe zuerst die offenen Änderungen.' : 'Quick-Sync-Datenweg nicht verfügbar.', 'warn');
+        return;
+      }
+      const draft = promotion.draft;
+      const existingNames = new Set((this.config.backup.pairs || []).map((item) => String(item.name || '').toLowerCase()));
+      const nameBase = `Quick-Sync ${new Date().toLocaleDateString('de-DE')}`;
+      let name = nameBase;
+      let suffix = 2;
+      while (existingNames.has(name.toLowerCase())) name = `${nameBase} (${suffix++})`;
+      const pair = {
+        name,
+        local: draft.local, remote: draft.remote,
+        source: draft.direction === 'push' ? draft.local : draft.remote,
+        target: draft.direction === 'push' ? draft.remote : draft.local,
+        direction: draft.direction, mode: draft.mode, two_way: draft.direction === 'bisync',
+        enabled: false, min_local_files: draft.new_target ? 0 : 1,
+        exclude: '.DS_Store\nThumbs.db', include: '', filter: '', rclone_args: '',
+        transfers: '', checkers: '', max_delete: draft.max_delete, allow_delete: false,
+        min_remote_files: 0, allow_empty_remote_target: false, min_free_gb: 0,
+        max_success_age_hours: 48, require_mountpoint: false, mountpoint: '', sentinel_file: '',
+        backup_dir: '', backup_dir1: '', backup_dir2: '',
+      };
+      this.config.backup.pairs.push(pair);
+      this.markConfigDirty();
+      this.quickPromotion = null;
+      this.closeJob();
+      this.navigate('pairs');
+      this.showToast('Deaktivierter Entwurf angelegt. Pfade und Schutzregeln vor dem Speichern prüfen.', 'warn');
+    },
+
     pickPath(path) {
       const { mode, idx } = this.picker;
       if (path === 'pbs:') {
@@ -2042,6 +2315,191 @@ function app() {
       if (this.isStale(result)) return;
       if (result) this.copies.data = result;
       this.copies.loading = false;
+    },
+
+    async loadRecovery() {
+      this.recovery.loading = true;
+      this.recovery.error = '';
+      const configured = (this.config.backup?.pairs || []).filter((pair) => pair.enabled !== false && pair.name);
+      if (!this.recovery.pair || !configured.some((pair) => pair.name === this.recovery.pair)) this.recovery.pair = configured[0]?.name || '';
+      const tasks = [
+        this.api('GET', '/api/recovery/staging', undefined, { silent: true, captureError: true, requestKey: 'recovery-staging' }),
+        this.api('GET', '/api/recovery/quarantine', undefined, { silent: true, captureError: true, requestKey: 'recovery-quarantine' }),
+      ];
+      if (this.recovery.pair) tasks.push(this.api('GET', `/api/recovery/points?identity=${encodeURIComponent(this.recovery.pair)}`, undefined, { silent: true, captureError: true, requestKey: 'recovery-points' }));
+      const [staging, quarantine, points] = await Promise.all(tasks);
+      if (staging?.items) this.recovery.staging = staging.items;
+      if (quarantine?.items) this.recovery.quarantine = quarantine.items;
+      if (points?.points) {
+        this.recovery.points = points.points;
+        if (!this.recovery.points.some((point) => point.id === this.recovery.pointId)) this.recovery.pointId = this.recovery.points[0]?.id || '';
+      }
+      const failures = [staging, quarantine, points].filter((result) => result?.__error);
+      if (failures.length) this.recovery.error = failures.map((result) => typeof result.detail === 'string' ? result.detail : result.detail?.message || 'Recovery-Daten konnten nicht vollständig geladen werden.').join(' ');
+      this.recovery.loading = false;
+      if (this.recovery.pair && this.recovery.pointId) await this.loadRecoveryBrowse('');
+    },
+
+    async selectRecoveryPair(name) {
+      this.recovery.pair = name;
+      this.recovery.pointId = '';
+      this.recovery.path = '';
+      this.recovery.selectedPaths = [];
+      this.recovery.diff = null;
+      await this.loadRecovery();
+    },
+
+    async loadRecoveryPoints() {
+      if (!this.recovery.pair) return;
+      const result = await this.api('GET', `/api/recovery/points?identity=${encodeURIComponent(this.recovery.pair)}`, undefined, { silent: true, captureError: true, requestKey: 'recovery-points' });
+      if (this.isStale(result)) return;
+      if (result?.points) {
+        this.recovery.points = result.points;
+        if (!result.points.some((point) => point.id === this.recovery.pointId)) this.recovery.pointId = result.points[0]?.id || '';
+      }
+    },
+
+    async loadRecoveryBrowse(path = '') {
+      if (!this.recovery.pair || !this.recovery.pointId) return;
+      this.recovery.path = path;
+      this.recovery.loading = true;
+      const params = new URLSearchParams({ identity: this.recovery.pair, path });
+      const endpoint = this.recovery.pointId === 'current' ? `/api/recovery/browse?${params}` : `/api/recovery/points/${encodeURIComponent(this.recovery.pointId)}/browse?${params}`;
+      const result = await this.api('GET', endpoint, undefined, { silent: true, captureError: true, requestKey: 'recovery-browse', timeoutMs: 70000 });
+      if (this.isStale(result)) return;
+      if (result?.__error) this.recovery.error = typeof result.detail === 'string' ? result.detail : (result.detail?.message || 'Dateiliste konnte nicht geladen werden.');
+      else if (result) { this.recovery.items = result.items || []; this.recovery.error = ''; }
+      this.recovery.loading = false;
+    },
+
+    async loadRecoveryDiff() {
+      if (!this.recovery.pair || !this.recovery.pointId || this.recovery.pointId === 'current') {
+        this.recovery.diff = { changes: [], total: 0, message: 'Wähle einen gespeicherten Wiederherstellungspunkt.' };
+        return;
+      }
+      const params = new URLSearchParams({ identity: this.recovery.pair, from_point: this.recovery.pointId, to_point: 'current' });
+      const result = await this.api('GET', `/api/recovery/diff?${params}`, undefined, { silent: true, captureError: true, requestKey: 'recovery-diff', timeoutMs: 70000 });
+      if (this.isStale(result)) return;
+      if (result?.__error) { this.recovery.error = typeof result.detail === 'string' ? result.detail : (result.detail?.message || 'Bestände konnten nicht verglichen werden.'); return; }
+      this.recovery.diff = result;
+    },
+
+    toggleRecoveryPath(path, checked) {
+      const selected = new Set(this.recovery.selectedPaths);
+      if (checked) selected.add(path); else selected.delete(path);
+      this.recovery.selectedPaths = [...selected].slice(0, 100);
+    },
+
+    async startSelectiveRestore() {
+      const selected = this.recovery.selectedPaths;
+      if (!selected.length || !this.recovery.pair) return;
+      if (!(await this.requestConfirmation(`Es werden ${selected.length} ausgewählte Einträge in das geschützte Staging zurückgeholt. Die produktiven Quellordner werden nicht überschrieben.`, { title: 'Wiederherstellung ins Staging starten', confirmLabel: 'Ins Staging wiederherstellen' }))) return;
+      const result = await this.api('POST', '/api/recovery/restore', { identity: this.recovery.pair, paths: selected, point_id: this.recovery.pointId || 'current', max_total_mb: Number(this.recovery.maxTotalMb) || 512 });
+      if (result?.ok) { this.showToast(`Recovery-Lauf #${result.job_id} gestartet`); this.recovery.selectedPaths = []; this.loadJobs(true); }
+    },
+
+    async startFullSnapshot() {
+      if (!this.recovery.pair) return;
+      if (!(await this.requestConfirmation('Der aktuelle Sicherungsbestand wird in einen vollständigen, lokalen Recovery-Punkt kopiert. Der Vorgang kann Speicherplatz und Zeit beanspruchen.', { title: 'Recovery-Punkt erstellen', confirmLabel: 'Recovery-Punkt erstellen' }))) return;
+      const result = await this.api('POST', '/api/recovery/snapshots', { identity: this.recovery.pair, max_total_mb: Math.min(51200, Math.max(1, Number(this.recovery.maxTotalMb) || 5120)) });
+      if (result?.ok) { this.showToast(`Recovery-Punkt wird erstellt (Lauf #${result.job_id})`); this.loadJobs(true); }
+    },
+
+    async startFullStagedRestore(pointId) {
+      if (!this.recovery.pair || !pointId) return;
+      if (!(await this.requestConfirmation('Der vollständige Stand wird geprüft und ausschließlich in ein isoliertes Staging-Verzeichnis wiederhergestellt. Die produktiven Datenwege bleiben unberührt.', { title: 'Vollständigen Stand ins Staging laden', confirmLabel: 'Ins Staging wiederherstellen' }))) return;
+      const point = this.recovery.points.find((p) => p.id === pointId);
+      const limit = Math.min(51200, Math.max(1, Math.ceil(Number(point?.total_bytes || 0) / 1048576) || Number(this.recovery.maxTotalMb) || 5120));
+      const result = await this.api('POST', `/api/recovery/points/${encodeURIComponent(pointId)}/restore`, { identity: this.recovery.pair, max_total_mb: limit });
+      if (result?.ok) { this.showToast(`Vollständige Recovery läuft (Job #${result.job_id})`); this.loadJobs(true); }
+    },
+
+    async removeRecoveryStaging(item) {
+      if (!(await this.requestConfirmation('Die zurückgeholten Dateien in diesem Staging werden gelöscht. Prüfe vorher, ob du sie noch benötigst.', { title: 'Staging entfernen?', confirmLabel: 'Staging entfernen' }))) return;
+      const password = await this.requestCurrentPassword('Aktuelles Passwort zur Löschung eingeben.');
+      if (!password) return;
+      const result = await this.api('DELETE', `/api/recovery/staging/${encodeURIComponent(item.id)}`, { current_password: password });
+      if (result?.ok) await this.loadRecovery();
+    },
+
+    async acknowledgeQuarantine(item) {
+      if (!(await this.requestConfirmation(`Quarantäne für „${item.pair}“ aufheben? Dateirückgang: ${item.file_drop_percent ?? '–'} %, Größenrückgang: ${item.size_drop_percent ?? '–'} %. Prüfe Mount, Quellpfad und Bestand außerhalb der Anwendung. Die Freigabe erlaubt nachfolgende produktive Läufe einschließlich Löschungen.`, { title: 'Quarantäne wirklich aufheben?', confirmLabel: 'Geprüfte Quelle freigeben' }))) return;
+      const password = await this.requestCurrentPassword('Aktuelles Passwort zur Freigabe der Quarantäne eingeben.');
+      if (!password) return;
+      const result = await this.api('POST', `/api/recovery/quarantine/${encodeURIComponent(item.pair)}/acknowledge`, { current_password: password });
+      if (result?.ok) { this.showToast('Quarantäne bestätigt'); await this.loadRecovery(); }
+    },
+
+    async downloadRecoveryHandover() {
+      const handover = this.recovery.handover;
+      if (handover.passphrase.length < 12 || !handover.password) { this.showToast('Aktuelles Passwort und Passphrase mit mindestens 12 Zeichen eingeben.', 'err'); return; }
+      if (handover.passphrase !== handover.repeat) { this.showToast('Die Passphrasen stimmen nicht überein.', 'err'); return; }
+      if (location.protocol === 'http:' && !(await this.requestConfirmation('Diese Verbindung ist unverschlüsselt. Serverpasswort und Paket-Passphrase werden im Klartext an den Server übertragen. Verwende nach Möglichkeit HTTPS.', { title: 'Unverschlüsselte Verbindung', confirmLabel: 'Bewusst über HTTP fortfahren' }))) return;
+      try {
+        const response = await fetch('/api/recovery/handover', {
+          method: 'POST', credentials: 'same-origin', cache: 'no-store',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.cookie('rclone_sync_csrf') },
+          body: JSON.stringify({ current_password: handover.password, passphrase: handover.passphrase, include_paths: handover.includePaths }),
+        });
+        if (!response.ok) {
+          let message = `Serverfehler (HTTP ${response.status})`;
+          try { const payload = await response.json(); if (typeof payload.detail === 'string') message = payload.detail; } catch (_) {}
+          throw new Error(message);
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a'); link.href = url; link.download = 'recovery-handover.encrypted.json'; link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+        handover.downloaded = true;
+        handover.password = '';
+        this.showToast('Verschlüsseltes Übergabepaket heruntergeladen');
+      } catch (error) { this.showToast(error.message || 'Übergabepaket konnte nicht erstellt werden.', 'err'); }
+    },
+
+    printHandoverKey() {
+      if (!this.recovery.handover.passphrase) { this.showToast('Zuerst eine Passphrase eingeben.', 'err'); return; }
+      const printWindow = window.open('', '_blank', 'width=640,height=520');
+      if (!printWindow) { this.showToast('Druckfenster wurde vom Browser blockiert.', 'err'); return; }
+      printWindow.opener = null;
+      const escaped = this.recovery.handover.passphrase.replace(/[&<>"']/g, (char) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]));
+      printWindow.document.write(`<!doctype html><meta charset="utf-8"><title>Passphrase für Sicherpfad-Notfallpaket</title><h1>Passphrase für das Notfallpaket</h1><p>Getrennt vom verschlüsselten Paket verwahren und nur der bevollmächtigten Person übergeben.</p><pre>${escaped}</pre>`);
+      printWindow.document.close();
+      printWindow.focus();
+      printWindow.print();
+    },
+
+    recoveryBreadcrumbs() {
+      const parts = String(this.recovery.path || '').split('/').filter(Boolean);
+      return [{ label: 'Wurzel', path: '' }, ...parts.map((part, index) => ({ label: part, path: parts.slice(0, index + 1).join('/') }))];
+    },
+
+    async loadStorageComposition(pair, side = 'source', refresh = false) {
+      const key = `${pair}:${side}`;
+      this.storageComposition.loading[key] = true;
+      this.storageComposition.errors[key] = '';
+      const params = new URLSearchParams({ pair, side, refresh: refresh ? 'true' : 'false' });
+      const result = await this.api('GET', `/api/storage/composition?${params}`, undefined, { silent: true, captureError: true, requestKey: `composition-${key}`, timeoutMs: 70000 });
+      if (this.isStale(result)) return;
+      if (result?.__error) {
+        const detail = result.detail;
+        this.storageComposition.errors[key] = typeof detail === 'string' ? detail : (detail?.message || 'Zusammensetzung konnte nicht geladen werden.');
+      } else if (result) this.storageComposition.data[key] = result;
+      this.storageComposition.loading[key] = false;
+    },
+
+    compositionFor(pair, side) { return this.storageComposition.data[`${pair}:${side}`] || null; },
+    compositionLoading(pair, side) { return Boolean(this.storageComposition.loading[`${pair}:${side}`]); },
+    compositionError(pair, side) { return this.storageComposition.errors[`${pair}:${side}`] || ''; },
+    compositionBuckets(pair, side) {
+      return (this.compositionFor(pair, side)?.categories || []).filter((item) => Number(item.bytes) > 0).slice(0, 8);
+    },
+    compositionPercent(bucket, pair, side) {
+      const total = Number(this.compositionFor(pair, side)?.bytes || 0);
+      return total > 0 ? Math.max(0, Math.min(100, Number(bucket.bytes || 0) / total * 100)) : 0;
+    },
+    copyMatrixSummary() {
+      const rows = this.copies.data?.sources || [];
+      return { total: rows.length, protected: rows.filter((row) => row.level === 'ok').length, atRisk: rows.filter((row) => row.level !== 'ok') };
     },
 
     async runRestoreTest(pairName = '') {
@@ -2129,6 +2587,20 @@ function app() {
       this.snapshots.loading = false;
     },
 
+    async loadSnapshotDiff() {
+      const name = this.snapshots.restoreName;
+      if (!name) { this.snapshots.diff = { loading: false, data: null, error: '' }; return; }
+      this.snapshots.diff = { loading: true, data: null, error: '' };
+      const result = await this.api('GET', `/api/maintenance/config/snapshots/${encodeURIComponent(name)}/diff`, undefined, { silent: true, captureError: true, requestKey: 'snapshot-diff' });
+      if (this.isStale(result)) return;
+      if (result?.__error) {
+        const detail = result.detail;
+        this.snapshots.diff = { loading: false, data: null, error: typeof detail === 'string' ? detail : (detail?.message || 'Snapshot-Unterschiede konnten nicht geladen werden.') };
+        return;
+      }
+      this.snapshots.diff = { loading: false, data: result || null, error: '' };
+    },
+
     async createSnapshot() {
       const result = await this.api('POST', '/api/maintenance/config/snapshots');
       if (result?.ok) {
@@ -2209,6 +2681,27 @@ function app() {
       } finally {
         this.pending.filter = false;
       }
+    },
+
+    applyFilterPreset(name) {
+      const presets = {
+        os: ['- .DS_Store', '- Thumbs.db', '- desktop.ini', '- ._*'],
+        dev: ['- node_modules/**', '- __pycache__/**', '- .venv/**', '- .git/**'],
+        temp: ['- *.tmp', '- *.swp', '- ~$*'],
+      };
+      const incoming = presets[name];
+      if (!incoming) return;
+      const lines = String(this.filterFile.content || '').split(/\r?\n/);
+      const existing = new Set(lines.map((line) => line.trim()).filter(Boolean));
+      const additions = incoming.filter((line) => !existing.has(line));
+      if (!additions.length) {
+        this.showToast('Dieses Filter-Preset ist bereits enthalten.', 'warn');
+        return;
+      }
+      const prefix = this.filterFile.content && !this.filterFile.content.endsWith('\n') ? '\n' : '';
+      this.filterFile.content = `${this.filterFile.content || ''}${prefix}${additions.join('\n')}\n`;
+      this.filterFile.dirty = true;
+      this.showToast(`${additions.length} Filterregel(n) ergänzt`);
     },
 
     async changePassword() {
@@ -2307,6 +2800,8 @@ function app() {
     },
 
     activeDialog() {
+      if (this.remoteSetup.show) return this.$refs.remoteSetupDialog;
+      if (this.commandPalette.show) return this.$refs.commandPaletteDialog;
       if (this.confirmationDialog.show) return this.$refs.confirmationDialog;
       if (this.currentPasswordDialog.show) return this.$refs.currentPasswordDialog;
       if (this.jobModal.show) return this.$refs.jobDialog;
@@ -2458,7 +2953,8 @@ function app() {
     },
 
     closeOverlays() {
-      if (this.confirmationDialog.show) this.respondConfirmation(false);
+      if (this.remoteSetup.show) this.closeRemoteSetup();
+      else if (this.confirmationDialog.show) this.respondConfirmation(false);
       else if (this.currentPasswordDialog.show) this.cancelCurrentPassword();
       else if (this.jobModal.show) this.closeJob();
       else if (this.picker.show) this.closePicker();
@@ -2583,7 +3079,7 @@ function app() {
     },
 
     statusLabel(status) {
-      return ({ running: 'Läuft', ok: 'Erfolgreich', error: 'Fehler', skipped: 'Übersprungen', cancelled: 'Abgebrochen', stale: 'Verwaist', pending: 'Ausstehend', done: 'Fertig', disabled: 'Deaktiviert', warn: 'Prüfen' })[status] || status || 'Unbekannt';
+      return ({ running: 'Läuft', ok: 'Erfolgreich', error: 'Fehler', warning: 'Mit Hinweis', skipped: 'Übersprungen', cancelled: 'Abgebrochen', stale: 'Verwaist', pending: 'Ausstehend', done: 'Fertig', disabled: 'Deaktiviert', warn: 'Prüfen' })[status] || status || 'Unbekannt';
     },
 
     kindLabel(kind) {
@@ -2604,6 +3100,7 @@ function app() {
 
     summaryShort(summary) {
       if (!summary) return 'Keine Zusammenfassung';
+      if (summary.kind === 'restoretest' && summary.outcome === 'partial') return 'Prüfumfang begrenzt · Details im Lauf';
       if (summary.ok_count !== undefined) return `${summary.ok_count}/${summary.total_pairs} Paare${summary.dry_run ? ' · Dry-Run' : ''}`;
       if (summary.pair && summary.command) return `Check ${summary.pair}`;
       if (summary.error) return String(summary.error).substring(0, 120);

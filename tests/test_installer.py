@@ -38,7 +38,9 @@ def test_installer_uses_pinned_requirements_and_services_have_safe_runtime_defau
         encoding="utf-8"
     )
 
-    assert '-r "$APP_DIR/requirements.txt"' in script
+    assert (
+        '--require-hashes --only-binary=:all: -r "$APP_DIR/requirements.lock"' in script
+    )
     assert "--upgrade pip wheel" not in script
     assert "uvicorn[standard]==" in requirements
     assert "uvloop==" in requirements
@@ -108,10 +110,15 @@ def test_installer_rollback_restores_normalized_config_and_migrated_database():
     assert "restore_runtime_backup || rollback_failed=1" in script
     assert '[[ "$(< "$candidate/source-path.txt")" == "$APP_DIR_CANONICAL" ]]' in script
     assert '[[ -d "$candidate" && ! -L "$candidate" ]]' in script
-    assert '[[ -f "$source" && ! -L "$source" ]]' in script
-    assert 'sqlite3 "$source" "PRAGMA quick_check;"' in script
-    assert '"$APP_DIR_CANONICAL/data/rclone-sync.db-wal"' in script
-    assert '"$APP_DIR_CANONICAL/data/rclone-sync.db-shm"' in script
+    assert '/usr/bin/python3 -I "$ROLLBACK_RUNTIME_HELPER"' in script
+    assert (
+        '"$APP_DIR_CANONICAL" "$RUNTIME_UID" "$RUNTIME_GID" restore "$restore_dir"'
+        in script
+    )
+    assert 'git -c safe.directory="$APP_DIR" -C "$APP_DIR" show --no-textconv' in script
+    assert script.index('> "$ROLLBACK_RUNTIME_HELPER"') < script.index(
+        'checkout --detach "$SOURCE_COMMIT"'
+    )
     assert 'rm -rf "$APP_DIR/data"' not in script
     assert script.index("restore_runtime_backup || rollback_failed=1") < script.index(
         'restore_active_state rclone-sync-web.service "$WEB_WAS_ACTIVE"'
@@ -141,8 +148,8 @@ def test_ci_covers_supported_python_dependencies_ui_and_systemd_units():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
     assert 'python-version: ["3.10", "3.11", "3.12", "3.13"]' in workflow
-    assert "actions/checkout@v7" in workflow
-    assert "actions/setup-python@v7" in workflow
+    assert re.search(r"actions/checkout@[a-f0-9]{40}\b", workflow)
+    assert re.search(r"actions/setup-python@[a-f0-9]{40}\b", workflow)
     assert "-r requirements-dev.txt" in workflow
     assert "python -m pip check" in workflow
     assert "node --check app/static/app.js" in workflow

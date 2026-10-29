@@ -69,7 +69,11 @@ def test_support_and_privacy_pages_are_publishable_without_tracking():
 
     assert "Sicherpfad" in support
     assert "Datenschutzerklärung" in privacy
-    assert "keine personenbezogenen Daten" in privacy
+    assert "keine Analyse-, Werbe- oder Trackingdienste" in privacy
+    assert "Sicherungsinhalte werden nicht an den Entwickler übertragen" in privacy
+    assert "Apple" in privacy and "GitHub Pages" in privacy
+    assert "Geräte-Token" in privacy and "vollständige lokale Kopie" in privacy
+    assert "365 Tage" in privacy and "30 Tagen" in privacy
     assert "analytics" not in (support + privacy).lower()
     assert "<script" not in (support + privacy).lower()
 

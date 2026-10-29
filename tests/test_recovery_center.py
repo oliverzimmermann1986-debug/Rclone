@@ -1,6 +1,9 @@
 import base64
 import json
 from pathlib import Path
+from unittest.mock import Mock
+
+import pytest
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -98,8 +101,9 @@ def test_selection_rejects_traversal_and_deduplicates():
             raise AssertionError(f"unsafe path accepted: {unsafe}")
 
 
+@pytest.mark.parametrize("reporting_failure", [None, "audit", "notify"])
 def test_selective_restore_stages_and_verifies_without_writing_original(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, reporting_failure
 ):
     database = Database(tmp_path / "recovery.db")
     config = {
@@ -136,6 +140,15 @@ def test_selective_restore_stages_and_verifies_without_writing_original(
 
     monkeypatch.setattr(selective_restore, "_run", fake_run)
     monkeypatch.setattr(selective_restore, "notify", lambda *_args, **_kwargs: None)
+    if reporting_failure:
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("dummy reporting failure")
+
+        if reporting_failure == "audit":
+            monkeypatch.setattr(database, "audit_add", fail)
+        else:
+            monkeypatch.setattr(selective_restore, "notify", fail)
     job_id = database.job_start("recovery")
     result = selective_restore.run_selective_restore(
         database,
@@ -165,3 +178,50 @@ def test_staging_cleanup_is_confined_to_recovery_root(tmp_path: Path):
     else:
         raise AssertionError("traversal was accepted")
     assert outside.is_dir()
+
+
+def test_recovery_default_uses_configured_data_directory(tmp_path):
+    config = {"paths": {"data_dir": str(tmp_path / "data")}}
+    assert selective_restore.staging_root(config) == tmp_path / "data" / "recovery"
+    assert (
+        selective_restore._staging_path({})
+        .as_posix()
+        .endswith("/opt/rclone-sync/data/recovery")
+    )
+
+
+@pytest.mark.parametrize("failure", ["selection", "staging", "existing"])
+def test_selective_setup_failure_finishes_job_without_deleting_existing_work(
+    monkeypatch, tmp_path, failure
+):
+    database = Database(tmp_path / "setup.db")
+    config = {"paths": {"recovery_dir": str(tmp_path / "staging")}}
+    pair = {
+        "name": "Dummy",
+        "direction": "push",
+        "local": "/dummy",
+        "remote": "cloud:/dummy",
+    }
+    job_id = database.job_start("recovery")
+    work = tmp_path / "staging" / f"recovery-{job_id}"
+    if failure == "existing":
+        work.mkdir(parents=True)
+        (work / "keep").write_bytes(b"existing dummy data")
+    if failure == "staging":
+        config["paths"]["recovery_dir"] = "relative"
+    runner = Mock(side_effect=AssertionError("No subprocess expected"))
+    monkeypatch.setattr(selective_restore, "_run", runner)
+    monkeypatch.setattr(selective_restore, "notify", lambda *a, **k: None)
+    record = selective_restore.run_selective_restore(
+        database,
+        config,
+        pair,
+        ["../unsafe"] if failure == "selection" else ["a.txt"],
+        max_total_mb=1,
+        job_id=job_id,
+    )
+    assert record["status"] == "error"
+    assert database.job_get(job_id)["status"] == "error"
+    runner.assert_not_called()
+    if failure == "existing":
+        assert (work / "keep").read_bytes() == b"existing dummy data"

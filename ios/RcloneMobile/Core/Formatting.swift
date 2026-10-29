@@ -67,8 +67,8 @@ enum StatusStyle {
         switch value?.lowercased() {
         case "ok", "active", "healthy": .green
         case "running": .blue
-        case "warn", "warning", "stale", "overdue": .orange
-        case "error", "failed", "inactive": .red
+        case "warn", "warning", "partial", "overdue": .orange
+        case "error", "failed", "inactive", "stale": .red
         case "cancelled", "skipped": .secondary
         default: .secondary
         }
@@ -78,14 +78,23 @@ enum StatusStyle {
         switch value?.lowercased() {
         case "ok": "Erfolgreich"
         case "running": "Läuft"
+        case "warn", "warning": "Hinweis"
+        case "partial": "Prüfumfang begrenzt"
         case "error", "failed": "Fehler"
-        case "stale": "Veraltet"
+        case "stale": "Unterbrochen"
         case "cancelled": "Abgebrochen"
         case "skipped": "Übersprungen"
         case "active": "Aktiv"
         case "inactive": "Inaktiv"
         case let value?: value.capitalized
         case nil: "Unbekannt"
+        }
+    }
+
+    static func symbol(for value: String?) -> String {
+        switch value?.lowercased() {
+        case "warn", "warning", "partial": "exclamationmark.triangle.fill"
+        default: "circle.fill"
         }
     }
 }

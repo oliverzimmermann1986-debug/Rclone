@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
@@ -53,8 +54,7 @@ def _safe_relative(value: str) -> str:
         or path.is_absolute()
         or ".." in path.parts
         or "\\" in value
-        or ":" in value
-        or any(ord(char) < 32 for char in value)
+        or any(unicodedata.category(char) == "Cc" for char in value)
         or path.as_posix() != value
     ):
         raise HandoverError("Ungültiger Geräte-Vault-Pfad in der Notfallakte")
@@ -64,6 +64,8 @@ def _safe_relative(value: str) -> str:
 def portable_inventory(config: Mapping[str, Any], *, include_paths: bool) -> dict:
     pairs = {_identity(pair): pair for pair in _pairs(config)}
     records = []
+    target_hints: dict[str, set[str]] = {}
+    skipped_invalid = 0
     for path in (device_vault.vault_root(config) / "records").glob("*.json"):
         if len(records) >= MAX_RECORDS:
             raise HandoverError("Zu viele Geräte-Dateien für eine Notfallakte")
@@ -83,33 +85,63 @@ def portable_inventory(config: Mapping[str, Any], *, include_paths: bool) -> dic
         ):
             continue
         # An old receipt for a renamed target must not silently refer to the new one.
-        if str(value.get("target_root") or "") != _endpoints(pair)[1]:
+        if str(value.get("target_root") or "") not in {
+            device_vault.target_root(pair),
+            _endpoints(pair)[1],
+        }:
             continue
-        records.append(
-            {
-                key: value.get(key)
-                for key in (
-                    "id",
-                    "identity",
-                    "filename",
-                    "size",
-                    "sha256",
-                    "source_type",
-                    "device_name",
-                    "target_relative",
-                    "created_at",
-                    "completed_at",
-                )
-            }
+        try:
+            _safe_relative(str(value.get("target_relative") or ""))
+            device_vault.safe_filename(str(value.get("filename") or ""))
+        except (HandoverError, device_vault.VaultError):
+            skipped_invalid += 1
+            continue
+        item = {
+            key: value.get(key)
+            for key in (
+                "id",
+                "identity",
+                "filename",
+                "size",
+                "sha256",
+                "source_type",
+                "device_name",
+                "target_relative",
+                "created_at",
+                "completed_at",
+            )
+        }
+        item["cloud"] = device_vault._is_remote(str(value.get("target_root") or ""))
+        try:
+            validate_inventory(
+                {
+                    "rescue_inventory": {
+                        "schema": "sicherpfad-rescue-inventory-v1",
+                        "data_paths": [
+                            {"identity": item["identity"], "name": pair.get("name")}
+                        ],
+                        "records": [item],
+                    }
+                }
+            )
+        except HandoverError:
+            skipped_invalid += 1
+            continue
+        target_hints.setdefault(str(item["identity"]), set()).add(
+            str(value.get("target_root") or "")
         )
+        records.append(item)
     return {
         "schema": "sicherpfad-rescue-inventory-v1",
         "records": records,
+        "skipped_invalid": skipped_invalid,
         "data_paths": [
             {
                 "identity": identity,
                 "name": str(pair.get("name") or ""),
-                "target_hint": _endpoints(pair)[1] if include_paths else None,
+                "target_hint": next(iter(target_hints[identity]))
+                if include_paths and len(target_hints.get(identity, set())) == 1
+                else None,
             }
             for identity, pair in pairs.items()
         ],
@@ -131,7 +163,7 @@ def decrypt_handover(envelope: Mapping[str, Any], passphrase: str) -> dict:
         "ciphertext_b64",
         "plaintext_sha256",
     }
-    if set(envelope) != allowed:
+    if set(envelope) not in (allowed, allowed - {"plaintext_sha256"}):
         raise HandoverError("Notfallakte enthält unbekannte oder fehlende Felder")
     if (
         envelope.get("schema") != "rclone-recovery-handover-v1"
@@ -176,8 +208,9 @@ def decrypt_handover(envelope: Mapping[str, Any], passphrase: str) -> dict:
         raise HandoverError(
             "Notfallakte konnte nicht geöffnet werden; Passphrase und Datei prüfen"
         ) from exc
-    if hashlib.sha256(plaintext).hexdigest() != envelope.get(
-        "plaintext_sha256"
+    if (
+        "plaintext_sha256" in envelope
+        and hashlib.sha256(plaintext).hexdigest() != envelope["plaintext_sha256"]
     ) or not isinstance(package, dict):
         raise HandoverError("Integritätsprüfung der Notfallakte ist fehlgeschlagen")
     return package
@@ -256,6 +289,7 @@ def validate_inventory(package: Mapping[str, Any]) -> dict:
                 "target_relative": _safe_relative(
                     str(row.get("target_relative") or "")
                 ),
+                "cloud": row.get("cloud") is True,
             }
         )
     return {"data_paths": list(known.values()), "records": clean}
@@ -268,6 +302,8 @@ def preview_handover(
     return {
         "schema": "sicherpfad-rescue-preview-v1",
         "records": len(inventory["records"]),
+        "cloud_records": sum(row["cloud"] for row in inventory["records"]),
+        "local_only_records": sum(not row["cloud"] for row in inventory["records"]),
         "total_bytes": sum(row["size"] for row in inventory["records"]),
         "data_paths": [
             row
@@ -280,13 +316,13 @@ def preview_handover(
             {
                 "identity": _identity(pair),
                 "name": str(pair.get("name") or ""),
-                "target": _endpoints(pair)[1],
+                "target": device_vault.target_root(pair),
             }
             for pair in _pairs(config)
         ],
         "credentials_included": False,
         "config_will_change": False,
-        "instructions": "Cloud-Zugang auf diesem Server einrichten, Datenwege zuordnen und danach eine Datei zurückholen. Jede Datei wird vor der Freigabe mit SHA-256 geprüft.",
+        "instructions": "Zielzugang auf diesem Server einrichten und Datenwege zuordnen. Nur lokal abgelegte Dateien sind nach Serververlust nur mit weiterhin erreichbarem ursprünglichem Speicher rettbar. Jede Datei wird vor der Freigabe mit SHA-256 geprüft.",
     }
 
 
@@ -309,7 +345,7 @@ def import_handover(
     prepared = []
     for row in inventory["records"]:
         pair = current[mappings[row["identity"]]]
-        target = _endpoints(pair)[1]
+        target = device_vault.target_root(pair)
         if not target:
             raise HandoverError("Zugeordneter Datenweg besitzt kein Sicherungsziel")
         signature = hashlib.sha256(
@@ -337,6 +373,8 @@ def import_handover(
             "received": 0,
             "deduplicated": False,
             "target_root": target,
+            "cloud": device_vault._is_remote(target),
+            "local_only": not device_vault._is_remote(target),
             "created_at": time.time(),
             "error": None,
             "rescue_signature": signature,
@@ -366,5 +404,5 @@ def import_handover(
             device_vault._public_record(record) for _path, record, _new in prepared
         ],
         "config_changed": False,
-        "next_step": "Eine Geräte-Datei aus der Bibliothek zurückholen; die Cloud-Kopie wird vollständig geprüft.",
+        "next_step": "Eine Geräte-Datei aus der Bibliothek zurückholen; die Zielkopie wird vollständig geprüft.",
     }

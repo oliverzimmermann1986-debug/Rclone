@@ -533,8 +533,117 @@ def test_partial_selection_is_checked_but_fails_closed(monkeypatch, tmp_path: Pa
     assert result["sample_status"] == "partial_selection"
     assert result["sample_shortfall"] == 1
     assert result["sample_shortfall_reason"] == "insufficient_eligible_files"
-    assert "Teil-Stichprobe" in result["error"]
+    assert result["outcome"] == "partial"
+    assert result["integrity_ok"] is True
+    assert result["coverage_complete"] is False
+    assert "1 von 2" in result["warning"]
+    assert "error" not in result
+    assert drill.is_verified_partial(result) is True
     assert len(calls) == 2
+
+
+def test_partial_only_drill_is_a_warning_notification(monkeypatch, tmp_path: Path):
+    _cfg_value, _calls = _patch_common(
+        monkeypatch,
+        tmp_path,
+        sample={"paths": ["datei.bin"], "scanned": 1, "truncated": False},
+        sample_files=2,
+    )
+    notifications = []
+    monkeypatch.setattr(
+        drill, "notify", lambda *args, **kwargs: notifications.append((args, kwargs))
+    )
+    monkeypatch.setattr(drill, "reset_cancel", lambda *a, **kw: None)
+    summary = drill.run_restore_test(trigger="manual", seed=1)
+    assert summary["ok"] is False
+    assert summary["kind"] == "restoretest"
+    assert summary["outcome"] == "partial"
+    assert drill.is_partial_restore_summary(summary) is True
+    assert notifications[0][0][0] == "restore_test_warning"
+    assert "1 von 2" in notifications[0][0][2]
+    assert notifications[0][1]["pairs"] == ["archiv"]
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_partial_sample_with_mismatch_or_cancel_is_not_warning(
+    monkeypatch, tmp_path: Path, cancelled
+):
+    _cfg_value, _calls = _patch_common(
+        monkeypatch,
+        tmp_path,
+        sample={"paths": ["datei.bin"], "scanned": 1, "truncated": False},
+        sample_files=2,
+        check_rc=1,
+    )
+    notifications = []
+    monkeypatch.setattr(
+        drill, "notify", lambda *args, **kwargs: notifications.append(args)
+    )
+    monkeypatch.setattr(drill, "reset_cancel", lambda *a, **kw: None)
+    if cancelled:
+        monkeypatch.setattr(drill, "is_cancelled", lambda: True)
+    summary = drill.run_restore_test(trigger="manual", seed=1)
+    assert summary["ok"] is False
+    assert summary.get("outcome") != "partial"
+    assert not drill.is_partial_restore_summary(summary)
+    assert (
+        not notifications if cancelled else notifications[0][0] == "restore_test_error"
+    )
+
+
+def test_partial_sample_cleanup_failure_is_still_error(monkeypatch, tmp_path: Path):
+    _cfg_value, _calls = _patch_common(
+        monkeypatch,
+        tmp_path,
+        sample={"paths": ["datei.bin"], "scanned": 1, "truncated": False},
+        sample_files=2,
+    )
+    monkeypatch.setattr(drill, "reset_cancel", lambda *a, **kw: None)
+    notifications = []
+    monkeypatch.setattr(
+        drill, "notify", lambda *args, **kwargs: notifications.append(args)
+    )
+
+    def cleanup_fails(_path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(drill.shutil, "rmtree", cleanup_fails)
+    summary = drill.run_restore_test(trigger="manual", seed=1)
+    result = summary["pairs"][0]
+    assert result["temp_cleanup_failed"] is True
+    assert result.get("outcome") != "partial"
+    assert "warning" not in result
+    assert not drill.is_verified_partial(result)
+    assert not drill.is_partial_restore_summary(summary)
+    assert notifications[0][0] == "restore_test_error"
+
+
+def test_real_failure_in_mixed_partial_drill_uses_error_notification(monkeypatch):
+    partial = {
+        "name": "Fotos",
+        "ok": False,
+        "sample_status": "partial_selection",
+        "requested_sample_size": 20,
+        "sample_size": 19,
+        "verified": 19,
+        "restored_files": 19,
+        "return_code": 0,
+        "sample_shortfall_reason": "byte_budget",
+        "warning": "Prüfumfang begrenzt",
+    }
+    failure = {"name": "Rezepte", "ok": False, "error": "Prüfsummen weichen ab"}
+    results = [partial, failure]
+    notifications = []
+    monkeypatch.setattr(
+        drill, "notify", lambda *args, **kwargs: notifications.append(args)
+    )
+    drill._notify_result(
+        {"kind": "restoretest", "ok": False, "pairs": results}, results
+    )
+    assert notifications[0][0] == "restore_test_error"
+    assert "Prüfsummen weichen ab" in notifications[0][2]
+    assert "unbekannter Fehler" not in notifications[0][2]
+    assert "Fotos:" not in notifications[0][2]
 
 
 def test_incomplete_restore_never_reaches_checksum_success(monkeypatch, tmp_path: Path):

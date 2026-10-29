@@ -22,15 +22,18 @@ from .auth import (
     LOGIN_CSRF_COOKIE,
     bump_session_version,
     SESSION_COOKIE,
+    account_generation,
+    account_generation_guard,
     clear_login_failures,
     create_session,
     login_key,
     login_retry_after,
     record_login_failure,
     require_auth,
+    request_is_https,
     session_max_age,
     session_user,
-    verify_password,
+    verify_password_with_generation,
 )
 from .auth_contract import (
     NATIVE_LOGIN_PATH,
@@ -41,8 +44,13 @@ from .auth_contract import (
 from .config_store import get_config
 from .db import check_database_readonly, database_path, get_db
 from .rclone_args import rclone_subprocess_env
-from .security import CSRF_COOKIE, new_csrf_token, require_csrf
-from .static_assets import AllowlistedStaticFiles
+from .security import (
+    CSRF_COOKIE,
+    cookie_secure_for_request,
+    new_csrf_token,
+    require_csrf,
+)
+from .static_assets import AllowlistedStaticFiles, web_asset_cache_revision
 from .utils import bounded_number as _bounded_number
 from .routes import (
     api_pbs,
@@ -53,6 +61,7 @@ from .routes import (
     api_maintenance,
     api_push,
     api_recovery,
+    api_remotes,
     api_storage,
     api_test,
     api_vault,
@@ -91,12 +100,8 @@ def _sd_notify(message: str) -> None:
 
 
 def _cookie_secure(request: Request) -> bool:
-    configured = get_config().get("web", "secure_cookie", default=False)
-    if configured is True:
-        return True
-    if str(configured).lower() == "auto":
-        return request.url.scheme == "https"
-    return False
+    configured = get_config().get("web", "secure_cookie", default="auto")
+    return cookie_secure_for_request(request, configured)
 
 
 def _set_csrf_cookie(response, request: Request, token: str) -> None:
@@ -127,40 +132,57 @@ def _authenticate_login(
     request: Request, username: str, password: str
 ) -> tuple[str, int]:
     """Run the shared lockout/password flow for browser and native logins."""
+    request.state.login_generation = None
     key = login_key(request, username)
     retry_after = login_retry_after(key)
     if retry_after:
         return "rate_limited", retry_after
-    if not verify_password(username, password):
+    # Resolve a legacy empty session secret before binding the password proof.
+    account_generation()
+    generation = verify_password_with_generation(username, password)
+    if generation is None:
         return "invalid_credentials", record_login_failure(key)
+    request.state.login_generation = generation
     clear_login_failures(key)
-    _remove_initial_password_marker()
     return "success", 0
 
 
-def _set_authenticated_session(response, request: Request, username: str) -> None:
-    response.set_cookie(
-        SESSION_COOKIE,
-        create_session(username),
-        httponly=True,
-        samesite="lax",
-        max_age=session_max_age(),
-        secure=_cookie_secure(request),
-        path="/",
-    )
-    _set_csrf_cookie(response, request, new_csrf_token())
+def _set_authenticated_session(response, request: Request, username: str) -> bool:
+    generation = getattr(request.state, "login_generation", None)
+    if not generation:
+        return False
+    try:
+        with account_generation_guard(generation):
+            response.set_cookie(
+                SESSION_COOKIE,
+                create_session(username),
+                httponly=True,
+                samesite="lax",
+                max_age=session_max_age(),
+                secure=_cookie_secure(request),
+                path="/",
+            )
+            _set_csrf_cookie(response, request, new_csrf_token())
+            _remove_initial_password_marker()
+    except ValueError:
+        return False
+    return True
 
 
 def _production_security_warnings() -> list[str]:
     """Erkennt riskante Web-Defaults, ohne lokale HTTP-Installationen zu blockieren."""
     web = get_config().get("web", default={}) or {}
     warnings: list[str] = []
-    allowed_hosts = web.get("allowed_hosts", ["*"]) or ["*"]
+    allowed_hosts = web.get("allowed_hosts", ["localhost", "127.0.0.1", "::1"]) or [
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ]
     if isinstance(allowed_hosts, str):
         allowed_hosts = [allowed_hosts]
     if "*" in {str(item).strip() for item in allowed_hosts}:
         warnings.append("web.allowed_hosts enthält den Wildcard-Eintrag '*'")
-    if web.get("secure_cookie", False) is False:
+    if web.get("secure_cookie", "auto") is False:
         warnings.append("web.secure_cookie ist deaktiviert")
     try:
         hsts_seconds = int(web.get("hsts_seconds", 0) or 0)
@@ -251,6 +273,18 @@ async def _lifespan(_app):
                 )
                 continue
             result = reconcile_locked_scope(db, scope=scope, kinds=kinds)
+            if scope == runtime_state.DEFAULT_CANCEL_SCOPE and result.get("safe"):
+                from .jobs.selective_restore import reconcile_staging
+                from .recovery_snapshots import reconcile_snapshot_captures
+
+                try:
+                    config_snapshot = get_config().snapshot()
+                    reconcile_staging(db, config_snapshot)
+                    reconcile_snapshot_captures(config_snapshot)
+                except (OSError, ValueError, RuntimeError):
+                    logger.exception(
+                        "Recovery-Teildaten konnten beim Start nicht sicher bereinigt werden"
+                    )
             recovered += int(result.get("recovered_jobs") or 0)
             if not result.get("safe"):
                 logger.error(
@@ -331,7 +365,9 @@ def _host_allowed(request: Request) -> bool:
                 return True
         except ValueError:
             pass
-    configured = get_config().get("web", "allowed_hosts", default=["*"]) or ["*"]
+    configured = get_config().get(
+        "web", "allowed_hosts", default=["localhost", "127.0.0.1", "::1"]
+    ) or ["localhost", "127.0.0.1", "::1"]
     if isinstance(configured, str):
         configured = [configured]
     allowed = {str(item).casefold().strip() for item in configured if str(item).strip()}
@@ -382,7 +418,9 @@ def _same_origin(request: Request) -> bool:
     # konfigurierte allowed_hosts gelten dann als vertrauenswürdige Origins —
     # der Wildcard-Default "*" bewusst nicht.
     origin_host = str(parsed.hostname or "").casefold()
-    configured = get_config().get("web", "allowed_hosts", default=["*"]) or ["*"]
+    configured = get_config().get(
+        "web", "allowed_hosts", default=["localhost", "127.0.0.1", "::1"]
+    ) or ["localhost", "127.0.0.1", "::1"]
     if isinstance(configured, str):
         configured = [configured]
     explicit = {
@@ -432,15 +470,21 @@ def _apply_security_headers(response, request: Request, request_id: str):
             maximum=63_072_000,
         )
     )
-    if hsts_seconds > 0 and request.url.scheme == "https":
+    if hsts_seconds > 0 and request_is_https(request):
         response.headers.setdefault(
             "Strict-Transport-Security", f"max-age={hsts_seconds}"
         )
-    if request.url.path.startswith("/api/") or request.url.path in {
-        "/",
-        "/login",
-        "/logout",
-    }:
+    if (
+        request.url.path.startswith("/api/")
+        or request.url.path
+        in {
+            "/",
+            "/login",
+            "/logout",
+            "/security",
+        }
+        or request.url.path.startswith("/webauthn/")
+    ):
         response.headers.setdefault("Cache-Control", "no-store")
     elif request.url.path.startswith("/static/"):
         response.headers.setdefault("Cache-Control", "public, max-age=86400")
@@ -537,6 +581,7 @@ app.include_router(api_storage.router)
 app.include_router(api_diagnostics.router)
 app.include_router(api_maintenance.router)
 app.include_router(api_browse.router)
+app.include_router(api_remotes.router)
 app.include_router(api_pbs.router)
 app.include_router(api_push.router)
 app.include_router(api_webauthn.router)
@@ -550,6 +595,8 @@ STATIC_ASSET_ALLOWLIST = frozenset(
         "app.js",
         "ui-helpers.js",
         "style.css",
+        "workspace.js",
+        "workspace.css",
         "manifest.json",
         "sw.js",
         "app-icon-192.png",
@@ -617,7 +664,8 @@ def login_submit(
     if status != "success":
         return RedirectResponse(url=retry_url + "error=1", status_code=303)
     response = RedirectResponse(url=target, status_code=303)
-    _set_authenticated_session(response, request, username)
+    if not _set_authenticated_session(response, request, username):
+        return RedirectResponse(url=retry_url + "error=1", status_code=303)
     response.delete_cookie(LOGIN_CSRF_COOKIE, path="/login")
     return response
 
@@ -665,7 +713,8 @@ def native_login_submit(request: Request, credentials: NativeLoginRequest):
         return JSONResponse(status_code=401, content={"status": "invalid_credentials"})
 
     response = JSONResponse(content={"status": "success"})
-    _set_authenticated_session(response, request, credentials.username)
+    if not _set_authenticated_session(response, request, credentials.username):
+        return JSONResponse(status_code=401, content={"status": "invalid_credentials"})
     response.delete_cookie(LOGIN_CSRF_COOKIE, path=NATIVE_LOGIN_PATH)
     return response
 
@@ -727,9 +776,8 @@ def index(request: Request):
     if not session_user(token):
         return RedirectResponse(url="/login", status_code=303)
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    # Cache-Busting: Query-Version an app.js/style.css folgt der App-Version,
-    # sonst hängen Browser nach Updates auf altem Frontend (fehlende GUI-Features).
-    html = html.replace("?v=__APP_VERSION__", f"?v={__version__}")
+    asset_revision = web_asset_cache_revision(STATIC_DIR, __version__)
+    html = html.replace("?v=__APP_VERSION__", f"?v={asset_revision}")
     response = HTMLResponse(html)
     if not request.cookies.get(CSRF_COOKIE):
         _set_csrf_cookie(response, request, new_csrf_token())
@@ -772,14 +820,11 @@ def readyz():
         )
     except Exception:
         ready = False
-    warnings = _production_security_warnings() if ready else []
     return JSONResponse(
         status_code=200 if ready else 503,
         content={
             "ok": ready,
             "version": __version__,
-            "warnings": warnings,
-            "secure_configuration": not warnings,
         },
     )
 

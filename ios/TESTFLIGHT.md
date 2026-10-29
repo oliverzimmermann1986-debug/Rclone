@@ -26,7 +26,7 @@ de.oliverzimmermann.rclonesync
 
    Benötigt werden Issuer ID, Key ID und die `.p8`-Datei. Codemagic erzeugt beziehungsweise lädt damit Distribution-Zertifikat und Provisioning Profile automatisch.
    In Codemagic sind Haupt-App (`rclone-sync-app-store-shared-v2`) und Widget (`rclone-sync-widget-app-store`) konfiguriert. Für `.share` ein zusätzliches App-Store-Profil mit derselben App Group und demselben Distribution-Zertifikat erstellen. Erst nach tatsächlicher Hinterlegung dessen Reference in `codemagic.yaml` unter `ios_signing.provisioning_profiles` aufnehmen. Diese Datei behauptet nicht, dass das neue Profil bereits existiert. Keine alten App-/Widget-Profile oder Bundle-IDs ersetzen.
-7. Den öffentlichen GPG-Schlüssel, der die iOS-Release-Tags prüft, ASCII-armored exportieren, Base64-kodieren und in Codemagic in der Variablengruppe `ios-release` als geschützte Variable `IOS_RELEASE_GPG_PUBLIC_KEY_B64` hinterlegen. Der private Schlüssel bleibt ausschließlich beim Release-Verantwortlichen. Die Pipeline importiert nur den öffentlichen Schlüssel in einen isolierten, leeren GPG-Schlüsselbund und akzeptiert deshalb keine Signaturen anderer Schlüssel. Der aktuell eingerichtete Release-Schlüssel hat den Fingerprint `47F8 4407 A9D8 76BC C960 973F 7E69 CA72 01C4 C7B3` und läuft am 26. August 2028 ab.
+7. Den öffentlichen GPG-Schlüssel, der die iOS-Release-Tags prüft, ASCII-armored exportieren, Base64-kodieren und in Codemagic in der Variablengruppe `ios-release` als geschützte Variable `IOS_RELEASE_GPG_PUBLIC_KEY_B64` hinterlegen. Der private Schlüssel bleibt ausschließlich beim Release-Verantwortlichen. Die Pipeline importiert den öffentlichen Schlüssel in einen isolierten, leeren GPG-Schlüsselbund. Der Herkunftsprüfer verlangt den konfigurierten `IOS_RELEASE_GPG_FINGERPRINT` und bindet den tatsächlichen Signierer anhand der rohen GPG-Statusdaten an diesen Hauptschlüssel; ein zugehöriger gültiger Signier-Unterschlüssel ist ebenfalls zulässig. Zusätzliche Schlüssel im importierten Block erhalten dadurch keine Release-Berechtigung. Der aktuell eingerichtete Release-Schlüssel hat den Fingerprint `47F8 4407 A9D8 76BC C960 973F 7E69 CA72 01C4 C7B3` und läuft am 26. August 2028 ab.
 
 ## Erster Build
 
@@ -40,7 +40,11 @@ git tag -v ios-v1.0.0
 git push origin ios-v1.0.0
 ```
 
-Der öffentliche Signierschlüssel muss über `IOS_RELEASE_GPG_PUBLIC_KEY_B64` verfügbar sein. Die Pipeline holt `origin/main` und den exakten Tag erneut und bricht vor Versionsänderung, Build oder Publishing ab, wenn Schlüsselimport oder Signaturprüfung scheitern, der Tag nur lightweight, nicht auf dem Checkout oder nicht in der Main-Historie ist.
+Der öffentliche Signierschlüssel muss über `IOS_RELEASE_GPG_PUBLIC_KEY_B64` verfügbar sein. Die Pipeline holt `origin/main` und den exakten Tag erneut. Sie pinnt den geholten Main-Commit und entnimmt diesem Commit den Herkunftsprüfer und dessen Versionshelfer. Beide liegen zusammen mit einem leeren GPG-Schlüsselbund in einem frischen privaten Temporärverzeichnis außerhalb des noch ungeprüften Checkouts; Python startet den Prüfer isoliert mit `-I`. Erst danach laufen Programme aus dem Release-Checkout.
+
+Die Prüfung bricht vor Versionsänderung, Build oder Publishing ab, wenn Schlüsselimport oder Signaturprüfung scheitern, der tatsächliche Signierer nicht zum gepinnten Hauptschlüssel gehört, GPG fehlende, mehrdeutige, abgelaufene, widerrufene oder fehlerhafte Signaturstatusdaten liefert, der Tag nur lightweight ist, der signierte eingebettete Tag-Name vom angeforderten `ios-vX.Y.Z` abweicht, das Tag-Objekt nicht direkt auf den Checkout-Commit zeigt oder dieser nicht in der Historie des gepinnten Main-Commits liegt. Eine weitere Referenz auf ein älteres korrekt signiertes Tag-Objekt gilt damit nicht als Signatur eines neuen Versionsnamens.
+
+**Betriebliche Freigabegrenze:** Codemagic muss die verwendete Workflowdefinition und die Tag-/Main-Berechtigungen unabhängig schützen. Tag-Annahme, Freigaben und der Zeitpunkt der Bereitstellung von `ios-release`, App-Store-Integration und Signing-Ressourcen sind Einstellungen des Hosted-Dienstes. Dieser Quelltextschritt belegt nicht, dass dort Secrets erst nach der Herkunftsprüfung verfügbar sind. Wer eine beliebige Workflowdatei auswählen und ändern darf, kann einen darin definierten Prüfschritt ebenfalls ändern; das muss die Betreiberkonfiguration vor dem Build verhindern.
 
 Die Pipeline:
 
@@ -60,6 +64,20 @@ Der Export ist nicht auf interne TestFlight-Gruppen beschränkt. Derselbe verarb
 Auf der Anmeldeseite steht zusätzlich eine lokale, ausdrücklich simulierte Vorschau bereit. Für Apples Funktionsprüfung weiterhin den erreichbaren isolierten Prüfserver mit echten Beispieldaten und gültigem Prüferkonto verwenden; die Vorschau allein belegt keine Übertragung oder Wiederherstellung. Die vorbereiteten Texte, URLs und Prüferhinweise stehen in [`APP_STORE_METADATA.md`](APP_STORE_METADATA.md).
 
 ## Sicherheitsregeln
+
+Die folgenden Einstellungen sind in GitHub/Codemagic selbst vorzunehmen und
+durch die Repository-YAML nicht erzwingbar:
+
+- Ein GitHub-Ruleset schützt Erstellung, Änderung und Löschung von `ios-v*`-Tags;
+  nur die zuständigen Release-Verantwortlichen erhalten die erforderlichen Rechte.
+- Die Signiergruppe `ios-release` ist ausschließlich für freigegebene Builds des
+  geschützten `main` zugänglich. Ein ungeprüfter Tag darf nicht allein durch eine
+  selbst mitgebrachte YAML Zugriff auf die Signierintegration erlangen.
+- Runner-Image und bereits installiertes GPG sind vertrauenswürdig bereitzustellen.
+  Fehlt `gpg`, bricht die Pipeline vor Downloads/Herkunftsprüfung ab. Ein früheres
+  ungepinntes `brew install gnupg` wird nicht als Vertrauensanker verwendet.
+
+Diese Dokumentation bestätigt keine live konfigurierten Plattformrechte.
 
 - API-Schlüssel, `.p8`, Zertifikate und Provisioning Profiles niemals committen.
 - Die App speichert das Serverpasswort nicht.

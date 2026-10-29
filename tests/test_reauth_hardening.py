@@ -13,6 +13,118 @@ from app.db import Database
 from app.routes import api_config, api_maintenance
 
 
+@pytest.mark.parametrize("native", [False, True])
+def test_registration_cannot_rebind_old_password_proof_to_new_generation(
+    tmp_path, monkeypatch, native
+):
+    from app.routes import api_webauthn
+
+    store, database = _setup(tmp_path, monkeypatch)
+    store.update(
+        lambda data: data["web"].update(
+            webauthn_rp_id="backup.example",
+            webauthn_origin="https://backup.example",
+            secure_cookie=True,
+        )
+    )
+    token = auth.create_session("admin")
+    reauthenticate = api_webauthn.require_reauthentication
+
+    def rotate_after_proof(*args):
+        proof = reauthenticate(*args)
+        store.update(lambda data: data["web"].update(session_version=2))
+        return proof
+
+    monkeypatch.setattr(api_webauthn, "require_reauthentication", rotate_after_proof)
+    with pytest.raises(HTTPException) as denied:
+        if native:
+            api_webauthn.create_native_registration_ticket(
+                api_webauthn.NativeRegistrationTicketRequest(
+                    method="passkey",
+                    current_password="correct-password",
+                    app_challenge="C" * 43,
+                ),
+                _request(token),
+                user="admin",
+            )
+        else:
+            api_webauthn.begin_registration(
+                api_webauthn.RegistrationOptionsRequest(
+                    method="passkey", current_password="correct-password"
+                ),
+                _request(token),
+                user="admin",
+            )
+    assert denied.value.status_code in {400, 401}
+    with database.conn() as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM webauthn_challenges").fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM native_webauthn_registrations"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "global",
+        "pair",
+        "remove_pair",
+        "change_identity",
+        "remove_copy_pair",
+        "remove_backup",
+    ],
+)
+def test_quarantine_controls_cannot_be_weakened_without_password(
+    tmp_path, monkeypatch, scope
+):
+    from app import protection
+
+    store, database = _setup(tmp_path, monkeypatch)
+    pair = {
+        "id": "a" * 32,
+        "name": "Protected",
+        "local": str(tmp_path / "source"),
+        "remote": "cloud:/backup",
+        "direction": "push",
+        "mode": "sync",
+        "allow_delete": True,
+        "max_delete": 10,
+    }
+    if scope == "remove_copy_pair":
+        pair["mode"] = "copy"
+    store.update(lambda data: data["backup"].update(pairs=[pair], filter_file=""))
+    database.runtime_set(
+        protection._ANOMALY_STATE_KEY,
+        {"quarantines": {protection._state_key(pair): {"pair": "Protected"}}},
+    )
+    candidate, revision = store.snapshot_with_revision()
+    candidate["_revision"] = revision
+    if scope == "global":
+        candidate["backup"]["anomaly_guard"] = {"enabled": False}
+    elif scope == "pair":
+        candidate["backup"]["pairs"][0]["anomaly_guard"] = {"enabled": False}
+    elif scope == "remove_backup":
+        del candidate["backup"]
+    elif scope in {"remove_pair", "remove_copy_pair"}:
+        candidate["backup"]["pairs"] = []
+    else:
+        candidate["backup"]["pairs"][0]["id"] = "b" * 32
+    with pytest.raises(HTTPException) as denied:
+        api_config.update_config(
+            _request("config-session"),
+            api_config.ConfigUpdate(config=candidate),
+            user="admin",
+        )
+    assert denied.value.status_code == 403
+    assert store.revision == revision
+
+
 def _config(tmp_path: Path) -> dict:
     return {
         "web": {
@@ -67,6 +179,24 @@ def _request(token: str, host: str = "192.0.2.10") -> Request:
             "client": (host, 12345),
         }
     )
+
+
+@pytest.mark.parametrize("pairs", [True, 7, {"unexpected": "mapping"}])
+def test_quarantine_security_check_preserves_config_validation_errors(
+    tmp_path, monkeypatch, pairs
+):
+    store, _database = _setup(tmp_path, monkeypatch)
+    candidate, revision = store.snapshot_with_revision()
+    candidate["_revision"] = revision
+    candidate["backup"]["pairs"] = pairs
+    with pytest.raises(HTTPException) as denied:
+        api_config.update_config(
+            _request("config-session"),
+            api_config.ConfigUpdate(config=candidate),
+            user="admin",
+        )
+    assert denied.value.status_code == 422
+    assert store.revision == revision
 
 
 def test_reauthentication_is_persistently_limited_per_session_and_ip(
@@ -153,7 +283,7 @@ def test_password_change_stays_successful_when_post_cleanup_fails(
     monkeypatch.setattr(api_config, "get_db", lambda: _FailingAuditDB())
 
     result = api_config.change_password(
-        _request("password-change"),
+        _request(auth.create_session("admin")),
         api_config.PasswordChange(
             current_password="correct-password",
             new_password="new-correct-password",
@@ -192,6 +322,78 @@ def test_config_update_stays_successful_when_post_audit_fails(
     assert result["status"] == "success_with_warning"
     assert store.get("backup", "max_parallel") == 3
     assert any("Audit-Protokoll" in warning for warning in result["warnings"])
+
+
+@pytest.mark.parametrize(
+    "section,key,value",
+    [
+        ("paths", "data_dir", "alternate-data"),
+        ("paths", "recovery_dir", "alternate-recovery"),
+        ("backup", "filter_file", "alternate-filters.txt"),
+    ],
+)
+def test_path_changes_require_password(tmp_path, monkeypatch, section, key, value):
+    store, _ = _setup(tmp_path, monkeypatch)
+    candidate, revision = store.snapshot_with_revision()
+    candidate[section][key] = str(
+        (tmp_path / "data" if section == "backup" else tmp_path) / value
+    )
+    candidate["_revision"] = revision
+    with pytest.raises(HTTPException) as denied:
+        api_config.update_config(
+            _request("path-change"),
+            api_config.ConfigUpdate(config=candidate),
+            user="admin",
+        )
+    assert denied.value.status_code == 403
+    assert store.revision == revision
+
+
+def test_omitted_sensitive_fields_are_preserved_in_saved_config(tmp_path, monkeypatch):
+    store, _ = _setup(tmp_path, monkeypatch)
+
+    def customize(data):
+        data["web"].update({"secure_cookie": True, "hsts_seconds": 1234})
+        data["paths"]["recovery_dir"] = str(tmp_path / "private-recovery")
+        data["notifications"]["apns"] = {"key_file": str(tmp_path / "data" / "key.p8")}
+
+    store.update(customize)
+    candidate, revision = store.snapshot_with_revision()
+    candidate["web"].pop("secure_cookie")
+    candidate["web"].pop("hsts_seconds")
+    candidate["paths"].pop("recovery_dir")
+    candidate["notifications"].pop("apns")
+    candidate["backup"]["max_parallel"] = 3
+    candidate["_revision"] = revision
+    result = api_config.update_config(
+        _request("legacy-client"),
+        api_config.ConfigUpdate(config=candidate),
+        user="admin",
+    )
+    assert result["ok"]
+    assert store.get("web", "secure_cookie") is True
+    assert store.get("web", "hsts_seconds") == 1234
+    assert store.get("paths", "recovery_dir") == str(tmp_path / "private-recovery")
+    assert store.get("notifications", "apns", "key_file") == str(
+        tmp_path / "data" / "key.p8"
+    )
+
+
+def test_apns_key_change_requires_password(tmp_path, monkeypatch):
+    store, _ = _setup(tmp_path, monkeypatch)
+    candidate, revision = store.snapshot_with_revision()
+    candidate["notifications"]["apns"] = {
+        "key_file": str(tmp_path / "data" / "other.p8")
+    }
+    candidate["_revision"] = revision
+    with pytest.raises(HTTPException) as denied:
+        api_config.update_config(
+            _request("key-change"),
+            api_config.ConfigUpdate(config=candidate),
+            user="admin",
+        )
+    assert denied.value.status_code == 403
+    assert store.revision == revision
 
 
 def test_snapshot_restore_stays_successful_when_post_audit_fails(

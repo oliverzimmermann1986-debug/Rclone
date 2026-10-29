@@ -13,6 +13,7 @@ struct OpenRecoveryCenterIntent: AppIntent {
 }
 
 struct ProtectionStatusIntent: AppIntent {
+    static var authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
     static var title: LocalizedStringResource = "Schutzstatus anzeigen"
     static var description = IntentDescription("Liest den zuletzt auf diesem Gerät gespeicherten Schutzstatus vor.")
 

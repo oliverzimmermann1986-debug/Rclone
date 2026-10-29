@@ -32,7 +32,13 @@ from typing import Any, Mapping, Optional, Sequence
 from ..config_store import get_config
 from ..notifications import notify
 from ..rclone_args import rclone_subprocess_env
-from ..restore_evidence import pair_binding, restore_history_key
+from ..restore_evidence import (
+    is_partial_restore_summary,
+    is_verified_partial,
+    pair_binding,
+    partial_restore_warning,
+    restore_history_key,
+)
 from ..utils import bounded_int as _bounded_int
 from .rclone_sync import (
     DEFAULT_CANCEL_SCOPE,
@@ -48,6 +54,7 @@ from .rclone_sync import (
     is_cancelled,
     reset_cancel,
 )
+from .restore_sampling import select_budgeted_sample
 
 logger = logging.getLogger(__name__)
 
@@ -317,15 +324,8 @@ def _sample_paths(
             f"{stderr[:300]}"
         )
     rng.shuffle(reservoir)
-    selected: list[tuple[str, int]] = []
-    selected_bytes = 0
-    for path, size in reservoir:
-        if len(selected) >= sample_size:
-            break
-        if selected_bytes + size > max_total_bytes:
-            continue
-        selected.append((path, size))
-        selected_bytes += size
+    selected = select_budgeted_sample(reservoir, sample_size, max_total_bytes)
+    selected_bytes = sum(size for _path, size in selected)
     return {
         "paths": [path for path, _size in selected],
         "sizes": {path: size for path, size in selected},
@@ -647,13 +647,13 @@ def run_pair_restore_test(
                     {
                         "ok": False,
                         "verified": pulled,
-                        "error": (
-                            "Teil-Stichprobe: "
-                            f"{pulled} von {requested_sample_size} angeforderten "
-                            "Dateien ausgewählt und erfolgreich geprüft"
-                        ),
+                        "outcome": "partial",
+                        "integrity_ok": True,
+                        "coverage_complete": False,
                     }
                 )
+                result.pop("error", None)
+                result["warning"] = partial_restore_warning(result)
             else:
                 result.update(
                     {"ok": True, "verified": pulled, "sample_status": "complete"}
@@ -710,6 +710,8 @@ def run_pair_restore_test(
                 cleanup_error,
             )
             previous_error = str(result.get("error") or "").strip()
+            result.pop("outcome", None)
+            result.pop("warning", None)
             result.update(
                 {
                     "ok": False,
@@ -824,6 +826,7 @@ def run_restore_test(
     history_keys[AGGREGATE_RUN_NAME] = HISTORY_KEY
 
     summary: dict[str, Any] = {
+        "kind": JOB_KIND,
         "ok": ok,
         "cancelled": cancelled,
         "trigger": trigger,
@@ -835,6 +838,9 @@ def run_restore_test(
     if not results:
         summary["error"] = "Kein passendes Pair ausgewählt"
 
+    if is_partial_restore_summary(summary):
+        summary["outcome"] = "partial"
+
     _notify_result(summary, results)
     return summary
 
@@ -842,16 +848,36 @@ def run_restore_test(
 def _notify_result(summary: Mapping[str, Any], results: list[dict[str, Any]]) -> None:
     if not results or summary.get("cancelled"):
         return
-    failed = [item for item in results if not item.get("ok")]
-    if failed:
-        detail = "\n".join(
+    if is_partial_restore_summary(summary):
+        partial_results = [item for item in results if is_verified_partial(item)]
+        notify(
+            "restore_test_warning",
+            "Restore-Prüfung: Prüfumfang begrenzt",
+            "\n".join(
+                f"{item.get('name')}: {partial_restore_warning(item)}"
+                for item in partial_results
+            ),
+            pairs=[str(item.get("name")) for item in partial_results],
+        )
+        return
+    failed = [
+        item for item in results if not item.get("ok") and not is_verified_partial(item)
+    ]
+    if failed or not summary.get("ok"):
+        details = [
             f"{item.get('name')}: {item.get('error') or 'unbekannter Fehler'}"
             for item in failed
-        )
+        ]
+        if summary.get("error"):
+            details.append(str(summary["error"]))
+        if not details:
+            details.append("Restore-Prüfung wurde nicht vollständig abgeschlossen")
         notify(
             "restore_test_error",
-            f"Restore-Drill fehlgeschlagen für {len(failed)} Pair(s)",
-            detail,
+            f"Restore-Drill fehlgeschlagen für {len(failed)} Pair(s)"
+            if failed
+            else "Restore-Drill fehlgeschlagen",
+            "\n".join(details),
             pairs=[str(item.get("name")) for item in failed],
         )
         return

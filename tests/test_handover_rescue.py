@@ -40,6 +40,7 @@ def fixture(tmp_path, monkeypatch):
         source_type="photo",
         device_name="iPhone",
         target_root=str(target),
+        local_only=True,
     )
     device_vault.append_chunk(config, record["id"], offset=0, payload=payload)
     device_vault.queue_completion(config, record["id"])
@@ -64,6 +65,7 @@ def test_fresh_server_import_maps_target_and_recovers_verified_bytes(
     unchanged = copy.deepcopy(fresh)
     preview = rescue.preview_handover(fresh, envelope, "correct-rescue-passphrase")
     assert preview["records"] == 1 and not preview["credentials_included"]
+    assert preview["local_only_records"] == 1 and preview["cloud_records"] == 0
     assert "never-export-this" not in json.dumps(
         rescue.decrypt_handover(envelope, "correct-rescue-passphrase")
     )
@@ -172,6 +174,33 @@ def test_reconfigured_target_requires_fresh_explicit_import(tmp_path, monkeypatc
     fresh["backup"]["pairs"][0]["remote"] = str(tmp_path / "different")
     with pytest.raises(device_vault.VaultError, match="geändert"):
         device_vault.download_blob(fresh, item["id"])
+
+
+def test_colon_filename_is_portable_and_old_control_name_is_skipped(
+    tmp_path, monkeypatch
+):
+    config, fresh, record, _envelope, _payload = fixture(tmp_path, monkeypatch)
+    root = device_vault.vault_root(config)
+    receipt = device_vault._load_record(root, record["id"])
+    receipt["filename"] = "Notiz 12:30.txt"
+    receipt["target_relative"] = "Sicherpfad/iPhone/Dateien/Notiz 12:30.txt"
+    device_vault._save_record(root, receipt)
+    inventory = rescue.portable_inventory(config, include_paths=False)
+    validated = rescue.validate_inventory({"rescue_inventory": inventory})
+    assert validated["records"][0]["filename"] == "Notiz 12:30.txt"
+    assert validated["records"][0]["target_relative"].endswith("Notiz 12:30.txt")
+    envelope = encrypted_handover(
+        {"rescue_inventory": inventory}, "correct-rescue-passphrase"
+    )
+    imported = rescue.import_handover(
+        fresh, envelope, "correct-rescue-passphrase", {"old-photos": "new-photos"}
+    )
+    assert imported["imported"] == 1
+    receipt["filename"] = "Notiz\t12:30.txt"
+    device_vault._save_record(root, receipt)
+    skipped = rescue.portable_inventory(config, include_paths=False)
+    assert skipped["skipped_invalid"] == 1
+    assert skipped["records"] == []
 
 
 def test_missing_server_blob_streams_cloud_bytes_through_size_and_hash_verification(

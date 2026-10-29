@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -5,7 +6,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app import main
-from app.static_assets import AllowlistedStaticFiles
+from app.static_assets import (
+    WEB_CACHE_ASSETS,
+    AllowlistedStaticFiles,
+    web_asset_cache_revision,
+)
 
 
 def _mounted_static_app() -> AllowlistedStaticFiles:
@@ -25,6 +30,8 @@ def test_production_static_mount_has_an_explicit_complete_allowlist():
         "app.js",
         "ui-helpers.js",
         "style.css",
+        "workspace.js",
+        "workspace.css",
         "manifest.json",
         "sw.js",
         "app-icon-192.png",
@@ -119,3 +126,18 @@ def test_allowlist_rejects_hidden_or_nested_configuration(tmp_path: Path):
             directory=tmp_path,
             allowed_files={"app.js", "nested/extra.js", ".secret"},
         )
+
+
+@pytest.mark.parametrize("changed_asset", ["workspace.js", "workspace.css", "app.js"])
+def test_asset_revision_changes_for_same_timestamp_and_size_web_patch(
+    tmp_path: Path, changed_asset: str
+):
+    for name in WEB_CACHE_ASSETS:
+        (tmp_path / name).write_bytes(b"before")
+    before = web_asset_cache_revision(tmp_path, "2.4.0")
+    assert web_asset_cache_revision(tmp_path, "2.4.0") == before
+    path = tmp_path / changed_asset
+    old_stat = path.stat()
+    path.write_bytes(b"after!")
+    os.utime(path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    assert web_asset_cache_revision(tmp_path, "2.4.0") != before

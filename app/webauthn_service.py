@@ -26,6 +26,7 @@ from webauthn.helpers.structs import (
     UserVerificationRequirement,
 )
 
+from .auth import account_generation, account_generation_guard
 from .config_store import get_config
 from .db import Database, get_db
 
@@ -95,9 +96,15 @@ def registration_options(
     *,
     native: bool = False,
     app_binding: str = "",
+    authorization_generation: str | None = None,
     database: Database | None = None,
 ) -> dict[str, Any]:
     db = database or get_db()
+    generation = (
+        account_generation()
+        if authorization_generation is None
+        else authorization_generation
+    )
     rp_id, _origin, username = settings()
     is_passkey = method == "passkey"
     options = generate_registration_options(
@@ -129,15 +136,17 @@ def registration_options(
         ],
     )
     challenge_id = secrets.token_urlsafe(24)
-    db.webauthn_challenge_create(
-        challenge_id=challenge_id,
-        challenge=options.challenge,
-        purpose="register",
-        method=method,
-        label=label,
-        native=native,
-        app_binding=app_binding,
-    )
+    with account_generation_guard(generation):
+        db.webauthn_challenge_create(
+            challenge_id=challenge_id,
+            challenge=options.challenge,
+            purpose="register",
+            method=method,
+            label=label,
+            native=native,
+            app_binding=app_binding,
+            account_generation=generation,
+        )
     return {
         "challenge_id": challenge_id,
         "publicKey": json.loads(options_to_json(options)),
@@ -152,7 +161,11 @@ def finish_registration(
     database: Database | None = None,
 ) -> dict[str, Any]:
     db = database or get_db()
-    challenge = db.webauthn_challenge_consume(challenge_id, purpose="register")
+    generation = account_generation()
+    with account_generation_guard(generation):
+        challenge = db.webauthn_challenge_consume(
+            challenge_id, purpose="register", account_generation=generation
+        )
     if not challenge:
         raise ValueError(
             "Die Registrierungsanfrage ist abgelaufen oder wurde bereits benutzt."
@@ -177,16 +190,19 @@ def finish_registration(
         if isinstance(credential.get("response"), dict)
         else []
     )
-    db.webauthn_credential_add(
-        credential_id=credential_id,
-        method=str(challenge["method"]),
-        public_key=verified.credential_public_key,
-        sign_count=verified.sign_count,
-        transports=[str(value) for value in raw_transports if isinstance(value, str)],
-        device_type=verified.credential_device_type.value,
-        backed_up=verified.credential_backed_up,
-        label=str(challenge["label"] or ""),
-    )
+    with account_generation_guard(generation):
+        db.webauthn_credential_add(
+            credential_id=credential_id,
+            method=str(challenge["method"]),
+            public_key=verified.credential_public_key,
+            sign_count=verified.sign_count,
+            transports=[
+                str(value) for value in raw_transports if isinstance(value, str)
+            ],
+            device_type=verified.credential_device_type.value,
+            backed_up=verified.credential_backed_up,
+            label=str(challenge["label"] or ""),
+        )
     return {
         "credential_id": credential_id,
         "method": str(challenge["method"]),
@@ -203,6 +219,7 @@ def authentication_options(
     database: Database | None = None,
 ) -> dict[str, Any]:
     db = database or get_db()
+    generation = account_generation()
     rp_id, _origin, _username = settings()
     credentials = db.webauthn_credentials(method)
     if not credentials:
@@ -214,14 +231,16 @@ def authentication_options(
         user_verification=UserVerificationRequirement.REQUIRED,
     )
     challenge_id = secrets.token_urlsafe(24)
-    db.webauthn_challenge_create(
-        challenge_id=challenge_id,
-        challenge=options.challenge,
-        purpose="authenticate",
-        method=method,
-        native=native,
-        app_binding=app_binding,
-    )
+    with account_generation_guard(generation):
+        db.webauthn_challenge_create(
+            challenge_id=challenge_id,
+            challenge=options.challenge,
+            purpose="authenticate",
+            method=method,
+            native=native,
+            app_binding=app_binding,
+            account_generation=generation,
+        )
     return {
         "challenge_id": challenge_id,
         "publicKey": json.loads(options_to_json(options)),
@@ -235,7 +254,11 @@ def finish_authentication(
     database: Database | None = None,
 ) -> dict[str, Any]:
     db = database or get_db()
-    challenge = db.webauthn_challenge_consume(challenge_id, purpose="authenticate")
+    generation = account_generation()
+    with account_generation_guard(generation):
+        challenge = db.webauthn_challenge_consume(
+            challenge_id, purpose="authenticate", account_generation=generation
+        )
     if not challenge:
         raise ValueError(
             "Die Anmeldeanfrage ist abgelaufen oder wurde bereits benutzt."
@@ -259,14 +282,24 @@ def finish_authentication(
     old_count = int(stored["sign_count"])
     if old_count > 0 and verified.new_sign_count <= old_count:
         raise ValueError("Der Signaturzähler des Schlüssels ist ungültig.")
-    db.webauthn_credential_used(
-        credential_id,
-        sign_count=verified.new_sign_count,
-        device_type=verified.credential_device_type.value,
-        backed_up=verified.credential_backed_up,
-    )
+    with account_generation_guard(generation):
+        updated = db.webauthn_credential_used(
+            credential_id,
+            expected_generation=str(stored["generation"]),
+            expected_sign_count=old_count,
+            sign_count=verified.new_sign_count,
+            device_type=verified.credential_device_type.value,
+            backed_up=verified.credential_backed_up,
+        )
+        if not updated:
+            raise ValueError(
+                "Der Schlüssel wurde geändert oder widerrufen. Melde dich erneut an."
+            )
     return {
         "username": username,
+        "account_generation": generation,
+        "credential_id": credential_id,
+        "credential_generation": str(stored["generation"]),
         "native": bool(challenge["native"]),
         "method": str(challenge["method"]),
         "app_binding": str(challenge["app_binding"] or ""),

@@ -1,0 +1,10 @@
+{
+  "name": "sicherpfad-web-checks",
+  "private": true,
+  "scripts": {
+    "test": "node workspace-dom.cjs && node workspace-alpine.cjs"
+  },
+  "devDependencies": {
+    "linkedom": "0.18.12"
+  }
+}

@@ -8,8 +8,9 @@ struct VaultQueueScope: Codable, Equatable, Sendable {
     let source: String
     let target: String
     let direction: String
+    let localOnly: Bool?
 
-    init(serverURL: URL, username: String, pairID: String, source: String, target: String, direction: String) {
+    init(serverURL: URL, username: String, pairID: String, source: String, target: String, direction: String, localOnly: Bool = false) {
         var components = URLComponents(url: serverURL, resolvingAgainstBaseURL: false)
         let normalizedScheme = components?.scheme?.lowercased()
         let normalizedHost = components?.host?.lowercased()
@@ -30,10 +31,16 @@ struct VaultQueueScope: Codable, Equatable, Sendable {
         self.source = source
         self.target = target
         self.direction = direction
+        self.localOnly = localOnly
     }
 
     var key: String {
-        let encoded = try? JSONEncoder().encode([server, username, pairID, source, target, direction])
+        var components = [server, username, pairID, source, target, direction]
+        // Old bisync entries were bound to the local side. Require explicit
+        // reassignment before publishing those files to the remote side.
+        if direction == "bisync" { components.append("bisync-vault-remote-v2") }
+        if localOnly == true { components.append("local-only-approved") }
+        let encoded = try? JSONEncoder().encode(components)
         return SHA256.hash(data: encoded ?? Data()).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -42,7 +49,7 @@ struct VaultQueueScope: Codable, Equatable, Sendable {
             .map { String(format: "%02x", $0) }.joined()
     }
 
-    var destinationDescription: String { direction == "push" ? target : source }
+    var destinationDescription: String { direction == "pull" ? source : target }
 }
 
 struct VaultQueueEntry: Codable, Identifiable, Sendable {

@@ -47,6 +47,23 @@ private struct PendingPushRevocation: Codable, Equatable {
     let token: String
 }
 
+private struct LogoutCleanupKey: Hashable {
+    let scheme: String
+    let host: String
+    let port: Int
+    let basePath: String
+
+    init?(server: String) {
+        guard let url = try? APIClient.normalizedServerURL(server),
+              let origin = APIServerOrigin(url),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        scheme = origin.scheme
+        host = origin.host
+        port = origin.port
+        basePath = components.percentEncodedPath
+    }
+}
+
 struct SavedServerProfile: Codable, Identifiable, Equatable {
     var id: String { address }
     let name: String
@@ -98,9 +115,12 @@ final class AppModel: ObservableObject {
 
     private(set) var client: (any APIClientProtocol)?
     private var registeredPushToken: String?
+    private var pushServerBinding: PushServerBinding?
     private let pendingPushRevocationsKey = "pendingPushRevocations"
     private let defaults: UserDefaults
     private let clientFactory: (URL) -> any APIClientProtocol
+    private let webAuthnBrowserFactory: @MainActor () -> any WebAuthnBrowserSessionProtocol
+    private var activeWebAuthnBrowser: (id: UUID, browser: any WebAuthnBrowserSessionProtocol)?
     private let runPollInterval: Duration
     private var sessionGeneration = 0
     private var refreshGeneration = 0
@@ -113,6 +133,7 @@ final class AppModel: ObservableObject {
     private var desiredPushToken: String?
     private var desiredPushEnvironment: String?
     private var knownPushTokens: Set<String> = []
+    private var logoutCleanups: [LogoutCleanupKey: (id: UUID, task: Task<Void, Never>)] = [:]
     private let liveActivityCoordinator = ProtectionLiveActivityCoordinator()
 
     var serverAddress: String {
@@ -125,6 +146,49 @@ final class AppModel: ObservableObject {
         return defaults.string(forKey: "username") ?? "admin"
     }
 
+    var currentPushServerID: String? {
+        guard let binding = pushServerBinding,
+              canHandlePush(serverID: binding.serverID) else { return nil }
+        return binding.serverID
+    }
+
+    func canHandlePush(serverID: String?) -> Bool {
+        guard phase == .signedIn, !isDemoMode, client != nil else { return false }
+        return pushServerBinding?.matches(
+            serverID: serverID, origin: serverAddress, session: sessionGeneration
+        ) == true
+    }
+
+    @discardableResult
+    func pauseSchedulerFromPush(serverID: String?) -> Task<Void, Never>? {
+        guard canHandlePush(serverID: serverID), let currentClient = client else {
+            if phase == .signedIn {
+                errorMessage = "Diese Mitteilung gehört nicht zur aktuellen Serververbindung. Öffne den passenden Server, um die Zeitpläne zu pausieren."
+            }
+            return nil
+        }
+        // Capture identity and transport synchronously, before a Task can be deferred.
+        let session = sessionGeneration
+        let origin = serverAddress
+        return Task { [weak self] in
+            guard let self, self.isCurrentSession(session), self.serverAddress == origin,
+                  self.canHandlePush(serverID: serverID) else { return }
+            do {
+                _ = try await currentClient.pauseScheduler(minutes: 60)
+                guard self.isCurrentSession(session), self.serverAddress == origin else { return }
+                self.actionMessage = "Zeitpläne wurden für eine Stunde pausiert."
+                await self.refresh()
+            } catch APIError.unauthenticated {
+                if self.isCurrentSession(session) { self.signOutLocally() }
+            } catch is CancellationError {
+            } catch {
+                if self.isCurrentSession(session), self.serverAddress == origin {
+                    self.errorMessage = self.userMessage(for: error)
+                }
+            }
+        }
+    }
+
     var progressIsStale: Bool {
         guard progressConsecutiveFailures > 0 else { return false }
         if progressConsecutiveFailures >= 3 { return true }
@@ -135,11 +199,13 @@ final class AppModel: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         runPollInterval: Duration = .seconds(2),
+        webAuthnBrowserFactory: @escaping @MainActor () -> any WebAuthnBrowserSessionProtocol = { WebAuthnBrowserSession() },
         clientFactory: @escaping (URL) -> any APIClientProtocol = { APIClient(baseURL: $0) }
     ) {
         self.defaults = defaults
         self.runPollInterval = runPollInterval
         self.clientFactory = clientFactory
+        self.webAuthnBrowserFactory = webAuthnBrowserFactory
         if let data = defaults.data(forKey: "savedServerProfiles"),
            let profiles = try? JSONDecoder().decode([SavedServerProfile].self, from: data) {
             savedServerProfiles = profiles.sorted { $0.lastUsedAt > $1.lastUsedAt }
@@ -163,6 +229,9 @@ final class AppModel: ObservableObject {
         var candidate: (any APIClientProtocol)?
         do {
             let url = try APIClient.normalizedServerURL(serverAddress)
+            await waitForLogoutCleanup(server: url.absoluteString)
+            try Task.checkCancellation()
+            guard isCurrentSession(generation) else { return }
             let newClient = clientFactory(url)
             candidate = newClient
             if (defaults.stringArray(forKey: "sessionOnlyServers") ?? []).contains(url.absoluteString) {
@@ -187,7 +256,7 @@ final class AppModel: ObservableObject {
                 // registration from an earlier logout cannot be revoked. Only
                 // this cleanup failure invalidates the persisted cookie; an
                 // ordinary transient refresh error keeps it available for retry.
-                newClient.clearLocalSession()
+                if isCurrentSession(generation) { newClient.clearLocalSession() }
                 throw error
             }
             try Task.checkCancellation()
@@ -227,15 +296,22 @@ final class AppModel: ObservableObject {
         var candidate: (any APIClientProtocol)?
         do {
             let url = try APIClient.normalizedServerURL(server)
+            await waitForLogoutCleanup(server: url.absoluteString)
+            try Task.checkCancellation()
+            guard isCurrentSession(generation) else { return }
             let newClient = clientFactory(url)
             candidate = newClient
-            newClient.setSessionPersistence(rememberSession)
+            newClient.deferSessionPersistenceUntilAccepted()
             try await newClient.login(username: username, password: password)
             try Task.checkCancellation()
             guard isCurrentSession(generation) else {
                 newClient.clearLocalSession()
                 return
             }
+            await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
+            try Task.checkCancellation()
+            guard isCurrentSession(generation) else { return }
+            newClient.setSessionPersistence(rememberSession)
             defaults.set(url.absoluteString, forKey: "serverAddress")
             defaults.set(username, forKey: "username")
             var rememberedHTTP = Set(defaults.stringArray(forKey: "rememberedHTTPServers") ?? [])
@@ -248,7 +324,6 @@ final class AppModel: ObservableObject {
             defaults.set(Array(sessionOnly), forKey: "sessionOnlyServers")
             rememberServerProfile(url: url, username: username)
             client = newClient
-            await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
             phase = .signedIn
             await refresh()
         } catch is CancellationError {
@@ -985,7 +1060,7 @@ final class AppModel: ObservableObject {
             return
         }
         let exitingClient = client
-        let exitingServer = serverAddress
+        let exitingServer = (try? APIClient.normalizedServerURL(serverAddress).absoluteString) ?? serverAddress
         let pendingRegistration = pushSyncTask
         var tokens = knownPushTokens
         if let desiredPushToken { tokens.insert(desiredPushToken) }
@@ -998,38 +1073,54 @@ final class AppModel: ObservableObject {
 
         // Wechsel die sichtbare Sitzung sofort. Der kurze Lifecycle-Transport
         // widerruft Push und Server-Session anschließend ohne Connectivity-Wait.
-        beginSessionTransition()
+        let generation = beginSessionTransition()
         errorMessage = nil
         clearSessionState()
-        var warnings: [String] = []
-        await pendingRegistration?.value
-        if let exitingClient {
-            for token in tokens {
+        let cleanupID = UUID()
+        let cleanupKey = LogoutCleanupKey(server: exitingServer)
+        let preceding = cleanupKey.flatMap { logoutCleanups[$0]?.task }
+        let cleanup = Task { [self] in
+            defer {
+                if let cleanupKey, logoutCleanups[cleanupKey]?.id == cleanupID {
+                    logoutCleanups.removeValue(forKey: cleanupKey)
+                }
+            }
+            await preceding?.value
+            var warnings: [String] = []
+            await pendingRegistration?.value
+            if let exitingClient {
+                for token in tokens {
+                    do {
+                        _ = try await exitingClient.unregisterPushDevice(token: token)
+                        removePendingPushRevocation(server: exitingServer, token: token)
+                    } catch {
+                        rememberPendingPushRevocation(server: exitingServer, token: token)
+                    }
+                }
+                if pendingPushRevocations().contains(where: { $0.server == exitingServer && tokens.contains($0.token) }) {
+                    warnings.append("Die Push-Registrierung konnte offline nicht sofort vom Server entfernt werden. Sie wird beim nächsten Login erneut widerrufen und läuft serverseitig automatisch aus.")
+                }
                 do {
-                    _ = try await exitingClient.unregisterPushDevice(token: token)
-                    removePendingPushRevocation(server: exitingServer, token: token)
+                    let result = try await exitingClient.logout()
+                    if !result.globalRevocation {
+                        warnings.append(result.detail ?? "Andere Sitzungen konnten nicht sicher beendet werden. Bitte später erneut anmelden und noch einmal abmelden.")
+                    }
                 } catch {
-                    rememberPendingPushRevocation(server: exitingServer, token: token)
+                    warnings.append("Ob andere Sitzungen beendet wurden, konnte nicht bestätigt werden: \(userMessage(for: error))")
+                }
+                if isCurrentSession(generation) || serverAddress != exitingServer {
+                    exitingClient.clearLocalSession()
                 }
             }
-            if pendingPushRevocations().contains(where: { $0.server == exitingServer && tokens.contains($0.token) }) {
-                warnings.append("Die Push-Registrierung konnte offline nicht sofort vom Server entfernt werden. Sie wird beim nächsten Login erneut widerrufen und läuft serverseitig automatisch aus.")
-            }
-            do {
-                let result = try await exitingClient.logout()
-                if !result.globalRevocation {
-                    warnings.append(result.detail ?? "Andere Sitzungen konnten nicht sicher beendet werden. Bitte später erneut anmelden und noch einmal abmelden.")
-                }
-            } catch {
-                warnings.append("Ob andere Sitzungen beendet wurden, konnte nicht bestätigt werden: \(userMessage(for: error))")
-            }
-            exitingClient.clearLocalSession()
+            guard isCurrentSession(generation) else { return }
+            errorMessage = warnings.isEmpty ? nil : warnings.joined(separator: "\n\n")
+            registeredPushToken = nil
+            knownPushTokens.removeAll()
+            pushSyncTask = nil
+            pushSyncOwner = nil
         }
-        errorMessage = warnings.isEmpty ? nil : warnings.joined(separator: "\n\n")
-        registeredPushToken = nil
-        knownPushTokens.removeAll()
-        pushSyncTask = nil
-        pushSyncOwner = nil
+        if let cleanupKey { logoutCleanups[cleanupKey] = (cleanupID, cleanup) }
+        await cleanup.value
     }
 
     func retryJob(id: Int) async -> Bool {
@@ -1062,14 +1153,19 @@ final class AppModel: ObservableObject {
             return
         }
         do {
-            _ = try await currentClient.registerPushDevice(
+            let response = try await currentClient.registerPushDevice(
                 token: token,
                 environment: environment,
                 appVersion: version
             )
+            guard response.ok else { throw APIError.invalidResponse }
             if isCurrentSession(session), desiredPushToken == token,
-               desiredPushEnvironment == environment, phase == .signedIn {
+               desiredPushEnvironment == environment, phase == .signedIn,
+               serverAddress == server {
                 registeredPushToken = token
+                pushServerBinding = PushServerBinding(
+                    serverID: response.serverID, origin: server, session: session
+                )
                 removePendingPushRevocation(server: server, token: token)
             } else {
                 do {
@@ -1264,17 +1360,15 @@ final class AppModel: ObservableObject {
     ) async {
         let matching = pendingPushRevocations().filter { $0.server == server }
         guard !matching.isEmpty else { return }
-        var remaining = pendingPushRevocations()
         for item in matching {
             do {
                 _ = try await client.unregisterPushDevice(token: item.token)
-                remaining.removeAll { $0 == item }
+                removePendingPushRevocation(server: item.server, token: item.token)
             } catch {
                 // Die Server-Lease begrenzt den Restzeitraum. Ein fehlgeschlagener
                 // Nachholversuch darf die eigentliche Anmeldung nicht blockieren.
             }
         }
-        savePendingPushRevocations(remaining)
     }
 
     func loginWithWebAuthn(server: String, method: String, rememberSession: Bool = true) async {
@@ -1286,11 +1380,17 @@ final class AppModel: ObservableObject {
         var candidate: (any APIClientProtocol)?
         do {
             let url = try APIClient.normalizedServerURL(server)
+            await waitForLogoutCleanup(server: url.absoluteString)
+            try Task.checkCancellation()
+            guard isCurrentSession(generation) else { return }
             let newClient = clientFactory(url)
             candidate = newClient
-            let browser = WebAuthnBrowserSession()
-            newClient.setSessionPersistence(rememberSession)
+            let (browserID, browser) = beginWebAuthnBrowser()
+            defer { finishWebAuthnBrowser(id: browserID) }
+            newClient.deferSessionPersistenceUntilAccepted()
             let exchange = try await browser.authenticate(baseURL: url, method: method)
+            try Task.checkCancellation()
+            guard isCurrentSession(generation), activeWebAuthnBrowser?.id == browserID else { return }
             try await newClient.exchangeWebAuthnToken(
                 exchange.token,
                 verifier: exchange.verifier
@@ -1300,6 +1400,10 @@ final class AppModel: ObservableObject {
                 newClient.clearLocalSession()
                 return
             }
+            await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
+            try Task.checkCancellation()
+            guard isCurrentSession(generation), activeWebAuthnBrowser?.id == browserID else { return }
+            newClient.setSessionPersistence(rememberSession)
             defaults.set(url.absoluteString, forKey: "serverAddress")
             var sessionOnly = Set(defaults.stringArray(forKey: "sessionOnlyServers") ?? [])
             if rememberSession { sessionOnly.remove(url.absoluteString) }
@@ -1307,7 +1411,6 @@ final class AppModel: ObservableObject {
             defaults.set(Array(sessionOnly), forKey: "sessionOnlyServers")
             rememberServerProfile(url: url, username: savedUsername)
             client = newClient
-            await retryPendingPushRevocations(using: newClient, server: url.absoluteString)
             phase = .signedIn
             await refresh()
         } catch is CancellationError {
@@ -1326,25 +1429,39 @@ final class AppModel: ObservableObject {
         return try await client.getWebAuthnCredentials().credentials
     }
 
-    func registerWebAuthnCredential(method: String, label: String) async throws {
-        guard let client else { throw APIError.unauthenticated }
-        let baseURL = try APIClient.normalizedServerURL(serverAddress)
+    func registerWebAuthnCredential(method: String, label: String, currentPassword: String) async throws {
+        guard phase == .signedIn, let client else { throw APIError.unauthenticated }
+        let generation = sessionGeneration
+        let origin = serverAddress
+        let baseURL = try APIClient.normalizedServerURL(origin)
         guard baseURL.scheme?.lowercased() == "https" else {
             throw WebAuthnBrowserSession.SessionError.insecureServer
         }
-        let browser = WebAuthnBrowserSession()
+        let (browserID, browser) = beginWebAuthnBrowser()
+        defer { finishWebAuthnBrowser(id: browserID) }
         let binding = try browser.makeRegistrationBinding()
         let ticket = try await client.createNativeWebAuthnRegistration(
             method: method,
             label: label,
-            appChallenge: binding.appChallenge
+            appChallenge: binding.appChallenge,
+            currentPassword: currentPassword
         )
+        try Task.checkCancellation()
+        guard isCurrentSession(generation), serverAddress == origin,
+              phase == .signedIn, activeWebAuthnBrowser?.id == browserID else {
+            throw CancellationError()
+        }
         try await browser.register(
             baseURL: baseURL,
             method: method,
             token: ticket.registrationToken,
             binding: binding
         )
+        try Task.checkCancellation()
+        guard isCurrentSession(generation), serverAddress == origin,
+              phase == .signedIn, activeWebAuthnBrowser?.id == browserID else {
+            throw CancellationError()
+        }
     }
 
     /// A stored cookie must not become an active app session while revocations
@@ -1357,11 +1474,9 @@ final class AppModel: ObservableObject {
     ) async throws {
         let matching = pendingPushRevocations().filter { $0.server == server }
         guard !matching.isEmpty else { return }
-        var remaining = pendingPushRevocations()
         for item in matching {
             _ = try await client.unregisterPushDevice(token: item.token)
-            remaining.removeAll { $0 == item }
-            savePendingPushRevocations(remaining)
+            removePendingPushRevocation(server: item.server, token: item.token)
         }
     }
 
@@ -1426,12 +1541,44 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     private func beginSessionTransition() -> Int {
+        if let activeWebAuthnBrowser {
+            self.activeWebAuthnBrowser = nil
+            activeWebAuthnBrowser.browser.cancel()
+        }
+        if let token = registeredPushToken ?? desiredPushToken, !serverAddress.isEmpty, !isDemoMode {
+            rememberPendingPushRevocation(server: serverAddress, token: token)
+        }
+        pushServerBinding = nil
+        registeredPushToken = nil
+        desiredPushToken = nil
+        desiredPushEnvironment = nil
         refreshTask?.cancel()
         refreshTask = nil
         refreshOwner = nil
         sessionGeneration += 1
         refreshGeneration += 1
         return sessionGeneration
+    }
+
+    private func beginWebAuthnBrowser() -> (UUID, any WebAuthnBrowserSessionProtocol) {
+        if let activeWebAuthnBrowser {
+            self.activeWebAuthnBrowser = nil
+            activeWebAuthnBrowser.browser.cancel()
+        }
+        let id = UUID()
+        let browser = webAuthnBrowserFactory()
+        activeWebAuthnBrowser = (id, browser)
+        return (id, browser)
+    }
+
+    private func finishWebAuthnBrowser(id: UUID) {
+        guard activeWebAuthnBrowser?.id == id else { return }
+        activeWebAuthnBrowser = nil
+    }
+
+    private func waitForLogoutCleanup(server: String) async {
+        guard let key = LogoutCleanupKey(server: server) else { return }
+        await logoutCleanups[key]?.task.value
     }
 
     private func isCurrentSession(_ generation: Int) -> Bool {
@@ -1534,6 +1681,7 @@ final class AppModel: ObservableObject {
     }
 
     private func clearSessionState() {
+        pushServerBinding = nil
         ProtectionWidgetSnapshot.clear()
         liveActivityCoordinator.endAll()
         client = nil

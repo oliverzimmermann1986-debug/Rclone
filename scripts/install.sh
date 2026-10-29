@@ -24,6 +24,8 @@ VENV_ROLLBACK=""
 SYSTEM_FILES_ROLLBACK=""
 SYSTEM_FILES_STARTED=0
 RUNTIME_MUTATION_STARTED=0
+RUNTIME_HELPER_DIR=""
+ROLLBACK_RUNTIME_HELPER=""
 SYSTEM_TARGETS=(
   /etc/systemd/system/rclone-sync-web.service
   /etc/systemd/system/rclone-sync.service
@@ -57,56 +59,15 @@ runtime_backup_dir() {
   printf '%s\n' "$candidate"
 }
 
-restore_runtime_file() {
-  local restore_dir="$1"
-  local name="$2"
-  local state_dir="$restore_dir/runtime-state"
-  local source="$restore_dir/data/$name"
-  local destination="$APP_DIR_CANONICAL/data/$name"
-  local destination_dir tmp
-
-  destination_dir=$(realpath -m -- "$APP_DIR_CANONICAL/data") || return 1
-  [[ "$destination_dir" == "$APP_DIR_CANONICAL/data" ]] || return 1
-  [[ -d "$destination_dir" && ! -L "$destination_dir" ]] || return 1
-
-  if [[ -f "$state_dir/$name.present" && ! -L "$state_dir/$name.present" ]] &&
-    [[ ! -e "$state_dir/$name.missing" && ! -L "$state_dir/$name.missing" ]]; then
-    [[ -f "$source" && ! -L "$source" ]] || return 1
-    if [[ "$name" == "rclone-sync.db" ]]; then
-      [[ "$(sqlite3 "$source" "PRAGMA quick_check;")" == "ok" ]] || return 1
-    fi
-    tmp=$(mktemp "$destination_dir/.rollback-$name.XXXXXX") || return 1
-    if ! install -m 0600 -o "$APP_USER" -g "$APP_GROUP" -- "$source" "$tmp"; then
-      rm -f -- "$tmp"
-      return 1
-    fi
-    if ! mv -fT -- "$tmp" "$destination"; then
-      rm -f -- "$tmp"
-      return 1
-    fi
-  elif [[ -f "$state_dir/$name.missing" && ! -L "$state_dir/$name.missing" ]] &&
-    [[ ! -e "$state_dir/$name.present" && ! -L "$state_dir/$name.present" ]]; then
-    rm -f -- "$destination" || return 1
-  else
-    return 1
-  fi
-}
-
 restore_runtime_backup() {
-  local restore_dir name
+  local restore_dir
   restore_dir=$(runtime_backup_dir) || {
     echo "Rollback-Sicherung konnte nicht sicher validiert werden; Dienste bleiben gestoppt." >&2
     return 1
   }
-  rm -f -- \
-    "$APP_DIR_CANONICAL/data/rclone-sync.db-wal" \
-    "$APP_DIR_CANONICAL/data/rclone-sync.db-shm" || return 1
-  for name in "${RUNTIME_BACKUP_FILES[@]}"; do
-    if ! restore_runtime_file "$restore_dir" "$name"; then
-      echo "Runtime-Rollback für $name fehlgeschlagen; Dienste bleiben gestoppt." >&2
-      return 1
-    fi
-  done
+  [[ -n "$ROLLBACK_RUNTIME_HELPER" && -f "$ROLLBACK_RUNTIME_HELPER" ]] || return 1
+  /usr/bin/python3 -I "$ROLLBACK_RUNTIME_HELPER" \
+    "$APP_DIR_CANONICAL" "$RUNTIME_UID" "$RUNTIME_GID" restore "$restore_dir"
 }
 
 restore_enabled_state() {
@@ -164,6 +125,10 @@ on_error() {
   if (( RUNTIME_MUTATION_STARTED )) && [[ -n "${backup_dir:-}" ]]; then
     restore_runtime_backup || rollback_failed=1
   fi
+  if (( rollback_failed == 0 )) && [[ -n "$RUNTIME_HELPER_DIR" ]]; then
+    rm -rf -- "$RUNTIME_HELPER_DIR"
+    RUNTIME_HELPER_DIR=""
+  fi
   [[ -z "$SYSTEM_FILES_ROLLBACK" ]] || rm -rf "$SYSTEM_FILES_ROLLBACK"
   systemctl daemon-reload >/dev/null 2>&1 || true
   if (( UNIT_STATES_CAPTURED )); then
@@ -200,6 +165,76 @@ if [[ ! "$BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || [[ "$BRANCH" == *..* ]]
   exit 1
 fi
 
+# Never ask Git or a checkout-supplied program whether a service-writable
+# checkout is safe. Reject it before packages, services, hooks or helpers run.
+if [[ -e "$APP_DIR" || -L "$APP_DIR" ]]; then
+  if [[ ! -x /usr/bin/python3 ]]; then
+    echo "Abbruch: Für die sichere Prüfung des bestehenden Checkouts wird /usr/bin/python3 benötigt." >&2
+    exit 1
+  fi
+  if ! /usr/bin/python3 -I - "$APP_DIR" <<'CHECKOUT_TRUST_PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+
+def trusted_metadata(path, *, directory=False):
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        raise ValueError(f"Symbolischer Link im unveränderlichen Checkout: {path}")
+    if directory and not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"Echtes Checkout-Verzeichnis erforderlich: {path}")
+    if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+        raise ValueError(f"Spezialdatei im unveränderlichen Checkout: {path}")
+    if info.st_uid != 0 or info.st_mode & 0o022:
+        raise ValueError(f"Checkout muss root gehören und darf nicht gruppen-/öffentlich schreibbar sein: {path}")
+    return info
+
+
+def assert_trusted_checkout(application):
+    application = Path(application)
+    if not application.is_absolute() or ".." in application.parts:
+        raise ValueError("APP_DIR muss ein sicherer absoluter Pfad sein")
+    if application == Path(application.anchor):
+        raise ValueError("Das Wurzelverzeichnis darf kein Checkout sein")
+    for ancestor in reversed(application.parents):
+        trusted_metadata(ancestor, directory=True)
+    trusted_metadata(application, directory=True)
+    trusted_metadata(application / ".git", directory=True)
+    runtime_directories = {"data", "logs", "temp", "venv", "venv.rollback"}
+    pending = [application]
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                path = current / entry.name
+                if current == application and entry.name in runtime_directories:
+                    # Runtime contents can belong to the service. An existing
+                    # venv intentionally contains interpreter links and will be
+                    # replaced, not executed as root during source admission.
+                    if not stat.S_ISDIR(path.lstat().st_mode):
+                        raise ValueError(f"Runtime-Pfad muss ein echtes Verzeichnis sein: {path}")
+                    continue
+                info = trusted_metadata(path)
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(path)
+
+
+if __name__ == "__main__":
+    try:
+        assert_trusted_checkout(sys.argv[1])
+    except (OSError, ValueError) as exc:
+        print(f"Unsicherer bestehender Checkout: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+CHECKOUT_TRUST_PY
+  then
+    echo "Abbruch: Bestehenden Checkout außerhalb des Installers sichern und aus einer unabhängig geprüften Quelle neu bereitstellen." >&2
+    echo "Kein automatisches chown und kein Git-Befehl werden auf dem untrusted Checkout ausgeführt." >&2
+    exit 1
+  fi
+fi
+
 APP_DIR_CANONICAL=$(realpath -m -- "$APP_DIR")
 BACKUP_ROOT_CANONICAL=$(realpath -m -- "$BACKUP_ROOT")
 case "$BACKUP_ROOT_CANONICAL" in
@@ -212,6 +247,26 @@ if [[ "$BACKUP_ROOT_CANONICAL" == "/" ]]; then
   echo "Abbruch: Das Wurzelverzeichnis ist kein zulässiges BACKUP_ROOT." >&2
   exit 1
 fi
+
+# Backup paths are used by root for copying and pruning. Reject writable or
+# linked ancestors before creating any directory or following a backup path.
+/usr/bin/python3 -I - "$BACKUP_ROOT" <<'BACKUP_TRUST_PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+if not root.is_absolute() or ".." in root.parts:
+    raise SystemExit("BACKUP_ROOT muss ein sicherer absoluter Pfad sein")
+for path in [*reversed(root.parents), root]:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise SystemExit(f"Unsicherer Backup-Pfad oder Vorfahr: {path}")
+BACKUP_TRUST_PY
 
 if [[ -e "$APP_DIR" || -L "$APP_DIR" ]] && [[ ! -d "$APP_DIR/.git" ]]; then
   echo "Abbruch: APP_DIR existiert, ist aber kein Git-Checkout: $APP_DIR" >&2
@@ -356,6 +411,14 @@ fi
 git -c safe.directory="$APP_DIR" -C "$APP_DIR" cat-file -e "$SOURCE_COMMIT^{commit}"
 git -c safe.directory="$APP_DIR" -C "$APP_DIR" merge-base --is-ancestor \
   "$SOURCE_COMMIT" "origin/$BRANCH"
+# Pin the reviewed helper before checkout or venv replacement. Rollback must
+# survive resetting both and must never execute a helper from the old checkout.
+RUNTIME_HELPER_DIR=$(mktemp -d /run/rclone-sync-runtime.XXXXXX)
+chmod 0700 "$RUNTIME_HELPER_DIR"
+ROLLBACK_RUNTIME_HELPER="$RUNTIME_HELPER_DIR/runtime_files.py"
+git -c safe.directory="$APP_DIR" -C "$APP_DIR" show --no-textconv \
+  "$SOURCE_COMMIT:scripts/runtime_files.py" > "$ROLLBACK_RUNTIME_HELPER"
+chmod 0400 "$ROLLBACK_RUNTIME_HELPER"
 git -c safe.directory="$APP_DIR" -C "$APP_DIR" checkout --detach "$SOURCE_COMMIT"
 CHECKED_OUT_COMMIT=$(git -c safe.directory="$APP_DIR" -C "$APP_DIR" rev-parse HEAD)
 if [[ "$CHECKED_OUT_COMMIT" != "$SOURCE_COMMIT" ]]; then
@@ -371,52 +434,33 @@ if [[ -d "$APP_DIR/venv" ]]; then
   mv "$APP_DIR/venv" "$VENV_ROLLBACK"
 fi
 python3 -m venv "$APP_DIR/venv"
-"$APP_DIR/venv/bin/pip" install --disable-pip-version-check -r "$APP_DIR/requirements.txt"
+"$APP_DIR/venv/bin/pip" install --disable-pip-version-check --require-hashes --only-binary=:all: -r "$APP_DIR/requirements.lock"
 
 printf '%s\n' "📁 Laufzeitverzeichnisse …"
-install -d -m 0700 -o "$APP_USER" -g "$APP_GROUP" \
-  "$APP_DIR/data" "$APP_DIR/data/.rclone-cache" "$APP_DIR/data/runtime" \
-  "$APP_DIR/logs" "$APP_DIR/temp" \
+RUNTIME_UID=$(id -u "$APP_USER")
+RUNTIME_GID=$(getent group "$APP_GROUP" | cut -d: -f3)
+RUNTIME_MUTATION_STARTED=1
+RUNTIME_HELPER="$ROLLBACK_RUNTIME_HELPER"
+"$APP_DIR/venv/bin/python" -I "$RUNTIME_HELPER" \
+  "$APP_DIR" "$RUNTIME_UID" "$RUNTIME_GID" prepare
+sudo -u "$APP_USER" -g "$APP_GROUP" -H install -d -m 0700 -o "$APP_USER" -g "$APP_GROUP" \
   "/home/$APP_USER/.config" "/home/$APP_USER/.config/rclone"
 
-RUNTIME_MUTATION_STARTED=1
 INITIAL_PASSWORD=""
 if [[ ! -f "$APP_DIR/data/config.yaml" ]]; then
   printf '%s\n' "📝 Sichere Erstkonfiguration erzeugen …"
-  cp "$APP_DIR/config/config.example.yaml" "$APP_DIR/data/config.yaml"
   INITIAL_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)
   GEN_SECRET=$(openssl rand -base64 64 | tr -d '/+=' | cut -c1-64)
-  INITIAL_PASSWORD="$INITIAL_PASSWORD" GEN_SECRET="$GEN_SECRET" CONFIG_PATH="$APP_DIR/data/config.yaml" \
-    "$APP_DIR/venv/bin/python" - <<'PY'
-import os
-from pathlib import Path
-
-import bcrypt
-from app.config_store import Config
-
-path = Path(os.environ["CONFIG_PATH"])
-config = Config(path)
-data = config.snapshot()
-web = data.setdefault("web", {})
-password = os.environ["INITIAL_PASSWORD"]
-web["password"] = ""
-web["password_hash"] = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode("ascii")
-web["secret_key"] = os.environ["GEN_SECRET"]
-web["session_version"] = 1
-config.replace(data)
-PY
-  printf '%s\n' "$INITIAL_PASSWORD" > "$APP_DIR/data/.initial-password"
+  INITIAL_PASSWORD="$INITIAL_PASSWORD" GEN_SECRET="$GEN_SECRET" \
+    "$APP_DIR/venv/bin/python" -I "$RUNTIME_HELPER" \
+    "$APP_DIR" "$RUNTIME_UID" "$RUNTIME_GID" initialize
 fi
 
-if [[ ! -f "$APP_DIR/data/rclone-filters.txt" ]]; then
-  cp "$APP_DIR/config/rclone-filters.example.txt" "$APP_DIR/data/rclone-filters.txt"
-fi
-
-chown -R "$APP_USER:$APP_GROUP" "$APP_DIR/data" "$APP_DIR/logs" "$APP_DIR/temp"
-chmod 0600 "$APP_DIR/data/config.yaml"
-[[ ! -f "$APP_DIR/data/config.yaml.bak" ]] || chmod 0600 "$APP_DIR/data/config.yaml.bak"
-[[ ! -f "$APP_DIR/data/.initial-password" ]] || chmod 0600 "$APP_DIR/data/.initial-password"
-chmod 0600 "$APP_DIR/data/rclone-filters.txt"
+"$APP_DIR/venv/bin/python" -I "$RUNTIME_HELPER" \
+  "$APP_DIR" "$RUNTIME_UID" "$RUNTIME_GID" filters
+"$APP_DIR/venv/bin/python" -I "$RUNTIME_HELPER" \
+  "$APP_DIR" "$RUNTIME_UID" "$RUNTIME_GID" permissions
+find "$APP_DIR/data" "$APP_DIR/logs" "$APP_DIR/temp" -xdev \( -type d -o -type f -links 1 \) -exec chown -h "$APP_USER:$APP_GROUP" {} +
 
 printf '%s\n' "🔎 Konfiguration und Python-Dateien prüfen …"
 sudo -u "$APP_USER" -H env RCLONE_SYNC_CONFIG="$APP_DIR/data/config.yaml" \
@@ -482,6 +526,8 @@ SYSTEM_FILES_ROLLBACK=""
 SYSTEM_FILES_STARTED=0
 UNIT_STATES_CAPTURED=0
 RUNTIME_MUTATION_STARTED=0
+[[ -z "$RUNTIME_HELPER_DIR" ]] || rm -rf -- "$RUNTIME_HELPER_DIR"
+RUNTIME_HELPER_DIR=""
 trap - ERR
 
 printf '\n%s\n' "✅ Installation abgeschlossen"
@@ -512,7 +558,9 @@ Sicherheitshinweis (Transportverschlüsselung):
   Die Web-UI lauscht standardmäßig nur auf 127.0.0.1:8001. Für Zugriff aus
   dem LAN einen Reverse-Proxy mit TLS (z. B. Caddy/nginx) verwenden, danach in der
   Konfiguration web.secure_cookie: auto und web.hsts_seconds setzen sowie
-  web.allowed_hosts auf den Proxy-Hostnamen begrenzen.
+  web.allowed_hosts auf den Proxy-Hostnamen begrenzen. web.trusted_proxy_ips
+  darf nur die direkten Proxy-Peers enthalten; der Proxy muss X-Forwarded-Proto
+  selbst setzen und eingehende Client-Werte überschreiben.
 
 Nächste Schritte:
   1. sudo -u $APP_USER -H rclone config
