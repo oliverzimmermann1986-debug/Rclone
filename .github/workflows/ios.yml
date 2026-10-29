@@ -32,15 +32,18 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Toolchain
         run: xcodebuild -version
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
           cache: pip
       - name: Install backend contract test dependencies
-        run: python3 -m pip install -r requirements-dev.txt
+        run: |
+          python3 scripts/update_dependency_lock.py --check
+          python3 -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+          python3 -m pip install -r requirements-dev.txt
       - name: Validate native API, security and release contracts
         run: python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_install_pinned_xcodegen.py tests/test_ios_*.py
       - name: Install verified pinned XcodeGen

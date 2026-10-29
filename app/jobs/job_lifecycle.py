@@ -38,6 +38,9 @@ def reconcile_locked_scope(
             runtime_state.recover_stale_run_details(reason=reason, force=True)
             is not None
         )
+    recover_terminal = getattr(db, "job_terminal_recover_pending", None)
+    if recover_terminal is not None:
+        recover_terminal()
     recovered_jobs = db.jobs_mark_all_running_stale(
         kinds=tuple(kinds),
         reason=reason,

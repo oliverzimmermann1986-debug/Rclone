@@ -195,3 +195,54 @@ def test_worker_failure_releases_lock_and_preserves_confirmed_completion(
         if failure == "after_finish"
         else "error"
     )
+
+
+def test_startup_preserves_verified_terminal_result_before_staging_record_saved(
+    setup, tmp_path
+):
+    from app.jobs import selective_restore
+
+    database, _lease, _pair = setup
+    config = {
+        "paths": {
+            "data_dir": str(tmp_path / "server"),
+            "recovery_dir": str(tmp_path / "staging"),
+        },
+        "backup": {"pairs": []},
+    }
+    job_id = database.job_start("recovery")
+    recovery_id = f"recovery-{job_id}"
+    folder = selective_restore.staging_root(config) / recovery_id
+    folder.mkdir()
+    (folder / "proof.txt").write_bytes(b"verified result")
+    selective_restore._save_record(
+        database, {"id": recovery_id, "job_id": job_id, "status": "running"}
+    )
+    database.job_finish(
+        job_id,
+        "ok",
+        {"id": recovery_id, "status": "ready", "verified": True, "bytes": 15},
+    )
+
+    selective_restore.reconcile_staging(database, config)
+
+    assert (folder / "proof.txt").read_bytes() == b"verified result"
+    assert selective_restore._load_state(database)[0]["status"] == "ready"
+
+
+def test_staging_quota_includes_partial_result_awaiting_safe_cleanup(setup, tmp_path):
+    from app.jobs import selective_restore
+
+    database, _lease, _pair = setup
+    config = {"backup": {"recovery_staging_max_mb": 1}}
+    selective_restore._save_record(
+        database,
+        {
+            "id": "recovery-1",
+            "status": "error",
+            "cleanup_required": True,
+            "bytes": 1024 * 1024,
+        },
+    )
+    with pytest.raises(ValueError, match="Gesamtlimit"):
+        selective_restore.check_staging_budget(database, config, 1)

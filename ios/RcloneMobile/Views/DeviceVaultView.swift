@@ -19,6 +19,10 @@ struct DeviceVaultView: View {
     @State private var exportIsVerified = true
     @State private var pendingReassignment: VaultQueueEntry?
     @State private var pendingReassignmentScope: VaultQueueScope?
+    @State private var localOnlyAccepted = false
+    @State private var pendingRemoval: VaultUploadStatus?
+    @State private var removalPassword = ""
+    @State private var isRemoving = false
 
     private var pairs: [PairConfig] {
         (model.config?.backup.pairs ?? []).filter(\.enabled)
@@ -38,6 +42,23 @@ struct DeviceVaultView: View {
                 Text(reassignmentMessage)
             }
             .safeAreaInset(edge: .bottom) { exportFooter }
+            .sheet(item: $pendingRemoval, onDismiss: { removalPassword = "" }) { item in
+                NavigationStack {
+                    Form {
+                        Section("Serverkopie entfernen") {
+                            Text(item.filename)
+                            Text("Der Eintrag, die lokale Serverkopie und eine mögliche Teildatei werden gelöscht. Gemeinsam verwendete Dateiblöcke bleiben erhalten. Die Zielkopie des Datenwegs wird nicht gelöscht; ohne diesen Eintrag ist sie nicht mehr über die Vault-Bibliothek erreichbar.")
+                            SecureField("Aktuelles Serverpasswort", text: $removalPassword)
+                            Button("Serverkopie und Eintrag entfernen", role: .destructive) {
+                                Task { await removeLocalCopy(item) }
+                            }.disabled(removalPassword.isEmpty || isRemoving)
+                        }
+                    }
+                    .navigationTitle("Vault-Datei entfernen")
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Abbrechen") { pendingRemoval = nil }.disabled(isRemoving) } }
+                    .interactiveDismissDisabled(isRemoving)
+                }
+            }
     }
 
     private var lifecycleContent: some View {
@@ -106,7 +127,15 @@ struct DeviceVaultView: View {
                         }
                     }
                     .disabled(transfer.isWorking || isImporting)
-                    Text("Die Datei landet getrennt unter „Sicherpfad“, nicht in deiner Live-Quelle.")
+                    if let selectedDestination {
+                        Text("Ziel: \(selectedDestination)").font(.caption).textSelection(.enabled)
+                        if destinationIsLocal {
+                            Text("Dieses Ziel liegt nur lokal auf dem Server oder einem eingebundenen Speicher. Es ist keine Cloud-Kopie und schützt allein nicht gegen Serververlust.").font(.caption).foregroundStyle(.orange)
+                            Toggle("Nur lokale Ablage ausdrücklich verwenden", isOn: $localOnlyAccepted)
+                                .disabled(transfer.isWorking || isImporting)
+                        }
+                    }
+                    Text("Die Zielkopie liegt im vom Sync ausgeschlossenen Unterordner „Sicherpfad“ des Datenwegs.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -122,12 +151,12 @@ struct DeviceVaultView: View {
                 ) {
                     Label("Fotos auswählen", systemImage: "photo.on.rectangle.angled")
                 }
-                .disabled(selectedIdentity.isEmpty || transfer.isWorking || isImporting || model.isDemoMode)
+                .disabled(selectedIdentity.isEmpty || (destinationIsLocal && !localOnlyAccepted) || transfer.isWorking || isImporting || model.isDemoMode)
 
                 Button { showingFileImporter = true } label: {
                     Label("Dateien auswählen", systemImage: "folder.badge.plus")
                 }
-                .disabled(selectedIdentity.isEmpty || transfer.isWorking || isImporting || model.isDemoMode)
+                .disabled(selectedIdentity.isEmpty || (destinationIsLocal && !localOnlyAccepted) || transfer.isWorking || isImporting || model.isDemoMode)
 
                 if model.isDemoMode {
                     Button {
@@ -275,10 +304,14 @@ struct DeviceVaultView: View {
                         .buttonStyle(.plain)
                         .disabled(restoringItemID != nil || !(item.verified || item.status == "remote"))
                         .accessibilityHint("Holt die Datei zurück und prüft sie, bevor sie geteilt werden kann.")
+                        .swipeActions {
+                            Button("Serverkopie entfernen", role: .destructive) { pendingRemoval = item }
+                                .disabled(transfer.isWorking || restoringItemID != nil)
+                        }
                     }
                 }
                 if restoringItemID != nil {
-                    Text("Falls die lokale Kopie fehlt, wird zuerst die Cloud-Kopie vollständig geladen. Bei großen Dateien kann das mehrere Minuten dauern.")
+                    Text("Falls die lokale Serverkopie fehlt, wird zuerst die Zielkopie des Datenwegs vollständig geladen. Bei großen Dateien kann das mehrere Minuten dauern.")
                         .font(.caption).foregroundStyle(.secondary)
                     Button("Download abbrechen", role: .cancel) { restoreTask?.cancel() }
                 }
@@ -325,6 +358,7 @@ struct DeviceVaultView: View {
     private func viewAppeared() { isVisible = true; selectDefaultPair() }
     private func viewDisappeared() { isVisible = false; transfer.pause(); restoreTask?.cancel() }
     private func selectedIdentityChanged() {
+        localOnlyAccepted = false
         restoreTask?.cancel()
         restoredURL = nil
         Task { await loadLibrary() }
@@ -417,7 +451,18 @@ struct DeviceVaultView: View {
     }
 
     private var queueScope: VaultQueueScope? {
-        pairs.first(where: { $0.id == selectedIdentity }).flatMap { scope(for: $0) }
+        if destinationIsLocal && !localOnlyAccepted { return nil }
+        return pairs.first(where: { $0.id == selectedIdentity }).flatMap { scope(for: $0) }
+    }
+
+    private var selectedDestination: String? {
+        guard let pair = pairs.first(where: { $0.id == selectedIdentity }) else { return nil }
+        return pair.direction == "pull" ? pair.local : pair.remote
+    }
+
+    private var destinationIsLocal: Bool {
+        guard let selectedDestination else { return false }
+        return selectedDestination.hasPrefix("/") || !selectedDestination.contains(":")
     }
 
     private var activeScopeKeys: Set<String> { Set(pairs.compactMap { scope(for: $0)?.key }) }
@@ -432,7 +477,8 @@ struct DeviceVaultView: View {
         guard !model.isDemoMode,
               let server = try? APIClient.normalizedServerURL(model.serverAddress) else { return nil }
         return VaultQueueScope(serverURL: server, username: model.savedUsername, pairID: pair.id,
-            source: pair.local, target: pair.remote, direction: pair.direction)
+            source: pair.local, target: pair.remote, direction: pair.direction,
+            localOnly: pair.id == selectedIdentity && destinationIsLocal && localOnlyAccepted)
     }
 
     private func importFiles(_ urls: [URL]) async {
@@ -495,6 +541,16 @@ struct DeviceVaultView: View {
         } catch {
             transfer.errorMessage = error.localizedDescription
         }
+    }
+
+    private func removeLocalCopy(_ item: VaultUploadStatus) async {
+        isRemoving = true
+        defer { isRemoving = false; removalPassword = "" }
+        do {
+            _ = try await model.withCurrentClient { try await $0.removeVaultLocalCopy(uploadID: item.id, currentPassword: removalPassword) }
+            pendingRemoval = nil
+            await loadLibrary()
+        } catch { transfer.errorMessage = error.localizedDescription; pendingRemoval = nil }
     }
 
     private func restore(_ item: VaultUploadStatus) async {
@@ -601,6 +657,12 @@ private struct VaultLibraryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             VaultTransferRow(item: item, showPath: false)
+            if let target = item.targetRoot {
+                Text("Ziel: \(target)").font(.caption).foregroundStyle(.secondary)
+            }
+            if item.localOnly == true {
+                Text("Nur lokale Zielkopie · kein Cloud-Beleg").font(.caption).foregroundStyle(.orange)
+            }
             if isRestoring {
                 ProgressView("Datei wird zurückgeholt und geprüft …")
             } else if item.status == "remote" {

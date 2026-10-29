@@ -2,8 +2,8 @@
 
 Uploads arrive in small resumable chunks, are verified locally, copied to the
 selected backup target and read back before they become restorable.  The blob
-store deliberately stays separate from configured live sources: importing a
-phone file must never mutate the source of an existing sync pair.
+store deliberately stays separate from configured live sources. Target copies
+live in the sync-excluded ``Sicherpfad`` subtree of the selected data path.
 """
 
 from __future__ import annotations
@@ -18,8 +18,9 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+import unicodedata
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, Iterator, Mapping
 
@@ -75,7 +76,8 @@ def _validate_destination(config: Mapping[str, Any], record: Mapping[str, Any]) 
     binding = record.get("endpoint_binding")
     if (
         configured is None
-        or _endpoints(configured)[1] != str(record.get("target_root") or "")
+        or str(record.get("target_root") or "")
+        not in {target_root(configured), _endpoints(configured)[1]}
         or (binding is not None and binding != endpoint_binding(configured))
     ):
         raise VaultError(
@@ -113,13 +115,16 @@ def _safe_upload_id(value: str) -> str:
 
 
 def safe_filename(value: str) -> str:
-    name = str(value or "").strip()
+    raw = str(value or "")
+    if any(unicodedata.category(char) == "Cc" for char in raw):
+        raise VaultError("Ungültiger Dateiname")
+    name = raw.strip()
     if (
         not name
         or len(name) > 240
         or name in {".", ".."}
         or name.startswith(".")
-        or any(char in name for char in ("/", "\\", "\x00", "\r", "\n"))
+        or any(char in name for char in ("/", "\\"))
     ):
         raise VaultError("Ungültiger Dateiname")
     return name
@@ -236,7 +241,7 @@ def _save_record(root: Path, record: Mapping[str, Any]) -> dict[str, Any]:
 
 def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with _open_regular(path) as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -263,8 +268,123 @@ def _is_remote(path: str) -> bool:
     return ":" in prefix and not path.startswith("/")
 
 
+def target_root(pair: Mapping[str, Any]) -> str:
+    """Vault destination is explicit; bisync's remote side is preferred."""
+    direction = str(pair.get("direction") or "bisync").lower().strip()
+    return str((pair.get("local") if direction == "pull" else pair.get("remote")) or "")
+
+
+def _guard_local_target(pair: Mapping[str, Any], target: str) -> None:
+    from .jobs.rclone_sync import _check_local_endpoint
+
+    field = "remote" if str(pair.get("remote") or "") == target else "local"
+    allowed, reason = _check_local_endpoint(
+        dict(pair), field, Path(target), include_counts=False, include_free_space=True
+    )
+    if not allowed:
+        raise VaultError(reason)
+
+
+def _confined_local_path(base: Path, path: Path) -> Path:
+    base = base.expanduser().absolute()
+    path = path.expanduser().absolute()
+    if not path.is_relative_to(base) or not path.resolve().is_relative_to(
+        base.resolve()
+    ):
+        raise VaultError("Datei liegt außerhalb des Sicherungsziels")
+    for component in (base, *base.parents, *path.relative_to(base).parents):
+        candidate = component if component.is_absolute() else base / component
+        if candidate.is_symlink():
+            raise VaultError("Symlinks im Sicherungsziel sind nicht erlaubt")
+    if path.is_symlink():
+        raise VaultError("Symlinks im Sicherungsziel sind nicht erlaubt")
+    return path
+
+
+def _open_regular(path: Path) -> BinaryIO:
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise VaultError("Die Wiederherstellungsdatei ist keine reguläre Datei")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+@contextmanager
+def _anchored_local_parent(base: Path, path: Path, *, create: bool = False):
+    """Walk from the filesystem root without following any directory symlink.
+
+    All subsequent file operations use the retained parent descriptor. A rename
+    or symlink substitution of an ancestor cannot redirect them to another tree.
+    Unsupported hosts fail closed rather than reverting to pathname I/O.
+    """
+    needed = (os.open, os.mkdir, os.stat, os.unlink, os.rename, os.rmdir)
+    if (
+        os.name != "posix"
+        or not all(call in os.supports_dir_fd for call in needed)
+        or not all(
+            hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+        )
+    ):
+        raise VaultError(
+            "Sichere lokale Vault-Dateizugriffe benötigen POSIX-Verzeichnisdeskriptoren"
+        )
+    base = base.expanduser().absolute()
+    path = path.expanduser().absolute()
+    if (
+        ".." in base.parts
+        or ".." in path.parts
+        or path == base
+        or not path.is_relative_to(base)
+    ):
+        raise VaultError("Datei liegt außerhalb des Sicherungsziels")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    current = os.open(path.anchor, flags)
+    try:
+        for component in path.parent.parts[1:]:
+            try:
+                following = os.open(component, flags, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(component, mode=0o750, dir_fd=current)
+                except FileExistsError:
+                    pass
+                following = os.open(component, flags, dir_fd=current)
+            os.close(current)
+            current = following
+        yield current, path.name
+    except OSError as exc:
+        raise VaultError(
+            "Das lokale Sicherungsziel wurde verändert oder ist nicht sicher zugänglich"
+        ) from exc
+    finally:
+        os.close(current)
+
+
+def _open_local_target(base: Path, path: Path) -> BinaryIO:
+    with _anchored_local_parent(base, path) as (parent, name):
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent,
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise VaultError("Die Wiederherstellungsdatei ist keine reguläre Datei")
+            return os.fdopen(descriptor, "rb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+
 def _public_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         key: record.get(key)
         for key in (
             "id",
@@ -284,9 +404,15 @@ def _public_record(record: Mapping[str, Any]) -> dict[str, Any]:
             "updated_at",
             "completed_at",
             "error",
+            "target_root",
+            "cloud",
+            "local_only",
             "endpoint_binding",
         )
     }
+    result["cloud"] = _is_remote(str(record.get("target_root") or ""))
+    result["local_only"] = not result["cloud"]
+    return result
 
 
 def create_upload(
@@ -299,6 +425,7 @@ def create_upload(
     source_type: str,
     device_name: str,
     target_root: str,
+    local_only: bool = False,
     expected_endpoints: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     binding = endpoint_binding(pair)
@@ -318,6 +445,12 @@ def create_upload(
         raise VaultError("Unbekannter Quelltyp")
     if not target_root:
         raise VaultError("Der Datenweg besitzt kein Sicherungsziel")
+    if not _is_remote(target_root):
+        if not local_only:
+            raise VaultError(
+                "Dieses Ziel liegt nur lokal. Lokale Ablage ausdrücklich bestätigen."
+            )
+        _guard_local_target(pair, target_root)
 
     root = vault_root(config)
     upload_id = str(uuid.uuid4())
@@ -349,6 +482,8 @@ def create_upload(
         "deduplicated": deduplicated,
         "verified": False,
         "target_root": str(target_root),
+        "cloud": _is_remote(target_root),
+        "local_only": not _is_remote(target_root),
         "endpoint_binding": binding,
         "target_relative": target_relative,
         "created_at": now,
@@ -452,19 +587,81 @@ def _prepare_blob_locked(root: Path, record: dict[str, Any]) -> Path:
     return blob
 
 
-def _copy_and_verify_local(blob: Path, target: str, expected_sha256: str) -> None:
+def _copy_and_verify_local(
+    blob: Path, target: str, expected_sha256: str, *, base: str | None = None
+) -> None:
     destination = Path(target).expanduser()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        shutil.copyfile(blob, temporary)
-        with temporary.open("rb+") as handle:
-            os.fsync(handle.fileno())
-        if _hash_file(temporary) != expected_sha256:
-            raise RuntimeError("Prüfsumme der Zielkopie stimmt nicht")
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
+    boundary = Path(base) if base else destination.parent
+    with _anchored_local_parent(boundary, destination, create=True) as (parent, name):
+        staging_name = f".sicherpfad-{uuid.uuid4().hex}"
+        os.mkdir(staging_name, mode=0o700, dir_fd=parent)
+        staging = os.open(
+            staging_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent,
+        )
+        temporary = "payload"
+        owns_staging = False
+        try:
+            staging_metadata = os.fstat(staging)
+            if (
+                staging_metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(staging_metadata.st_mode) & 0o077
+            ):
+                raise VaultError(
+                    "Die private Ablage des Sicherungsziels wurde verändert"
+                )
+            owns_staging = True
+            descriptor = os.open(
+                temporary,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=staging,
+            )
+            with os.fdopen(descriptor, "w+b") as output, _open_regular(blob) as source:
+                shutil.copyfileobj(source, output, length=MAX_CHUNK_BYTES)
+                output.flush()
+                os.fsync(output.fileno())
+                output.seek(0)
+                if _hash_stream(output) != expected_sha256:
+                    raise RuntimeError("Prüfsumme der Zielkopie stimmt nicht")
+            try:
+                metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                metadata = None
+            if metadata is not None and not stat.S_ISREG(metadata.st_mode):
+                raise VaultError("Die Zieldatei ist keine reguläre Datei")
+            os.rename(temporary, name, src_dir_fd=staging, dst_dir_fd=parent)
+            os.fsync(parent)
+            # Do not claim an accessible target copy if its directory was moved
+            # or replaced while bytes were published through the retained fd.
+            with _anchored_local_parent(boundary, destination) as (current, _):
+                if (os.fstat(current).st_dev, os.fstat(current).st_ino) != (
+                    os.fstat(parent).st_dev,
+                    os.fstat(parent).st_ino,
+                ):
+                    raise VaultError(
+                        "Das Sicherungsziel hat sich während der Ablage verändert"
+                    )
+        finally:
+            try:
+                if owns_staging:
+                    os.unlink(temporary, dir_fd=staging)
+            except FileNotFoundError:
+                pass
+            finally:
+                os.close(staging)
+                try:
+                    if owns_staging:
+                        os.rmdir(staging_name, dir_fd=parent)
+                except OSError:
+                    # A renamed private staging directory is empty after publish;
+                    # do not try to locate or remove it through another pathname.
+                    pass
 
 
 def _copy_and_verify_remote(
@@ -587,7 +784,25 @@ def _complete_upload_locked(
                     blob, target, str(record["sha256"]), timeout=timeout
                 )
             else:
-                _copy_and_verify_local(blob, target, str(record["sha256"]))
+                pair = next(
+                    (
+                        pair
+                        for pair in (current_config.get("backup") or {}).get(
+                            "pairs", []
+                        )
+                        if str(pair.get("id") or pair.get("name") or "")
+                        == str(record.get("identity") or "")
+                    ),
+                    None,
+                )
+                if not isinstance(pair, Mapping):
+                    raise VaultError(
+                        "Datenweg für die lokale Ablage ist nicht mehr verfügbar"
+                    )
+                _guard_local_target(pair, str(record["target_root"]))
+                _copy_and_verify_local(
+                    blob, target, str(record["sha256"]), base=str(record["target_root"])
+                )
         with _upload_record_lock(root, upload_id):
             record["status"] = "ready"
             record["verified"] = True
@@ -601,7 +816,6 @@ def _complete_upload_locked(
             details={
                 "id": upload_id,
                 "pair": record.get("pair"),
-                "filename": record.get("filename"),
                 "size": record.get("size"),
                 "sha256": record.get("sha256"),
                 "deduplicated": record.get("deduplicated"),
@@ -731,13 +945,8 @@ def _restore_missing_blob(
                 watchdog.start()
                 stream = process.stdout
             else:
-                base = Path(str(record["target_root"])).expanduser().resolve()
-                origin = Path(target).expanduser()
-                if origin.is_symlink() or not origin.resolve().is_relative_to(base):
-                    raise VaultError(
-                        "Wiederherstellungsdatei liegt außerhalb des Sicherungsziels"
-                    )
-                stream = origin.open("rb")
+                base = Path(str(record["target_root"])).expanduser()
+                stream = _open_local_target(base, Path(target))
             assert stream is not None
             actual = hashlib.sha256()
             received = 0
@@ -750,7 +959,7 @@ def _restore_missing_blob(
                     received += len(block)
                     if received > size:
                         raise VaultError(
-                            "Cloud-Datei ist größer als der gespeicherte Wiederherstellungsbeleg"
+                            "Zielkopie ist größer als der gespeicherte Wiederherstellungsbeleg"
                         )
                     actual.update(block)
                     output.write(block)
@@ -760,7 +969,7 @@ def _restore_missing_blob(
                 process.wait(timeout=10)
                 if process.returncode or timed_out.is_set():
                     raise VaultError(
-                        "Cloud-Datei konnte nicht vollständig zurückgeholt werden; Zugang und Verbindung prüfen"
+                        "Zielkopie konnte nicht vollständig zurückgeholt werden; Zugang und Verbindung prüfen"
                     )
             if received != size or actual.hexdigest() != digest:
                 raise VaultError(
@@ -829,6 +1038,52 @@ def download_blob(config: Mapping[str, Any], upload_id: str) -> tuple[Path, str]
     return blob, safe_filename(str(record.get("filename") or "Wiederherstellung"))
 
 
+def remove_local_copy(config: Mapping[str, Any], upload_id: str) -> dict[str, Any]:
+    """Delete the server receipt/cache only, never touch a configured target.
+
+    Shared deduplicated blobs remain while any other receipt references them.
+    There is deliberately no automatic expiry of a potentially sole copy.
+    """
+    root = vault_root(config)
+    with _LOCK:
+        record = _load_record(root, upload_id)
+        if upload_id in _TRANSFER_LOCKS or record.get("status") in {
+            "queued",
+            "transferring",
+        }:
+            raise VaultError("Diese Datei wird gerade übertragen oder zurückgeholt")
+        digest = str(record.get("sha256") or "")
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise VaultError("Upload-Status ist beschädigt")
+        with _blob_lock(digest):
+            others = []
+            for path in (root / "records").glob("*.json"):
+                if path == _record_path(root, upload_id):
+                    continue
+                try:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    # An unreadable receipt might still reference this blob.
+                    raise VaultError(
+                        "Beschädigte Vault-Einträge vor dem Löschen prüfen"
+                    ) from None
+                if not isinstance(value, dict):
+                    raise VaultError(
+                        "Beschädigte Vault-Einträge vor dem Löschen prüfen"
+                    )
+                if value.get("sha256") == digest:
+                    others.append(path)
+            _confined_local_path(root, _part_path(root, upload_id)).unlink(
+                missing_ok=True
+            )
+            if not others:
+                _confined_local_path(root, _blob_path(root, digest)).unlink(
+                    missing_ok=True
+                )
+            _confined_local_path(root, _record_path(root, upload_id)).unlink()
+    return {"ok": True, "target_untouched": True, "shared_blob_retained": bool(others)}
+
+
 __all__ = [
     "MAX_CHUNK_BYTES",
     "MAX_FILE_BYTES",
@@ -838,6 +1093,8 @@ __all__ = [
     "create_upload",
     "download_blob",
     "library",
+    "remove_local_copy",
+    "target_root",
     "queue_completion",
     "safe_filename",
     "upload_status",

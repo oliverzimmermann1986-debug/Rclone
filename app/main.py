@@ -30,6 +30,7 @@ from .auth import (
     login_retry_after,
     record_login_failure,
     require_auth,
+    request_is_https,
     session_max_age,
     session_user,
     verify_password_with_generation,
@@ -62,6 +63,7 @@ from .routes import (
     api_maintenance,
     api_push,
     api_recovery,
+    api_remotes,
     api_restore_plan,
     api_storage,
     api_test,
@@ -298,6 +300,18 @@ async def _lifespan(_app):
                 )
                 continue
             result = reconcile_locked_scope(db, scope=scope, kinds=kinds)
+            if scope == runtime_state.DEFAULT_CANCEL_SCOPE and result.get("safe"):
+                from .jobs.selective_restore import reconcile_staging
+                from .recovery_snapshots import reconcile_snapshot_captures
+
+                try:
+                    config_snapshot = get_config().snapshot()
+                    reconcile_staging(db, config_snapshot)
+                    reconcile_snapshot_captures(config_snapshot)
+                except (OSError, ValueError, RuntimeError):
+                    logger.exception(
+                        "Recovery-Teildaten konnten beim Start nicht sicher bereinigt werden"
+                    )
             recovered += int(result.get("recovered_jobs") or 0)
             if not result.get("safe"):
                 logger.error(
@@ -485,7 +499,7 @@ def _apply_security_headers(response, request: Request, request_id: str):
             maximum=63_072_000,
         )
     )
-    if hsts_seconds > 0 and request.url.scheme == "https":
+    if hsts_seconds > 0 and request_is_https(request):
         response.headers.setdefault(
             "Strict-Transport-Security", f"max-age={hsts_seconds}"
         )
@@ -596,6 +610,7 @@ app.include_router(api_storage.router)
 app.include_router(api_diagnostics.router)
 app.include_router(api_maintenance.router)
 app.include_router(api_browse.router)
+app.include_router(api_remotes.router)
 app.include_router(api_pbs.router)
 app.include_router(api_push.router)
 app.include_router(api_webauthn.router)
@@ -610,6 +625,8 @@ STATIC_ASSET_ALLOWLIST = frozenset(
         "app.js",
         "ui-helpers.js",
         "style.css",
+        "workspace.js",
+        "workspace.css",
         "manifest.json",
         "sw.js",
         "app-icon-192.png",
@@ -835,14 +852,11 @@ def readyz():
         )
     except Exception:
         ready = False
-    warnings = _production_security_warnings() if ready else []
     return JSONResponse(
         status_code=200 if ready else 503,
         content={
             "ok": ready,
             "version": __version__,
-            "warnings": warnings,
-            "secure_configuration": not warnings,
         },
     )
 

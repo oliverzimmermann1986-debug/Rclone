@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import logging
 import os
-import subprocess
 import time
 from pathlib import PurePosixPath
 from typing import Any, Mapping
@@ -32,7 +30,6 @@ from ..config_store import get_config
 from ..db import JobAlreadyRunningError, get_db
 from ..jobs import rclone_sync
 from ..jobs.job_lifecycle import BACKUP_KINDS, reconcile_locked_scope
-from ..jobs.locks import HeldFileLock, try_file_lock
 from ..jobs.recovery_lifecycle import (
     RecoveryBusy,
     RecoveryCancelled,
@@ -41,6 +38,7 @@ from ..jobs.recovery_lifecycle import (
     finish_job,
 )
 from ..jobs.restore_test import _endpoints
+from ..jobs.locks import HeldFileLock, try_file_lock
 from ..jobs.selective_restore import (
     JOB_KIND,
     list_staging,
@@ -48,11 +46,11 @@ from ..jobs.selective_restore import (
     remove_staging,
     run_selective_restore,
 )
-from ..rclone_args import rclone_subprocess_env
 from ..recovery_points import (
     RecoveryPointError,
     _is_remote,
     _local_browse,
+    _remote_listing,
     browse_point,
     compare_points,
     list_points,
@@ -184,7 +182,6 @@ def encrypted_handover(payload: Mapping[str, Any], passphrase: str) -> dict[str,
         "salt_b64": base64.b64encode(salt).decode("ascii"),
         "nonce_b64": base64.b64encode(nonce).decode("ascii"),
         "ciphertext_b64": base64.b64encode(ciphertext).decode("ascii"),
-        "plaintext_sha256": hashlib.sha256(plaintext).hexdigest(),
     }
 
 
@@ -286,7 +283,12 @@ def create_handover(
     get_db().audit_add(
         "recovery_handover_exported",
         actor=user,
-        details={"paths_included": body.include_paths},
+        details={
+            "paths_included": body.include_paths,
+            "skipped_invalid": int(
+                (package.get("rescue_inventory") or {}).get("skipped_invalid") or 0
+            ),
+        },
     )
     return Response(
         json.dumps(envelope, ensure_ascii=False, indent=2),
@@ -496,27 +498,19 @@ def browse_backup(
     truncated = False
     if _is_remote(backup_target):
         target = backup_target.rstrip("/") + (f"/{relative}" if relative else "")
-        result = subprocess.run(
-            ["rclone", "lsjson", "--max-depth", "1", "--", target],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            stdin=subprocess.DEVNULL,
-            env=rclone_subprocess_env(),
-        )
-        if result.returncode != 0:
-            raise HTTPException(502, "Sicherungsziel konnte nicht gelesen werden")
         try:
-            entries = json.loads(result.stdout or "[]")
-        except json.JSONDecodeError as exc:
+            entries, truncated = _remote_listing(
+                ["rclone", "lsjson", "--max-depth", "1", "--", target]
+            )
+        except (RecoveryPointError, OSError) as exc:
             raise HTTPException(
-                502, "Sicherungsziel hat eine ungültige Antwort geliefert"
+                502, "Sicherungsziel konnte nicht sicher gelesen werden"
             ) from exc
         if not isinstance(entries, list):
             raise HTTPException(
                 502, "Sicherungsziel hat eine ungültige Antwort geliefert"
             )
-        truncated = len(entries) > 500
+        truncated = truncated or len(entries) > 500
         items = [
             {
                 "name": str(item.get("Name") or ""),

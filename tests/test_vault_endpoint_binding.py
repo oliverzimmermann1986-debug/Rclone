@@ -54,6 +54,7 @@ def env(tmp_path, monkeypatch):
         "size": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
         "source_type": "photo",
+        "local_only": True,
         "expected_endpoints": device_vault.endpoint_binding(pair),
     }
     return client, store, database, body, payload

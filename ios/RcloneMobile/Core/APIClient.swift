@@ -110,6 +110,14 @@ enum APIError: LocalizedError, Equatable {
 }
 
 protocol APIClientProtocol: AnyObject {
+    func getRecoveryStaging() async throws -> RecoveryStagingResponse
+    func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse
+    func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse
+    func getRemoteProviders() async throws -> RemoteProvidersResponse
+    func startRemoteSetup(name: String, provider: String) async throws -> RemoteSetupSession
+    func answerRemoteSetup(id: String, answer: String, step: Int) async throws -> RemoteSetupSession
+    func saveRemoteSetup(id: String) async throws -> RemoteSetupSaved
+    func cancelRemoteSetup(id: String) async throws
     func login(username: String, password: String) async throws
     func exchangeWebAuthnToken(_ token: String, verifier: String) async throws
     func getWebAuthnCredentials() async throws -> WebAuthnCredentialsResponse
@@ -197,6 +205,14 @@ protocol APIClientProtocol: AnyObject {
 }
 
 extension APIClientProtocol {
+    func getRecoveryStaging() async throws -> RecoveryStagingResponse { throw APIError.serverFeatureUnavailable(feature: "Recovery-Staging") }
+    func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
+    func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
+    func getRemoteProviders() async throws -> RemoteProvidersResponse { throw APIError.serverFeatureUnavailable(feature: "Neue Remotes") }
+    func startRemoteSetup(name: String, provider: String) async throws -> RemoteSetupSession { throw APIError.invalidResponse }
+    func answerRemoteSetup(id: String, answer: String, step: Int) async throws -> RemoteSetupSession { throw APIError.invalidResponse }
+    func saveRemoteSetup(id: String) async throws -> RemoteSetupSaved { throw APIError.invalidResponse }
+    func cancelRemoteSetup(id: String) async throws {}
     func getRestorePlan() async throws -> RestorePlanResponse {
         throw APIError.serverFeatureUnavailable(feature: "Restore-Prüfplan")
     }
@@ -917,6 +933,36 @@ final class APIClient: APIClientProtocol {
         try await get("/api/browse/local?path=\(Self.queryEncode(path))")
     }
 
+    func getRecoveryStaging() async throws -> RecoveryStagingResponse { try await get("/api/recovery/staging") }
+
+    func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse {
+        try await delete("/api/recovery/staging/\(Self.queryEncode(id))", body: ["current_password": currentPassword])
+    }
+
+    func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse {
+        try await delete("/api/vault/library/\(Self.queryEncode(uploadID))", body: ["current_password": currentPassword])
+    }
+
+    func getRemoteProviders() async throws -> RemoteProvidersResponse {
+        try await get("/api/remotes/providers")
+    }
+
+    func startRemoteSetup(name: String, provider: String) async throws -> RemoteSetupSession {
+        try await post("/api/remotes/setup", body: RemoteSetupStart(name: name, provider: provider), timeout: 70)
+    }
+
+    func answerRemoteSetup(id: String, answer: String, step: Int) async throws -> RemoteSetupSession {
+        try await post("/api/remotes/setup/\(Self.queryEncode(id))/answer", body: RemoteSetupAnswer(answer: answer, step: step), timeout: 70)
+    }
+
+    func saveRemoteSetup(id: String) async throws -> RemoteSetupSaved {
+        try await post("/api/remotes/setup/\(Self.queryEncode(id))/save", body: [String: String](), timeout: 70)
+    }
+
+    func cancelRemoteSetup(id: String) async throws {
+        let _: ActionResponse = try await delete("/api/remotes/setup/\(Self.queryEncode(id))", body: [String: String]())
+    }
+
     func browseRemote(path: String = "") async throws -> BrowseResponse {
         try await get("/api/browse/rclone?path=\(Self.queryEncode(path))")
     }
@@ -1094,6 +1140,9 @@ final class APIClient: APIClientProtocol {
     func clearLocalSession() {
         persistenceLock.lock()
         defer { persistenceLock.unlock() }
+        exportGeneration += 1
+        for directory in exportDirectories { try? FileManager.default.removeItem(at: directory) }
+        exportDirectories.removeAll()
         remembersSession = false
         clearCookies()
     }
@@ -1158,7 +1207,26 @@ final class APIClient: APIClientProtocol {
         return try await send(request, using: requestSession ?? session)
     }
 
+    private var exportDirectories: Set<URL> = []
+    private var exportGeneration = 0
+
+    private func exportEpoch() -> Int {
+        persistenceLock.lock()
+        defer { persistenceLock.unlock() }
+        return exportGeneration
+    }
+
+    private func writeOwnedExport(filename: String, epoch: Int, write: (URL) throws -> Void) throws -> URL {
+        persistenceLock.lock()
+        defer { persistenceLock.unlock() }
+        guard epoch == exportGeneration else { throw APIError.unauthenticated }
+        let result = try Self.writeExport(filename: filename, write: write)
+        exportDirectories.insert(result.deletingLastPathComponent())
+        return result
+    }
+
     private func download(_ path: String, filename: String, using requestSession: URLSession? = nil, timeout: TimeInterval? = nil) async throws -> URL {
+        let epoch = exportEpoch()
         var request = URLRequest(url: url(for: path))
         request.httpMethod = "GET"
         if let timeout { request.timeoutInterval = timeout }
@@ -1170,7 +1238,7 @@ final class APIClient: APIClientProtocol {
             let errorData = (try? Data(contentsOf: temporary)) ?? Data()
             try validate(response, data: errorData, allowed: 200..<300)
         }
-        return try Self.writeExport(filename: filename) { target in
+        return try writeOwnedExport(filename: filename, epoch: epoch) { target in
             try FileManager.default.moveItem(at: temporary, to: target)
         }
     }
@@ -1180,6 +1248,7 @@ final class APIClient: APIClientProtocol {
         body: Body,
         filename: String
     ) async throws -> URL {
+        let epoch = exportEpoch()
         var request = URLRequest(url: url(for: path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1188,7 +1257,7 @@ final class APIClient: APIClientProtocol {
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await performDataRequest(request)
         try validate(response, data: data, allowed: 200..<300)
-        return try Self.writeExport(filename: filename) { target in
+        return try writeOwnedExport(filename: filename, epoch: epoch) { target in
             try data.write(to: target, options: [.atomic, .completeFileProtection])
         }
     }

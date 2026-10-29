@@ -3,6 +3,18 @@ import XCTest
 @testable import RcloneMobile
 
 final class VaultQueueTests: XCTestCase {
+    func testBisyncVaultTargetsRemoteAndExplicitLocalConsentChangesScope() throws {
+        let server = URL(string: "https://backup.example")!
+        let bisync = VaultQueueScope(serverURL: server, username: "admin", pairID: "photos", source: "/photos", target: "cloud:/Photos", direction: "bisync")
+        XCTAssertEqual(bisync.destinationDescription, "cloud:/Photos")
+        let pull = VaultQueueScope(serverURL: server, username: "admin", pairID: "photos", source: "/photos", target: "cloud:/Photos", direction: "pull")
+        let approved = VaultQueueScope(serverURL: server, username: "admin", pairID: "photos", source: "/photos", target: "cloud:/Photos", direction: "pull", localOnly: true)
+        XCTAssertEqual(pull.destinationDescription, "/photos")
+        XCTAssertNotEqual(pull.key, approved.key)
+        let legacy = Data(#"{"server":"https://backup.example","username":"admin","pairID":"photos","source":"/photos","target":"cloud:/Photos","direction":"pull"}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(VaultQueueScope.self, from: legacy).localOnly)
+    }
+
     private func scope(server: String = "https://backup.example", user: String = "admin", pair: String = "photos", target: String = "cloud:/Photos") -> VaultQueueScope {
         VaultQueueScope(serverURL: URL(string: server)!, username: user, pairID: pair,
             source: "/photos", target: target, direction: "push")

@@ -130,9 +130,7 @@ extension ProtectionIncident {
         }
         for pair in overview.pairs.health {
             let error = pair.error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let status = pair.lastStatus?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-            let failed = ["error", "failed", "timeout", "stale"].contains(status)
-            if failed || (!["ok", "success", "successful", "passed", "cancelled"].contains(status) && !error.isEmpty) {
+            if pair.hasFailure {
                 let message = error.isEmpty
                     ? "Der letzte Lauf dieses Datenwegs ist fehlgeschlagen. Protokoll prüfen."
                     : error

@@ -284,6 +284,8 @@ def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeyp
             "alpine.min.js",
             "ui-helpers.js",
             "app.js",
+            "workspace.js",
+            "workspace.css",
             "app-icon-1024.png",
         ):
             assert f"/static/{asset}?v={revision}" in index_page.text

@@ -38,6 +38,13 @@ def validated_staging_path(
             for value in _endpoints(configured)
             if value and not _is_remote(value)
         )
+    for target in (config.get("pbs") or {}).get("targets") or []:
+        if isinstance(target, Mapping):
+            endpoints.extend(
+                Path(str(value)).expanduser().resolve()
+                for value in target.get("paths") or []
+                if value and not _is_remote(str(value))
+            )
     if any(
         proposed == endpoint
         or proposed.is_relative_to(endpoint)

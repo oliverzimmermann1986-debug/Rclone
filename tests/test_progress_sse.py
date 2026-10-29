@@ -125,24 +125,24 @@ def test_slow_client_queue_keeps_only_latest_snapshot_and_shutdown_unblocks_it()
 
     async def scenario() -> None:
         broadcaster = _ProgressBroadcaster(snapshot, interval=0.01)
+        published = asyncio.Event()
+        original_publish = broadcaster._publish
+
+        def observe_publish(payload):
+            original_publish(payload)
+            if json.loads(payload)["sequence"] >= 3:
+                published.set()
+
+        broadcaster._publish = observe_publish
         queue = await broadcaster.subscribe()
-        deadline = asyncio.get_running_loop().time() + 5
-        while True:
-            # Wait for actual publication of at least two snapshots. Keep the
-            # producer's thread from changing its counter during assertions.
-            with snapshot_lock:
-                published = json.loads(broadcaster._last_payload or "{}")
-                if call_count > 1 and published.get("sequence") == call_count:
-                    assert call_count > 1
-                    assert queue.maxsize == 1
-                    assert queue.qsize() == 1
-                    latest = json.loads(queue.get_nowait())
-                    assert latest["sequence"] == call_count
-                    break
-            assert asyncio.get_running_loop().time() < deadline, (
-                "Snapshots were not published"
-            )
-            await asyncio.sleep(0.001)
+        await asyncio.wait_for(published.wait(), timeout=10)
+
+        assert call_count >= 3
+        assert queue.maxsize == 1
+        assert queue.qsize() == 1
+        latest = json.loads(queue.get_nowait())
+        assert latest == json.loads(broadcaster._last_payload)
+        assert latest["sequence"] >= 3
 
         waiting = asyncio.create_task(queue.get())
         await broadcaster.stop()

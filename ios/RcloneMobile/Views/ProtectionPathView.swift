@@ -18,7 +18,8 @@ struct RestoreEvidenceBadge: View {
         case "passed": return evidence?.isCurrent == true ? "Stichprobe geprüft" : "Nachweis erneuern"
         case "failed": return "Restore fehlgeschlagen"
         case "partial": return "Prüfumfang begrenzt"
-        case "never", "stale": return "Restore offen"
+        case "stale": return "Nachweis veraltet"
+        case "never": return "Restore offen"
         default: return "Nachweis unbekannt"
         }
     }
@@ -187,8 +188,8 @@ struct ProtectionPathDetailView: View {
         }
     }
 
-    private var sourceIsLocal: Bool { pair.source == pair.local }
-    private var targetIsLocal: Bool { pair.target == pair.local }
+    private var sourceIsLocal: Bool { pair.source.hasPrefix("/") }
+    private var targetIsLocal: Bool { pair.target.hasPrefix("/") }
 
     private var assignedJobs: [String] {
         guard let configuredPair = model.config?.backup.pairs.first(where: { $0.name == pair.name }) else { return [] }
@@ -206,7 +207,7 @@ struct ProtectionPathDetailView: View {
         let destructive = configuredPair.direction.lowercased() == "bisync" || configuredPair.mode.lowercased() == "sync"
         if !destructive { return "Keine automatischen Löschungen" }
         if !configuredPair.allowDelete { return "Produktive Löschungen gesperrt" }
-        if configuredPair.maxDelete == nil { return "Löschlimit fehlt" }
+        if (configuredPair.maxDelete ?? -1) < 0 { return "Löschlimit fehlt" }
         if configuredPair.backupDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Löschungen begrenzt" }
         return "Begrenzt und versioniert"
     }
@@ -216,7 +217,7 @@ struct ProtectionPathDetailView: View {
         let destructive = configuredPair.direction.lowercased() == "bisync" || configuredPair.mode.lowercased() == "sync"
         if !destructive { return "Dieser Datenweg kopiert Dateien, ohne entfernte Quelldateien automatisch am Ziel zu löschen." }
         if !configuredPair.allowDelete { return "Der Server blockiert produktive Sync-Läufe, bis Löschungen ausdrücklich freigegeben werden." }
-        guard let maximum = configuredPair.maxDelete else { return "Vor dem nächsten produktiven Lauf ein festes maximales Löschlimit setzen." }
+        guard let maximum = configuredPair.maxDelete, maximum >= 0 else { return "Vor dem nächsten produktiven Lauf ein festes maximales Löschlimit setzen." }
         if configuredPair.backupDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Pro Lauf sind höchstens \(maximum) Löschungen erlaubt. Eine Versionsablage schützt zusätzlich vor Überschreiben."
         }
@@ -227,13 +228,13 @@ struct ProtectionPathDetailView: View {
         guard let configuredPair else { return .secondary }
         let destructive = configuredPair.direction.lowercased() == "bisync" || configuredPair.mode.lowercased() == "sync"
         if !destructive || !configuredPair.allowDelete { return .green }
-        return configuredPair.maxDelete == nil ? .red : configuredPair.backupDir.isEmpty ? .orange : .green
+        return (configuredPair.maxDelete ?? -1) < 0 ? .red : configuredPair.backupDir.isEmpty ? .orange : .green
     }
 
     private var shieldSymbol: String {
         guard let configuredPair else { return "questionmark.circle" }
         let destructive = configuredPair.direction.lowercased() == "bisync" || configuredPair.mode.lowercased() == "sync"
-        if destructive && configuredPair.allowDelete && configuredPair.maxDelete == nil {
+        if destructive && configuredPair.allowDelete && (configuredPair.maxDelete ?? -1) < 0 {
             return "exclamationmark.shield.fill"
         }
         if destructive && configuredPair.allowDelete && configuredPair.backupDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -248,6 +249,7 @@ struct ProtectionPathDetailView: View {
         case "passed": return pair.restoreEvidence?.isCurrent == true ? "Stichprobe bestätigt" : "Nachweis erneuern"
         case "failed": return "Prüfung fehlgeschlagen"
         case "partial": return "Prüfumfang begrenzt"
+        case "stale": return "Nachweis veraltet"
         case "never": return "Noch nicht nachgewiesen"
         default: return "Nachweis nicht verfügbar"
         }
@@ -502,7 +504,7 @@ private struct StorageStatisticsView: View {
     }
 
     private var sourceSymbol: String { pair.source == pair.local ? "folder.fill" : "icloud.fill" }
-    private var targetSymbol: String { pair.target == pair.local ? "folder.fill" : "icloud.fill" }
+    private var targetSymbol: String { pair.target.hasPrefix("/") ? "folder.fill" : "icloud.fill" }
 
     private func chartValue(_ bucket: StorageCompositionBucket) -> Double {
         bucket.bytes > 0 ? Double(bucket.bytes) : Double(bucket.count)

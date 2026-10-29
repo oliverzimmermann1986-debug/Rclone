@@ -9,10 +9,11 @@ IOS = ROOT / "ios" / "RcloneMobile"
 
 def test_status_style_distinguishes_limited_proof_from_failed_restore():
     source = (IOS / "Core" / "Formatting.swift").read_text(encoding="utf-8")
-    assert 'case "warn", "warning", "partial", "stale", "overdue": .orange' in source
+    assert 'case "warn", "warning", "partial", "overdue": .orange' in source
     assert 'case "warn", "warning": "Hinweis"' in source
     assert 'case "partial": "Prüfumfang begrenzt"' in source
-    assert 'case "error", "failed", "inactive": .red' in source
+    assert 'case "error", "failed", "inactive", "stale": .red' in source
+    assert 'case "stale": "Unterbrochen"' in source
     assert 'case "error", "failed": "Fehler"' in source
     assert (
         'case "warn", "warning", "partial": "exclamationmark.triangle.fill"' in source

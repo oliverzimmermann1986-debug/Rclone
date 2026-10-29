@@ -38,7 +38,9 @@ def test_installer_uses_pinned_requirements_and_services_have_safe_runtime_defau
         encoding="utf-8"
     )
 
-    assert '-r "$APP_DIR/requirements.txt"' in script
+    assert (
+        '--require-hashes --only-binary=:all: -r "$APP_DIR/requirements.lock"' in script
+    )
     assert "--upgrade pip wheel" not in script
     assert "uvicorn[standard]==" in requirements
     assert "uvloop==" in requirements
@@ -146,8 +148,8 @@ def test_ci_covers_supported_python_dependencies_ui_and_systemd_units():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
     assert 'python-version: ["3.10", "3.11", "3.12", "3.13"]' in workflow
-    assert "actions/checkout@v7" in workflow
-    assert "actions/setup-python@v7" in workflow
+    assert re.search(r"actions/checkout@[a-f0-9]{40}\b", workflow)
+    assert re.search(r"actions/setup-python@[a-f0-9]{40}\b", workflow)
     assert "-r requirements-dev.txt" in workflow
     assert "python -m pip check" in workflow
     assert "node --check app/static/app.js" in workflow

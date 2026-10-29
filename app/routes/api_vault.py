@@ -15,7 +15,7 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from ..auth import require_auth
+from ..auth import require_auth, require_reauthentication
 from ..config_store import get_config
 from ..db import get_db
 from ..device_vault import (
@@ -27,8 +27,9 @@ from ..device_vault import (
     library,
     queue_completion,
     upload_status,
+    target_root,
+    remove_local_copy,
 )
-from ..jobs.restore_test import _endpoints
 from ..security import require_csrf
 
 router = APIRouter(
@@ -77,6 +78,7 @@ class CreateUploadRequest(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
     source_type: Literal["photo", "file"]
     device_name: str = Field(default="iPhone", min_length=1, max_length=80)
+    local_only: bool = False
     expected_endpoints: ExpectedEndpoints | None = None
 
 
@@ -92,7 +94,7 @@ def start_upload(body: CreateUploadRequest) -> dict[str, Any]:
                 "Datenweg wurde entfernt; Konfiguration neu laden und das Sicherungsziel prüfen.",
             ) from exc
         raise
-    _source, target = _endpoints(pair)
+    target = target_root(pair)
     result = _safe(
         create_upload,
         config,
@@ -103,6 +105,7 @@ def start_upload(body: CreateUploadRequest) -> dict[str, Any]:
         source_type=body.source_type,
         device_name=body.device_name,
         target_root=target,
+        local_only=body.local_only,
         expected_endpoints=body.expected_endpoints.model_dump()
         if body.expected_endpoints is not None
         else None,
@@ -113,7 +116,7 @@ def start_upload(body: CreateUploadRequest) -> dict[str, Any]:
         details={
             "id": result["id"],
             "pair": result["pair"],
-            "filename": result["filename"],
+            "sha256": result["sha256"],
             "size": result["size"],
             "deduplicated": result["deduplicated"],
         },
@@ -180,7 +183,7 @@ def download_vault_item(upload_id: str) -> FileResponse:
     get_db().audit_add(
         "device_vault_restored_to_iphone",
         actor="ios",
-        details={"id": upload_id, "filename": filename},
+        details={"id": upload_id},
     )
     return FileResponse(
         path,
@@ -188,6 +191,25 @@ def download_vault_item(upload_id: str) -> FileResponse:
         filename=filename,
         headers={"Cache-Control": "no-store"},
     )
+
+
+class RemoveLocalCopyRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=1024)
+
+
+@router.delete("/library/{upload_id}")
+def delete_local_copy(
+    upload_id: str,
+    body: RemoveLocalCopyRequest,
+    request: Request,
+    user: str = Depends(require_auth),
+) -> dict[str, Any]:
+    require_reauthentication(request, user, body.current_password)
+    result = _safe(remove_local_copy, get_config().snapshot(), upload_id)
+    get_db().audit_add(
+        "device_vault_local_copy_removed", actor=user, details={"id": upload_id}
+    )
+    return result
 
 
 __all__ = ["router"]

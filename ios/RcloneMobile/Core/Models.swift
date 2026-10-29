@@ -78,6 +78,11 @@ struct PairHealth: Decodable, Identifiable {
     let jobID: Int?
     let overdue: Bool?
     let error: String?
+    var hasFailure: Bool {
+        let status = lastStatus?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return ["error", "failed", "timeout", "stale"].contains(status)
+            || (!["ok", "success", "successful", "passed", "cancelled"].contains(status) && !(error ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
 
     enum CodingKeys: String, CodingKey {
         case name, direction, mode, schedule, jobs, overdue, error
@@ -284,7 +289,7 @@ extension StoragePair {
         let decodedDirection = try values.decodeIfPresent(String.self, forKey: .direction)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        direction = decodedDirection.flatMap { $0.isEmpty ? nil : $0 } ?? "push"
+        direction = decodedDirection.flatMap { $0.isEmpty ? nil : $0 } ?? "bisync"
 
         let fallbackSource = direction == "pull" ? (remote ?? "") : local
         let fallbackTarget = direction == "pull" ? local : (remote ?? "")
@@ -955,7 +960,7 @@ struct PairConfig: Codable, Identifiable {
         name = try values.decode(String.self, forKey: key("name"))
         local = try values.decode(String.self, forKey: key("local"))
         remote = try values.decode(String.self, forKey: key("remote"))
-        direction = try values.decodeIfPresent(String.self, forKey: key("direction")) ?? "push"
+        direction = try values.decodeIfPresent(String.self, forKey: key("direction")) ?? "bisync"
         mode = try values.decodeIfPresent(String.self, forKey: key("mode")) ?? (direction == "bisync" ? "bisync" : "copy")
         enabled = try values.decodeIfPresent(Bool.self, forKey: key("enabled")) ?? true
         allowDelete = try values.decodeIfPresent(Bool.self, forKey: key("allow_delete")) ?? false
@@ -1127,6 +1132,8 @@ struct JobSearchResponse: Decodable {
 struct JobRecord: Decodable, Identifiable {
     var summary: [String: JSONValue]? = nil
     var displayStatus: String? = nil
+    var dryRun: Bool? = nil
+    var isDryRun: Bool { dryRun == true || summary?["dry_run"] == .bool(true) }
     var effectiveStatus: String { displayStatus ?? status }
     let id: Int
     let kind: String
@@ -1141,6 +1148,7 @@ struct JobRecord: Decodable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, kind, status, summary
         case displayStatus = "display_status"
+        case dryRun = "dry_run"
         case startedAt = "started_at"
         case endedAt = "ended_at"
         case logFile = "log_file"
@@ -1976,9 +1984,11 @@ struct VaultUploadRequest: Encodable {
     let sha256: String
     let sourceType: String
     let deviceName: String
+    var localOnly: Bool = false
     let expectedEndpoints: VaultEndpointBinding
 
     enum CodingKeys: String, CodingKey {
+        case localOnly = "local_only"
         case identity, filename, size, sha256
         case sourceType = "source_type"
         case deviceName = "device_name"
@@ -2000,6 +2010,9 @@ struct VaultUploadStatus: Decodable, Identifiable {
     let deduplicated: Bool
     let verified: Bool
     let targetRelative: String
+    var targetRoot: String? = nil
+    var cloud: Bool? = nil
+    var localOnly: Bool? = nil
     let createdAt: Double
     let updatedAt: Double
     let completedAt: Double?
@@ -2016,6 +2029,9 @@ struct VaultUploadStatus: Decodable, Identifiable {
         case sourceType = "source_type"
         case deviceName = "device_name"
         case targetRelative = "target_relative"
+        case targetRoot = "target_root"
+        case cloud
+        case localOnly = "local_only"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case completedAt = "completed_at"

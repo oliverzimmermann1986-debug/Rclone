@@ -25,6 +25,7 @@ function app() {
 
   return {
     page: 'dashboard',
+    remoteSetup: { show: false, busy: false, name: '', provider: '', providers: [], session: null, answer: '', error: '' },
     pages: ['dashboard', 'pairs', 'definitions', 'runs', 'doctor', 'settings', 'recovery'],
     settingsTabs: ['general', 'scheduler', 'security', 'filters', 'account', 'pbs'],
     navOpen: false,
@@ -112,7 +113,7 @@ function app() {
     recovery: {
       loading: false, pair: '', points: [], pointId: '', path: '', items: [],
       selectedPaths: [], diff: null, staging: [], quarantine: [], error: '',
-      maxTotalMb: 512, handover: { password: '', passphrase: '', includePaths: false, downloaded: false },
+      maxTotalMb: 512, handover: { password: '', passphrase: '', repeat: '', includePaths: false, downloaded: false },
     },
     storageComposition: { loading: {}, data: {}, errors: {} },
     maintenance: { logs: [], loading: false, prune: null, database: null, logQuery: '' },
@@ -633,6 +634,9 @@ function app() {
       if (!this.online) return 'error';
       if (!data) return 'pending';
       if ((data.alerts || []).some((a) => a.level === 'error')) return 'error';
+      if ((data.pairs?.health || []).some((p) => ['error', 'failed', 'timeout', 'stale'].includes(p.last_status) || (p.error && !['ok', 'success', 'cancelled'].includes(p.last_status)))) return 'error';
+      if (this.storagePairs().some((p) => p.restore_evidence?.state === 'failed')) return 'error';
+      if (data.services?.scheduler?.configured_enabled === false || data.services?.scheduler?.control?.paused) return 'warn';
       if ((data.alerts || []).some((a) => ['warn', 'warning'].includes(a.level))) return 'warn';
       if (this.busy()) return 'running';
       return 'ok';
@@ -2012,7 +2016,7 @@ function app() {
       if (src && dst && src.replace(/\/+$/, '') === dst.replace(/\/+$/, '')) issues.push('Quelle und Ziel identisch');
       const destructive = pair.two_way || pair.direction === 'bisync' || pair.mode === 'sync';
       if (destructive && pair.enabled && !pair.allow_delete) issues.push('Löschen nicht freigegeben');
-      if (destructive && pair.enabled && (pair.max_delete === '' || pair.max_delete === null || pair.max_delete === undefined)) issues.push('Löschlimit fehlt');
+      if (destructive && pair.enabled && (pair.max_delete === '' || pair.max_delete === null || pair.max_delete === undefined || Number(pair.max_delete) < 0)) issues.push('Löschlimit fehlt');
       if (pair.require_mountpoint && !String(pair.mountpoint || '').trim()) issues.push('Mountpoint fehlt');
       return issues;
     },
@@ -2045,7 +2049,7 @@ function app() {
       const health = this.pairLastRun(pair);
       if (!pair.enabled) return 'disabled';
       if (health?.last_status === 'error' || health?.last_status === 'stale') return 'error';
-      if (health?.overdue || this.pairIssues(pair).length) return 'warn';
+      if ((health?.last_status === 'skipped' && health?.error) || health?.overdue || this.pairIssues(pair).length) return 'warn';
       if (health?.last_status === 'ok') return 'ok';
       return 'pending';
     },
@@ -2181,7 +2185,8 @@ function app() {
       const fresh = state === 'passed' && age > 0;
       const count = Number(evidence?.verified_files || 0);
       const sample = Number(evidence?.sample_size || 0);
-      return { state: fresh ? 'passed' : (state === 'passed' ? 'stale' : state), text: fresh ? `${count}/${sample} geprüft` : (labels[state] || labels.never), title: labels[state] || labels.never };
+      const effective = !fresh && state === 'passed' ? 'stale' : state;
+      return { state: fresh ? 'passed' : effective, text: fresh ? `${count}/${sample} geprüft` : (labels[effective] || labels.never), title: labels[effective] || labels.never };
     },
 
     restoreEvidenceLabel(entry) { return this.restoreEvidence(entry).text; },
@@ -2258,6 +2263,50 @@ function app() {
     pairSizeError(name, side) {
       const size = this.pairSize(name)?.[`${side}_size`];
       return size?.measurement_error || size?.error || '';
+    },
+
+    async openRemoteSetup() {
+      this.remoteSetup = { show: true, busy: true, name: '', provider: '', providers: [], session: null, answer: '', error: '' };
+      this.openDialog('remoteSetupDialog');
+      const data = await this.api('GET', '/api/remotes/providers', undefined, { captureError: true });
+      this.remoteSetup.busy = false;
+      if (!data || data.__error) { this.remoteSetup.error = data?.detail || 'Anbieter konnten nicht geladen werden.'; return; }
+      this.remoteSetup.providers = data.providers;
+    },
+
+    async submitRemoteSetup() {
+      const state = this.remoteSetup;
+      if (state.busy) return;
+      state.busy = true;
+      state.error = '';
+      const session = state.session;
+      const url = !session ? '/api/remotes/setup' : `/api/remotes/setup/${session.id}/${session.ready ? 'save' : 'answer'}`;
+      const body = !session ? { name: state.name.trim(), provider: state.provider }
+        : session.ready ? {} : { step: session.step, answer: state.answer || session.option.default || '' };
+      const result = await this.api('POST', url, body, { captureError: true, timeoutMs: 70000 });
+      state.busy = false;
+      if (!result || result.__error) { state.error = result?.detail || 'Einrichtung fehlgeschlagen. Bitte erneut versuchen.'; return; }
+      if (session?.ready) {
+        state.session = null;
+        await this.closeRemoteSetup();
+        this.showToast(`Remote ${result.name} ist angelegt.`, 'ok');
+        if (this.picker.show && this.picker.kind === 'remote') await this.loadPicker('');
+      } else {
+        state.session = result;
+        state.answer = '';
+        state.error = result.error || '';
+        this.$nextTick(() => this.$refs.remoteAnswer?.focus());
+      }
+    },
+
+    async closeRemoteSetup() {
+      if (this.remoteSetup.busy) return;
+      const id = this.remoteSetup.session?.id;
+      this.remoteSetup.show = false;
+      this.remoteSetup.answer = '';
+      this.remoteSetup.session = null;
+      this.restoreDialogFocus();
+      if (id) await this.api('DELETE', `/api/remotes/setup/${id}`, undefined, { silent: true });
     },
 
     openPicker(mode, idx) {
@@ -2583,18 +2632,29 @@ function app() {
     async startFullSnapshot() {
       if (!this.recovery.pair) return;
       if (!(await this.requestConfirmation('Der aktuelle Sicherungsbestand wird in einen vollständigen, lokalen Recovery-Punkt kopiert. Der Vorgang kann Speicherplatz und Zeit beanspruchen.', { title: 'Recovery-Punkt erstellen', confirmLabel: 'Recovery-Punkt erstellen' }))) return;
-      const result = await this.api('POST', '/api/recovery/snapshots', { identity: this.recovery.pair, max_total_mb: 5120 });
+      const result = await this.api('POST', '/api/recovery/snapshots', { identity: this.recovery.pair, max_total_mb: Math.min(51200, Math.max(1, Number(this.recovery.maxTotalMb) || 5120)) });
       if (result?.ok) { this.showToast(`Recovery-Punkt wird erstellt (Lauf #${result.job_id})`); this.loadJobs(true); }
     },
 
     async startFullStagedRestore(pointId) {
       if (!this.recovery.pair || !pointId) return;
       if (!(await this.requestConfirmation('Der vollständige Stand wird geprüft und ausschließlich in ein isoliertes Staging-Verzeichnis wiederhergestellt. Die produktiven Datenwege bleiben unberührt.', { title: 'Vollständigen Stand ins Staging laden', confirmLabel: 'Ins Staging wiederherstellen' }))) return;
-      const result = await this.api('POST', `/api/recovery/points/${encodeURIComponent(pointId)}/restore`, { identity: this.recovery.pair, max_total_mb: 5120 });
+      const point = this.recovery.points.find((p) => p.id === pointId);
+      const limit = Math.min(51200, Math.max(1, Math.ceil(Number(point?.total_bytes || 0) / 1048576) || Number(this.recovery.maxTotalMb) || 5120));
+      const result = await this.api('POST', `/api/recovery/points/${encodeURIComponent(pointId)}/restore`, { identity: this.recovery.pair, max_total_mb: limit });
       if (result?.ok) { this.showToast(`Vollständige Recovery läuft (Job #${result.job_id})`); this.loadJobs(true); }
     },
 
+    async removeRecoveryStaging(item) {
+      if (!(await this.requestConfirmation('Die zurückgeholten Dateien in diesem Staging werden gelöscht. Prüfe vorher, ob du sie noch benötigst.', { title: 'Staging entfernen?', confirmLabel: 'Staging entfernen' }))) return;
+      const password = await this.requestCurrentPassword('Aktuelles Passwort zur Löschung eingeben.');
+      if (!password) return;
+      const result = await this.api('DELETE', `/api/recovery/staging/${encodeURIComponent(item.id)}`, { current_password: password });
+      if (result?.ok) await this.loadRecovery();
+    },
+
     async acknowledgeQuarantine(item) {
+      if (!(await this.requestConfirmation(`Quarantäne für „${item.pair}“ aufheben? Dateirückgang: ${item.file_drop_percent ?? '–'} %, Größenrückgang: ${item.size_drop_percent ?? '–'} %. Prüfe Mount, Quellpfad und Bestand außerhalb der Anwendung. Die Freigabe erlaubt nachfolgende produktive Läufe einschließlich Löschungen.`, { title: 'Quarantäne wirklich aufheben?', confirmLabel: 'Geprüfte Quelle freigeben' }))) return;
       const password = await this.requestCurrentPassword('Aktuelles Passwort zur Freigabe der Quarantäne eingeben.');
       if (!password) return;
       const result = await this.api('POST', `/api/recovery/quarantine/${encodeURIComponent(item.pair)}/acknowledge`, { current_password: password });
@@ -2604,6 +2664,8 @@ function app() {
     async downloadRecoveryHandover() {
       const handover = this.recovery.handover;
       if (handover.passphrase.length < 12 || !handover.password) { this.showToast('Aktuelles Passwort und Passphrase mit mindestens 12 Zeichen eingeben.', 'err'); return; }
+      if (handover.passphrase !== handover.repeat) { this.showToast('Die Passphrasen stimmen nicht überein.', 'err'); return; }
+      if (location.protocol === 'http:' && !(await this.requestConfirmation('Diese Verbindung ist unverschlüsselt. Serverpasswort und Paket-Passphrase werden im Klartext an den Server übertragen. Verwende nach Möglichkeit HTTPS.', { title: 'Unverschlüsselte Verbindung', confirmLabel: 'Bewusst über HTTP fortfahren' }))) return;
       try {
         const response = await fetch('/api/recovery/handover', {
           method: 'POST', credentials: 'same-origin', cache: 'no-store',
@@ -2627,11 +2689,14 @@ function app() {
 
     printHandoverKey() {
       if (!this.recovery.handover.passphrase) { this.showToast('Zuerst eine Passphrase eingeben.', 'err'); return; }
-      const printWindow = window.open('', '_blank', 'noopener,noreferrer,width=640,height=520');
+      const printWindow = window.open('', '_blank', 'width=640,height=520');
       if (!printWindow) { this.showToast('Druckfenster wurde vom Browser blockiert.', 'err'); return; }
+      printWindow.opener = null;
       const escaped = this.recovery.handover.passphrase.replace(/[&<>"']/g, (char) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]));
-      printWindow.document.write(`<!doctype html><meta charset="utf-8"><title>Passphrase für Sicherpfad-Notfallpaket</title><h1>Passphrase für das Notfallpaket</h1><p>Getrennt vom verschlüsselten Paket verwahren und nur der bevollmächtigten Person übergeben.</p><pre>${escaped}</pre><script>window.print()<\\/script>`);
+      printWindow.document.write(`<!doctype html><meta charset="utf-8"><title>Passphrase für Sicherpfad-Notfallpaket</title><h1>Passphrase für das Notfallpaket</h1><p>Getrennt vom verschlüsselten Paket verwahren und nur der bevollmächtigten Person übergeben.</p><pre>${escaped}</pre>`);
       printWindow.document.close();
+      printWindow.focus();
+      printWindow.print();
     },
 
     recoveryBreadcrumbs() {
@@ -3104,6 +3169,7 @@ function app() {
     },
 
     activeDialog() {
+      if (this.remoteSetup.show) return this.$refs.remoteSetupDialog;
       if (this.commandPalette.show) return this.$refs.commandPaletteDialog;
       if (this.confirmationDialog.show) return this.$refs.confirmationDialog;
       if (this.currentPasswordDialog.show) return this.$refs.currentPasswordDialog;
@@ -3256,7 +3322,8 @@ function app() {
     },
 
     closeOverlays() {
-      if (this.confirmationDialog.show) this.respondConfirmation(false);
+      if (this.remoteSetup.show) this.closeRemoteSetup();
+      else if (this.confirmationDialog.show) this.respondConfirmation(false);
       else if (this.currentPasswordDialog.show) this.cancelCurrentPassword();
       else if (this.jobModal.show) this.closeJob();
       else if (this.picker.show) this.closePicker();

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import multiprocessing
 
 import subprocess
@@ -45,15 +46,23 @@ def _config(tmp_path: Path) -> dict:
 
 def _create(tmp_path: Path, payload: bytes) -> tuple[dict, dict]:
     config = _config(tmp_path)
+    pair = {
+        "id": "photos",
+        "name": "Fotos",
+        "direction": "push",
+        "remote": str(tmp_path / "target"),
+    }
+    config["backup"]["pairs"] = [pair]
     record = device_vault.create_upload(
         config,
-        pair=config["backup"]["pairs"][0],
+        pair=pair,
         filename="Urlaub.heic",
         size=len(payload),
         sha256=hashlib.sha256(payload).hexdigest(),
         source_type="photo",
         device_name="Olivers iPhone",
         target_root=str(tmp_path / "target"),
+        local_only=True,
     )
     return config, record
 
@@ -133,6 +142,210 @@ def test_rejects_wrong_offset_and_unsafe_filename(tmp_path: Path):
         pass
     else:
         raise AssertionError("unsafe filename must fail")
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "Notiz\t12.txt",
+        "line\x1ffeed.txt",
+        "delete\x7f.txt",
+        "trailing.txt\t",
+        "\tleading.txt",
+        "control\x85.txt",
+    ],
+)
+def test_filename_rejects_all_control_characters(filename):
+    with pytest.raises(device_vault.VaultError, match="Dateiname"):
+        device_vault.safe_filename(filename)
+
+
+def test_vault_target_uses_remote_for_bisync_and_requires_local_consent(tmp_path):
+    assert (
+        device_vault.target_root({"local": "/source", "remote": "cloud:"}) == "cloud:"
+    )
+    assert (
+        device_vault.target_root(
+            {"direction": "bisync", "local": "/source", "remote": "cloud:"}
+        )
+        == "cloud:"
+    )
+    assert (
+        device_vault.target_root(
+            {"direction": "pull", "local": "/target", "remote": "cloud:"}
+        )
+        == "/target"
+    )
+    with pytest.raises(device_vault.VaultError, match="ausdrücklich"):
+        device_vault.create_upload(
+            _config(tmp_path),
+            pair={},
+            filename="note.txt",
+            size=1,
+            sha256="a" * 64,
+            source_type="file",
+            device_name="iPhone",
+            target_root=str(tmp_path / "target"),
+        )
+
+
+def test_bisync_receipts_keep_their_original_target_and_endpoint_binding(tmp_path):
+    pair = {
+        "id": "photos",
+        "local": str(tmp_path / "legacy-local"),
+        "remote": "cloud:/photos",
+        "direction": "bisync",
+    }
+    config = {"backup": {"pairs": [pair]}}
+    for saved_target in (pair["remote"], pair["local"]):
+        receipt = {
+            "identity": "photos",
+            "target_root": saved_target,
+            "endpoint_binding": device_vault.endpoint_binding(pair),
+        }
+        device_vault._validate_destination(config, receipt)
+        changed = {"backup": {"pairs": [{**pair, "remote": "other-cloud:/photos"}]}}
+        with pytest.raises(device_vault.VaultError, match="Konfiguration neu laden"):
+            device_vault._validate_destination(changed, receipt)
+
+
+def test_local_publication_rejects_an_escaping_parent(tmp_path):
+    boundary = tmp_path / "target"
+    boundary.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    try:
+        (boundary / "Sicherpfad").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symlinks require host support")
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"fixture")
+    with pytest.raises(device_vault.VaultError):
+        device_vault._copy_and_verify_local(
+            blob,
+            str(boundary / "Sicherpfad" / "file"),
+            hashlib.sha256(b"fixture").hexdigest(),
+            base=str(boundary),
+        )
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Anchored directory I/O requires POSIX")
+def test_parent_replacement_cannot_redirect_local_publication(tmp_path, monkeypatch):
+    boundary = tmp_path / "target"
+    parent = boundary / "Sicherpfad"
+    parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    moved = tmp_path / "moved-original"
+    blob = tmp_path / "blob"
+    payload = b"anchored-vault-bytes"
+    blob.write_bytes(payload)
+    original_copy = device_vault.shutil.copyfileobj
+
+    def replace_parent(source, destination, **kwargs):
+        parent.rename(moved)
+        parent.symlink_to(outside, target_is_directory=True)
+        return original_copy(source, destination, **kwargs)
+
+    monkeypatch.setattr(device_vault.shutil, "copyfileobj", replace_parent)
+    with pytest.raises(device_vault.VaultError):
+        device_vault._copy_and_verify_local(
+            blob,
+            str(parent / "photo"),
+            hashlib.sha256(payload).hexdigest(),
+            base=str(boundary),
+        )
+    assert list(outside.iterdir()) == []
+    assert (moved / "photo").read_bytes() == payload
+    assert not list(moved.glob(".sicherpfad-*"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Anchored directory I/O requires POSIX")
+def test_parent_replacement_cannot_redirect_local_restore(tmp_path, monkeypatch):
+    boundary = tmp_path / "target"
+    parent = boundary / "Sicherpfad"
+    parent.mkdir(parents=True)
+    (parent / "photo").write_bytes(b"expected")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "photo").write_bytes(b"untrusted")
+    moved = tmp_path / "moved-original"
+    original_open = device_vault.os.open
+    replaced = False
+
+    def replace_parent(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if path == "photo" and kwargs.get("dir_fd") is not None and not replaced:
+            replaced = True
+            parent.rename(moved)
+            parent.symlink_to(outside, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(device_vault.os, "open", replace_parent)
+    monkeypatch.setattr(
+        device_vault.os,
+        "supports_dir_fd",
+        device_vault.os.supports_dir_fd | {replace_parent},
+    )
+    with device_vault._open_local_target(boundary, parent / "photo") as handle:
+        assert handle.read() == b"expected"
+
+
+def test_local_target_io_fails_closed_without_dirfd_support(tmp_path, monkeypatch):
+    monkeypatch.setattr(device_vault.os, "supports_dir_fd", set())
+    with pytest.raises(device_vault.VaultError, match="POSIX"):
+        with device_vault._anchored_local_parent(tmp_path, tmp_path / "file"):
+            pytest.fail("Unsupported hosts must not fall back to pathname I/O")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO requires POSIX")
+def test_regular_reader_rejects_fifo_without_blocking(tmp_path):
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(device_vault.VaultError, match="reguläre"):
+        device_vault._open_regular(fifo)
+
+
+def test_local_copy_removal_keeps_target_and_shared_blob(tmp_path, monkeypatch):
+    payload = b"retained-target"
+    config, first = _create(tmp_path, payload)
+    device_vault.append_chunk(config, first["id"], offset=0, payload=payload)
+    device_vault.queue_completion(config, first["id"])
+    monkeypatch.setattr(device_vault, "notify", lambda *args, **kwargs: None)
+    ready = device_vault.complete_upload(AuditDatabase(), config, first["id"])
+    assert ready["status"] == "ready"
+    _, second = _create(tmp_path, payload)
+    blob = device_vault._blob_path(device_vault.vault_root(config), first["sha256"])
+    target = tmp_path / "target" / ready["target_relative"]
+    assert device_vault.remove_local_copy(config, first["id"])["shared_blob_retained"]
+    assert blob.exists() and target.read_bytes() == payload
+    assert not device_vault.remove_local_copy(config, second["id"])[
+        "shared_blob_retained"
+    ]
+    assert not blob.exists() and target.read_bytes() == payload
+
+
+def test_local_mount_guard_is_checked_before_creating_a_vault_record(tmp_path):
+    config = _config(tmp_path)
+    pair = {
+        "direction": "pull",
+        "local": str(tmp_path / "absent"),
+        "sentinel_file": ".mounted",
+    }
+    with pytest.raises(device_vault.VaultError, match="Sentinel"):
+        device_vault.create_upload(
+            config,
+            pair=pair,
+            filename="file.txt",
+            size=1,
+            sha256="a" * 64,
+            source_type="file",
+            device_name="iPhone",
+            target_root=pair["local"],
+            local_only=True,
+        )
+    assert not (tmp_path / "vault" / "records").exists()
 
 
 @pytest.mark.parametrize("committed", [0, 4])

@@ -26,3 +26,9 @@ app/static/_stub-methods.js
 # Local security-review material and operator secrets.
 .planning/
 deploy-backend*.sh
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.mobileprovision

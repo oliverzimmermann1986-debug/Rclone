@@ -202,9 +202,7 @@ Eine Expertenausnahme ist mit `backup.allow_unsafe_rclone_args: true` möglich, 
 - rclone-Unterprozesse erhalten `RCLONE_ASK_PASSWORD=false` und können keine Dienste blockierend nach einem Passwort fragen
 - systemd-Sandbox mit leerem Capability-Set, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectProc=invisible`, deaktiviertem Uvicorn-Serverheader und restriktiven Schreibpfaden
 
-Push-Nutzlasten können Job-/Datenwegnamen und gekürzte Fehlertexte enthalten und
-werden über Apples APNs übertragen. Enthalten Namen personenbezogene Daten, sollte
-die Funktion nur nach der eigenen Datenschutzprüfung aktiviert werden.
+Neue Push-Nutzlasten enthalten generische Titel und Texte sowie technische IDs; Job-/Datenwegnamen und rohe Fehlertexte bleiben auf dem Server. Token, Text und technische Kennungen werden über Apples APNs übertragen; Verarbeitung in den USA ist möglich. Der Serverbetreiber prüft Rechtsgrundlage und Drittlandgarantien vor Aktivierung. Geräteregistrierungen: standardmäßig 7 Tage Lease, höchstens 90; erledigte Outbox: 30 Tage. Das Systemjournal hat eine getrennte Betreiberfrist.
 Zugangsdaten werden in Nutzlasten, Logs und Support-Bundles maskiert.
 
 Die mitgelieferte Unit startet absichtlich genau **einen Uvicorn-Worker**. Die zentralen Daten, Locks und Login-Sperren sind prozessübergreifend, aber ein einzelner Worker hält Jobsteuerung und Web-Lebenszyklus eindeutig und vereinfacht den Betrieb.
@@ -246,7 +244,27 @@ Der Installer:
 7. aktiviert Web-UI und Per-Pair-Scheduler,
 8. deaktiviert den Legacy-Voll-Run-Timer, damit keine Doppelstarts entstehen.
 
-Danach rclone als Dienstbenutzer konfigurieren:
+Danach können neue Remotes in der Webversion und iPhone-App unter **System →
+Neues Remote einbinden** sowie direkt in der Cloud-Ordnerauswahl eingerichtet
+werden. pCloud, Google Drive, WebDAV und OneDrive stehen oben in der
+Anbieterauswahl; weitere Anbieter stammen aus der installierten rclone-Version.
+Der Assistent fragt die erforderlichen Angaben schrittweise ab. Cloud-Anmeldungen
+verwenden die von rclone angezeigte Autorisierung auf einem Rechner mit Browser
+und installiertem rclone; das Ergebnis wird anschließend im Assistenten
+eingefügt. Je nach Anbieter sind eigene OAuth-Client-Zugangsdaten erforderlich.
+Eine reine OAuth-Anmeldung im iPhone-Browser ist damit noch nicht umgesetzt.
+Die Anbieterfragen können auf Englisch erscheinen.
+
+Erst **Remote speichern** übernimmt die neue Verbindung in die rclone-Konfiguration
+des Dienstbenutzers. Vorhandene Namen werden nicht überschrieben. Abgebrochene
+Entwürfe werden entfernt, offene Einrichtungen laufen nach 30 Minuten ab und
+überstehen keinen Serverneustart. Nach dem Speichern lässt sich die Verbindung
+über die Ordnerauswahl prüfen; ein Datenweg oder Job wird nicht automatisch
+angelegt. Die Datei muss für das Dienstkonto schreibbar sein. Eine verschlüsselte
+rclone-Konfiguration benötigt weiterhin die serverseitige Entsperrung.
+Der Einrichtungszustand liegt im einzelnen Web-Worker der Standardinstallation.
+
+Alternativ rclone als Dienstbenutzer konfigurieren:
 
 ```bash
 sudo -u rclone-sync -H rclone config
@@ -328,7 +346,7 @@ Wichtige globale Werte:
 - `backup.allow_unsafe_rclone_args`: Schutz interner rclone-Flags nur bewusst deaktivieren
 - `backup.auto_resync`: standardmäßig `false`; `bisync --resync` erst nach Log-/Planprüfung
 - `web.allowed_hosts`: in Produktion konkrete DNS-Namen/IPs statt `*`
-- `web.secure_cookie`: standardmäßig `auto` (Secure-Cookies bei HTTPS, direktes lokales HTTP bleibt nutzbar); hinter festem HTTPS `true` verwenden. Bei TLS-Proxys muss uvicorn ausschließlich den tatsächlichen Proxy-Hops vertrauen.
+- `web.secure_cookie`: standardmäßig `auto` (Secure-Cookies bei HTTPS, direktes lokales HTTP bleibt nutzbar); hinter festem HTTPS `true` verwenden. Bei TLS-Proxys `web.trusted_proxy_ips` auf die tatsächlichen Proxy-Hops begrenzen; `X-Forwarded-Proto` wird ausschließlich von diesen Peers übernommen.
 - `web.hsts_seconds`: erst bei dauerhaftem HTTPS aktivieren
 - `web.local_browse_roots`: erlaubte lokale Browser-/Quick-Sync-Wurzeln
 - `notifications.apns`: native Fehler-Pushs mit dauerhafter Outbox, Retry und Geräte-Lease
@@ -526,6 +544,42 @@ Fehlt der bisync-State, nicht blind automatisch resyncen. Zuerst beide Seiten, F
 
 ## Tests
 
+### Abhängigkeits-Lockdatei pflegen
+
+Der produktive Installer verwendet `requirements.lock` mit `--require-hashes`
+und `--only-binary=:all:`. Die Datei enthält ausschließlich Hashes nicht
+zurückgezogener Wheels der exakt in `requirements.txt` gepinnten Versionen;
+Plattformmarker und Extras bleiben erhalten. Gibt es für Python oder Plattform
+kein passendes Wheel, bricht die Installation ab; ein Quellbuild ist kein Fallback.
+
+Nach einer bewusst geprüften Änderung an `requirements.txt` (auch durch
+Dependabot) die Lockdatei aus den offiziellen PyPI-Release-Metadaten erneuern:
+
+```bash
+python scripts/update_dependency_lock.py
+python scripts/update_dependency_lock.py --check
+```
+
+Der erste Aufruf benötigt HTTPS-Zugriff auf `pypi.org`, installiert keine Pakete
+und ersetzt die bisherige Lockdatei erst nach vollständigem Erfolg. `--check`
+prüft offline Pins, Extras, Marker und Hashsyntax; es ersetzt keine Prüfung der
+Herkunft neuer Versionen. Beide Dateien gemeinsam reviewen und übernehmen.
+
+### Externe Release-Grenzen
+
+Release-Tags `ios-v*` können signierte Builds auslösen. Ihre Erstellung und
+Änderung müssen zusätzlich durch ein GitHub-Ruleset auf die zuständigen
+Release-Verantwortlichen beschränkt werden. Die Codemagic-Signiergruppe
+`ios-release` muss in der Plattform ausschließlich für freigegebene Builds des
+geschützten `main` zugänglich sein. Eine YAML im zu prüfenden Tag kann sich
+selbst ändern und erzwingt diese externen Grenzen nicht. Der Betreiber muss die
+tatsächlich wirksamen Berechtigungen in GitHub/Codemagic prüfen.
+
+Die Codemagic-Provenienzprüfung verlangt ein bereits vertrauenswürdig
+bereitgestelltes `gpg`. Fehlt es, bricht der Build ab; vor der Herkunftsprüfung
+wird kein `brew install` mehr ausgeführt. Build-Image und GPG-Bereitstellung sind
+Teil der externen Runner-Vertrauensbasis.
+
 CI prüft Python 3.10 bis 3.13. Lokal nach Installation von
 `requirements-dev.txt`:
 
@@ -536,11 +590,44 @@ ruff check .
 ruff format --check .
 python -m compileall -q app tests
 node --check app/static/app.js
+node --check app/static/workspace.js
+npm ci --prefix tests/web --ignore-scripts --no-audit --no-fund
+npm test --prefix tests/web
 bash -n scripts/install.sh
 shellcheck scripts/install.sh
 git diff --check
 ```
 
+Die Web-Prüfungen laufen mit dem mitgelieferten Alpine und einem isolierten DOM
+ohne Browser oder Backend. Sie prüfen die Unteransichten, erhaltene Aktionen,
+Warnhinweise und Tastaturbedienung. Eine Sichtprüfung auf Desktop und Mobilgerät
+bleibt zusätzlich erforderlich.
+
+
+### Recovery-Aufbewahrung und lokale Pfade
+
+`backup.recovery_snapshot_retention_days` ist standardmäßig 90 Tage. Nach einem
+erfolgreichen neuen Vollstand werden nur überprüfbar zu diesem Datenweg gehörende
+ältere Stände aufgeräumt; der neue Stand bleibt erhalten. Unbekannte Altordner
+und Stände entfernter Datenwege werden nicht automatisch gelöscht.
+`backup.recovery_staging_max_mb` begrenzt die Summe aufbewahrter Restore-Daten
+standardmäßig auf 51200 MiB. Staging lässt sich in Web und App mit Passwortbestätigung
+entfernen. Recovery-Prozesse werden pro Auftrag registriert und unter ihren Laufzeitsperren
+abgebrochen; temporäre Daten werden erst nach sicher festgestelltem Prozessende bereinigt.
+
+Lokale Vault-Veröffentlichung und Ordneranlage benötigen POSIX-Verzeichnisdeskriptoren;
+auf nicht unterstützten Hosts wird diese Aktion abgewiesen. Unter Linux müssen die
+Vorfahren lokaler Sync-Endpunkte root oder dem Dienstkonto gehören und gegen Austausch
+durch andere Benutzer geschützt sein. Gruppen-/weltschreibbare Vorfahren und Symlinks
+werden abgewiesen; Root-Sticky-Verzeichnisse sind nur mit einem bereits geschützten
+Kind zulässig. Das friert keine von berechtigten Benutzern gleichzeitig geänderten
+Dateiinhalte ein.
+
+### Datenschutz und Betreiberpflichten
+
+Vault-Dateien und Datensätze bleiben lokal unter `paths.device_vault_dir` (Standard `<data_dir>/device-vault`) bis zur ausdrücklich bestätigten Entfernung erhalten. Es gibt keine automatische Blob-Löschung, weil die lokale Datei die letzte erreichbare Kopie sein kann. Die Entfernung der lokalen Vault-Kopie löscht keine Zielkopie oder bereits exportierte Notfallakte. Audit-Wartung erhält mindestens 365 Tage und die neuesten 1000 Einträge, die deshalb länger verbleiben können. App-Logout entfernt die Sitzung und clientgebundene temporäre Exporte; Profile, Offline-Pässe und Upload-Warteschlange werden gesondert verwaltet.
+
+Hosting-/Supportanbieter, genaue Kontakt-Aufbewahrung, Auftragsverarbeitungsverträge und Drittlandgrundlagen müssen anhand der tatsächlich verwendeten Dienste bestätigt werden. Der App-Quelltext belegt diese externen Betreiberangaben nicht. Die Datenschutzhinweise ersetzen diese Prüfung nicht.
 Die Browserprüfung bedient die tatsächliche Weboberfläche in Chromium und
 mobilem WebKit mit lokalen API-Fixtures. Sie startet keine produktiven Jobs:
 

@@ -29,7 +29,10 @@ workflows:
     scripts:
       - name: Install GnuPG release verifier
         script: |
-          brew install gnupg
+          command -v gpg >/dev/null || {
+            echo "GnuPG muss im vertrauenswürdigen Build-Image vorinstalliert sein; keine Installation vor der Herkunftsprüfung." >&2
+            exit 1
+          }
           GPG_VERSION="$(gpg --version | head -n 1)"
           printf '%s\n' "$GPG_VERSION"
           printf '%s\n' "$GPG_VERSION" | grep -Eq '^gpg \(GnuPG\) 2\.([4-9]|[1-9][0-9])\.' || {
@@ -81,6 +84,8 @@ workflows:
             "$CM_TAG" "$CM_BUILD_DIR/ios/project.yml" --write
       - name: Install backend contract test dependencies
         script: |
+          python3 "$CM_BUILD_DIR/scripts/update_dependency_lock.py" --check
+          python3 -m pip install --require-hashes --only-binary=:all: -r "$CM_BUILD_DIR/requirements.lock"
           python3 -m pip install -r "$CM_BUILD_DIR/requirements-dev.txt"
       - name: Validate shared native API contracts and release version tooling
         script: |

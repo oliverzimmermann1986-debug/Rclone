@@ -268,7 +268,7 @@ def _inventory_remote(
         raise SnapshotError("Sicherungsziel lieferte ungültigen Bestand") from exc
     if not isinstance(rows, list) or len(rows) > MAX_FILES:
         raise SnapshotError("Sicherungsbestand überschreitet das Dateilimit")
-    files, directories, total = {}, [], 0
+    files, directories, total = {}, set(), 0
     for row in rows:
         if cancellable:
             check_cancelled()
@@ -278,7 +278,7 @@ def _inventory_remote(
         if relative in files or relative in directories:
             raise SnapshotError("Doppelte Pfade im Sicherungsbestand")
         if row.get("IsDir"):
-            directories.append(relative)
+            directories.add(relative)
             continue
         size = row.get("Size")
         if not isinstance(size, int) or size < 0:
@@ -305,7 +305,14 @@ def capture_snapshot(
         root, prefix="restore-snapshot-capture-", kind="snapshot-capture"
     )
     source, target = _endpoints(pair)
+    timeout = max(
+        300, int(float((config.get("backup") or {}).get("timeout_hours", 4)) * 3600)
+    )
     try:
+        _atomic_json(
+            work / ".capture-owner.json",
+            {"schema": "sicherpfad-capture-draft-v1", "point_id": point_id},
+        )
         before, directories = (
             _inventory_remote(target, work, limit, cancellable=True)
             if _is_remote(target)
@@ -336,7 +343,8 @@ def capture_snapshot(
                     "--",
                     target,
                     str(data),
-                ]
+                ],
+                timeout=timeout,
             )
         else:
             target_root = Path(target).expanduser().resolve()
@@ -380,7 +388,10 @@ def capture_snapshot(
             )
         # Remote providers need not expose SHA-256; download-compare every captured file.
         if _is_remote(target) and captured:
-            _run(["rclone", "check", "--download", "--", str(data), target])
+            _run(
+                ["rclone", "check", "--download", "--", str(data), target],
+                timeout=timeout,
+            )
         if not set(directories).issubset(captured_dirs):
             raise SnapshotError(
                 "Vollständiger Stand enthält nicht alle erwarteten Ordner"
@@ -411,8 +422,10 @@ def capture_snapshot(
             raise SnapshotError("Vollständiger Stand überschreitet das Manifestlimit")
         check_cancelled()
         _atomic_json(work / "manifest.json", manifest)
+        (work / ".capture-owner.json").unlink()
         check_cancelled()
         os.replace(work, root / point_id)
+        prune_snapshots(config, pair, keep_id=point_id)
         return public_snapshot(manifest)
     finally:
         try:
@@ -456,8 +469,67 @@ def public_snapshot(manifest: Mapping[str, Any]) -> dict:
     }
 
 
+def prune_snapshots(
+    config: Mapping[str, Any], pair: Mapping[str, Any], *, keep_id: str
+) -> None:
+    """Age retention only for validated points of this data path; keep newest."""
+    days = int((config.get("backup") or {}).get("recovery_snapshot_retention_days", 90))
+    if days <= 0:
+        return
+    cutoff = time.time() - days * 86400
+    root = snapshot_root(config)
+    for folder in root.iterdir():
+        if (
+            folder.name == keep_id
+            or folder.is_symlink()
+            or not POINT_RE.fullmatch(folder.name)
+        ):
+            continue
+        try:
+            manifest = load_manifest(
+                config, pair, folder.name, allow_previous_binding=True
+            )
+        except SnapshotError:
+            continue
+        if float(manifest["created_at"]) < cutoff:
+            shutil.rmtree(folder)
+
+
+def reconcile_snapshot_captures(config: Mapping[str, Any]) -> None:
+    """Called only under the free recovery/sync scope lock at startup."""
+    ensure_cleanup_safe()
+    root = snapshot_root(config)
+    if not root.is_dir():
+        return
+    for folder in root.iterdir():
+        marker = folder / ".capture-owner.json"
+        if (
+            not folder.name.startswith(".capture-")
+            or folder.is_symlink()
+            or marker.is_symlink()
+        ):
+            continue
+        try:
+            if not marker.is_file() or marker.stat().st_size > 1024:
+                continue
+            owner = json.loads(marker.read_text(encoding="utf-8"))
+            if owner.get(
+                "schema"
+            ) != "sicherpfad-capture-draft-v1" or not POINT_RE.fullmatch(
+                str(owner.get("point_id") or "")
+            ):
+                continue
+        except (OSError, ValueError, AttributeError):
+            continue
+        shutil.rmtree(folder)
+
+
 def load_manifest(
-    config: Mapping[str, Any], pair: Mapping[str, Any], point_id: str
+    config: Mapping[str, Any],
+    pair: Mapping[str, Any],
+    point_id: str,
+    *,
+    allow_previous_binding: bool = False,
 ) -> dict:
     if not POINT_RE.fullmatch(point_id):
         raise SnapshotError("Vollständiger Stand nicht gefunden")
@@ -478,7 +550,14 @@ def load_manifest(
         not isinstance(value, dict)
         or value.get("schema") != "sicherpfad-full-snapshot-v1"
         or value.get("id") != point_id
-        or value.get("fingerprint") != pair_fingerprint(pair)
+        or (
+            not allow_previous_binding
+            and value.get("fingerprint") != pair_fingerprint(pair)
+        )
+        or (
+            allow_previous_binding
+            and value.get("identity") != str(pair.get("id") or pair.get("name") or "")
+        )
         or value.get("complete") is not True
     ):
         raise SnapshotError("Vollständiger Stand gehört nicht zu diesem Datenweg")
@@ -525,7 +604,9 @@ def list_snapshots(config: Mapping[str, Any], pair: Mapping[str, Any]) -> list[d
             result.append(public_snapshot(load_manifest(config, pair, directory.name)))
         except SnapshotError:
             continue
-    return sorted(result, key=lambda row: row["created_at"], reverse=True)[:180]
+    # Retained full points must remain discoverable and removable. Retention,
+    # rather than an arbitrary display cut-off, bounds their lifetime.
+    return sorted(result, key=lambda row: row["created_at"], reverse=True)
 
 
 def snapshot_target(
@@ -565,7 +646,7 @@ def run_snapshot_capture(
 def run_snapshot_restore(
     database, config, pair, *, point_id: str, max_total_mb: int, job_id: int
 ) -> dict:
-    from .jobs.selective_restore import _save_record, staging_root
+    from .jobs.selective_restore import _save_record, staging_root, check_staging_budget
 
     root: Path | None = None
     work: Path | None = None
@@ -589,6 +670,8 @@ def run_snapshot_restore(
             raise SnapshotError(
                 "Vollständiger Stand überschreitet das Wiederherstellungslimit"
             )
+        check_staging_budget(database, config, total)
+        record["bytes"] = total
         if shutil.disk_usage(root).free < total + 64 * 1024 * 1024:
             raise SnapshotError("Nicht genügend Speicher für die Wiederherstellung")
         source = Path(snapshot_target(config, pair, point_id))
