@@ -119,7 +119,11 @@ def test_dashboard_exposes_distinct_evidence_based_protection_score():
         'pair.restoreEvidence?.isCurrent == true ? "checkmark.seal.fill"'
         in protection_path
     )
-    assert 'case "never", "stale": return "Restore offen"' in protection_path
+    assert 'case "never": return "Restore offen"' in protection_path
+    assert 'case "stale": return "Nachweis veraltet"' in protection_path
+    assert "!overview.services.scheduler.configuredEnabled" in dashboard
+    assert "overview.services.scheduler.control?.paused == true" in dashboard
+    assert "$0.hasFailure" in dashboard
     assert 'case "never", "stale": return .orange' in protection_path
     assert "default: return .secondary" in protection_path
 

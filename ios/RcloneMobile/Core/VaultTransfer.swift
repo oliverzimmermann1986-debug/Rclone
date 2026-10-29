@@ -201,8 +201,7 @@ final class VaultTransferModel: ObservableObject {
             if let statusToResume {
                 status = statusToResume
             } else {
-                status = try await client.createVaultUpload(
-                VaultUploadRequest(
+                var request = VaultUploadRequest(
                     identity: scope.pairID,
                     filename: entry.filename,
                     size: size,
@@ -211,7 +210,8 @@ final class VaultTransferModel: ObservableObject {
                     deviceName: UIDevice.current.name,
                     expectedEndpoints: VaultEndpointBinding(scope: scope)
                 )
-            )
+                request.localOnly = scope.localOnly == true
+                status = try await client.createVaultUpload(request)
             }
             try checkActiveScope(isCurrentScope)
             try validate(status, for: entry, scope: scope)

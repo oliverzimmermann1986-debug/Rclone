@@ -83,6 +83,10 @@ struct RecoveryCenterView: View {
             }
             .disabled(recoveryPass == nil)
             .accessibilityIdentifier("verifyRestoreLink")
+            NavigationLink { RecoveryStagingView() } label: {
+                recoveryTaskLabel("Zurückgeholte Dateien & Staging", detail: "Ergebnis, Prüfstatus und Ablageort ansehen", symbol: "folder.badge.gearshape")
+            }
+            .accessibilityIdentifier("recoveryStagingLink")
             NavigationLink { RecoveryRescueView() } label: {
                 recoveryTaskLabel("Server ausgefallen", detail: "Mit deiner Notfallakte weiterarbeiten", symbol: "lifepreserver")
             }
@@ -642,6 +646,7 @@ private struct SelectiveRecoveryBrowser: View {
     let pointLabel: String
     @StateObject private var browser = RecoveryBrowserLoadState()
     @State private var confirmRestore = false
+    @State private var requestLimitMB = 512
 
     init(
         dataPath: RecoveryDataPath,
@@ -659,6 +664,7 @@ private struct SelectiveRecoveryBrowser: View {
                 Label("Wiederherstellung erfolgt nur in ein getrenntes Staging.", systemImage: "shield.lefthalf.filled")
                     .font(.subheadline).foregroundStyle(.green)
                 LabeledContent("Stand", value: pointLabel)
+                Stepper("Limit dieser Anfrage: \(requestLimitMB) MB", value: $requestLimitMB, in: 512...51200, step: 512)
                 if !browser.path.isEmpty {
                     Button { navigateUp() } label: { Label("Übergeordnet", systemImage: "arrow.up") }
                 }
@@ -704,7 +710,7 @@ private struct SelectiveRecoveryBrowser: View {
             Button("Getrennt wiederherstellen") { Task { await restore() } }
             Button("Abbrechen", role: .cancel) {}
         } message: {
-            Text("Produktive Quell- und Zielpfade werden nicht verändert. Das Serverlimit beträgt 512 MB.")
+            Text("Produktive Quell- und Zielpfade werden nicht verändert. Limit dieser Anfrage: \(requestLimitMB) MB.")
         }
     }
 
@@ -746,7 +752,7 @@ private struct SelectiveRecoveryBrowser: View {
                     SelectiveRestoreRequest(
                         identity: dataPath.name,
                         paths: capturedPaths,
-                        maxTotalMB: 512,
+                        maxTotalMB: requestLimitMB,
                         pointID: pointID
                     )
                 )

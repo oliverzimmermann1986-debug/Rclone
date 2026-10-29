@@ -66,6 +66,10 @@ backup:
   # Beendet nur echten Stillstand. Unveränderte Statistik-Herzschläge zählen
   # nicht als Fortschritt.
   timeout_hours: 4
+  # Alter bestätigter Vollstände; Bereinigung erst nach erfolgreichem neuem Stand.
+  recovery_snapshot_retention_days: 90
+  # Gesamtbudget aller aufbewahrten Restore-Staging-Daten (MiB).
+  recovery_staging_max_mb: 51200
   # Optionaler absoluter Not-Aus auch bei Fortschritt; 0 = deaktiviert.
   max_runtime_hours: 0
 

@@ -159,7 +159,9 @@ def _resolve_spec(target: str, spec: str) -> str:
     return _join(target, spec)
 
 
-def version_root(config: Mapping[str, Any], pair: Mapping[str, Any]) -> str | None:
+def version_root(
+    config: Mapping[str, Any], pair: Mapping[str, Any], *, side: str = "local"
+) -> str | None:
     backup = config.get("backup") if isinstance(config.get("backup"), Mapping) else {}
     generic = str(
         pair.get("backup_dir") or (backup or {}).get("backup_dir") or ""
@@ -167,8 +169,11 @@ def version_root(config: Mapping[str, Any], pair: Mapping[str, Any]) -> str | No
     direction = str(pair.get("direction") or "bisync").lower().strip()
     _source, target = _endpoints(pair)
     if direction == "bisync":
+        if side == "remote":
+            target = str(pair.get("remote") or "")
+        specific_key = "backup_dir1" if side == "remote" else "backup_dir2"
         specific = str(
-            pair.get("backup_dir2") or (backup or {}).get("backup_dir2") or ""
+            pair.get(specific_key) or (backup or {}).get(specific_key) or ""
         ).strip()
         if specific:
             generic = specific
@@ -317,7 +322,7 @@ def _remote_listing(command: list[str]) -> tuple[list[dict[str, Any]], bool]:
                 continue
             try:
                 item, end = decoder.raw_decode(pending)
-            except json.JSONDecodeError as exc:
+            except (ValueError, RecursionError) as exc:
                 if final:
                     raise RecoveryPointError(
                         "Recovery-Punkt lieferte ungültige Daten"
@@ -340,7 +345,9 @@ def _remote_listing(command: list[str]) -> tuple[list[dict[str, Any]], bool]:
                         return items[:MAX_BROWSE_ITEMS], True
             pending += utf8.decode(b"", final=True)
             items.extend(parse(final=True))
-    except UnicodeDecodeError as exc:
+    except RecoveryPointError:
+        raise
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise RecoveryPointError("Recovery-Punkt lieferte ungültige Daten") from exc
     return items, False
 
@@ -370,15 +377,18 @@ def _remote_directories(root: str) -> list[str]:
 
 
 def list_points(
-    config: Mapping[str, Any], pair: Mapping[str, Any]
+    config: Mapping[str, Any], pair: Mapping[str, Any], *, _side: str = "local"
 ) -> list[dict[str, Any]]:
     from .recovery_snapshots import SnapshotError, list_snapshots
 
-    root = version_root(config, pair)
+    bisync = str(pair.get("direction") or "bisync").lower() == "bisync"
+    root = version_root(config, pair, side=_side)
     result: list[dict[str, Any]] = [
         {
             "id": "current",
-            "label": "Aktueller Sicherungsstand",
+            "label": "Lokale Live-Seite (Bi-Sync)"
+            if bisync
+            else "Aktueller Sicherungsstand",
             "created_at": None,
             "kind": "current",
             "complete": False,
@@ -397,6 +407,31 @@ def list_points(
             + " · Vollständig"
         )
     result.extend(complete)
+    if bisync and _side == "local":
+        remote_pair = {**pair, "direction": "push"}
+        remote_root = version_root(config, pair, side="remote")
+        remote_config = {
+            **config,
+            "backup": {**(config.get("backup") or {}), "backup_dir": ""},
+        }
+        remote_pair["backup_dir"] = remote_root or ""
+        # Reuse the same bounded archive listing for the other side. Full
+        # snapshots remain bound to the original pair and are listed only once.
+        remote_points = list_points(remote_config, remote_pair, _side="remote")
+        result.append(
+            {
+                "id": "current-remote",
+                "label": "Remote-Live-Seite (Bi-Sync)",
+                "created_at": None,
+                "kind": "current",
+                "complete": False,
+            }
+        )
+        result.extend(
+            {**p, "id": "remote:" + p["id"], "label": "Remote · " + p["label"]}
+            for p in remote_points
+            if p["kind"] == "version"
+        )
     if not root:
         return result
     if _is_remote(root):
@@ -414,8 +449,9 @@ def list_points(
         created_at = _parse_point_time(name, display_timezone)
         points.append(
             {
-                "id": name,
-                "label": (
+                "id": "local:" + name if bisync else name,
+                "label": ("Lokal · " if bisync else "")
+                + (
                     datetime.fromtimestamp(created_at, display_timezone).strftime(
                         "%d.%m.%Y · %H:%M"
                     )
@@ -448,12 +484,22 @@ def point_target(
             raise RecoveryPointError(str(exc)) from exc
     if value == "current":
         return _endpoints(pair)[1]
+    if (
+        value == "current-remote"
+        and str(pair.get("direction") or "bisync").lower() == "bisync"
+    ):
+        return str(pair.get("remote") or "")
     known = {
         str(item["id"]) for item in list_points(config, pair) if item["id"] != "current"
     }
     if value not in known:
         raise RecoveryPointError("Recovery-Punkt nicht gefunden")
-    root = version_root(config, pair)
+    side, separator, archive_id = value.partition(":")
+    if separator and side in {"local", "remote"}:
+        root = version_root(config, pair, side=side)
+        value = archive_id
+    else:
+        root = version_root(config, pair)
     if not root:
         raise RecoveryPointError("Für diesen Datenweg gibt es keine Versionsablage")
     return _join(root, value)

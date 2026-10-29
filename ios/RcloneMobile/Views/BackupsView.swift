@@ -299,7 +299,7 @@ private struct RunRow: View {
             Image(systemName: symbol)
                 .font(.title3).foregroundStyle(StatusStyle.color(for: job.effectiveStatus)).frame(width: 30)
             VStack(alignment: .leading, spacing: 4) {
-                Text(label).font(.headline)
+                Text(label + (job.isDryRun ? " · Probelauf" : "")).font(.headline)
                 Text("\(AppFormat.date(job.startedAt)) · \(AppFormat.duration(start: job.startedAt, end: job.endedAt))")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -357,6 +357,7 @@ struct RunDetailView: View {
         List {
             Section("Status") {
                 LabeledContent("Ergebnis") { StatusBadge(status: currentJob.effectiveStatus) }
+                if currentJob.isDryRun { Label("Probelauf – keine produktive Sicherung", systemImage: "testtube.2") }
                 LabeledContent("Gestartet", value: AppFormat.date(detail?.startedAt ?? job.startedAt))
                 LabeledContent("Dauer", value: AppFormat.duration(start: detail?.startedAt ?? job.startedAt, end: detail?.endedAt ?? job.endedAt))
                 LabeledContent("Typ", value: (detail?.kind ?? job.kind).uppercased())
@@ -370,7 +371,7 @@ struct RunDetailView: View {
                 Section("Wiederherstellungsbeleg") {
                     let restored = receipt["verified"] == .bool(true)
                     let captured = receipt["complete"] == .bool(true)
-                    Label(restored ? "Gesamter Stand zurückgelesen & geprüft" : captured ? "Vollständiger Stand gespeichert" : "Prüfung nicht abgeschlossen",
+                    Label(restored ? (receipt["verification_scope"] == .string("complete_selection") ? "Gesamte Auswahl zurückgelesen & geprüft" : "Gesamter Stand zurückgelesen & geprüft") : captured ? "Vollständiger Stand gespeichert" : "Prüfung nicht abgeschlossen",
                           systemImage: restored || captured ? "checkmark.seal" : "exclamationmark.triangle")
                         .foregroundStyle(restored || captured ? .green : .orange)
                     if case let .number(count)? = receipt["files"] {
@@ -484,7 +485,7 @@ struct RunDetailView: View {
 
     private var recoveryReceipt: [String: JSONValue]? {
         if case let .object(snapshot)? = currentJob.summary?["snapshot"] { return snapshot }
-        if currentJob.summary?["verification_scope"] == .string("full-snapshot") { return currentJob.summary }
+        if [JSONValue.string("full-snapshot"), JSONValue.string("complete_selection")].contains(currentJob.summary?["verification_scope"] ?? .null) { return currentJob.summary }
         return nil
     }
 

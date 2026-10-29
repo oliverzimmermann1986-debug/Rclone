@@ -231,6 +231,9 @@ class _Client:
     def __exit__(self, *_args):
         return False
 
+    def close(self):
+        pass
+
     def post(self, url, *, content, headers):
         self.calls.append((url, content, headers))
         return next(self.responses)

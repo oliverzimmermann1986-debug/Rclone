@@ -3385,10 +3385,12 @@ class Database:
             connection.execute(
                 "DELETE FROM webauthn_challenges WHERE expires_at < ?", (now,)
             )
-            connection.execute(
-                "DELETE FROM webauthn_challenges WHERE id IN ("
-                "SELECT id FROM webauthn_challenges ORDER BY created_at DESC LIMIT -1 OFFSET 1023)"
-            )
+            # Never evict an unexpired ceremony to admit an anonymous request.
+            count = connection.execute(
+                "SELECT COUNT(*) FROM webauthn_challenges WHERE purpose=?", (purpose,)
+            ).fetchone()[0]
+            if count >= 512:
+                raise ValueError("Zu viele offene Passkey-Vorgänge. Bitte kurz warten.")
             connection.execute(
                 "INSERT INTO webauthn_challenges(id, challenge, purpose, method, label, "
                 "native, app_binding, account_generation, expires_at, created_at) "
@@ -3476,6 +3478,19 @@ class Database:
                 ),
             )
             return cursor.rowcount == 1
+
+    def native_auth_exchange_pending(self, token_hash: str, verifier_hash: str) -> bool:
+        """Cheap rejection before acquiring the account/configuration guard."""
+        with self.conn() as connection:
+            row = connection.execute(
+                "SELECT verifier_hash, expires_at FROM native_auth_exchanges WHERE token_hash=?",
+                (token_hash,),
+            ).fetchone()
+        return bool(
+            row
+            and float(row["expires_at"]) >= time.time()
+            and secrets.compare_digest(str(row["verifier_hash"]), verifier_hash)
+        )
 
     def native_auth_exchange_consume(
         self,
@@ -3814,9 +3829,8 @@ def check_database_readonly(path: Path | None = None) -> bool:
             }
             if "jobs" not in tables:
                 return False
-            quick_check = str(connection.execute("PRAGMA quick_check(1)").fetchone()[0])
-            if quick_check != "ok":
-                return False
+            # Readiness checks schema reachability only. Full integrity checks
+            # belong to authenticated maintenance, not every anonymous probe.
         finally:
             connection.close()
         after = candidate.stat()

@@ -248,6 +248,26 @@ if [[ "$BACKUP_ROOT_CANONICAL" == "/" ]]; then
   exit 1
 fi
 
+# Backup paths are used by root for copying and pruning. Reject writable or
+# linked ancestors before creating any directory or following a backup path.
+/usr/bin/python3 -I - "$BACKUP_ROOT" <<'BACKUP_TRUST_PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+if not root.is_absolute() or ".." in root.parts:
+    raise SystemExit("BACKUP_ROOT muss ein sicherer absoluter Pfad sein")
+for path in [*reversed(root.parents), root]:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise SystemExit(f"Unsicherer Backup-Pfad oder Vorfahr: {path}")
+BACKUP_TRUST_PY
+
 if [[ -e "$APP_DIR" || -L "$APP_DIR" ]] && [[ ! -d "$APP_DIR/.git" ]]; then
   echo "Abbruch: APP_DIR existiert, ist aber kein Git-Checkout: $APP_DIR" >&2
   echo "Den Pfad manuell prüfen, sichern und entfernen oder REPO_URL/APP_DIR korrigieren." >&2
@@ -414,7 +434,7 @@ if [[ -d "$APP_DIR/venv" ]]; then
   mv "$APP_DIR/venv" "$VENV_ROLLBACK"
 fi
 python3 -m venv "$APP_DIR/venv"
-"$APP_DIR/venv/bin/pip" install --disable-pip-version-check -r "$APP_DIR/requirements.txt"
+"$APP_DIR/venv/bin/pip" install --disable-pip-version-check --require-hashes --only-binary=:all: -r "$APP_DIR/requirements.lock"
 
 printf '%s\n' "📁 Laufzeitverzeichnisse …"
 RUNTIME_UID=$(id -u "$APP_USER")
@@ -440,7 +460,7 @@ fi
   "$APP_DIR" "$RUNTIME_UID" "$RUNTIME_GID" filters
 "$APP_DIR/venv/bin/python" -I "$RUNTIME_HELPER" \
   "$APP_DIR" "$RUNTIME_UID" "$RUNTIME_GID" permissions
-chown -hR "$APP_USER:$APP_GROUP" "$APP_DIR/data" "$APP_DIR/logs" "$APP_DIR/temp"
+find "$APP_DIR/data" "$APP_DIR/logs" "$APP_DIR/temp" -xdev \( -type d -o -type f -links 1 \) -exec chown -h "$APP_USER:$APP_GROUP" {} +
 
 printf '%s\n' "🔎 Konfiguration und Python-Dateien prüfen …"
 sudo -u "$APP_USER" -H env RCLONE_SYNC_CONFIG="$APP_DIR/data/config.yaml" \
@@ -538,7 +558,9 @@ Sicherheitshinweis (Transportverschlüsselung):
   Die Web-UI lauscht standardmäßig nur auf 127.0.0.1:8001. Für Zugriff aus
   dem LAN einen Reverse-Proxy mit TLS (z. B. Caddy/nginx) verwenden, danach in der
   Konfiguration web.secure_cookie: auto und web.hsts_seconds setzen sowie
-  web.allowed_hosts auf den Proxy-Hostnamen begrenzen.
+  web.allowed_hosts auf den Proxy-Hostnamen begrenzen. web.trusted_proxy_ips
+  darf nur die direkten Proxy-Peers enthalten; der Proxy muss X-Forwarded-Proto
+  selbst setzen und eingehende Client-Werte überschreiben.
 
 Nächste Schritte:
   1. sudo -u $APP_USER -H rclone config

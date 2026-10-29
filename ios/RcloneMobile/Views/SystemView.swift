@@ -6,9 +6,15 @@ struct SystemView: View {
     @Binding var showingSettings: Bool
     @State private var showPauseOptions = false
     @State private var confirmResume = false
+    @State private var showRemoteSetup = false
 
     var body: some View {
         List {
+            Section("Speicher verbinden") {
+                Button { showRemoteSetup = true } label: {
+                    Label("Neues Remote einbinden", systemImage: "externaldrive.badge.plus")
+                }
+            }
             if let system = model.overview?.system {
                 Section("Server") {
                     LabeledContent("Hostname", value: system.hostname)
@@ -66,6 +72,7 @@ struct SystemView: View {
             }
         }
         .navigationTitle("System")
+        .sheet(isPresented: $showRemoteSetup) { RemoteSetupView() }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
             ToolbarItem(placement: .topBarTrailing) {
@@ -92,9 +99,9 @@ struct SystemView: View {
         Section("Zeitpläne") {
             let paused = model.overview?.services.scheduler.control?.paused == true
             HStack {
-                Label(paused ? "Pausiert" : "Aktiv", systemImage: paused ? "pause.circle.fill" : "calendar.badge.clock")
+                Label(model.overview?.services.scheduler.configuredEnabled == false ? "Automatik deaktiviert" : paused ? "Pausiert" : "Aktiv", systemImage: paused ? "pause.circle.fill" : "calendar.badge.clock")
                 Spacer()
-                StatusBadge(status: paused ? "warning" : model.overview?.services.scheduler.active)
+                StatusBadge(status: model.overview?.services.scheduler.configuredEnabled == false || paused ? "warning" : model.overview?.services.scheduler.active)
             }
             if paused {
                 Button("Zeitpläne fortsetzen") { confirmResume = true }

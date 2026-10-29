@@ -21,8 +21,10 @@ def cookie_secure_for_request(request: Request, configured: object = "auto") -> 
     """Use one transport policy for login, session, CSRF and WebAuthn cookies."""
     mode = str(configured).strip().lower()
     if configured is None or mode == "auto":
-        # Proxy headers are interpreted by the trusted ASGI server, never here.
-        return request.url.scheme == "https"
+        # Local import avoids auth/security's shared cookie dependency cycle.
+        from .auth import request_is_https
+
+        return request_is_https(request)
     if mode in {"false", "0", "no", "off", "nein"}:
         return False
     # Valid true aliases and invalid manually edited values fail closed.

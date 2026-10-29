@@ -211,6 +211,8 @@ _SENSITIVE_WEB_SCALARS = {
     "hsts_seconds": 0,
     "login_max_failures": 10,
     "login_lock_seconds": 900,
+    "login_window_seconds": 300,
+    "session_max_age_seconds": 604800,
     "webauthn_rp_id": "",
     "webauthn_origin": "",
 }
@@ -260,6 +262,7 @@ def _sensitive_config_changed(
             "logs_dir",
             "temp_dir",
             "recovery_dir",
+            "recovery_snapshots_dir",
             "device_vault_dir",
         ):
             if key in new_paths and str(old_paths.get(key) or "") != str(
@@ -307,6 +310,14 @@ def _sensitive_config_changed(
     new_backup = (
         new_data.get("backup") if isinstance(new_data.get("backup"), dict) else {}
     )
+    for key, default in (
+        ("recovery_snapshot_retention_days", 90),
+        ("recovery_staging_max_mb", 51200),
+    ):
+        if key in new_backup and _scalar(old_backup.get(key, default)) != _scalar(
+            new_backup[key]
+        ):
+            return True
 
     def effective_guards(data: dict[str, Any]) -> tuple[dict, dict] | None:
         # Use the same defaults, coercions and bounds as the eventual write.

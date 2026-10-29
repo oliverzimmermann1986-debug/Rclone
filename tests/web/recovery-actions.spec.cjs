@@ -9,7 +9,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function openRecovery(page) {
+async function openRecovery(page, { view = 'maintenance' } = {}) {
   const config = structuredClone(fixture.config);
   config._revision = 'a'.repeat(64);
   const snapshots = [
@@ -48,6 +48,7 @@ async function openRecovery(page) {
     return route.fulfill({ json: data });
   });
   await page.goto('/#doctor');
+  await page.getByRole('tab', { name: 'Wartung', exact: true }).click();
   const section = page.locator('.snapshot-restore');
   await expect(section.getByRole('combobox')).toBeVisible();
   await section.getByRole('combobox').selectOption('config-first.yaml');
@@ -56,6 +57,7 @@ async function openRecovery(page) {
   const startButton = page.locator('.panel').filter({
     has: page.getByRole('heading', { name: 'Kopien je Datenbestand', exact: true }),
   }).getByRole('button', { name: /Restore-Drill starten|Start wird geprüft/ });
+  if (view === 'copies') await page.getByRole('tab', { name: 'Kopien & Schutz', exact: true }).click();
   return {
     section, snapshotButton, startButton, snapshots, config, snapshotWrites, drillWrites, errors,
     setDrillHandler: (handler) => { drillHandler = handler; },
@@ -146,6 +148,7 @@ test('history navigation discards snapshot consent even when returning to the sa
   await page.evaluate(() => { window.location.hash = 'runs'; });
   await expect(page.getByRole('dialog')).toBeHidden();
   await page.evaluate(() => { window.location.hash = 'doctor'; });
+  await page.getByRole('tab', { name: 'Wartung', exact: true }).click();
   await expect(snapshotButton).toBeVisible();
   expect(snapshotWrites).toHaveLength(0);
   await expect(snapshotButton).toBeEnabled();
@@ -170,7 +173,7 @@ test('an authentication change discards snapshot consent without a POST', async 
 });
 
 test('restore-drill consent and dispatch each exclude a second start, and cancellation releases the guard', async ({ page }) => {
-  const { startButton, drillWrites, setDrillHandler } = await openRecovery(page);
+  const { startButton, drillWrites, setDrillHandler } = await openRecovery(page, { view: 'copies' });
   await startButton.click();
   await page.evaluate(() => { Alpine.$data(document.body).runRestoreTest('second'); });
   await expect(page.getByRole('dialog')).toContainText('alle aktiven Pairs');
@@ -195,7 +198,7 @@ test('restore-drill consent and dispatch each exclude a second start, and cancel
 });
 
 test('an accepted completed drill with a lost response stays blocked until status review and separate consent', async ({ page }) => {
-  const { startButton, drillWrites, setDrillHandler, setJobs, errors } = await openRecovery(page);
+  const { startButton, drillWrites, setDrillHandler, setJobs, errors } = await openRecovery(page, { view: 'copies' });
   setDrillHandler(async (route) => {
     setJobs([{ id: 123, kind: 'restoretest', status: 'ok', started_at: 1900000000, finished_at: 1900000020 }]);
     await route.abort('failed');
@@ -207,6 +210,7 @@ test('an accepted completed drill with a lost response stays blocked until statu
   expect(drillWrites).toHaveLength(1);
   await expect(startButton).toBeDisabled();
   await page.reload();
+  await page.getByRole('tab', { name: 'Kopien & Schutz', exact: true }).click();
   await expect(alert).toBeVisible();
   await expect(page.getByRole('button', { name: 'Restore-Drill starten', exact: true })).toBeDisabled();
   await alert.getByRole('button', { name: 'Aufträge prüfen' }).click();
@@ -229,7 +233,7 @@ test('an accepted completed drill with a lost response stays blocked until statu
 });
 
 test('unknown start review cannot unlock a new drill while one is running or status is unavailable', async ({ page }) => {
-  const { startButton, drillWrites, setDrillHandler, setStatus } = await openRecovery(page);
+  const { startButton, drillWrites, setDrillHandler, setStatus } = await openRecovery(page, { view: 'copies' });
   setDrillHandler((route) => route.abort('failed'));
   await startAndConfirm(page, startButton);
   const alert = page.getByRole('alert').filter({ hasText: 'Startstatus unbekannt' });
@@ -247,7 +251,7 @@ test('unknown start review cannot unlock a new drill while one is running or sta
 });
 
 test('a definite HTTP rejection releases the restore-drill start guard', async ({ page }) => {
-  const { startButton, drillWrites, setDrillHandler } = await openRecovery(page);
+  const { startButton, drillWrites, setDrillHandler } = await openRecovery(page, { view: 'copies' });
   setDrillHandler((route) => route.fulfill({ status: 409, json: { detail: 'Ein Auftrag läuft bereits.' } }));
   await startAndConfirm(page, startButton);
   await expect(page.getByText('Restore-Drill nicht gestartet: Ein Auftrag läuft bereits.', { exact: true })).toBeVisible();
@@ -258,7 +262,7 @@ test('a definite HTTP rejection releases the restore-drill start guard', async (
 
 for (const status of [408, 499]) {
   test(`an accepted drill followed by HTTP ${status} keeps its uncertain-start guard`, async ({ page }) => {
-    const { startButton, drillWrites, setDrillHandler, setJobs } = await openRecovery(page);
+    const { startButton, drillWrites, setDrillHandler, setJobs } = await openRecovery(page, { view: 'copies' });
     setDrillHandler((route) => {
       setJobs([{ id: 123, kind: 'restoretest', status: 'ok', started_at: 1900000000, finished_at: 1900000020 }]);
       return route.fulfill({ status, json: { detail: 'Proxy did not deliver the start response.' } });
@@ -270,6 +274,7 @@ for (const status of [408, 499]) {
     await page.evaluate(() => { Alpine.$data(document.body).runRestoreTest(); });
     expect(drillWrites).toHaveLength(1);
     await page.reload();
+    await page.getByRole('tab', { name: 'Kopien & Schutz', exact: true }).click();
     await expect(alert).toBeVisible();
     await expect(page.getByRole('button', { name: 'Restore-Drill starten', exact: true })).toBeDisabled();
     expect(drillWrites).toHaveLength(1);
@@ -278,7 +283,7 @@ for (const status of [408, 499]) {
 
 for (const firstResolved of ['current-status', 'jobs']) {
   test(`a compound review cannot overwrite newer ${firstResolved} data after its other response arrives`, async ({ page }) => {
-    const { startButton, drillWrites, setDrillHandler, setStatus, setJobs, errors } = await openRecovery(page);
+    const { startButton, drillWrites, setDrillHandler, setStatus, setJobs, errors } = await openRecovery(page, { view: 'copies' });
     setDrillHandler((route) => route.abort('failed'));
     await startAndConfirm(page, startButton);
     const alert = page.getByRole('alert').filter({ hasText: 'Startstatus unbekannt' });

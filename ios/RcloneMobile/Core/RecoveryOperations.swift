@@ -28,11 +28,15 @@ struct RecoveryRescueTarget: Decodable, Identifiable {
 
 struct RecoveryRescuePreview: Decodable {
     let records: Int
+    let cloudRecords: Int?
+    let localOnlyRecords: Int?
     let totalBytes: Int64
     let dataPaths: [RecoveryRescueTarget]
     let availableTargets: [RecoveryRescueTarget]
     enum CodingKeys: String, CodingKey {
         case records
+        case cloudRecords = "cloud_records"
+        case localOnlyRecords = "local_only_records"
         case totalBytes = "total_bytes"
         case dataPaths = "data_paths"
         case availableTargets = "available_targets"

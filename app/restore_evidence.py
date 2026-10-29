@@ -173,7 +173,7 @@ def evaluate_restore_evidence(
         state, reason = "stale", "invalid_timestamp"
     elif current >= valid_until:
         state, reason = "stale", "expired"
-    elif partial:
+    elif partial or result.get("truncated"):
         state, reason = "partial", "incomplete_sample"
     elif (
         result.get("sample_status") != "complete"
@@ -203,7 +203,13 @@ def evaluate_restore_evidence(
         "checksum_verified": state == "passed",
         "sample_checksum_verified": state in {"passed", "partial"},
         "coverage_complete": state == "passed",
-        "warning": partial_restore_warning(result) if state == "partial" else None,
+        "warning": (
+            "Das Scanlimit begrenzt die Stichprobe; der vollständige Bestand wurde nicht erfasst."
+            if state == "partial" and result.get("truncated")
+            else partial_restore_warning(result)
+            if state == "partial"
+            else None
+        ),
         "error": result.get("error") if state == "failed" else None,
     }
     if attempt.get("ended_at") and attempt.get("started_at"):

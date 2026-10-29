@@ -92,7 +92,7 @@ _SENSITIVE_FLAG = (
 _SENSITIVE_FLAG_VALUE_RE = re.compile(
     rf"(?P<flag>{_SENSITIVE_FLAG})"
     rf"(?P<separator>\s*=\s*|\s+)"
-    rf"(?P<value>\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;\]\)}}\"']+)",
+    rf"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;\]\)}}\"']+)",
     re.IGNORECASE,
 )
 _SENSITIVE_FLAG_NAME_RE = re.compile(rf"^{_SENSITIVE_FLAG}$", re.IGNORECASE)

@@ -97,7 +97,7 @@ struct ProtectionAssessment {
         let destructive = pair.direction.lowercased() == "bisync" || pair.mode.lowercased() == "sync"
         guard destructive else { return 1 }
         guard pair.allowDelete else { return 1 }
-        guard pair.maxDelete != nil else { return 0 }
+        guard let maximum = pair.maxDelete, maximum >= 0 else { return 0 }
         return pair.backupDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.75 : 1
     }
 
@@ -107,9 +107,9 @@ struct ProtectionAssessment {
             $0.direction.lowercased() == "bisync" || $0.mode.lowercased() == "sync"
         }
         guard !destructive.isEmpty else { return "Alle aktiven Kopierwege arbeiten ohne automatische Löschungen." }
-        let unbounded = destructive.filter { $0.allowDelete && $0.maxDelete == nil }
+        let unbounded = destructive.filter { $0.allowDelete && ($0.maxDelete ?? -1) < 0 }
         let unversioned = destructive.filter {
-            $0.allowDelete && $0.maxDelete != nil && $0.backupDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            $0.allowDelete && ($0.maxDelete ?? -1) >= 0 && $0.backupDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if !unbounded.isEmpty { return "\(unbounded.count) Löschpfad/-pfade besitzen noch kein festes Löschlimit." }
         if !unversioned.isEmpty { return "Löschungen sind begrenzt; \(unversioned.count) Pfad/-e haben noch keine Versionsablage." }

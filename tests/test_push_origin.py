@@ -109,7 +109,10 @@ def test_old_or_malformed_notification_identity_does_not_gain_a_new_binding(iden
         )
     )
     assert payload["server_id"] is None
-    assert payload["aps"]["alert"]["body"] == "Still displayed"
+    assert (
+        payload["aps"]["alert"]["body"]
+        == "Ein Sicherpfad-Ereignis benötigt deine Aufmerksamkeit. Details findest du in der App."
+    )
 
 
 def test_caller_and_summary_cannot_spoof_notification_origin(origin_server):

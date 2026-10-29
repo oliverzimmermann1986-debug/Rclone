@@ -11,6 +11,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -69,7 +70,9 @@ _CANCEL_EVENTS: dict[str, threading.Event] = {
 _CANCEL_EVENTS_LOCK = threading.Lock()
 
 _RESYNC_RE = re.compile(
-    r"(?:must run[^\n]*--resync|requires?[^\n]*--resync)", re.IGNORECASE
+    r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?\s+"
+    r"(?:ERROR\s*:|NOTICE:)\s+Bisync aborted\. Must run --resync to recover\.[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
 )
 _STATS_RE = re.compile(
     r"Transferred:\s*([^,\n]+?)(?:\s*/\s*([^,\n]+?))?"
@@ -1177,6 +1180,48 @@ def _endpoint_guard_settings(
     }
 
 
+def _local_endpoint_parent_guard(path: Path) -> tuple[bool, str]:
+    """Prevent another local UID from replacing an endpoint before rclone opens it.
+
+    This guards the root's directory entries, not concurrently edited contents.
+    Root-owned sticky temporary parents are safe only for an already owned child.
+    """
+    if os.name != "posix":
+        return True, ""
+    allowed = {0, os.geteuid()}
+    child = path.absolute()
+    for parent in child.parents:
+        try:
+            info = parent.lstat()
+        except FileNotFoundError:
+            child = parent
+            continue
+        except OSError:
+            return False, f"Pfadvorfahr kann nicht geprüft werden: {parent}"
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid not in allowed:
+            return False, f"Unsicherer oder fremder Pfadvorfahr: {parent}"
+        if info.st_mode & 0o022:
+            try:
+                child_info = child.lstat()
+                sticky_owned = bool(
+                    info.st_uid == 0
+                    and info.st_mode & stat.S_ISVTX
+                    and child_info.st_uid in allowed
+                    and not stat.S_ISLNK(child_info.st_mode)
+                )
+            except OSError:
+                sticky_owned = False
+            if not sticky_owned:
+                return (
+                    False,
+                    f"Pfadvorfahr ist durch andere Benutzer austauschbar: {parent}",
+                )
+        child = parent
+    if path.is_symlink():
+        return False, f"Lokale Endpunkte dürfen keine symbolischen Links sein: {path}"
+    return True, ""
+
+
 def _check_local_endpoint(
     pair: dict[str, Any],
     field: str,
@@ -1185,6 +1230,9 @@ def _check_local_endpoint(
     include_counts: bool,
     include_free_space: bool,
 ) -> tuple[bool, str]:
+    trusted, explanation = _local_endpoint_parent_guard(path)
+    if not trusted:
+        return False, explanation
     settings = _endpoint_guard_settings(pair, field, path)
     label = "Remote-Lokalpfad" if field == "remote" else "Lokaler Pfad"
     require_mountpoint = bool(settings["require_mountpoint"])
@@ -2104,6 +2152,7 @@ def run_pair_check(
         backup.get("check_args"),
         allow_unsafe=bool(backup.get("allow_unsafe_rclone_args", False)),
     )
+    args = _protected_filter_args(args)
     bwlimit = str(
         backup.get("bwlimit") or (backup.get("tuning") or {}).get("bwlimit") or ""
     ).strip()

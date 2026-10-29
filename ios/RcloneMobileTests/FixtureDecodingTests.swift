@@ -64,7 +64,7 @@ final class FixtureDecodingTests: XCTestCase {
 
         let overview = try JSONDecoder().decode(StorageOverview.self, from: data)
         let pair = try XCTUnwrap(overview.pairs.first)
-        XCTAssertEqual(pair.direction, "push")
+        XCTAssertEqual(pair.direction, "bisync", "Missing direction must match the server default")
         XCTAssertEqual(pair.source, "/mnt/fotos")
         XCTAssertEqual(pair.target, "cloud:Fotos")
         XCTAssertEqual(pair.lastTransferred, "2048 B")

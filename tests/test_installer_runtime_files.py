@@ -301,7 +301,8 @@ def test_helper_is_required_before_privileged_runtime_leaf_operations():
     assert '> "$APP_DIR/data/.initial-password"' not in script
     assert 'cp "$APP_DIR/config/rclone-filters.example.txt"' not in script
     assert 'chmod 0600 "$APP_DIR/data/' not in script
-    assert 'chown -hR "$APP_USER:$APP_GROUP"' in script
+    assert 'chown -hR "$APP_USER:$APP_GROUP"' not in script
+    assert "-xdev \\( -type d -o -type f -links 1 \\)" in script
 
 
 @pytest.mark.parametrize("late_entry", ["regular", "symlink"])

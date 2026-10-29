@@ -191,6 +191,24 @@ def _paths_overlap(a: str, b: str) -> bool:
         return False
 
 
+def _strict_path_ancestor(ancestor: str, child: str) -> bool:
+    if not ancestor or not child or _is_remote(ancestor) != _is_remote(child):
+        return False
+    if _is_remote(ancestor):
+        base = ancestor.rstrip("/")
+        return child.rstrip("/") != base and child.startswith(
+            base + ("" if base.endswith(":") else "/")
+        )
+    try:
+        base, leaf = (
+            Path(ancestor).expanduser().resolve(),
+            Path(child).expanduser().resolve(),
+        )
+        return base != leaf and leaf.is_relative_to(base)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _valid_cron(expression: str) -> bool:
     """Only accept the five-field minute-based format used by the systemd timer."""
     return len(expression.split()) == 5 and croniter.is_valid(expression)
@@ -428,13 +446,14 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         ("logs_dir", "/opt/rclone-sync/logs"),
         ("temp_dir", "/opt/rclone-sync/temp"),
         ("recovery_dir", "/opt/rclone-sync/data/recovery"),
+        ("recovery_snapshots_dir", "/opt/rclone-sync/data/recovery-snapshots"),
         ("device_vault_dir", "/opt/rclone-sync/data/device-vault"),
     ):
         try:
-            if key == "recovery_dir":
+            if key in {"recovery_dir", "recovery_snapshots_dir"}:
                 default = (
                     Path(str(paths.get("data_dir") or "/opt/rclone-sync/data"))
-                    / "recovery"
+                    / ("recovery" if key == "recovery_dir" else "recovery-snapshots")
                 ).as_posix()
             value = _clean_path(paths.get(key, default)) or default
             if not _is_absolute_local(value):
@@ -448,6 +467,24 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         errors.append("backup muss ein Mapping sein")
         backup = cfg["backup"] = {}
     backup["enabled"] = _boolean(backup.get("enabled", True), default=True)
+    backup["recovery_staging_max_mb"] = int(
+        _number(
+            backup.get("recovery_staging_max_mb", 51_200),
+            default=51_200,
+            minimum=1,
+            maximum=1_048_576,
+            integer=True,
+        )
+    )
+    backup["recovery_snapshot_retention_days"] = int(
+        _number(
+            backup.get("recovery_snapshot_retention_days", 90),
+            default=90,
+            minimum=1,
+            maximum=3650,
+            integer=True,
+        )
+    )
     jobs_were_explicit = "jobs" in backup
     backup["max_parallel"] = int(
         _number(
@@ -732,6 +769,15 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         pair["enabled"] = _boolean(pair.get("enabled", True), default=True)
         pair["recovery_snapshots"] = _boolean(
             pair.get("recovery_snapshots", False), default=False
+        )
+        pair["recovery_snapshot_max_mb"] = int(
+            _number(
+                pair.get("recovery_snapshot_max_mb", 5120),
+                default=5120,
+                minimum=1,
+                maximum=51_200,
+                integer=True,
+            )
         )
 
         legacy_options = pair.pop("options", None)
@@ -1165,6 +1211,30 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         normalized_pairs.append(pair)
 
     backup["pairs"] = normalized_pairs
+    for recovery_key in ("recovery_dir", "recovery_snapshots_dir"):
+        recovery_root = str(cfg["paths"].get(recovery_key) or "")
+        for configured_pair in normalized_pairs:
+            for endpoint_key in ("local", "remote"):
+                endpoint = str(configured_pair.get(endpoint_key) or "")
+                if _is_absolute_local(endpoint) and _paths_overlap(
+                    recovery_root, endpoint
+                ):
+                    errors.append(
+                        f"paths.{recovery_key} muss außerhalb aller lokalen Datenwege liegen"
+                    )
+        if _paths_overlap(
+            recovery_root, str(cfg["paths"].get("device_vault_dir") or "")
+        ):
+            errors.append(
+                f"paths.{recovery_key} darf sich nicht mit dem Geräte-Vault überschneiden"
+            )
+    if _paths_overlap(
+        str(cfg["paths"].get("recovery_dir") or ""),
+        str(cfg["paths"].get("recovery_snapshots_dir") or ""),
+    ):
+        errors.append(
+            "Recovery-Staging und vollständige Stände dürfen sich nicht überschneiden"
+        )
 
     raw_jobs = backup.get("jobs") if jobs_were_explicit else migrated_legacy_jobs
     if not isinstance(raw_jobs, list):
@@ -1256,6 +1326,23 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             }
         )
     backup["jobs"] = normalized_jobs
+    for vault_pair in normalized_pairs:
+        vault_target = str(
+            vault_pair.get(
+                "local" if vault_pair.get("direction") == "pull" else "remote"
+            )
+            or ""
+        )
+        for other in normalized_pairs:
+            if other is vault_pair:
+                continue
+            if any(
+                _strict_path_ancestor(str(other.get(key) or ""), vault_target)
+                for key in ("local", "remote")
+            ):
+                errors.append(
+                    f"Pair '{other.get('name')}' umfasst das verschachtelte Vault-Ziel von '{vault_pair.get('name')}'; reservierte Sicherpfad-Ablagen wären dort nicht geschützt"
+                )
 
     for i, first in enumerate(normalized_pairs):
         for second in normalized_pairs[i + 1 :]:
@@ -1625,6 +1712,17 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
                     f"{backup_id}"
                 )
             seen_backup_ids.add(folded_backup_id)
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        for endpoint in target.get("paths") or []:
+            for recovery_key in ("recovery_dir", "recovery_snapshots_dir"):
+                if _is_absolute_local(str(endpoint)) and _paths_overlap(
+                    str(endpoint), str(cfg["paths"].get(recovery_key) or "")
+                ):
+                    errors.append(
+                        f"paths.{recovery_key} muss außerhalb aller PBS-Pfade liegen"
+                    )
     if pbs["enabled"] and not targets:
         warnings.append("pbs.enabled ohne pbs.targets — es wird nichts gesichert")
 

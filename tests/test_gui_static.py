@@ -94,9 +94,10 @@ def test_gui_assets_reference_current_cache_version():
     assert "/static/alpine.min.js?v=__APP_VERSION__" in html
     assert "/static/ui-helpers.js?v=__APP_VERSION__" in html
     assert "/static/app.js?v=__APP_VERSION__" in html
+    assert "/static/workspace.js?v=__APP_VERSION__" in html
+    assert "/static/workspace.css?v=__APP_VERSION__" in html
     assert html.index("/static/ui-helpers.js") < html.index("/static/app.js")
-    # Runtime cache keys and content changes are covered through TestClient in
-    # test_web_app; this test checks only template references and script order.
+    assert html.index("/static/app.js") < html.index("/static/workspace.js")
     assert "Verifizierte Backup-Leitstelle" in login
     assert "Sicherpfad" in html
     assert "rclone-sync</strong>" not in html
@@ -260,9 +261,10 @@ def test_dialog_focus_accessibility_and_loading_contracts():
         "quickDialog",
         "pickerDialog",
         "jobDialog",
+        "remoteSetupDialog",
     ):
         assert f'x-ref="{ref_name}"' in html
-    assert html.count('aria-modal="true"') == 7
+    assert html.count('aria-modal="true"') == 8
     assert "focusableElements(dialog)" in javascript
     assert "restoreDialogFocus()" in javascript
     assert "dialogFocusStack.push(document.activeElement)" in javascript
@@ -376,7 +378,9 @@ def test_pwa_caches_only_versioned_static_allowlist_and_has_install_icon():
     assert '"sizes": "1024x1024"' in manifest
     assert '"purpose": "any"' in manifest
     assert "const CACHE_PREFIX = 'rclone-sync-static-'" in service_worker
-    assert "const CACHE_NAME = `${CACHE_PREFIX}v3`" in service_worker
+    assert "const CACHE_NAME = `${CACHE_PREFIX}v4`" in service_worker
+    assert "'/static/workspace.js'" in service_worker
+    assert "'/static/workspace.css'" in service_worker
     assert "const STATIC_ASSETS = new Set([" in service_worker
     assert "new Request(path, { cache: 'reload' })" in service_worker
     for forbidden in ("'/api/", "'/login", "'/logout", "'/'"):

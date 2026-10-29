@@ -59,12 +59,22 @@ def test_downloads_share_the_private_export_writer_without_overwrite():
         api, "private func postDownload<", "static func sanitizedExportFilename"
     )
     for method in [get, post]:
-        assert "Self.writeExport(filename: filename)" in method
+        assert "let epoch = exportEpoch()" in method
+        assert "writeOwnedExport(filename: filename, epoch: epoch)" in method
         assert "temporaryDirectory.appendingPathComponent" not in method
         assert "removeItem(at: target)" not in method
     assert "defer { try? FileManager.default.removeItem(at: temporary) }" in get
-    assert get.index("throw APIError.unauthenticated") < get.index("Self.writeExport")
-    assert post.index("try validate(") < post.index("Self.writeExport")
+    assert get.index("throw APIError.unauthenticated") < get.index("writeOwnedExport")
+    assert post.index("try validate(") < post.index("writeOwnedExport")
+    owned = _between(api, "private func writeOwnedExport", "private func download(")
+    assert owned.index("guard epoch == exportGeneration") < owned.index(
+        "Self.writeExport"
+    )
+    assert "exportDirectories.insert(result.deletingLastPathComponent())" in owned
+    clear = _between(api, "func clearLocalSession() {", "func setSessionPersistence")
+    assert "exportGeneration += 1" in clear
+    assert "removeItem(at: directory)" in clear
+    assert "exportDirectories.removeAll()" in clear
 
 
 def test_export_names_are_single_components_and_exports_are_private_and_unique():

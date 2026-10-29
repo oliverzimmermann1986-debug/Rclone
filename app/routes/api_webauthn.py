@@ -147,7 +147,11 @@ def begin_authentication(body: AuthenticationOptionsRequest, request: Request):
     configured_username = str(
         get_config().get("web", "username", default="admin") or "admin"
     )
-    retry_after = login_retry_after(login_key(request, configured_username))
+    options_key = "webauthn-options:" + login_key(request, configured_username)
+    retry_after = max(
+        login_retry_after(options_key),
+        login_retry_after(login_key(request, configured_username)),
+    )
     if retry_after:
         response = JSONResponse(
             status_code=429,
@@ -162,6 +166,7 @@ def begin_authentication(body: AuthenticationOptionsRequest, request: Request):
         raise HTTPException(status_code=422, detail="Ungültige App-Bindung")
     if not body.native and body.native_challenge:
         raise HTTPException(status_code=422, detail="App-Bindung ohne native Anmeldung")
+    record_login_failure(options_key)
     try:
         return authentication_options(
             body.method,
@@ -198,6 +203,7 @@ def complete_authentication(body: CeremonyResponse, request: Request):
             error.headers = {"Retry-After": str(retry_after)}
         raise error from exc
     clear_login_failures(key)
+    clear_login_failures("webauthn-options:" + key)
     database = get_db()
     database.audit_add(
         "webauthn_login",
@@ -237,6 +243,12 @@ def complete_authentication(body: CeremonyResponse, request: Request):
 @router.post("/api/webauthn/native/exchange")
 def exchange_native_session(body: ExchangeRequest, request: Request):
     token_hash = hashlib.sha256(body.token.encode("ascii", errors="ignore")).hexdigest()
+    if not get_db().native_auth_exchange_pending(
+        token_hash, _pkce_challenge(body.verifier)
+    ):
+        raise HTTPException(
+            401, "Der einmalige Anmeldecode ist abgelaufen oder ungültig."
+        )
     with account_generation_guard() as generation:
         username = get_db().native_auth_exchange_consume(
             token_hash,

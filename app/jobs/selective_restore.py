@@ -12,6 +12,7 @@ import logging
 import shutil
 import subprocess
 import time
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
@@ -60,7 +61,7 @@ def _expected_manifest(
             "--",
             target,
         ],
-        timeout=timeout,
+        timeout=min(timeout, 900),
     )
     if measured.returncode != 0:
         raise RuntimeError(
@@ -235,7 +236,71 @@ def _save_record(database: Database, record: Mapping[str, Any]) -> None:
         item for item in _load_state(database) if item.get("id") != record.get("id")
     ]
     records.insert(0, dict(record))
-    database.runtime_set(_STATE_KEY, records[:_MAX_STATE_ITEMS])
+    # Never hide retained data merely because the display history grows.
+    retained = [
+        item
+        for item in records
+        if item.get("status") in {"running", "ready"} or item.get("cleanup_required")
+    ]
+    history = [
+        item
+        for item in records
+        if item.get("status") not in {"running", "ready"}
+        and not item.get("cleanup_required")
+    ]
+    database.runtime_set(_STATE_KEY, retained + history[:_MAX_STATE_ITEMS])
+
+
+def check_staging_budget(
+    database: Database, config: Mapping[str, Any], requested_bytes: int
+) -> None:
+    limit = (
+        int((config.get("backup") or {}).get("recovery_staging_max_mb", 51_200))
+        * 1024
+        * 1024
+    )
+    retained = sum(
+        max(0, int(item.get("bytes") or 0))
+        for item in _load_state(database)
+        if item.get("status") in {"ready", "running"} or item.get("cleanup_required")
+    )
+    if retained + requested_bytes > limit:
+        raise ValueError(
+            "Das Gesamtlimit des Recovery-Staging ist erreicht. Vorhandene Wiederherstellungen zuerst entfernen."
+        )
+
+
+def reconcile_staging(database: Database, config: Mapping[str, Any]) -> None:
+    ensure_cleanup_safe()
+    root = validated_staging_path(config)
+    records = _load_state(database)
+    for item in records:
+        if item.get("status") != "running" or not re.fullmatch(
+            r"recovery-[0-9]+", str(item.get("id") or "")
+        ):
+            continue
+        job = database.job_get(int(item.get("job_id") or 0)) or {}
+        summary = job.get("summary") or {}
+        if (
+            job.get("status") == "ok"
+            and summary.get("id") == item["id"]
+            and summary.get("verified") is True
+        ):
+            # The durable terminal intent may have been replayed before this
+            # startup reconciliation. Preserve its already verified result.
+            item.update(summary)
+            continue
+        target = root / item["id"]
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_dir() and target.parent == root:
+            shutil.rmtree(target)
+        item.update(
+            status="error",
+            verified=False,
+            error="Wiederherstellung durch Serverneustart unterbrochen",
+        )
+    database.runtime_set(_STATE_KEY, records)
 
 
 def list_staging(database: Database, config: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -280,11 +345,17 @@ def _remove_staging_locked(
     database: Database, config: Mapping[str, Any], recovery_id: str
 ) -> bool:
     root = validated_staging_path(config)
-    if not recovery_id or any(
-        char not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
-        for char in recovery_id.lower()
-    ):
+    if not re.fullmatch(r"recovery-[0-9]+", recovery_id):
         raise ValueError("Ungültige Recovery-ID")
+    known = next(
+        (item for item in _load_state(database) if item.get("id") == recovery_id), None
+    )
+    if known is None:
+        raise ValueError("Recovery ist unbekannt")
+    if known.get("status") == "running":
+        raise RecoveryBusy("Laufende Recovery zuerst abbrechen")
+    if (root / recovery_id).is_symlink():
+        raise ValueError("Unsicheres Recovery-Ziel")
     target = (root / recovery_id).resolve()
     if target.parent != root:
         raise ValueError("Recovery-Ziel liegt außerhalb des Staging-Bereichs")
@@ -359,16 +430,41 @@ def run_selective_restore(
         timeout = max(
             300, int(float((config.get("backup") or {}).get("timeout_hours", 4)) * 3600)
         )
-        manifest = _expected_manifest(
-            backup_target,
-            listing,
-            selection,
-            timeout=min(timeout, 900),
-            limit_bytes=limit_bytes,
-        )
+        if recovery_point.startswith("full-"):
+            from ..recovery_snapshots import load_manifest
+
+            historical = load_manifest(config, pair, recovery_point)
+            entries = {item["path"]: item for item in historical["entries"]}
+            if any(path not in entries for path in selection):
+                raise RuntimeError(
+                    "Ausgewählte Datei fehlt im aufgezeichneten SHA-256-Manifest"
+                )
+            manifest = {
+                path: {
+                    "bytes": entries[path]["size"],
+                    "algorithm": "sha256",
+                    "checksum": entries[path]["sha256"],
+                }
+                for path in selection
+            }
+            if sum(item["bytes"] for item in manifest.values()) > limit_bytes:
+                raise RuntimeError(
+                    "Die Auswahl überschreitet das bestätigte Recovery-Limit"
+                )
+        else:
+            manifest = _expected_manifest(
+                backup_target,
+                listing,
+                selection,
+                timeout=timeout,
+                limit_bytes=limit_bytes,
+            )
         check_cancelled()
         selected_bytes = sum(item["bytes"] for item in manifest.values())
         selected_count = len(manifest)
+        check_staging_budget(database, config, selected_bytes)
+        record["bytes"] = selected_bytes
+        _save_record(database, record)
         manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
         (work / "expected-manifest.json").write_text(manifest_json, encoding="utf-8")
         record["manifest_sha256"] = hashlib.sha256(manifest_json.encode()).hexdigest()

@@ -67,6 +67,20 @@ Auf der Anmeldeseite steht zusätzlich eine lokale, ausdrücklich simulierte Vor
 
 ## Sicherheitsregeln
 
+Die folgenden Einstellungen sind in GitHub/Codemagic selbst vorzunehmen und
+durch die Repository-YAML nicht erzwingbar:
+
+- Ein GitHub-Ruleset schützt Erstellung, Änderung und Löschung von `ios-v*`-Tags;
+  nur die zuständigen Release-Verantwortlichen erhalten die erforderlichen Rechte.
+- Die Signiergruppe `ios-release` ist ausschließlich für freigegebene Builds des
+  geschützten `main` zugänglich. Ein ungeprüfter Tag darf nicht allein durch eine
+  selbst mitgebrachte YAML Zugriff auf die Signierintegration erlangen.
+- Runner-Image und bereits installiertes GPG sind vertrauenswürdig bereitzustellen.
+  Fehlt `gpg`, bricht die Pipeline vor Downloads/Herkunftsprüfung ab. Ein früheres
+  ungepinntes `brew install gnupg` wird nicht als Vertrauensanker verwendet.
+
+Diese Dokumentation bestätigt keine live konfigurierten Plattformrechte.
+
 - API-Schlüssel, `.p8`, Zertifikate und Provisioning Profiles niemals committen.
 - Die App speichert das Serverpasswort nicht.
 - `ITSAppUsesNonExemptEncryption` ist `false`, weil die App ausschließlich Apples integrierte Standard-TLS-Implementierung verwendet und keine eigene oder nicht freigestellte Kryptografie enthält.

@@ -20,6 +20,8 @@ WEB_CACHE_ASSETS = (
     "app.js",
     "manifest.json",
     "app-icon-1024.png",
+    "workspace.js",
+    "workspace.css",
 )
 
 

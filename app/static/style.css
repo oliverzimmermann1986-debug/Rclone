@@ -2355,3 +2355,7 @@ html[data-density="compact"] .job-row { min-height: 54px; }
 .auto-refresh {
   font-size: 12px;
 }
+.remote-setup-help {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

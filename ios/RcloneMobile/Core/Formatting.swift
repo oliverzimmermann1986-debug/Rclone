@@ -67,8 +67,8 @@ enum StatusStyle {
         switch value?.lowercased() {
         case "ok", "active", "healthy": .green
         case "running": .blue
-        case "warn", "warning", "partial", "stale", "overdue": .orange
-        case "error", "failed", "inactive": .red
+        case "warn", "warning", "partial", "overdue": .orange
+        case "error", "failed", "inactive", "stale": .red
         case "cancelled", "skipped": .secondary
         default: .secondary
         }
@@ -81,7 +81,7 @@ enum StatusStyle {
         case "warn", "warning": "Hinweis"
         case "partial": "Prüfumfang begrenzt"
         case "error", "failed": "Fehler"
-        case "stale": "Veraltet"
+        case "stale": "Unterbrochen"
         case "cancelled": "Abgebrochen"
         case "skipped": "Übersprungen"
         case "active": "Aktiv"

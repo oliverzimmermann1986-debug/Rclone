@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import BackgroundTasks, HTTPException, Response
 
 from app import recovery_snapshots
 from app.db import Database
@@ -63,6 +63,43 @@ def assert_scope_free():
     lease = locks.try_file_lock("backup")
     assert lease is not None
     lease.release()
+
+
+def test_cancel_endpoint_accepts_recovery_between_registered_child_steps(
+    env, monkeypatch
+):
+    from app import notifications
+
+    notice_sent = threading.Event()
+    monkeypatch.setattr(
+        notifications, "notify", lambda *_args, **_kwargs: notice_sent.set()
+    )
+    monkeypatch.setattr(api_jobs, "get_db", lambda: env.db)
+    database, job_id, lease = api_recovery._start_recovery_job()
+    assert runtime_state.active_processes() == []
+    assert rclone_sync.get_runtime_state() is None
+    response = Response()
+    worker_called = False
+
+    def next_step(*_args, **_kwargs):
+        nonlocal worker_called
+        worker_called = True
+
+    try:
+        result = api_jobs.cancel_backup(response, user="operator")
+        assert response.status_code == 200
+        assert result["ok"] is True and result["killed"] == 0
+        assert result["signal_persisted"] is True
+        assert runtime_state.CANCEL_FILE.is_file()
+        assert notice_sent.wait(5)
+
+        api_recovery._run_recovery_job(database, job_id, lease, next_step)
+
+        assert not worker_called
+        assert database.job_get(job_id)["status"] == "cancelled"
+    finally:
+        lease.release()
+    assert_scope_free()
 
 
 def test_running_recovery_keeps_scope_against_reconciliation_and_backup_start(

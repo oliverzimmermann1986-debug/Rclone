@@ -174,6 +174,26 @@ def _trusted_proxy_networks() -> tuple[
     return tuple(networks)
 
 
+def request_is_https(request: Request) -> bool:
+    """Trust one overwritten proto header only from an explicitly trusted peer."""
+    if request.url.scheme == "https":
+        return True
+    try:
+        peer = (
+            ipaddress.ip_address(request.client.host.split("%", 1)[0])
+            if request.client
+            else None
+        )
+    except ValueError:
+        return False
+    if peer is None or not any(
+        peer.version == network.version and peer in network
+        for network in _trusted_proxy_networks()
+    ):
+        return False
+    return request.headers.get("x-forwarded-proto", "").strip().lower() == "https"
+
+
 def client_host(request: Request) -> str:
     """Return the socket peer or the first untrusted hop from the right.
 
