@@ -1004,15 +1004,6 @@ def cancel_backup(
     response: Response, user: str = Depends(require_auth)
 ) -> dict[str, Any]:
     db = get_db()
-    if (
-        db.job_running("recovery")
-        and not any(db.job_running(kind) for kind in BACKUP_KINDS if kind != "recovery")
-        and not runtime_state.active_processes()
-    ):
-        raise HTTPException(
-            409,
-            "Dieser Wiederherstellungsschritt ist nicht sicher abbrechbar. Der Lauf wird weiter überwacht.",
-        )
     queued_batches = db.job_batch_request_cancel()
     running = any(db.job_running(kind) for kind in BACKUP_KINDS)
     state = rclone_job.get_runtime_state() or {}

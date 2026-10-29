@@ -350,8 +350,10 @@ def _remove_staging_locked(
     known = next(
         (item for item in _load_state(database) if item.get("id") == recovery_id), None
     )
-    if known is None or known.get("status") == "running":
-        raise ValueError("Recovery ist unbekannt oder noch aktiv")
+    if known is None:
+        raise ValueError("Recovery ist unbekannt")
+    if known.get("status") == "running":
+        raise RecoveryBusy("Laufende Recovery zuerst abbrechen")
     if (root / recovery_id).is_symlink():
         raise ValueError("Unsicheres Recovery-Ziel")
     target = (root / recovery_id).resolve()
