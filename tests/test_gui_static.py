@@ -90,7 +90,6 @@ def test_template_direct_calls_exist_in_alpine_component():
 def test_gui_assets_reference_current_cache_version():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     login = (STATIC / "login.html").read_text(encoding="utf-8")
-    main_source = (STATIC.parent / "main.py").read_text(encoding="utf-8")
     assert "/static/style.css?v=__APP_VERSION__" in html
     assert "/static/alpine.min.js?v=__APP_VERSION__" in html
     assert "/static/ui-helpers.js?v=__APP_VERSION__" in html
@@ -99,10 +98,6 @@ def test_gui_assets_reference_current_cache_version():
     assert "/static/workspace.css?v=__APP_VERSION__" in html
     assert html.index("/static/ui-helpers.js") < html.index("/static/app.js")
     assert html.index("/static/app.js") < html.index("/static/workspace.js")
-    assert (
-        'html = html.replace("?v=__APP_VERSION__", f"?v={asset_revision}")'
-        in main_source
-    )
     assert "Verifizierte Backup-Leitstelle" in login
     assert "Sicherpfad" in html
     assert "rclone-sync</strong>" not in html

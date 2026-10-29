@@ -40,6 +40,7 @@ struct PendingAppNavigation: Equatable {
 
 @main
 struct RcloneMobileApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @UIApplicationDelegateAdaptor(PushNotificationCoordinator.self) private var pushDelegate
     @StateObject private var model = AppModel()
 
@@ -49,6 +50,7 @@ struct RcloneMobileApp: App {
                 .environmentObject(model)
                 .tint(.green)
                 .task { await model.restoreSession() }
+                .onChange(of: scenePhase) { _, phase in model.setSceneActive(phase == .active) }
         }
     }
 }

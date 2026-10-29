@@ -1179,6 +1179,7 @@ def start_restore_test(
                 trigger="manual",
                 reset_cancel_state=False,
                 config_snapshot=config_snapshot,
+                job_id=job_id,
             )
             status = _finish_status(result)
             external_result = (status, result)

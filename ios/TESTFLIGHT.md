@@ -1,6 +1,6 @@
 # TestFlight- und App-Store-Veröffentlichung ohne eigenen Mac
 
-Der Haupt-Bundle-Identifier bleibt unverändert. Vor dem nächsten signierten Build muss zusätzlich das Profil der neuen Teilen-Erweiterung angelegt und in Codemagic hinterlegt werden (siehe unten):
+Der Haupt-Bundle-Identifier bleibt unverändert. App-Store-Profile für Haupt-App, Widget und Teilen-Erweiterung sind in Codemagic hinterlegt (Stand: 17.09.2026):
 
 ```text
 de.oliverzimmermann.rclonesync
@@ -25,7 +25,7 @@ de.oliverzimmermann.rclonesync
    ```
 
    Benötigt werden Issuer ID, Key ID und die `.p8`-Datei. Codemagic erzeugt beziehungsweise lädt damit Distribution-Zertifikat und Provisioning Profile automatisch.
-   In Codemagic sind Haupt-App (`rclone-sync-app-store-shared-v2`) und Widget (`rclone-sync-widget-app-store`) konfiguriert. Für `.share` ein zusätzliches App-Store-Profil mit derselben App Group und demselben Distribution-Zertifikat erstellen. Erst nach tatsächlicher Hinterlegung dessen Reference in `codemagic.yaml` unter `ios_signing.provisioning_profiles` aufnehmen. Diese Datei behauptet nicht, dass das neue Profil bereits existiert. Keine alten App-/Widget-Profile oder Bundle-IDs ersetzen.
+   In Codemagic sind Haupt-App (`rclone-sync-app-store-shared-v2`), Widget (`rclone-sync-widget-app-store`) und Teilen-Erweiterung (`rclone-sync-share-app-store`) konfiguriert. Das am 17.09.2026 erstellte und importierte Profil **Sicherpfad Share App Store** (`8K65SUVHZ8`) gehört zu `de.oliverzimmermann.rclonesync.share`, verwendet die bestehende App Group `group.de.oliverzimmermann.rclonesync` und passt zum Zertifikat `rclone-sync-distribution`; es läuft am 21.08.2027 ab. Alle drei Referenzen stehen in `codemagic.yaml` unter `ios_signing.provisioning_profiles`. Bestehende App-/Widget-Profile und Bundle-IDs bleiben erhalten.
 7. Den öffentlichen GPG-Schlüssel, der die iOS-Release-Tags prüft, ASCII-armored exportieren, Base64-kodieren und in Codemagic in der Variablengruppe `ios-release` als geschützte Variable `IOS_RELEASE_GPG_PUBLIC_KEY_B64` hinterlegen. Der private Schlüssel bleibt ausschließlich beim Release-Verantwortlichen. Die Pipeline importiert den öffentlichen Schlüssel in einen isolierten, leeren GPG-Schlüsselbund. Der Herkunftsprüfer verlangt den konfigurierten `IOS_RELEASE_GPG_FINGERPRINT` und bindet den tatsächlichen Signierer anhand der rohen GPG-Statusdaten an diesen Hauptschlüssel; ein zugehöriger gültiger Signier-Unterschlüssel ist ebenfalls zulässig. Zusätzliche Schlüssel im importierten Block erhalten dadurch keine Release-Berechtigung. Der aktuell eingerichtete Release-Schlüssel hat den Fingerprint `47F8 4407 A9D8 76BC C960 973F 7E69 CA72 01C4 C7B3` und läuft am 26. August 2028 ab.
 
 ## Erster Build
@@ -46,13 +46,15 @@ Die Prüfung bricht vor Versionsänderung, Build oder Publishing ab, wenn Schlü
 
 **Betriebliche Freigabegrenze:** Codemagic muss die verwendete Workflowdefinition und die Tag-/Main-Berechtigungen unabhängig schützen. Tag-Annahme, Freigaben und der Zeitpunkt der Bereitstellung von `ios-release`, App-Store-Integration und Signing-Ressourcen sind Einstellungen des Hosted-Dienstes. Dieser Quelltextschritt belegt nicht, dass dort Secrets erst nach der Herkunftsprüfung verfügbar sind. Wer eine beliebige Workflowdatei auswählen und ändern darf, kann einen darin definierten Prüfschritt ebenfalls ändern; das muss die Betreiberkonfiguration vor dem Build verhindern.
 
+Am 28.10.2026 wurden für `main` verpflichtende GitHub-Actions-Prüfungen für Python 3.10–3.13, Installer, Weboberfläche und den nativen iOS-Build aktiviert. Sie gelten auch für Administratoren; Änderungen laufen über Pull Requests. Die iOS-Prüfung läuft deshalb bei jedem Pull Request. Das Ruleset [iOS release tag admission](https://github.com/oliverzimmermann1986-debug/Rclone/rules/26037500) erlaubt nur Repository-Administratoren, `ios-v*`-Tags anzulegen. Das getrennte Ruleset [Immutable iOS release tags](https://github.com/oliverzimmermann1986-debug/Rclone/rules/26037276) verhindert anschließend Änderungen und Löschungen, auch durch Administratoren. Diese GitHub-Regeln ersetzen keine unabhängige Codemagic-Freigabe.
+
 Die Pipeline:
 
 1. verwendet die aktuelle stabile Xcode-26-Version,
 2. lädt ausschließlich XcodeGen 2.46.0 aus dem offiziellen Releasearchiv, prüft dessen fest hinterlegte SHA-256-Prüfsumme und die ausgeführte Version und generiert damit `RcloneMobile.xcodeproj`,
 3. installiert die App-Store-Profile für Haupt-App, Widget und Teilen-Erweiterung,
 4. setzt eine eindeutige Buildnummer,
-5. führt die iOS-Unit-Tests auf einem iPhone-17-Simulator aus,
+5. wählt einen verfügbaren iPhone-Simulator, führt Unit- und UI-Tests seriell aus und archiviert deren Ergebnis einschließlich Bildschirmaufnahmen auch bei einem Testfehler,
 6. erstellt die signierte IPA und
 7. erzeugt echte, lokalisierte App-Store-Screenshots aus dem nativen Simulator,
 8. baut eine öffentlich verteilbare IPA und lädt sie zu App Store Connect/TestFlight hoch.

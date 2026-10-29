@@ -115,11 +115,13 @@ def test_forty_clients_share_one_expensive_snapshot_and_release_resources():
 
 def test_slow_client_queue_keeps_only_latest_snapshot_and_shutdown_unblocks_it():
     call_count = 0
+    snapshot_lock = threading.Lock()
 
     def snapshot():
         nonlocal call_count
-        call_count += 1
-        return {"sequence": call_count}
+        with snapshot_lock:
+            call_count += 1
+            return {"sequence": call_count}
 
     async def scenario() -> None:
         broadcaster = _ProgressBroadcaster(snapshot, interval=0.01)

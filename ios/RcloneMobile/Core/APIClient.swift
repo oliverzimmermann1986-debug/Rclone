@@ -176,6 +176,9 @@ protocol APIClientProtocol: AnyObject {
     func getRecoveryPass(includePaths: Bool) async throws -> RecoveryPassResponse
     func getRecoveryCalendar(days: Int) async throws -> RecoveryCalendarResponse
     func getRecoveryPolicies() async throws -> RecoveryPoliciesResponse
+    func getRestorePlan() async throws -> RestorePlanResponse
+    func previewRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse
+    func saveRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse
     func getRecoveryQuarantine() async throws -> RecoveryQuarantineResponse
     func browseRecovery(identity: String, path: String) async throws -> RecoveryBrowseResponse
     func startSelectiveRestore(_ request: SelectiveRestoreRequest) async throws -> SelectiveRestoreResponse
@@ -210,6 +213,15 @@ extension APIClientProtocol {
     func answerRemoteSetup(id: String, answer: String, step: Int) async throws -> RemoteSetupSession { throw APIError.invalidResponse }
     func saveRemoteSetup(id: String) async throws -> RemoteSetupSaved { throw APIError.invalidResponse }
     func cancelRemoteSetup(id: String) async throws {}
+    func getRestorePlan() async throws -> RestorePlanResponse {
+        throw APIError.serverFeatureUnavailable(feature: "Restore-Prüfplan")
+    }
+    func previewRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse {
+        throw APIError.serverFeatureUnavailable(feature: "Restore-Prüfplan")
+    }
+    func saveRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse {
+        throw APIError.serverFeatureUnavailable(feature: "Restore-Prüfplan")
+    }
     func setSessionPersistence(_ enabled: Bool) {}
     func deferSessionPersistenceUntilAccepted() {}
     func exchangeWebAuthnToken(_ token: String, verifier: String) async throws {
@@ -722,6 +734,22 @@ final class APIClient: APIClientProtocol {
 
     func getRecoveryPolicies() async throws -> RecoveryPoliciesResponse {
         try await get("/api/recovery/policies")
+    }
+
+    func getRestorePlan() async throws -> RestorePlanResponse {
+        do {
+            return try await get("/api/recovery/restore-plan")
+        } catch APIError.server(let status, _) where status == 404 || status == 405 {
+            throw APIError.serverFeatureUnavailable(feature: "Restore-Prüfplan")
+        }
+    }
+
+    func previewRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse {
+        try await post("/api/recovery/restore-plan/preview", body: request)
+    }
+
+    func saveRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse {
+        try await put("/api/recovery/restore-plan", body: request)
     }
 
     func getRecoveryQuarantine() async throws -> RecoveryQuarantineResponse {

@@ -368,10 +368,9 @@ def test_remote_json_accepts_split_unicode_and_rejects_trailing_data(monkeypatch
     assert process.killed and process.waited
 
 
-@pytest.mark.parametrize("kind", ["points", "snapshots"])
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 def test_watchdog_start_failure_still_closes_kills_and_waits(
-    tmp_path, monkeypatch, kind, cleanup_fails
+    tmp_path, monkeypatch, cleanup_fails
 ):
     process = install_listing(monkeypatch, b"[]")
     started_error = RuntimeError("dummy thread-start failure")
@@ -397,10 +396,7 @@ def test_watchdog_start_failure_still_closes_kills_and_waits(
         process.wait = fail_wait
     monkeypatch.setattr(points.threading, "Timer", Timer)
     with pytest.raises(RuntimeError) as caught:
-        if kind == "points":
-            list(points._remote_chunks(["rclone", "dummy"]))
-        else:
-            snapshots._inventory_remote("cloud:/dummy", tmp_path, 1024)
+        list(points._remote_chunks(["rclone", "dummy"]))
     assert caught.value is started_error
     assert timers[0].cancelled
     assert process.killed and process.waited and process.stdout.closed

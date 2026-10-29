@@ -29,7 +29,8 @@ def test_native_security_changes_select_ios_build(event, changed_path):
         (ROOT / ".github/workflows/ios.yml").read_text(encoding="utf-8"),
         Loader=yaml.BaseLoader,
     )
-    patterns = workflow["on"][event]["paths"]
-    assert any(fnmatchcase(changed_path, pattern) for pattern in patterns), (
-        f"{event}: {changed_path} would skip the native security gate"
-    )
+    trigger = workflow["on"][event]
+    patterns = trigger.get("paths") if isinstance(trigger, dict) else None
+    assert patterns is None or any(
+        fnmatchcase(changed_path, pattern) for pattern in patterns
+    ), f"{event}: {changed_path} would skip the native security gate"

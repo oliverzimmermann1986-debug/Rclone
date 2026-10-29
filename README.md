@@ -123,6 +123,15 @@ Nachweise sollten Prüfungen mit Reserve vor Ablauf stattfinden, etwa zweimal
 wöchentlich: Auch Laufzeit und die Zeitumstellung können einen exakt
 wöchentlichen Termin über die siebentägige Frist verschieben.
 
+Unter **Einstellungen → Scheduler → Restore-Prüfplan** zeigt die Weboberfläche
+die nächsten Termine in der Server-Zeitzone, den Ablauf vorhandener Nachweise
+und mögliche Prüflücken. In der iPhone-App liegt derselbe Plan unter
+**Wiederherstellen → Restore-Prüfplan**. Täglich, wöchentlich, Sonntag/Mittwoch
+oder ein eigener Cron-Ausdruck sind möglich. Eine Vorschau speichert nichts;
+erst die bestätigte Übernahme ändert den Restore-Plan für alle aktiven
+Datenwege. Parallele Konfigurationsänderungen erfordern ein erneutes Laden.
+Bestehende Sicherungsjobs und Zeitpläne werden dabei nicht umgestellt.
+
 ## Proxmox-Betrieb
 
 Empfohlen ist ein eigener, möglichst unprivilegierter Debian-/Ubuntu-LXC oder eine kleine VM. Die Anwendung benötigt keine Docker- oder Nesting-Funktion. Für typische Installationen genügen 1–2 vCPU und 512 MiB bis 1 GiB RAM; große Remotes, viele parallele Transfers oder `--fast-list` benötigen entsprechend mehr Speicher.
@@ -337,7 +346,7 @@ Wichtige globale Werte:
 - `backup.allow_unsafe_rclone_args`: Schutz interner rclone-Flags nur bewusst deaktivieren
 - `backup.auto_resync`: standardmäßig `false`; `bisync --resync` erst nach Log-/Planprüfung
 - `web.allowed_hosts`: in Produktion konkrete DNS-Namen/IPs statt `*`
-- `web.secure_cookie`: standardmäßig `auto` (Secure-Cookies bei HTTPS, direktes lokales HTTP bleibt nutzbar); hinter festem HTTPS `true` verwenden. Bei TLS-Proxys muss uvicorn ausschließlich den tatsächlichen Proxy-Hops vertrauen.
+- `web.secure_cookie`: standardmäßig `auto` (Secure-Cookies bei HTTPS, direktes lokales HTTP bleibt nutzbar); hinter festem HTTPS `true` verwenden. Bei TLS-Proxys `web.trusted_proxy_ips` auf die tatsächlichen Proxy-Hops begrenzen; `X-Forwarded-Proto` wird ausschließlich von diesen Peers übernommen.
 - `web.hsts_seconds`: erst bei dauerhaftem HTTPS aktivieren
 - `web.local_browse_roots`: erlaubte lokale Browser-/Quick-Sync-Wurzeln
 - `notifications.apns`: native Fehler-Pushs mit dauerhafter Outbox, Retry und Geräte-Lease
@@ -603,8 +612,8 @@ erfolgreichen neuen Vollstand werden nur überprüfbar zu diesem Datenweg gehör
 und Stände entfernter Datenwege werden nicht automatisch gelöscht.
 `backup.recovery_staging_max_mb` begrenzt die Summe aufbewahrter Restore-Daten
 standardmäßig auf 51200 MiB. Staging lässt sich in Web und App mit Passwortbestätigung
-entfernen. Ein Recovery-Schritt ohne sicher abbrechbaren Prozess wird bei einem
-Abbruchwunsch ausdrücklich mit HTTP 409 weitergeführt.
+entfernen. Recovery-Prozesse werden pro Auftrag registriert und unter ihren Laufzeitsperren
+abgebrochen; temporäre Daten werden erst nach sicher festgestelltem Prozessende bereinigt.
 
 Lokale Vault-Veröffentlichung und Ordneranlage benötigen POSIX-Verzeichnisdeskriptoren;
 auf nicht unterstützten Hosts wird diese Aktion abgewiesen. Unter Linux müssen die
@@ -619,3 +628,17 @@ Dateiinhalte ein.
 Vault-Dateien und Datensätze bleiben lokal unter `paths.device_vault_dir` (Standard `<data_dir>/device-vault`) bis zur ausdrücklich bestätigten Entfernung erhalten. Es gibt keine automatische Blob-Löschung, weil die lokale Datei die letzte erreichbare Kopie sein kann. Die Entfernung der lokalen Vault-Kopie löscht keine Zielkopie oder bereits exportierte Notfallakte. Audit-Wartung erhält mindestens 365 Tage und die neuesten 1000 Einträge, die deshalb länger verbleiben können. App-Logout entfernt die Sitzung und clientgebundene temporäre Exporte; Profile, Offline-Pässe und Upload-Warteschlange werden gesondert verwaltet.
 
 Hosting-/Supportanbieter, genaue Kontakt-Aufbewahrung, Auftragsverarbeitungsverträge und Drittlandgrundlagen müssen anhand der tatsächlich verwendeten Dienste bestätigt werden. Der App-Quelltext belegt diese externen Betreiberangaben nicht. Die Datenschutzhinweise ersetzen diese Prüfung nicht.
+Die Browserprüfung bedient die tatsächliche Weboberfläche in Chromium und
+mobilem WebKit mit lokalen API-Fixtures. Sie startet keine produktiven Jobs:
+
+```bash
+npm ci
+npx playwright install chromium webkit
+npm run test:web
+node --test scripts/test_web_requests.cjs
+```
+
+Die iOS-CI führt zusätzlich native Navigationstests im Offline-Vorschaumodus
+aus, einschließlich der größten Bedienungshilfen-Schriftgröße. Simulator-Build,
+Testresultate und Screenshots werden als CI-Artefakte abgelegt; dies ist kein
+TestFlight-Upload und keine Installation auf einem iPhone.

@@ -677,6 +677,7 @@ def main() -> int:
                         trigger="scheduler",
                         reset_cancel_state=False,
                         config_snapshot=scheduler_snapshot,
+                        job_id=job_id,
                     )
                     summary = _with_metadata(
                         summary,
