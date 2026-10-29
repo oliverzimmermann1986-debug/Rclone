@@ -96,9 +96,9 @@ def test_composition_aggregates_types_without_returning_file_names(monkeypatch):
 def test_composition_endpoint_resolves_side_and_reuses_cache(monkeypatch):
     pair = {
         "id": "recipes",
-        "name": "Rezepte",
-        "local": "/mnt/data/rezepte",
-        "remote": "pcloud:/Rezepte",
+        "name": "Documents",
+        "local": "/mnt/example/documents",
+        "remote": "cloud:Documents",
         "direction": "push",
     }
     monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
@@ -118,10 +118,10 @@ def test_composition_endpoint_resolves_side_and_reuses_cache(monkeypatch):
     monkeypatch.setattr(api_storage, "_rclone_composition", measure)
 
     first = api_storage.composition(pair="recipes", side="target")
-    cached = api_storage.composition(pair="Rezepte", side="target")
+    cached = api_storage.composition(pair="Documents", side="target")
     refreshed = api_storage.composition(pair="recipes", side="target", refresh=True)
 
-    assert first["path"] == "pcloud:/Rezepte"
+    assert first["path"] == "cloud:Documents"
     assert first["side"] == "target"
     assert first["status"] == "fresh"
     assert cached["status"] == "cached"
@@ -172,7 +172,7 @@ def test_rclone_size_preserves_parseable_values_after_traversal_error(monkeypatc
 
     monkeypatch.setattr(api_storage.subprocess, "run", run)
 
-    result = api_storage._rclone_size("/mnt/data/rezepte")
+    result = api_storage._rclone_size("/mnt/example/documents")
 
     assert result["count"] == 214
     assert result["bytes"] == 783_674_923
@@ -184,23 +184,23 @@ def test_cached_size_exposes_partial_values_without_caching_them_as_complete(
 ):
     pair = {
         "id": "recipes",
-        "name": "Rezepte",
-        "local": "/mnt/data/rezepte",
-        "remote": "pcloud:/Rezepte",
+        "name": "Documents",
+        "local": "/mnt/example/documents",
+        "remote": "cloud:Documents",
         "direction": "push",
     }
     monkeypatch.setattr(
         api_storage,
         "_rclone_size",
         lambda _path: {
-            "path": "/mnt/data/rezepte",
+            "path": "/mnt/example/documents",
             "count": 214,
             "bytes": 783_674_923,
             "error": "permission denied",
         },
     )
 
-    result = api_storage._cached_rclone_size(pair, "source", "/mnt/data/rezepte")
+    result = api_storage._cached_rclone_size(pair, "source", "/mnt/example/documents")
 
     assert result["count"] == 214
     assert result["bytes"] == 783_674_923
@@ -213,9 +213,9 @@ def test_cached_size_exposes_partial_values_without_caching_them_as_complete(
 def test_overview_measures_with_the_same_pair_filters_as_sync(monkeypatch):
     pair = {
         "id": "recipes",
-        "name": "Rezepte",
-        "local": "/mnt/data/rezepte",
-        "remote": "pcloud:/Rezepte",
+        "name": "Documents",
+        "local": "/mnt/example/documents",
+        "remote": "cloud:Documents",
         "direction": "push",
         "exclude": "/.work/**",
     }

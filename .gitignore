@@ -31,4 +31,11 @@ deploy-backend*.sh
 !.env.example
 *.p8
 *.p12
+*.pfx
+*.key
+*.pem
 *.mobileprovision
+config/config.yaml
+config/config.yml
+config/rclone.conf
+rclone.conf

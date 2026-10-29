@@ -267,7 +267,7 @@ final class AppModelLifecycleTests: XCTestCase {
 
     func testStoredHTTPConnectionRequiresFreshConfirmationAndClearsSession() async {
         let defaults = makeDefaults()
-        defaults.set("http://192.168.1.20:8001", forKey: "serverAddress")
+        defaults.set("http://192.168.50.20:8001", forKey: "serverAddress")
         let client = StubAPIClient()
         let model = AppModel(defaults: defaults) { _ in client }
 
@@ -276,7 +276,7 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.phase, .signedOut)
         XCTAssertTrue(client.clearedLocalSession)
         XCTAssertEqual(client.configCallCount, 0)
-        XCTAssertEqual(model.serverAddress, "http://192.168.1.20:8001")
+        XCTAssertEqual(model.serverAddress, "http://192.168.50.20:8001")
         XCTAssertTrue(model.errorMessage?.contains("noch nicht gespeichert") == true)
     }
 
@@ -303,8 +303,8 @@ final class AppModelLifecycleTests: XCTestCase {
 
     func testRememberedHTTPApprovalDoesNotCoverDifferentPort() async {
         let defaults = makeDefaults()
-        defaults.set("http://192.168.1.20:8002", forKey: "serverAddress")
-        defaults.set(["http://192.168.1.20:8001"], forKey: "rememberedHTTPServers")
+        defaults.set("http://192.168.50.20:8002", forKey: "serverAddress")
+        defaults.set(["http://192.168.50.20:8001"], forKey: "rememberedHTTPServers")
         let client = StubAPIClient()
         let model = AppModel(defaults: defaults) { _ in client }
 
@@ -316,7 +316,7 @@ final class AppModelLifecycleTests: XCTestCase {
     }
 
     func testSessionOnlyLoginNeverRestoresHTTPOrHTTPS() async throws {
-        for server in ["http://192.168.1.20:8001", "https://backup.example.de"] {
+        for server in ["http://192.168.50.20:8001", "https://backup.example.de"] {
             let defaults = makeDefaults()
             let original = StubAPIClient()
             let login = AppModel(defaults: defaults) { _ in original }

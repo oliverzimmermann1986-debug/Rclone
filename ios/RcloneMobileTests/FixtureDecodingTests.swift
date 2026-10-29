@@ -155,8 +155,8 @@ final class FixtureDecodingTests: XCTestCase {
     }
 
     func testLocalIPv4UsesHTTPReverseProxyPort() throws {
-        let url = try APIClient.normalizedServerURL("192.168.1.67")
-        XCTAssertEqual(url.absoluteString, "http://192.168.1.67")
+        let url = try APIClient.normalizedServerURL("192.168.50.10")
+        XCTAssertEqual(url.absoluteString, "http://192.168.50.10")
     }
 
     func testLocalIPv4KeepsExplicitPort() throws {
@@ -165,8 +165,8 @@ final class FixtureDecodingTests: XCTestCase {
     }
 
     func testExplicitLocalHTTPKeepsDefaultPort() throws {
-        let url = try APIClient.normalizedServerURL("http://192.168.1.67")
-        XCTAssertEqual(url.absoluteString, "http://192.168.1.67")
+        let url = try APIClient.normalizedServerURL("http://192.168.50.10")
+        XCTAssertEqual(url.absoluteString, "http://192.168.50.10")
     }
 
     func testExplicitHTTPSIsNotRewritten() throws {
@@ -178,7 +178,7 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertThrowsError(try APIClient.normalizedServerURL("https://admin:secret@backup.example.de")) { error in
             XCTAssertEqual(error as? APIError, .invalidServer)
         }
-        XCTAssertThrowsError(try APIClient.normalizedServerURL("admin:secret@192.168.1.67")) { error in
+        XCTAssertThrowsError(try APIClient.normalizedServerURL("admin:secret@192.168.50.10")) { error in
             XCTAssertEqual(error as? APIError, .invalidServer)
         }
     }

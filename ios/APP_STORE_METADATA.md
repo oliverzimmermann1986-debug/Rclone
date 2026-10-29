@@ -7,9 +7,9 @@
 - Kategorie: `Dienstprogramme`
 - Preis: `Kostenlos`
 - Verteilung: `Öffentlich`, alle Länder und Regionen
-- Support-URL: `https://support.zimlab.org/?module=sicherpfad`
+- Support-URL: `https://github.com/oliverzimmermann1986-debug/Rclone/issues`
 - Datenschutz-URL: `https://oliverzimmermann1986-debug.github.io/Rclone/datenschutz.html`
-- Copyright: `2026 Oliver Zimmermann`
+- Copyright: `Bei eigener Veröffentlichung ergänzen`
 - Schlüsselwörter: `backup,sicherung,recovery,rclone,server,dateien,fotos,self-hosted,restore`
 
 ### Werbetext
@@ -52,7 +52,7 @@ Sicherpfad stellt keinen Cloudspeicher bereit. Für den produktiven Einsatz ben�
 ## App-Prüfung
 
 - Anmeldung erforderlich: `Ja` für echte Upload-, Snapshot- und Restore-Prüfungen.
-- Prüfserver: `https://rclone-review.mausbaeren.me`. Den bestehenden isolierten Review-Zugang in App Store Connect hinterlegen und vor Einreichung am vorgesehenen Build testen. Zugangsdaten nicht in Repository oder Video veröffentlichen.
+- Prüfserver: vor Einreichung privat in App Store Connect hinterlegen und am vorgesehenen Build testen. `https://review.example.invalid` ist ein nicht erreichbarer Platzhalter. Zugangsdaten nicht in Repository oder Video veröffentlichen.
 - Prüfweg: Sichern → Fotos & Dateien sichern → kleine Testdatei hochladen → bestätigte Zielkopie zurückholen. Danach Wiederherstellen → Testdatenweg → Recovery-Zeitreise → vollständigen Stand erstellen → gesamten Stand getrennt zurückholen → Vorgang und Ergebnis öffnen. Für den Serververlust-Ablauf eine eigene aktuelle Notfallakte exportieren, am vorbereiteten Ersatzserver zuordnen und eine Vault-Datei wirklich herunterladen.
 - Die lokale Demo unter „App mit Beispieldaten ansehen“ ist eine zusätzliche, ausdrücklich simulierte Vorschau. Sie beweist keine echte Übertragung oder Wiederherstellung und ersetzt den nutzbaren Review-Zugang nicht.
 - Vor Einreichung: vollständiger iOS-Build einschließlich Share Extension, Gerätetest, aktuelles Video, aktuelle Screenshots und erfolgreicher Ende-zu-Ende-Test des isolierten Review-Servers. Lokale Code-Änderungen allein sind keine Veröffentlichung.

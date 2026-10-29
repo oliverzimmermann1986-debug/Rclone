@@ -84,7 +84,7 @@ struct LoginView: View {
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.top, 18)
-                    Button("Impressum") {
+                    Button("Projektinformationen") {
                         focusedField = nil
                         showingLegalInformation = true
                     }
@@ -141,7 +141,7 @@ struct LoginView: View {
         VStack(spacing: 0) {
             LoginField(
                 title: "Server",
-                placeholder: "192.168.1.67 oder backup.example.de",
+                placeholder: "192.168.50.10 oder backup.example.de",
                 accessibilityHint: "Gib die vollständige Adresse deines Sicherpfad-Servers ein. Einen abweichenden Port direkt anhängen.",
                 symbol: "server.rack",
                 text: $server,

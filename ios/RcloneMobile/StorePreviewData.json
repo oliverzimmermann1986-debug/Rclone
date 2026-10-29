@@ -7,7 +7,7 @@
       "kernel": "6.8.12",
       "python": "3.13.5",
       "virtualization": "lxc",
-      "addresses": ["192.168.1.67"],
+      "addresses": ["192.168.50.10"],
       "uptime_seconds": 864000,
       "cpu": {"count": 4, "capacity": 4.0, "source": "cgroup-v2", "load_1": 0.31, "load_5": 0.27, "load_15": 0.22, "load_percent": 18.0},
       "memory": {"total_bytes": 4294967296, "available_bytes": 2791728742, "used_bytes": 1503238554, "percent_used": 35.0, "source": "cgroup-v2"},

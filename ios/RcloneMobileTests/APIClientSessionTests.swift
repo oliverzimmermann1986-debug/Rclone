@@ -108,7 +108,7 @@ final class APIClientSessionTests: XCTestCase {
     }
 
     func testLoginUsesBoundedRequestsWithoutBlockingOnConfigRefresh() async throws {
-        let baseURL = try XCTUnwrap(URL(string: "http://192.168.1.67:8001"))
+        let baseURL = try XCTUnwrap(URL(string: "http://192.168.50.10:8001"))
         let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
             forGroupContainerIdentifier: "APIClientLoginTimeoutTests-\(UUID().uuidString)"
         )
@@ -136,7 +136,7 @@ final class APIClientSessionTests: XCTestCase {
     }
 
     func testLoginFallsBackToCSRFProtectedWebContractOnOlderServer() async throws {
-        let baseURL = try XCTUnwrap(URL(string: "http://192.168.1.67"))
+        let baseURL = try XCTUnwrap(URL(string: "http://192.168.50.10"))
         let cookieStorage = HTTPCookieStorage.sharedCookieStorage(
             forGroupContainerIdentifier: "APIClientLegacyLoginTests-\(UUID().uuidString)"
         )
@@ -573,7 +573,7 @@ private final class LegacyLoginURLProtocol: URLProtocol {
             type = "text/html"
             Self.postBody = Self.bodyData(from: request).flatMap { String(data: $0, encoding: .utf8) }
             if let cookie = HTTPCookie(properties: [
-                .domain: request.url?.host ?? "192.168.1.67",
+                .domain: request.url?.host ?? "192.168.50.10",
                 .path: "/",
                 .name: APIClient.sessionCookie,
                 .value: "session"
@@ -636,7 +636,7 @@ private final class RecordingLoginURLProtocol: URLProtocol {
         let body: Data
         if method == "POST" {
             if let cookie = HTTPCookie(properties: [
-                .domain: request.url?.host ?? "192.168.1.67",
+                .domain: request.url?.host ?? "192.168.50.10",
                 .path: "/",
                 .name: APIClient.sessionCookie,
                 .value: "session"
