@@ -64,3 +64,4 @@ def test_readyz_accepts_existing_initialized_database(tmp_path: Path, monkeypatc
 
     assert response.status_code == 200
     assert _body(response)["ok"] is True
+    assert set(_body(response)) == {"ok", "version"}

@@ -140,17 +140,17 @@ struct DashboardView: View {
                             HStack(spacing: 12) {
                                 Image(systemName: "clock.arrow.circlepath")
                                     .font(.title3)
-                                    .foregroundStyle(StatusStyle.color(for: last.status))
+                                    .foregroundStyle(StatusStyle.color(for: last.effectiveStatus))
                                     .frame(width: 28)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(AppFormat.date(last.startedAt))
                                         .font(.body.weight(.medium))
-                                    Text("Lauf #\(last.id)")
+                                    Text("Lauf #\(last.id)\(last.isDryRun ? " · Probelauf" : "")")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                StatusBadge(status: last.status)
+                                StatusBadge(status: last.effectiveStatus)
                             }
                         }
                     }
@@ -181,12 +181,13 @@ struct DashboardView: View {
         }
         .refreshable { await model.refresh() }
         .confirmationDialog("Alle Jobs jetzt starten?", isPresented: $confirmRunAll, titleVisibility: .visible) {
-            Button("Sicherung starten") {
+            Button("Produktive Sicherung starten", role: .destructive) {
                 Task { if await model.runAllJobDefinitions() { successFeedback += 1 } }
             }
+            Button("Probelauf starten") { Task { _ = await model.runAllJobDefinitions(dryRun: true) } }
             Button("Abbrechen", role: .cancel) {}
         } message: {
-            Text("Alle aktivierten Jobs werden nach ihren Schutzregeln ausgeführt.")
+            Text("Produktive Sync- und Bisync-Läufe können Zieldaten löschen. Prüfe zuerst einen Plan oder Probelauf.")
         }
         .confirmationDialog("Lauf abbrechen?", isPresented: $confirmCancel, titleVisibility: .visible) {
             Button("Abbruch anfordern", role: .destructive) {
@@ -257,9 +258,10 @@ struct DashboardView: View {
     private func protectionLevel(for overview: OverviewResponse) -> ProtectionLevel {
         if overview.alerts.contains(where: { $0.level.lowercased() == "error" }) { return .error }
         if model.storage?.pairs.contains(where: { $0.restoreEvidence?.state == "failed" }) == true { return .error }
-        if overview.pairs.health.contains(where: { ["error", "failed", "timeout"].contains($0.lastStatus?.lowercased() ?? "") }) {
+        if overview.pairs.health.contains(where: { $0.hasFailure }) {
             return .error
         }
+        if !overview.services.scheduler.configuredEnabled || overview.services.scheduler.control?.paused == true { return .warning }
         if overview.alerts.contains(where: { ["warn", "warning"].contains($0.level.lowercased()) }) { return .warning }
         if overview.pairs.health.contains(where: { $0.overdue == true }) { return .warning }
         if model.storage?.pairs.contains(where: { $0.restoreEvidence?.isCurrent != true }) == true { return .warning }
@@ -275,13 +277,15 @@ struct DashboardView: View {
             return "Restore-Nachweis für \(pair.name) fehlgeschlagen. Befund öffnen und erneut prüfen."
         }
         if let pair = overview.pairs.health.first(where: {
-            ["error", "failed", "timeout"].contains($0.lastStatus?.lowercased() ?? "")
+            $0.hasFailure
         }) {
             return "Datenweg \(pair.name) prüfen und den fehlgeschlagenen Lauf erneut starten."
         }
         if let alert = overview.alerts.first(where: { ["warn", "warning"].contains($0.level.lowercased()) }) {
             return alert.message
         }
+        if !overview.services.scheduler.configuredEnabled { return "Automatik deaktiviert. Zeitpläne starten keine Sicherungen." }
+        if overview.services.scheduler.control?.paused == true { return "Automatik pausiert. Wartungsfenster prüfen oder Zeitpläne fortsetzen." }
         if let pair = overview.pairs.health.first(where: { $0.overdue == true }) {
             return "Datenweg \(pair.name) ist überfällig. Zeitplan oder Serverzustand prüfen."
         }

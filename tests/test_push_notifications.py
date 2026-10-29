@@ -13,6 +13,35 @@ from app.routes import api_push
 TOKEN = "ab" * 32
 
 
+def test_restore_warning_payload_is_separate_from_error_incidents():
+    payload = json.loads(
+        push_notifications._payload(
+            {
+                "event": "restore_test_warning",
+                "title": "Prüfumfang begrenzt",
+                "message": "19 von 20 geprüft",
+            }
+        )
+    )
+    assert payload["aps"]["thread-id"] == "rclone-restore"
+    assert "category" not in payload["aps"]
+    assert payload["event"] == "restore_test_warning"
+
+
+def test_restore_warning_subscription_is_opt_in(tmp_path: Path):
+    config = _base_config(tmp_path)
+    normalized, _warnings = validate_config(config)
+    assert "restore_test_warning" not in normalized["notifications"]["apns"]["events"]
+    config["notifications"]["apns"] = {
+        "events": ["restore_test_warning", "restore_test_error"]
+    }
+    normalized, _warnings = validate_config(config)
+    assert normalized["notifications"]["apns"]["events"] == [
+        "restore_test_warning",
+        "restore_test_error",
+    ]
+
+
 def _base_config(tmp_path: Path) -> dict:
     return {
         "web": {"username": "admin", "local_browse_roots": [str(tmp_path)]},
@@ -115,7 +144,11 @@ def test_push_route_validates_and_registers_device(monkeypatch, tmp_path: Path):
         )
     )
 
-    assert result == {"ok": True, "registered": True}
+    assert result == {
+        "ok": True,
+        "registered": True,
+        "server_id": push_notifications.push_server_id(),
+    }
     assert database.push_devices()[0]["token"] == TOKEN
     with pytest.raises(Exception) as raised:
         api_push.unregister_push_device(api_push.PushDeviceRemoval(token="g" * 64))
@@ -143,6 +176,9 @@ class _Client:
 
     def __exit__(self, *_args):
         return False
+
+    def close(self):
+        pass
 
     def post(self, url, *, content, headers):
         self.calls.append((url, content, headers))

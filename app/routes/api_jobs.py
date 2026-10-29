@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..auth import require_auth
+from ..auth import SESSION_COOKIE, require_auth, session_user
 from ..config_store import get_config
 from ..db import JobAlreadyRunningError, get_db
 from ..job_definitions import definition_pairs, effective_job_definitions
@@ -33,10 +33,23 @@ from ..jobs.logging_scope import JobScopeFilter
 from ..jobs.locks import HeldFileLock, try_file_lock
 from ..jobs.scheduler import rclone_history_key
 from ..rclone_args import redact_command_text, rclone_subprocess_env
+from ..restore_evidence import is_partial_restore_summary
 from ..scheduler_control import pause_scheduler, resume_scheduler, scheduler_state
 from ..security import ensure_within, is_relative_to, parse_browse_roots, require_csrf
 
 logger = logging.getLogger(__name__)
+
+
+def _audit_actor(value: Any = None) -> str:
+    """Keep historical initiators; unresolved/internal calls belong to system."""
+    return value.strip() if isinstance(value, str) and value.strip() else "system"
+
+
+def _request_actor_args(user: Any) -> dict[str, str]:
+    # Direct internal callers do not resolve FastAPI Depends. Their helpers
+    # retain defaults; HTTP calls always receive the authenticated username.
+    return {"actor": _audit_actor(user)} if isinstance(user, str) else {}
+
 
 router = APIRouter(
     prefix="/api/jobs",
@@ -158,6 +171,8 @@ def _parse_pair_filter(raw: Optional[str]) -> Optional[list[str]]:
 def _finish_status(result: dict[str, Any]) -> str:
     if result.get("cancelled") or rclone_job.is_cancelled():
         return "cancelled"
+    if result.get("kind") == "restoretest" and is_partial_restore_summary(result):
+        return "warning"
     return "ok" if result.get("ok") else "error"
 
 
@@ -205,8 +220,13 @@ def _run_backup_thread(
             job_id=job_id,
             defer_runtime_finish=True,
             reset_cancel_state=False,
-            **run_metadata,
+            **{
+                key: value
+                for key, value in run_metadata.items()
+                if key != "_request_actor"
+            },
         )
+        summary["actor"] = _audit_actor(run_metadata.get("_request_actor"))
         summary["history_keys"] = history_keys
         status = _finish_status(summary)
         if status == "cancelled":
@@ -318,7 +338,7 @@ def _reserve_backup_job(
 def _audit_best_effort(event: str, *, actor: str, details: dict) -> None:
     """Audit darf einen bereits angelegten Job nicht verhindern."""
     try:
-        get_db().audit_add(event, actor=actor, details=details)
+        get_db().audit_add(event, actor=_audit_actor(actor), details=details)
     except Exception:
         logger.exception("Audit-Event %s konnte nicht gespeichert werden", event)
 
@@ -422,6 +442,7 @@ def _queue_backup(
     definition: dict[str, Any] | None = None,
     config_snapshot: dict[str, Any] | None = None,
     config_revision: str | None = None,
+    actor: str = "system",
 ) -> dict[str, Any]:
     if config_snapshot is None:
         config_snapshot, captured_revision = get_config().snapshot_with_revision()
@@ -473,10 +494,11 @@ def _queue_backup(
             "definition_name": definition_name,
             "config_revision": config_revision,
             "config_snapshot": config_snapshot,
+            "_request_actor": _audit_actor(actor),
         }
         _audit_best_effort(
             "backup_requested",
-            actor="web",
+            actor=_audit_actor(actor),
             details={"dry_run": dry_run, "pairs": pairs_filter or []},
         )
     except Exception as exc:
@@ -634,7 +656,7 @@ def _run_definition_batch_thread(batch_id: str, scope_lock: HeldFileLock) -> Non
                 db.job_batch_item_finish(batch_id, index, "cancelled")
                 _audit_best_effort(
                     "job_definition_batch_item_failed",
-                    actor="web",
+                    actor=_audit_actor(spec.get("actor")),
                     details={
                         "batch_job_id": first_job_id,
                         "definition_id": definition_id,
@@ -675,7 +697,7 @@ def _run_definition_batch_thread(batch_id: str, scope_lock: HeldFileLock) -> Non
                     )
                     _audit_best_effort(
                         "job_definition_batch_item_failed",
-                        actor="web",
+                        actor=_audit_actor(spec.get("actor")),
                         details={
                             "batch_job_id": first_job_id,
                             "definition_id": definition_id,
@@ -702,6 +724,7 @@ def _run_definition_batch_thread(batch_id: str, scope_lock: HeldFileLock) -> Non
                     "definition_name": definition_name,
                     "config_revision": config_revision,
                     "config_snapshot": snapshot,
+                    "_request_actor": _audit_actor(spec.get("actor")),
                 },
                 release_locks=False,
             )
@@ -737,11 +760,15 @@ def _run_definition_batch_thread(batch_id: str, scope_lock: HeldFileLock) -> Non
         _locks["backup"].release()
 
 
-def _queue_enabled_job_definitions(*, dry_run: bool) -> dict[str, Any]:
+def _queue_enabled_job_definitions(
+    *, dry_run: bool, actor: str = "system"
+) -> dict[str, Any]:
     snapshot, revision = get_config().snapshot_with_revision()
     snapshot = copy.deepcopy(snapshot)
     revision = str(revision or "")
     specs = _enabled_definition_specs(snapshot, dry_run=dry_run)
+    for spec in specs:
+        spec["actor"] = _audit_actor(actor)
     scope_lock = _acquire_definition_batch_scope()
     definitions = [spec["definition"] for spec in specs]
     first = specs[0]
@@ -783,7 +810,7 @@ def _queue_enabled_job_definitions(*, dry_run: bool) -> dict[str, Any]:
         raise HTTPException(500, "Jobs konnten nicht gespeichert werden") from exc
     _audit_best_effort(
         "job_definition_batch_requested",
-        actor="web",
+        actor=_audit_actor(actor),
         details={
             "dry_run": dry_run,
             "definition_ids": [str(item.get("id") or "") for item in definitions],
@@ -875,11 +902,17 @@ def resume_pending_definition_batches() -> int:
 
 @router.post("/backup/run")
 def run_backup(
-    dry_run: bool = Query(False), pairs: Optional[str] = Query(None)
+    dry_run: bool = Query(False),
+    pairs: Optional[str] = Query(None),
+    user: str = Depends(require_auth),
 ) -> dict[str, Any]:
     if pairs is not None:
-        return _queue_backup(dry_run=dry_run, pairs_filter=_parse_pair_filter(pairs))
-    return _queue_enabled_job_definitions(dry_run=dry_run)
+        return _queue_backup(
+            dry_run=dry_run,
+            pairs_filter=_parse_pair_filter(pairs),
+            **_request_actor_args(user),
+        )
+    return _queue_enabled_job_definitions(dry_run=dry_run, **_request_actor_args(user))
 
 
 @router.get("/definitions")
@@ -888,8 +921,10 @@ def list_job_definitions() -> list[dict[str, Any]]:
 
 
 @router.post("/definitions/run-all")
-def run_all_job_definitions(dry_run: bool = Query(False)) -> dict[str, Any]:
-    return _queue_enabled_job_definitions(dry_run=dry_run)
+def run_all_job_definitions(
+    dry_run: bool = Query(False), user: str = Depends(require_auth)
+) -> dict[str, Any]:
+    return _queue_enabled_job_definitions(dry_run=dry_run, **_request_actor_args(user))
 
 
 def _resolved_definition(
@@ -920,7 +955,7 @@ def _resolved_definition(
 
 @router.post("/definitions/{definition_id}/run")
 def run_job_definition(
-    definition_id: str, dry_run: bool = Query(False)
+    definition_id: str, dry_run: bool = Query(False), user: str = Depends(require_auth)
 ) -> dict[str, Any]:
     snapshot, revision = get_config().snapshot_with_revision()
     definition, pair_names = _resolved_definition(snapshot, definition_id)
@@ -930,6 +965,7 @@ def run_job_definition(
         definition=definition,
         config_snapshot=snapshot,
         config_revision=revision,
+        **_request_actor_args(user),
     )
 
 
@@ -964,8 +1000,19 @@ def backup_plan(
 
 
 @router.post("/backup/cancel")
-def cancel_backup(response: Response) -> dict[str, Any]:
+def cancel_backup(
+    response: Response, user: str = Depends(require_auth)
+) -> dict[str, Any]:
     db = get_db()
+    if (
+        db.job_running("recovery")
+        and not any(db.job_running(kind) for kind in BACKUP_KINDS if kind != "recovery")
+        and not runtime_state.active_processes()
+    ):
+        raise HTTPException(
+            409,
+            "Dieser Wiederherstellungsschritt ist nicht sicher abbrechbar. Der Lauf wird weiter überwacht.",
+        )
     queued_batches = db.job_batch_request_cancel()
     running = any(db.job_running(kind) for kind in BACKUP_KINDS)
     state = rclone_job.get_runtime_state() or {}
@@ -979,7 +1026,7 @@ def cancel_backup(response: Response) -> dict[str, Any]:
     result = rclone_job.cancel_job()
     _audit_best_effort(
         "backup_cancel_requested",
-        actor="web",
+        actor=_audit_actor(user),
         details={
             "ok": result.get("ok", False),
             "killed": result.get("killed", 0),
@@ -994,10 +1041,14 @@ def cancel_backup(response: Response) -> dict[str, Any]:
 
 
 @router.post("/backup/run-pair/{pair_name}")
-def run_single_pair(pair_name: str, dry_run: bool = Query(False)) -> dict[str, Any]:
+def run_single_pair(
+    pair_name: str, dry_run: bool = Query(False), user: str = Depends(require_auth)
+) -> dict[str, Any]:
     if pair_name not in _known_pair_names():
         raise HTTPException(404, "Pair nicht gefunden")
-    return _queue_backup(dry_run=dry_run, pairs_filter=[pair_name])
+    return _queue_backup(
+        dry_run=dry_run, pairs_filter=[pair_name], **_request_actor_args(user)
+    )
 
 
 @router.post("/backup/check/{pair_name}")
@@ -1005,6 +1056,7 @@ def check_pair(
     pair_name: str,
     one_way: Optional[bool] = Query(None),
     download: bool = Query(False),
+    user: str = Depends(require_auth),
 ) -> dict[str, Any]:
     if pair_name not in _known_pair_names():
         raise HTTPException(404, "Pair nicht gefunden")
@@ -1016,7 +1068,7 @@ def check_pair(
     job_id, scope_lock = _reserve_backup_job("check", config_revision=config_revision)
     _audit_best_effort(
         "check_requested",
-        actor="web",
+        actor=_audit_actor(user),
         details={"pair": pair_name, "one_way": one_way, "download": download},
     )
 
@@ -1084,7 +1136,9 @@ def check_pair(
 
 
 @router.post("/backup/restore-test")
-def start_restore_test(pairs: Optional[str] = Query(None)) -> dict[str, Any]:
+def start_restore_test(
+    pairs: Optional[str] = Query(None), user: str = Depends(require_auth)
+) -> dict[str, Any]:
     """Holt Stichproben aus dem Ziel zurück und vergleicht sie mit der Quelle.
 
     Teilt sich den Backup-Scope, damit kein Drill gegen einen halb
@@ -1104,7 +1158,7 @@ def start_restore_test(pairs: Optional[str] = Query(None)) -> dict[str, Any]:
     )
     _audit_best_effort(
         "restore_test_requested",
-        actor="web",
+        actor=_audit_actor(user),
         details={"pairs": pairs_filter or []},
     )
 
@@ -1324,10 +1378,13 @@ async def progress_stream(request: Request) -> StreamingResponse:
     """
 
     async def event_generator():
+        token = request.cookies.get(SESSION_COOKIE, "")
+        if not session_user(token):
+            return
         queue = await _progress_broadcaster.subscribe()
         try:
             while True:
-                if await request.is_disconnected():
+                if not session_user(token) or await request.is_disconnected():
                     break
                 try:
                     payload = await asyncio.wait_for(queue.get(), timeout=1.5)
@@ -1335,6 +1392,8 @@ async def progress_stream(request: Request) -> StreamingResponse:
                     yield ": keep-alive\n\n"
                     continue
                 if payload is None:
+                    break
+                if not session_user(token):
                     break
                 yield f"data: {payload}\n\n"
         finally:
@@ -1463,7 +1522,9 @@ def _finish_quick_validation(
 
 
 @router.post("/backup/quick")
-def run_quick_sync(payload: QuickSyncPayload) -> dict[str, Any]:
+def run_quick_sync(
+    payload: QuickSyncPayload, user: str = Depends(require_auth)
+) -> dict[str, Any]:
     config_snapshot, config_revision = get_config().snapshot_with_revision()
     remote_path, local_path = _validate_quick_paths(payload, config_snapshot)
     if not _locks["backup"].acquire(blocking=False):
@@ -1473,7 +1534,7 @@ def run_quick_sync(payload: QuickSyncPayload) -> dict[str, Any]:
     )
     _audit_best_effort(
         "quicksync_requested",
-        actor="web",
+        actor=_audit_actor(user),
         details={
             "direction": payload.direction,
             "mode": payload.mode,
@@ -1559,7 +1620,16 @@ def list_jobs(
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
+    allowed_status = {
+        None,
+        "running",
+        "ok",
+        "error",
+        "warning",
+        "skipped",
+        "cancelled",
+        "stale",
+    }
     if kind not in _ALLOWED_JOB_KINDS:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
@@ -1584,7 +1654,16 @@ def search_jobs(
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
+    allowed_status = {
+        None,
+        "running",
+        "ok",
+        "error",
+        "warning",
+        "skipped",
+        "cancelled",
+        "stale",
+    }
     if kind not in _ALLOWED_JOB_KINDS:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
@@ -1614,7 +1693,16 @@ def export_jobs_csv(
     q: str = Query("", max_length=200),
     limit: int = Query(5000, ge=1, le=10000),
 ) -> StreamingResponse:
-    allowed_status = {None, "running", "ok", "error", "skipped", "cancelled", "stale"}
+    allowed_status = {
+        None,
+        "running",
+        "ok",
+        "error",
+        "warning",
+        "skipped",
+        "cancelled",
+        "stale",
+    }
     if kind not in _ALLOWED_JOB_KINDS:
         raise HTTPException(400, "Unbekannter Job-Typ")
     if status not in allowed_status:
@@ -1644,6 +1732,7 @@ def export_jobs_csv(
                 "beendet",
                 "dauer_sekunden",
                 "zusammenfassung",
+                "anzeigestatus",
             ]
         )
         for job in db.job_iter(
@@ -1676,6 +1765,7 @@ def export_jobs_csv(
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),
+                    job.get("display_status") or job.get("status"),
                 ]
             )
 
@@ -1691,14 +1781,18 @@ def export_jobs_csv(
 
 
 @router.post("/cleanup-failed")
-def cleanup_failed_jobs() -> dict[str, Any]:
+def cleanup_failed_jobs(user: str = Depends(require_auth)) -> dict[str, Any]:
     deleted = get_db().jobs_delete_failed()
-    _audit_best_effort("failed_jobs_cleaned", actor="web", details={"deleted": deleted})
+    _audit_best_effort(
+        "failed_jobs_cleaned", actor=_audit_actor(user), details={"deleted": deleted}
+    )
     return {"ok": True, "deleted": deleted}
 
 
 @router.post("/{job_id}/retry")
-def retry_job(job_id: int, dry_run: bool = Query(False)) -> dict[str, Any]:
+def retry_job(
+    job_id: int, dry_run: bool = Query(False), user: str = Depends(require_auth)
+) -> dict[str, Any]:
     previous = get_db().job_get(job_id)
     if not previous:
         raise HTTPException(404, "Job nicht gefunden")
@@ -1735,10 +1829,11 @@ def retry_job(job_id: int, dry_run: bool = Query(False)) -> dict[str, Any]:
         definition=definition,
         config_snapshot=snapshot,
         config_revision=current_revision,
+        **_request_actor_args(user),
     )
     _audit_best_effort(
         "backup_retried",
-        actor="web",
+        actor=_audit_actor(user),
         details={
             "source_job_id": job_id,
             "new_job_id": result.get("job_id"),

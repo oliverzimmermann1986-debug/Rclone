@@ -20,35 +20,44 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: |
             requirements.txt
+            requirements.lock
             requirements-dev.txt
       - name: Install dependencies
-        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+        run: |
+          python scripts/update_dependency_lock.py --check
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.lock
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - name: Check dependency consistency
         run: python -m pip check
       - name: Lint
-        run: python -m ruff check app tests
+        run: python -m ruff check app tests scripts/runtime_files.py scripts/ios_release_preflight.py
       - name: Format check
-        run: python -m ruff format --check app tests
+        run: python -m ruff format --check app tests scripts/runtime_files.py scripts/ios_release_preflight.py
+      - name: Require POSIX security test capabilities
+        run: python -c "from scripts.runtime_files import supported; assert supported(), 'POSIX no-follow directory handles are required for the installer security tests'"
       - name: Tests
         run: python -m pytest -q
 
   installer:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Shell syntax
         run: bash -n scripts/install.sh
       - name: Shellcheck
         run: shellcheck scripts/install.sh
       - name: JavaScript syntax
-        run: node --check app/static/app.js
+        run: |
+          node --check app/static/app.js
+          node --check app/static/workspace.js
+          node --check app/static/sw.js
       - name: Prepare systemd verification paths
         run: |
           sudo groupadd --system rclone-sync
@@ -66,3 +75,12 @@ jobs:
             systemd/rclone-sync.timer \
             systemd/sync-scheduler.service \
             systemd/sync-scheduler.timer
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install isolated DOM test dependencies
+        run: npm ci --prefix tests/web --ignore-scripts --no-audit --no-fund
+      - name: Check workspace behavior and Alpine integration
+        run: npm test --prefix tests/web

@@ -3,12 +3,37 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+import hashlib
 from os import PathLike
+from pathlib import Path
 
 from starlette.exceptions import HTTPException
 from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
+
+
+WEB_CACHE_ASSETS = (
+    "style.css",
+    "alpine.min.js",
+    "ui-helpers.js",
+    "app.js",
+    "manifest.json",
+    "app-icon-1024.png",
+    "workspace.js",
+    "workspace.css",
+)
+
+
+def web_asset_cache_revision(directory: PathLike[str] | str, version: str) -> str:
+    """Invalidate the browser cache when a web-only patch changes asset bytes."""
+    root = Path(directory)
+    digest = hashlib.sha256()
+    for name in WEB_CACHE_ASSETS:
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((root / name).read_bytes())
+    return f"{version}-{digest.hexdigest()[:16]}"
 
 
 class AllowlistedStaticFiles(StaticFiles):

@@ -14,29 +14,35 @@
       <div><strong>Sicherpfad</strong><br><span>Datenschutz</span></div>
     </div>
     <h1>Datenschutzerklärung</h1>
-    <p class="lede">Stand: 24. August 2026</p>
+    <p class="lede">Stand: 29. Oktober 2026</p>
 
     <section class="card">
-      <h2>Keine Datenerfassung durch den Entwickler</h2>
-      <p>Sicherpfad verwendet keine Analyse-, Werbe- oder Trackingdienste. Der Entwickler erhält über die App keine personenbezogenen Daten, Nutzungsdaten, Dateinamen oder Sicherungsinhalte.</p>
-
-      <h2>Verbindung zum eigenen Server</h2>
-      <p>Die von dir eingegebene Serveradresse und der Benutzername werden lokal auf deinem Gerät gespeichert. Das Passwort wird nicht dauerhaft gespeichert. Anfragen gehen ausschließlich an den von dir angegebenen Sicherpfad-Server. Für Betrieb und Datenschutz dieses Servers ist dessen Betreiber verantwortlich.</p>
-
-      <h2>Push-Mitteilungen</h2>
-      <p>Wenn du Mitteilungen aktivierst, wird ein von Apple ausgegebener Geräte-Token an deinen eigenen Sicherpfad-Server übertragen. Dieser verwendet Apple Push Notification Service ausschließlich, um Sicherungs- und Prüffehler zu melden. Die Funktion ist optional und kann in iOS deaktiviert werden.</p>
-
-      <h2>Lokale Vorschau</h2>
-      <p>Die integrierte Demo verwendet ausschließlich mitgelieferte Beispieldaten und stellt keine Netzwerkverbindung her.</p>
-
-      <h2>Geräte-Vault</h2>
-      <p>Ausgewählte Fotos und Dateien werden ausschließlich an deinen eigenen Server und den von dir ausgewählten Datenweg übertragen. Der Server speichert Prüfsummen und technische Übertragungsdaten zur Deduplizierung und Wiederherstellung. Der Entwickler erhält weder diese Angaben noch die Inhalte.</p>
-
+      <h2>App, Anbieter und eigener Server</h2>
+      <p>Sicherpfad verwendet keine Analyse-, Werbe- oder Trackingdienste. Sicherungsinhalte werden nicht an den Entwickler übertragen. Apple kann dem Entwickler im Rahmen von App Store und TestFlight Testerfeedback, Absturzberichte oder freigegebene Diagnosedaten bereitstellen. Maßgeblich sind deine Apple-Einstellungen und Apples Hinweise.</p>
+      <p>Für die Verarbeitung auf deinem selbst betriebenen Sicherpfad-Server und bei den eingerichteten Speicheranbietern ist dessen Betreiber verantwortlich. Diese Erklärung beschreibt die App und diese Informationsseite; sie ersetzt die Datenschutzinformationen des Serverbetreibers nicht.</p>
+      <h2>Lokale Speicherung und Serververbindung</h2>
+      <p>Serveradressen, Benutzernamen und bis zu acht Profile werden lokal gespeichert. Das Passwort wird nicht dauerhaft gespeichert. Auf Wunsch speichert der nicht synchronisierende Geräteschlüsselbund Sitzung und CSRF-Cookie, auch für ausdrücklich bestätigte lokale HTTP-Verbindungen. HTTP überträgt diese Daten unverschlüsselt; verwende HTTPS. Die App hält außerdem getrennte Offline-Recovery-Pässe, einen Widget-Status und geschützte Dateikopien für Upload-Warteschlange und Teilen-Erweiterung vor. Abmelden beendet die Sitzung, leert Widget/Live Activity und entfernt von diesem Client erzeugte temporäre Exporte; Profile, Offline-Pass und wartende Uploads bleiben erhalten. Profile und zugehörige Offline-Pässe können über „Server vergessen“ entfernt werden; wartende Dateien separat in der Warteschlange löschen.</p>
+      <p>Fachliche API-Anfragen gehen an deinen Server. Ausnahmen sind die optionale Push-Registrierung bei Apple und externe Links, die du selbst öffnest. Cloud-Zugangsdaten werden auf dem Server gespeichert; bei der Remote-Einrichtung können externe Anmeldeseiten des ausgewählten Anbieters erforderlich sein.</p>
+      <h2>Push-Mitteilungen und Apple</h2>
+      <p>Bei aktivierten Mitteilungen erhält dein Server einen APNs-Geräte-Token. Der Server übermittelt Token, generischen Titel und Text sowie technische Ereignis-/Lauf- und Serverkennungen an Apple zur Zustellung; Jobnamen, Datenwegnamen, Dateinamen und rohe Fehlertexte werden nicht in neue APNs-Nutzlasten übernommen. Apple ist ein externer Empfänger; eine Verarbeitung in den USA ist möglich. Standardmäßig werden Fehler gemeldet, der Betreiber kann weitere Ereignisse aktivieren. Die Funktion ist optional und kann in iOS deaktiviert werden.</p>
+      <p>Der Serverbetreiber muss vor Aktivierung Rechtsgrundlage, gegebenenfalls erforderliche Drittlandgarantien und die für seine Installation geltenden Apple-Vertragsbedingungen prüfen und dokumentieren. Eine bestimmte Transfergrundlage wird hier nicht als für jede selbst betriebene Installation gegeben behauptet. Weitere Informationen: <a href="https://www.apple.com/legal/privacy/">Apple Datenschutz</a>.</p>
+      <p>Geräteregistrierungen laufen ohne Erneuerung standardmäßig nach sieben Tagen aus (konfigurierbar bis 90 Tage); abgeschlossene Outbox-Einträge werden bei der Wartung nach 30 Tagen bereinigt. Widerruf und Abmelden entfernen serverseitige Registrierungen gemäß dem Sitzungsablauf. Das Betriebssystem-Journal hat eine eigene Betreiberfrist; alte Protokolle müssen gesondert geprüft und bereinigt werden.</p>
+      <h2>Geräte-Vault und Aufbewahrung</h2>
+      <p>Ausgewählte Fotos und Dateien werden an deinen Server und das bewusst gewählte Datenwegziel übertragen. Der Server hält zusätzlich eine vollständige lokale Kopie unter <code>&lt;data_dir&gt;/device-vault/blobs</code> sowie Datensätze mit Dateiname, Gerätename, Datenweg, Zielpfad und SHA-256 unter <code>records</code>; <code>paths.device_vault_dir</code> kann den Ort ändern. Diese Daten bleiben ohne automatische Frist erhalten, bis der Betreiber die lokale Kopie ausdrücklich entfernt. Die entsprechende Löschfunktion entfernt die lokale Vault-Ablage, nicht die separate Zielkopie. Eine lokale Zielkopie allein schützt nicht vor Serververlust.</p>
+      <p>Notfallpakete enthalten das Vault-Inventar, keine Nutzdateien. Lokal abgelegte Belege und noch erreichbare Cloud-Belege sind getrennt zu betrachten. Bereits heruntergeladene oder geteilte Pakete und Zielkopien werden durch das Entfernen der lokalen Vault-Kopie nicht gelöscht.</p>
+      <h2>Serverprotokolle</h2>
+      <p>Das Audit protokolliert technische Aktionen, Akteur und Kennungen. Ältere Einträge können noch Dateinamen enthalten. Die automatische Wartung hält Audit-Einträge mindestens 365 Tage und mindestens die neuesten 1000 Einträge; bei geringer Aktivität können diese länger erhalten bleiben. Der Betreiber legt seine Aufbewahrung und Zugriffsrechte fest und bearbeitet Löschanfragen für seinen Server. Serverlogs und Betriebssystem-Journal sind getrennte Speicher mit getrennten Fristen.</p>
+      <h2>Diese Website und Kontakt</h2>
+      <p>Diese Informationsseite wird über GitHub Pages ausgeliefert. GitHub protokolliert dabei nach eigener Dokumentation IP-Adressen für Sicherheitszwecke, auch ohne GitHub-Konto. Eine Verarbeitung in den USA ist möglich. Siehe <a href="https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages#data-collection">GitHub Pages</a> und <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub Datenschutzhinweise</a>. Die öffentliche Bereitstellung und Absicherung der Informationsseite dient dem berechtigten Interesse an Information und sicherem Betrieb (Art. 6 Abs. 1 lit. f DSGVO).</p>
+      <p>Bei Kontakt per E-Mail verarbeiten wir die von dir übermittelten Kontakt- und Inhaltsdaten zur Bearbeitung der Anfrage, bei vertragsbezogenen Anfragen nach Art. 6 Abs. 1 lit. b, ansonsten Art. 6 Abs. 1 lit. f DSGVO (Beantwortung und Unterstützung). Daten werden nur solange benötigt aufbewahrt, wie Anfragebearbeitung, Nachweis berechtigter Ansprüche oder gesetzliche Pflichten es erfordern. Sende keine Zugangsdaten oder unnötigen Sicherungsinhalte. Für das verlinkte Supportformular müssen die dort bereitgestellten Informationen zu Hosting, Empfängern und Aufbewahrung gesondert beachtet werden; sein Backend ist nicht Bestandteil dieser App.</p>
+      <h2>Deine Rechte</h2>
+      <p>Bei Vorliegen der gesetzlichen Voraussetzungen bestehen Rechte auf Auskunft, Berichtigung, Löschung, Einschränkung und Datenübertragbarkeit (Art. 15–20 DSGVO), auf Widerruf einer Einwilligung und auf Widerspruch gegen eine Verarbeitung auf Grundlage berechtigter Interessen (Art. 21 DSGVO). Du kannst dich bei einer Datenschutzaufsichtsbehörde beschweren (Art. 77 DSGVO). Für Serverdaten wende dich an den Serverbetreiber, für die Website oder direkten Kontakt an den unten genannten Anbieter. Diese App trifft keine automatisierten Entscheidungen über Personen.</p>
       <h2>Kontakt</h2>
-      <p>Datenschutzfragen können über das <a href="https://github.com/oliverzimmermann1986-debug/Rclone/issues">öffentliche Supportsystem auf GitHub</a> gestellt werden. Bitte veröffentliche dort keine Passwörter, Tokens, privaten Serveradressen oder unredigierten Protokolle.</p>
+      <p>Anbieter und Kontakt: Oliver Zimmermann, c/o COCENTER, Koppoldstr. 1, 86551 Aichach, Deutschland. E-Mail: <a href="mailto:impressum@zimlab.org">impressum@zimlab.org</a>. Weitere Angaben stehen im <a href="impressum.html">Impressum</a>.</p>
+      <p>Datenschutz- und Supportfragen können über das <a href="https://support.zimlab.org/?module=sicherpfad">Zimlab-Supportformular für Sicherpfad</a> gestellt werden. Bitte übermittle nur die für deine Anfrage nötigen Angaben und keine Passwörter, Tokens oder unredigierten Protokolle.</p>
     </section>
 
-    <footer><a href="index.html">Zurück zum Support</a> · © 2026 Oliver Zimmermann</footer>
+    <footer><a href="https://support.zimlab.org/?module=sicherpfad">Supportformular</a> · <a href="impressum.html">Impressum</a> · © 2026 Oliver Zimmermann</footer>
   </main>
 </body>
 </html>

@@ -17,7 +17,8 @@ def test_logout_warning_survives_local_session_clear():
 
     assert "func logout() async throws -> LogoutResult" in api
     assert "partial.localSessionCleared" in api
-    assert "defer { clearCookies() }" in api
+    assert "defer { clearLocalSession() }" in api
+    assert "remove(for: baseURL, matchingSession: value)" in api
     assert "!result.globalRevocation" in model
     assert "warnings.append(result.detail" in model
     assert "if let error = model.errorMessage" in login
@@ -112,7 +113,11 @@ def test_dashboard_exposes_distinct_evidence_based_protection_score():
         'pair.restoreEvidence?.isCurrent == true ? "checkmark.seal.fill"'
         in protection_path
     )
-    assert 'case "never", "stale": return "Restore offen"' in protection_path
+    assert 'case "never": return "Restore offen"' in protection_path
+    assert 'case "stale": return "Nachweis veraltet"' in protection_path
+    assert "!overview.services.scheduler.configuredEnabled" in dashboard
+    assert "overview.services.scheduler.control?.paused == true" in dashboard
+    assert "$0.hasFailure" in dashboard
     assert 'case "never", "stale": return .orange' in protection_path
     assert "default: return .secondary" in protection_path
 
@@ -221,7 +226,11 @@ def test_failed_run_retry_and_push_deep_link_are_revision_safe():
     assert "pushNavigationRequested" in push
     assert 'userInfo["job_id"]' in push
     assert "consumePendingNavigationJobID" in push
-    assert "pendingNavigationJobID = jobID" in push
+    assert "pendingNavigation = (jobID, serverID)" in push
+    assert 'userInfo: ["job_id": jobID, "server_id": serverID]' in push
+    assert "pendingNavigation.serverID == serverID" in push
+    assert "consumePendingNavigationJobID(forServerID: serverID)" in app
+    assert "model.canHandlePush(serverID: serverID)" in app
     assert "model.requestRunNavigation(id: jobID)" in app
     assert "selectedTab = 3" in root
     assert "await openRequestedRun()" in runs

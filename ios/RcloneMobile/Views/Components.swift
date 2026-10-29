@@ -4,11 +4,15 @@ import UIKit
 struct StatusBadge: View {
     let status: String?
 
+    private var isWarning: Bool {
+        ["warn", "warning", "partial"].contains(status?.lowercased() ?? "")
+    }
+
     var body: some View {
-        Label(StatusStyle.label(for: status), systemImage: "circle.fill")
+        Label(StatusStyle.label(for: status), systemImage: StatusStyle.symbol(for: status))
             .font(.caption.weight(.semibold))
             .foregroundStyle(StatusStyle.color(for: status))
-            .labelStyle(CompactStatusLabelStyle())
+            .labelStyle(CompactStatusLabelStyle(isWarning: isWarning))
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
             .background(StatusStyle.color(for: status).opacity(0.12), in: Capsule())
@@ -17,9 +21,11 @@ struct StatusBadge: View {
 }
 
 private struct CompactStatusLabelStyle: LabelStyle {
+    let isWarning: Bool
+
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 5) {
-            configuration.icon.font(.system(size: 7))
+            configuration.icon.font(isWarning ? .caption2 : .system(size: 7))
             configuration.title
         }
     }

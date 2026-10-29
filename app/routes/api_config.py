@@ -6,6 +6,7 @@ import copy
 import hashlib
 import logging
 import os
+import secrets
 import stat
 import tempfile
 from datetime import datetime
@@ -18,12 +19,20 @@ from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..auth import require_auth, require_reauthentication
+from ..auth import (
+    SESSION_COOKIE,
+    account_generation,
+    require_auth,
+    require_reauthentication,
+    session_user,
+)
 from ..config_store import ConfigConflictError, get_config
 from ..file_lock import acquire as acquire_file_lock
 from ..file_lock import release as release_file_lock
 from ..config_validation import ConfigValidationError, validate_config
 from ..db import get_db
+from .. import protection
+from ..jobs.scheduler import rclone_history_key
 from ..security import ensure_within, require_csrf
 from ..push_notifications import revoke_all_push_devices
 from ..secret_redaction import is_secret_key
@@ -130,6 +139,31 @@ def _preserve_sensitive(new_data: dict[str, Any], old_data: dict[str, Any]) -> N
         return
     for key in _SERVER_OWNED_WEB_FIELDS:
         new_web[key] = copy.deepcopy(old_web.get(key, ""))
+    # Older clients omit newer security fields. Preserve those values rather
+    # than silently resetting them to validation defaults during a PUT.
+    for key in (
+        *_SENSITIVE_WEB_SCALARS,
+        "allowed_hosts",
+        "local_browse_roots",
+        "trusted_proxy_ips",
+    ):
+        if key not in new_web and key in old_web:
+            new_web[key] = copy.deepcopy(old_web[key])
+    old_paths = old_data.get("paths")
+    new_paths = new_data.setdefault("paths", {})
+    if isinstance(old_paths, dict) and isinstance(new_paths, dict):
+        for key, value in old_paths.items():
+            new_paths.setdefault(key, copy.deepcopy(value))
+    old_notifications = old_data.get("notifications") or {}
+    old_apns = (
+        old_notifications.get("apns") if isinstance(old_notifications, dict) else None
+    )
+    if isinstance(old_apns, dict) and "key_file" in old_apns:
+        new_notifications = new_data.setdefault("notifications", {})
+        if isinstance(new_notifications, dict):
+            new_apns = new_notifications.setdefault("apns", {})
+            if isinstance(new_apns, dict):
+                new_apns.setdefault("key_file", copy.deepcopy(old_apns["key_file"]))
 
 
 def _audit_best_effort(event: str, *, actor: str, details: dict[str, Any]) -> bool:
@@ -173,10 +207,12 @@ def _scalar(value: Any) -> str:
 # config_validation passen: ein Feld, das der Client gar nicht mitschickt, ist
 # keine Änderung gegenüber dem normalisierten Stand auf der Platte.
 _SENSITIVE_WEB_SCALARS = {
-    "secure_cookie": False,
+    "secure_cookie": "auto",
     "hsts_seconds": 0,
     "login_max_failures": 10,
     "login_lock_seconds": 900,
+    "login_window_seconds": 300,
+    "session_max_age_seconds": 604800,
     "webauthn_rp_id": "",
     "webauthn_origin": "",
 }
@@ -192,13 +228,52 @@ def _sensitive_config_changed(
         != str(new_web.get("username") or "").casefold()
     ):
         return True
-    if old_web.get("local_browse_roots") != new_web.get("local_browse_roots"):
-        return True
     if old_web.get("trusted_proxy_ips", []) != new_web.get("trusted_proxy_ips", []):
         return True
+    for key in ("allowed_hosts", "local_browse_roots"):
+        if old_web.get(key) != new_web.get(key):
+            return True
+    if "notifications" in new_data and isinstance(new_data["notifications"], dict):
+        new_notifications = new_data["notifications"]
+        if "apns" in new_notifications and isinstance(new_notifications["apns"], dict):
+            new_apns = new_notifications["apns"]
+            if "key_file" in new_apns:
+                old_notifications = (
+                    old_data.get("notifications")
+                    if isinstance(old_data.get("notifications"), dict)
+                    else {}
+                )
+                old_apns = (
+                    old_notifications.get("apns")
+                    if isinstance(old_notifications.get("apns"), dict)
+                    else {}
+                )
+                if str(old_apns.get("key_file") or "") != str(
+                    new_apns.get("key_file") or ""
+                ):
+                    return True
+    if "paths" in new_data and isinstance(new_data["paths"], dict):
+        old_paths = (
+            old_data.get("paths") if isinstance(old_data.get("paths"), dict) else {}
+        )
+        new_paths = new_data["paths"]
+        for key in (
+            "data_dir",
+            "logs_dir",
+            "temp_dir",
+            "recovery_dir",
+            "recovery_snapshots_dir",
+            "device_vault_dir",
+        ):
+            if key in new_paths and str(old_paths.get(key) or "") != str(
+                new_paths.get(key) or ""
+            ):
+                return True
     for key, fallback in _SENSITIVE_WEB_SCALARS.items():
+        if key not in new_web:
+            continue
         old_value = old_web.get(key, fallback)
-        new_value = new_web.get(key, fallback)
+        new_value = new_web[key]
         if _scalar(old_value if old_value is not None else fallback) != _scalar(
             new_value if new_value is not None else fallback
         ):
@@ -235,6 +310,42 @@ def _sensitive_config_changed(
     new_backup = (
         new_data.get("backup") if isinstance(new_data.get("backup"), dict) else {}
     )
+    for key, default in (
+        ("recovery_snapshot_retention_days", 90),
+        ("recovery_staging_max_mb", 51200),
+    ):
+        if key in new_backup and _scalar(old_backup.get(key, default)) != _scalar(
+            new_backup[key]
+        ):
+            return True
+
+    def effective_guards(data: dict[str, Any]) -> tuple[dict, dict] | None:
+        # Use the same defaults, coercions and bounds as the eventual write.
+        # Otherwise malformed numbers could reset a stricter guard to its
+        # default without appearing to change the effective settings here.
+        try:
+            normalized, _warnings = validate_config(data)
+        except ConfigValidationError:
+            # Invalid structures still receive the ordinary validation error,
+            # rather than requiring a password before they can be rejected.
+            return None
+        backup = normalized["backup"]
+        global_guard = protection.guard_settings(backup, {})
+        overrides = {}
+        for pair in backup["pairs"]:
+            guard = protection.guard_settings(backup, pair)
+            if guard != global_guard:
+                overrides[rclone_history_key(pair)] = guard
+        return global_guard, overrides
+
+    old_guards = effective_guards(old_data)
+    new_guards = effective_guards(new_data)
+    if new_guards is not None and (old_guards is None or old_guards != new_guards):
+        return True
+    if str(old_backup.get("filter_file") or "") != str(
+        new_backup.get("filter_file") or ""
+    ):
+        return True
     for key in ("allow_unsafe_rclone_args", "allow_external_filter_files"):
         if not _semantic_bool(old_backup.get(key), default=False) and _semantic_bool(
             new_backup.get(key), default=False
@@ -246,6 +357,38 @@ def _sensitive_config_changed(
         ):
             return True
 
+    return False
+
+
+def _quarantined_pair_changed(old_data: dict, new_data: dict) -> bool:
+    old_backup = old_data.get("backup")
+    new_backup = new_data.get("backup")
+    if not isinstance(old_backup, dict):
+        return False
+    if new_backup is None:
+        new_backup = {}
+    if not isinstance(new_backup, dict):
+        return False
+    old_pairs = old_backup.get("pairs") or []
+    new_pairs = new_backup.get("pairs") or []
+    if not isinstance(old_pairs, list) or not isinstance(new_pairs, list):
+        return False
+    if old_pairs == new_pairs:
+        return False
+    new_by_key = {
+        rclone_history_key(pair): pair for pair in new_pairs if isinstance(pair, dict)
+    }
+    for pair in old_pairs:
+        if not isinstance(pair, dict):
+            continue
+        replacement = new_by_key.get(rclone_history_key(pair))
+        if replacement is not None and all(
+            pair.get(key) == replacement.get(key)
+            for key in ("local", "remote", "direction")
+        ):
+            continue
+        if protection.has_quarantine(get_db(), pair):
+            return True
     return False
 
 
@@ -314,7 +457,9 @@ def update_config(
         str(old_web.get("username") or "").casefold()
         != str(new_web.get("username") or "").casefold()
     )
-    if _sensitive_config_changed(old_data, new_data):
+    if _sensitive_config_changed(old_data, new_data) or _quarantined_pair_changed(
+        old_data, new_data
+    ):
         if not body.current_password:
             raise HTTPException(
                 403,
@@ -549,7 +694,7 @@ def change_password(
     user: str = Depends(require_auth),
 ) -> dict[str, Any]:
     """Ändert das Passwort und invalidiert alle bestehenden Sessions."""
-    require_reauthentication(request, user, body.current_password)
+    generation = require_reauthentication(request, user, body.current_password)
 
     new = body.new_password
     if new != new.strip():
@@ -560,6 +705,8 @@ def change_password(
         raise HTTPException(400, "Neues Passwort muss vom alten abweichen")
     if len(new.encode("utf-8")) > _BCRYPT_MAX_PASSWORD_BYTES:
         raise HTTPException(400, "Passwort darf höchstens 72 UTF-8-Bytes lang sein")
+    if session_user(request.cookies.get(SESSION_COOKIE, "")) != user:
+        raise HTTPException(401, "Die Sitzung wurde widerrufen.")
 
     try:
         new_hash = bcrypt.hashpw(new.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode(
@@ -571,9 +718,15 @@ def change_password(
         ) from exc
 
     def updater(data: dict[str, Any]) -> None:
+        # Config.update supplies the latest state under its exclusive file lock.
+        if not generation or not secrets.compare_digest(
+            account_generation(data), generation
+        ):
+            raise HTTPException(401, "Die Passwortbestätigung wurde widerrufen.")
         web = data.setdefault("web", {})
         if not isinstance(web, dict):
             raise ValueError("web muss ein Mapping sein")
+        revoke_all_push_devices()
         web["password_hash"] = new_hash
         web["password"] = ""
         try:
@@ -584,7 +737,6 @@ def change_password(
 
     store = get_config()
     try:
-        revoke_all_push_devices()
         store.update(updater)
     except (OSError, ValueError) as exc:
         raise HTTPException(

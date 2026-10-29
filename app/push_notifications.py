@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import stat
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -17,10 +19,13 @@ import httpx
 import jwt
 
 from .config_store import get_config
+from .config_validation import SESSION_SECRET_PLACEHOLDER, session_secret_strength_error
 from .db import Database, get_db
+from .file_lock import acquire as lock_file, release as unlock_file
 from .rclone_args import redact_command_text
 
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 DEFAULT_ERROR_EVENTS = (
     "sync_error",
@@ -42,11 +47,47 @@ _INVALID_TOKEN_REASONS = {
 }
 
 
+@contextmanager
+def delivery_guard(database: Database):
+    """Serialize delivery and revocation across web and scheduler processes."""
+    with _DELIVERY_FENCE:
+        path = Path(str(database.path) + ".push-delivery.lock")
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise OSError("Unsichere Push-Zustellungssperre")
+            lock_file(fd)
+            try:
+                yield
+            finally:
+                unlock_file(fd)
+        finally:
+            os.close(fd)
+
+
+def push_server_id() -> str | None:
+    """Opaque installation identity; never transmit the underlying session secret."""
+    secret = str(get_config().get("web", "secret_key", default="") or "")
+    if (
+        not secret
+        or secret == SESSION_SECRET_PLACEHOLDER
+        or session_secret_strength_error(secret)
+    ):
+        return None
+    return hmac.new(
+        secret.encode("utf-8"),
+        b"sicherpfad-apns-server-identity-v1",
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def revoke_all_push_devices(*, db: Database | None = None) -> int:
     """Fence APNs I/O and revoke all registrations for a session-version change."""
 
     database = db or get_db()
-    with _DELIVERY_FENCE:
+    with delivery_guard(database):
         try:
             return database.push_devices_revoke_all()
         except Exception as exc:
@@ -70,6 +111,7 @@ def _post_with_claim_heartbeat(
 
     done = threading.Event()
     result: dict[str, Any] = {}
+    lease_lost = False
 
     def post() -> None:
         try:
@@ -97,7 +139,15 @@ def _post_with_claim_heartbeat(
                 row_id,
                 claim_owner,
             )
+            lease_lost = True
+            # Stop network I/O rather than continuing delivery without a lease.
+            client.close()
+            break
     worker.join()
+    if lease_lost:
+        raise httpx.TransportError(
+            "APNs-Zustellung nach Verlust der Outbox-Lease abgebrochen"
+        )
     error = result.get("error")
     if error is not None:
         raise error
@@ -220,15 +270,12 @@ def _push_context(extra: Mapping[str, Any]) -> dict[str, Any]:
         "job_id",
         "run_id",
         "definition_id",
-        "definition_name",
-        "scheduled_slot",
-        "trigger",
-        "pair",
-        "pairs",
     ):
         value = source.get(key, extra.get(key))
         if value not in (None, "", []):
             context[key] = _safe_context(value)
+    # Extra/summary data cannot select the server authorized for a native action.
+    context["server_id"] = push_server_id()
     return context
 
 
@@ -270,7 +317,14 @@ def notification_dedupe_key(
 
 def _payload(row: Mapping[str, Any]) -> bytes:
     context = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
-    event = str(row.get("event") or "")
+    server_id = context.get("server_id")
+    if (
+        not isinstance(server_id, str)
+        or len(server_id) != 64
+        or any(char not in "0123456789abcdef" for char in server_id)
+    ):
+        server_id = None
+    event = str(row.get("event") or "")[:80]
     incident_events = {
         "sync_error",
         "mount_check_failed",
@@ -279,27 +333,45 @@ def _payload(row: Mapping[str, Any]) -> bytes:
         "recovery_error",
     }
     payload = {
+        **{
+            key: context[key]
+            for key in ("job_id", "run_id", "definition_id")
+            if key in context
+        },
         "aps": {
             "alert": {
-                "title": str(row.get("title") or "")[:120],
-                "body": str(row.get("message") or "")[:900],
+                "title": "Sicherpfad",
+                "body": "Ein Sicherpfad-Ereignis benötigt deine Aufmerksamkeit. Details findest du in der App.",
             },
             "sound": "default",
-            "thread-id": "rclone-errors",
+            "thread-id": "rclone-restore"
+            if event == "restore_test_warning"
+            else "rclone-errors",
             **({"category": "RCLONE_INCIDENT"} if event in incident_events else {}),
         },
         "event": event,
-        **dict(context),
+        "server_id": server_id,
     }
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
     if len(body) <= 4_096:
         return body
-    payload = {"aps": payload["aps"], "event": payload["event"]}
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+    payload = {
+        "aps": payload["aps"],
+        "event": payload["event"],
+        "server_id": server_id,
+    }
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
+    while len(body) > 4_096:
+        alert = payload["aps"]["alert"]
+        alert["body"] = alert["body"][: len(alert["body"]) // 2]
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    return body
 
 
 def _response_reason(response: Any) -> str:
@@ -420,7 +492,11 @@ def dispatch_pending_pushes(
                 logger.warning("APNs Provider-Token fehlgeschlagen: %s", exc)
                 continue
             try:
-                with _DELIVERY_FENCE:
+                with delivery_guard(database):
+                    if row_id not in database.push_outbox_renew_claims(
+                        [row_id], claim_owner=owner, lease_seconds=active_lease_seconds
+                    ):
+                        continue
                     if not database.push_device_exists(token):
                         logger.info(
                             "APNs-Gerät %s wurde vor Zustellung widerrufen", token[-8:]
@@ -535,8 +611,8 @@ def send_push_notifications(
     key = dedupe_key or notification_dedupe_key(event, title, message, extra or {})
     result["queued"] = database.push_outbox_enqueue(
         event=event,
-        title=redact_command_text(str(title)),
-        message=redact_command_text(str(message)),
+        title="Sicherpfad",
+        message="Ein Sicherpfad-Ereignis benötigt deine Aufmerksamkeit. Details findest du in der App.",
         payload=context,
         dedupe_key=key,
         retention_seconds=int(settings.get("retention_seconds") or 86400),
@@ -563,8 +639,8 @@ def queue_push_notification(
     key = dedupe_key or notification_dedupe_key(event, title, message, extra or {})
     queued = database.push_outbox_enqueue(
         event=event,
-        title=redact_command_text(str(title)),
-        message=redact_command_text(str(message)),
+        title="Sicherpfad",
+        message="Ein Sicherpfad-Ereignis benötigt deine Aufmerksamkeit. Details findest du in der App.",
         payload=_push_context(extra or {}),
         dedupe_key=key,
         retention_seconds=int(settings.get("retention_seconds") or 86400),
@@ -593,6 +669,7 @@ __all__ = [
     "DEFAULT_ERROR_EVENTS",
     "dispatch_pending_pushes",
     "notification_dedupe_key",
+    "push_server_id",
     "queue_push_notification",
     "send_push_notifications",
 ]

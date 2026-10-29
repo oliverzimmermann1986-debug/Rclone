@@ -1,7 +1,12 @@
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.db import Database
+from app import protection
+from app.jobs.scheduler import next_run_after
 from app.protection import (
     POLICY_PRESETS,
     acknowledge_quarantine,
@@ -12,6 +17,7 @@ from app.protection import (
     record_anomaly_baseline,
     score_components,
 )
+from app.restore_evidence import MAX_EVIDENCE_AGE_SEC
 
 
 def _pair() -> dict[str, object]:
@@ -108,6 +114,116 @@ def test_non_destructive_copy_skips_measurement(tmp_path: Path, monkeypatch):
     )
 
 
+def test_quarantine_keeps_endpoint_binding_after_concurrent_pair_removal(
+    tmp_path: Path, monkeypatch
+):
+    database = Database(tmp_path / "orphaned-guard.db")
+    pair = {**_pair(), "local": str(tmp_path / "source")}
+    configured = [pair]
+    record_anomaly_baseline(
+        database, pair=pair, measurement={"ok": True, "count": 1000, "bytes": 10000}
+    )
+
+    def measure_after_config_change(*_args, **_kwargs):
+        configured.clear()
+        return {"ok": True, "count": 1, "bytes": 10}
+
+    monkeypatch.setattr(protection, "measure_path", measure_after_config_change)
+    finding = preflight_anomaly_guard(
+        database, pair=pair, backup={"pairs": configured}, source=pair["local"]
+    )
+    assert finding["blocked"] is True
+    alias = {
+        **pair,
+        "id": "b" * 32,
+        "name": "Renamed after measurement",
+        "local": str(tmp_path / "source" / "child"),
+        "remote": "different:/unrelated",
+    }
+    assert (
+        protection.active_quarantine(database, pair=alias, configured_pairs=configured)[
+            "blocked"
+        ]
+        is True
+    )
+    assert protection.has_quarantine(database, alias)
+    status = anomaly_status(database, configured)
+    assert status["active"] == 1
+    assert "endpoints" not in status["items"][0]
+    assert acknowledge_quarantine(database, alias)
+    assert protection.active_quarantine(database, pair=alias) is None
+
+
+def test_active_quarantines_are_not_evicted_to_bound_baseline_history():
+    records = {
+        str(index): {"detected_at": index, "acknowledged": False}
+        for index in range(protection._MAX_QUARANTINES + 1)
+    }
+    state = protection._bounded_state({"quarantines": records, "baselines": {}})
+    assert state["quarantines"] == records
+
+
+def test_runtime_update_serializes_independent_connections(tmp_path: Path):
+    database = Database(tmp_path / "atomic.db")
+    connections = [Database(database.path) for _ in range(8)]
+    barrier = threading.Barrier(len(connections))
+
+    def increment(connection):
+        barrier.wait(timeout=5)
+        for _ in range(8):
+            connection.runtime_update("counter", lambda value: value + 1, default=0)
+
+    with ThreadPoolExecutor(max_workers=len(connections)) as pool:
+        list(pool.map(increment, connections))
+    assert database.runtime_get("counter") == 64
+
+
+def test_guard_keeps_parallel_baseline_and_acknowledgement(tmp_path: Path, monkeypatch):
+    database = Database(tmp_path / "concurrent-guard.db")
+    other_connection = Database(database.path)
+    pair = _pair()
+    other_pair = {**pair, "id": "b" * 32, "name": "Dokumente", "local": "/mnt/docs"}
+    record_anomaly_baseline(
+        database, pair=pair, measurement={"ok": True, "count": 1000, "bytes": 50_000}
+    )
+    old_quarantine_key = protection._state_key(other_pair)
+    state = database.runtime_get(protection._ANOMALY_STATE_KEY)
+    state["quarantines"][old_quarantine_key] = {"detected_at": time.time()}
+    database.runtime_set(protection._ANOMALY_STATE_KEY, state)
+    started = threading.Event()
+    resume = threading.Event()
+
+    def measure(*_args, **_kwargs):
+        started.set()
+        assert resume.wait(timeout=5)
+        return {"ok": True, "count": 10, "bytes": 50}
+
+    monkeypatch.setattr(protection, "measure_path", measure)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            preflight_anomaly_guard,
+            database,
+            pair=pair,
+            backup={},
+            source="/mnt/photos",
+        )
+        try:
+            assert started.wait(timeout=5)
+            record_anomaly_baseline(
+                other_connection,
+                pair=other_pair,
+                measurement={"ok": True, "count": 500, "bytes": 5000},
+            )
+            assert acknowledge_quarantine(other_connection, other_pair)
+        finally:
+            resume.set()
+        assert future.result(timeout=5)["blocked"]
+    state = database.runtime_get(protection._ANOMALY_STATE_KEY)
+    assert old_quarantine_key in state["baselines"]
+    assert old_quarantine_key not in state["quarantines"]
+    assert protection._state_key(pair) in state["quarantines"]
+
+
 def test_protection_calendar_and_score_are_evidence_based(tmp_path: Path):
     database = Database(tmp_path / "calendar.db")
     ok_job = database.job_start("backup")
@@ -139,3 +255,16 @@ def test_policy_presets_have_unique_stable_identifiers():
     identifiers = [item["id"] for item in POLICY_PRESETS]
     assert len(identifiers) == len(set(identifiers))
     assert {"family_photos", "documents", "archive", "critical"} == set(identifiers)
+
+
+def test_restore_preset_recurrence_matches_evidence_window():
+    # UTC checks the calendar policy independently of local DST/runtime delays.
+    # A monthly recommendation used to leave three weeks without valid proof.
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    for preset in POLICY_PRESETS:
+        schedule = preset["restore"]["schedule"]
+        previous = next_run_after(schedule, after=start, timezone_name="UTC")
+        for _ in range(60):
+            following = next_run_after(schedule, after=previous, timezone_name="UTC")
+            assert 0 < following - previous <= MAX_EVIDENCE_AGE_SEC, preset["id"]
+            previous = following

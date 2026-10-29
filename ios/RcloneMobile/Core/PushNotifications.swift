@@ -5,6 +5,7 @@ extension Notification.Name {
     static let pushDeviceTokenReady = Notification.Name("pushDeviceTokenReady")
     static let pushNavigationRequested = Notification.Name("pushNavigationRequested")
     static let pushRecoveryNavigationRequested = Notification.Name("pushRecoveryNavigationRequested")
+    static let pushRecoveryNavigationReceived = Notification.Name("pushRecoveryNavigationReceived")
     static let deviceVaultNavigationRequested = Notification.Name("deviceVaultNavigationRequested")
     static let pushPauseRequested = Notification.Name("pushPauseRequested")
     static let pushAuthorizationRequested = Notification.Name("pushAuthorizationRequested")
@@ -13,8 +14,8 @@ extension Notification.Name {
 @MainActor
 final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     private(set) var registration: (token: String, environment: String)?
-    private var pendingNavigationJobID: Int?
-    private var pendingRecoveryNavigation = false
+    private var pendingNavigation: (jobID: Int, serverID: String)?
+    private var pendingRecoveryServerID: String?
 
     func application(
         _ application: UIApplication,
@@ -72,16 +73,22 @@ final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUser
     func unregisterLocally() {
         UIApplication.shared.unregisterForRemoteNotifications()
         registration = nil
+        pendingNavigation = nil
+        pendingRecoveryServerID = nil
+        let center = UNUserNotificationCenter.current()
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
     }
 
-    func consumePendingNavigationJobID() -> Int? {
-        defer { pendingNavigationJobID = nil }
-        return pendingNavigationJobID
+    func consumePendingNavigationJobID(forServerID serverID: String? = nil) -> Int? {
+        defer { pendingNavigation = nil }
+        guard let pendingNavigation, pendingNavigation.serverID == serverID else { return nil }
+        return pendingNavigation.jobID
     }
 
-    func consumePendingRecoveryNavigation() -> Bool {
-        defer { pendingRecoveryNavigation = false }
-        return pendingRecoveryNavigation
+    func consumePendingRecoveryNavigation(forServerID serverID: String? = nil) -> Bool {
+        defer { pendingRecoveryServerID = nil }
+        return pendingRecoveryServerID != nil && pendingRecoveryServerID == serverID
     }
 
     func application(
@@ -114,21 +121,26 @@ final class PushNotificationCoordinator: NSObject, UIApplicationDelegate, UNUser
         didReceive response: UNNotificationResponse
     ) async {
         let userInfo = response.notification.request.content.userInfo
+        guard let serverID = PushServerBinding.validatedServerID(userInfo["server_id"] as? String) else { return }
         if response.actionIdentifier == "PAUSE_SCHEDULES" {
-            NotificationCenter.default.post(name: .pushPauseRequested, object: nil)
+            NotificationCenter.default.post(
+                name: .pushPauseRequested, object: nil, userInfo: ["server_id": serverID]
+            )
             return
         }
         let event = userInfo["event"] as? String ?? ""
-        if ["anomaly_blocked", "recovery_error", "restore_test_error"].contains(event) {
-            pendingRecoveryNavigation = true
-            NotificationCenter.default.post(name: .pushRecoveryNavigationRequested, object: nil)
+        if ["anomaly_blocked", "recovery_error", "restore_test_error", "restore_test_warning"].contains(event) {
+            pendingRecoveryServerID = serverID
+            NotificationCenter.default.post(
+                name: .pushRecoveryNavigationReceived, object: nil, userInfo: ["server_id": serverID]
+            )
         }
         if let jobID = Self.jobID(from: userInfo) {
-            pendingNavigationJobID = jobID
+            pendingNavigation = (jobID, serverID)
             NotificationCenter.default.post(
                 name: .pushNavigationRequested,
                 object: nil,
-                userInfo: ["job_id": jobID]
+                userInfo: ["job_id": jobID, "server_id": serverID]
             )
         }
     }

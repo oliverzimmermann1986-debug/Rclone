@@ -12,12 +12,14 @@ import logging
 import shutil
 import subprocess
 import time
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from ..db import Database
 from ..notifications import notify
 from ..rclone_args import rclone_subprocess_env
+from ..recovery_paths import recovery_path, validated_staging_path
 from ..restore_evidence import pair_binding
 from .rclone_sync import _rclone_cache_args
 from .restore_test import _endpoints
@@ -51,7 +53,7 @@ def _expected_manifest(
             "--",
             target,
         ],
-        timeout=timeout,
+        timeout=min(timeout, 900),
     )
     if measured.returncode != 0:
         raise RuntimeError(
@@ -190,12 +192,14 @@ def normalize_selection(paths: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(clean))
 
 
-def staging_root(config: Mapping[str, Any]) -> Path:
-    paths = config.get("paths") if isinstance(config.get("paths"), Mapping) else {}
-    raw = str((paths or {}).get("recovery_dir") or "/opt/rclone-sync/recovery")
-    root = Path(raw).expanduser()
-    if not root.is_absolute():
-        raise ValueError("paths.recovery_dir muss absolut sein")
+def _staging_path(config: Mapping[str, Any]) -> Path:
+    return recovery_path(config, "recovery_dir", "recovery")
+
+
+def staging_root(
+    config: Mapping[str, Any], *, pair: Mapping[str, Any] | None = None
+) -> Path:
+    root = validated_staging_path(config, pair=pair)
     root.mkdir(parents=True, exist_ok=True)
     try:
         root.chmod(0o700)
@@ -229,11 +233,56 @@ def _save_record(database: Database, record: Mapping[str, Any]) -> None:
         item for item in _load_state(database) if item.get("id") != record.get("id")
     ]
     records.insert(0, dict(record))
-    database.runtime_set(_STATE_KEY, records[:_MAX_STATE_ITEMS])
+    # Never hide retained data merely because the display history grows.
+    retained = [item for item in records if item.get("status") in {"running", "ready"}]
+    history = [
+        item for item in records if item.get("status") not in {"running", "ready"}
+    ]
+    database.runtime_set(_STATE_KEY, retained + history[:_MAX_STATE_ITEMS])
+
+
+def check_staging_budget(
+    database: Database, config: Mapping[str, Any], requested_bytes: int
+) -> None:
+    limit = (
+        int((config.get("backup") or {}).get("recovery_staging_max_mb", 51_200))
+        * 1024
+        * 1024
+    )
+    retained = sum(
+        max(0, int(item.get("bytes") or 0))
+        for item in _load_state(database)
+        if item.get("status") in {"ready", "running"}
+    )
+    if retained + requested_bytes > limit:
+        raise ValueError(
+            "Das Gesamtlimit des Recovery-Staging ist erreicht. Vorhandene Wiederherstellungen zuerst entfernen."
+        )
+
+
+def reconcile_staging(database: Database, config: Mapping[str, Any]) -> None:
+    root = validated_staging_path(config)
+    records = _load_state(database)
+    for item in records:
+        if item.get("status") != "running" or not re.fullmatch(
+            r"recovery-[0-9]+", str(item.get("id") or "")
+        ):
+            continue
+        target = root / item["id"]
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_dir() and target.parent == root:
+            shutil.rmtree(target)
+        item.update(
+            status="error",
+            verified=False,
+            error="Wiederherstellung durch Serverneustart unterbrochen",
+        )
+    database.runtime_set(_STATE_KEY, records)
 
 
 def list_staging(database: Database, config: Mapping[str, Any]) -> list[dict[str, Any]]:
-    root = staging_root(config)
+    root = validated_staging_path(config)
     result = []
     for record in _load_state(database):
         candidate = (root / str(record.get("id") or "")).resolve()
@@ -246,12 +295,16 @@ def list_staging(database: Database, config: Mapping[str, Any]) -> list[dict[str
 def remove_staging(
     database: Database, config: Mapping[str, Any], recovery_id: str
 ) -> bool:
-    root = staging_root(config)
-    if not recovery_id or any(
-        char not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
-        for char in recovery_id.lower()
-    ):
+    root = validated_staging_path(config)
+    if not re.fullmatch(r"recovery-[0-9]+", recovery_id):
         raise ValueError("Ungültige Recovery-ID")
+    known = next(
+        (item for item in _load_state(database) if item.get("id") == recovery_id), None
+    )
+    if known is None or known.get("status") == "running":
+        raise ValueError("Recovery ist unbekannt oder noch aktiv")
+    if (root / recovery_id).is_symlink():
+        raise ValueError("Unsicheres Recovery-Ziel")
     target = (root / recovery_id).resolve()
     if target.parent != root:
         raise ValueError("Recovery-Ziel liegt außerhalb des Staging-Bereichs")
@@ -278,26 +331,29 @@ def run_selective_restore(
     recovery_point: str = "current",
 ) -> dict[str, Any]:
     started = time.monotonic()
-    selection = normalize_selection(paths)
-    limit_bytes = max(1, min(int(max_total_mb), 51_200)) * 1024 * 1024
-    _live_source, configured_target = _endpoints(pair)
-    backup_target = str(source_override or configured_target)
     recovery_id = f"recovery-{job_id}"
-    work = staging_root(config) / recovery_id
-    data = work / "data"
+    work = None
+    created = False
     record: dict[str, Any] = {
         "id": recovery_id,
         "job_id": job_id,
         "pair": str(pair.get("name") or ""),
         "status": "running",
         "created_at": time.time(),
-        "requested_items": len(selection),
-        "limit_bytes": limit_bytes,
         "recovery_point": recovery_point,
         "evidence_binding": pair_binding(pair),
     }
     try:
+        selection = normalize_selection(paths)
+        limit_bytes = max(1, min(int(max_total_mb), 51_200)) * 1024 * 1024
+        _live_source, configured_target = _endpoints(pair)
+        backup_target = str(source_override or configured_target)
+        record.update(requested_items=len(selection), limit_bytes=limit_bytes)
+        work = staging_root(config, pair=pair) / recovery_id
+        data = work / "data"
+        _save_record(database, record)
         work.mkdir(mode=0o700)
+        created = True
         data.mkdir(mode=0o700)
         listing = work / "selection.txt"
         listing.write_text("\n".join(selection) + "\n", encoding="utf-8")
@@ -308,15 +364,38 @@ def run_selective_restore(
         timeout = max(
             300, int(float((config.get("backup") or {}).get("timeout_hours", 4)) * 3600)
         )
-        manifest = _expected_manifest(
-            backup_target,
-            listing,
-            selection,
-            timeout=min(timeout, 900),
-            limit_bytes=limit_bytes,
-        )
+        if recovery_point.startswith("full-"):
+            from ..recovery_snapshots import load_manifest
+
+            historical = load_manifest(config, pair, recovery_point)
+            entries = {item["path"]: item for item in historical["entries"]}
+            if any(path not in entries for path in selection):
+                raise RuntimeError(
+                    "Ausgewählte Datei fehlt im aufgezeichneten SHA-256-Manifest"
+                )
+            manifest = {
+                path: {
+                    "bytes": entries[path]["size"],
+                    "algorithm": "sha256",
+                    "checksum": entries[path]["sha256"],
+                }
+                for path in selection
+            }
+            if sum(item["bytes"] for item in manifest.values()) > limit_bytes:
+                raise RuntimeError(
+                    "Die Auswahl überschreitet das bestätigte Recovery-Limit"
+                )
+        else:
+            manifest = _expected_manifest(
+                backup_target,
+                listing,
+                selection,
+                timeout=timeout,
+                limit_bytes=limit_bytes,
+            )
         selected_bytes = sum(item["bytes"] for item in manifest.values())
         selected_count = len(manifest)
+        check_staging_budget(database, config, selected_bytes)
         manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
         (work / "expected-manifest.json").write_text(manifest_json, encoding="utf-8")
         record["manifest_sha256"] = hashlib.sha256(manifest_json.encode()).hexdigest()
@@ -374,24 +453,10 @@ def run_selective_restore(
                 "verification_scope": "complete_selection",
             }
         )
-        database.job_finish(job_id, "ok", {"ok": True, **record})
-        database.audit_add(
-            "selective_recovery_ready",
-            actor="system",
-            details={
-                key: record[key] for key in ("id", "job_id", "pair", "files", "bytes")
-            },
-        )
-        notify(
-            "recovery_ready",
-            f"{record['pair']}: Recovery bereit",
-            f"{selected_count} Dateien wurden getrennt wiederhergestellt und geprüft.",
-            job_id=job_id,
-            pair=record["pair"],
-        )
     except Exception as exc:
         logger.exception("Selektive Recovery %s fehlgeschlagen", recovery_id)
-        shutil.rmtree(work, ignore_errors=True)
+        if created:
+            shutil.rmtree(work, ignore_errors=True)
         record.update(
             {
                 "status": "error",
@@ -399,15 +464,35 @@ def run_selective_restore(
                 "duration_sec": round(time.monotonic() - started, 2),
             }
         )
-        database.job_finish(job_id, "error", {"ok": False, **record})
+    _save_record(database, record)
+    ready = record["status"] == "ready"
+    database.job_finish(job_id, "ok" if ready else "error", {"ok": ready, **record})
+    if ready:
+        try:
+            database.audit_add(
+                "selective_recovery_ready",
+                actor="system",
+                details={
+                    key: record[key]
+                    for key in ("id", "job_id", "pair", "files", "bytes")
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Recovery-Audit %s konnte nicht gespeichert werden", recovery_id
+            )
+    try:
         notify(
-            "recovery_error",
-            f"{record['pair']}: Recovery fehlgeschlagen",
-            str(exc),
+            "recovery_ready" if ready else "recovery_error",
+            f"{record['pair']}: Recovery {'bereit' if ready else 'fehlgeschlagen'}",
+            f"{record['files']} Dateien wurden getrennt wiederhergestellt und geprüft."
+            if ready
+            else record["error"],
             job_id=job_id,
             pair=record["pair"],
         )
-    _save_record(database, record)
+    except Exception:
+        logger.exception("Recovery-Benachrichtigung %s fehlgeschlagen", recovery_id)
     return record
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -320,11 +321,31 @@ def create_directory(payload: CreateDirectoryPayload) -> dict[str, Any]:
                 503, "Keine vorhandenen lokalen Browser-Roots konfiguriert"
             )
         parent = ensure_within(Path(payload.parent), roots)
-        if not parent.is_dir():
+        if parent.is_symlink() or not parent.is_dir():
             raise HTTPException(404, "Übergeordneter Ordner wurde nicht gefunden")
         target = ensure_within(parent / name, roots)
+        if target.exists() or target.is_symlink():
+            raise HTTPException(409, "Ein Ordner mit diesem Namen existiert bereits")
         try:
-            target.mkdir(mode=0o750)
+            if (
+                os.mkdir not in os.supports_dir_fd
+                or not hasattr(os, "O_NOFOLLOW")
+                or not hasattr(os, "O_DIRECTORY")
+            ):
+                raise HTTPException(
+                    501,
+                    "Race-sicheres Anlegen lokaler Ordner wird auf diesem Server nicht unterstützt",
+                )
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            descriptor = os.open(parent.anchor, flags)
+            try:
+                for component in parent.parts[1:]:
+                    child = os.open(component, flags, dir_fd=descriptor)
+                    os.close(descriptor)
+                    descriptor = child
+                os.mkdir(name, mode=0o750, dir_fd=descriptor)
+            finally:
+                os.close(descriptor)
         except FileExistsError as exc:
             raise HTTPException(
                 409, "Ein Ordner mit diesem Namen existiert bereits"

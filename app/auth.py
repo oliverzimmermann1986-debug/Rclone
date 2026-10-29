@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+import json
 import logging
+import copy
 import secrets
 import threading
 import time
 from collections import defaultdict, deque
-from typing import Optional
+from contextlib import contextmanager
+from typing import Any, Iterator, Mapping, Optional
 
 import bcrypt
 from fastapi import Cookie, HTTPException, Request
@@ -26,6 +29,45 @@ logger = logging.getLogger(__name__)
 SESSION_COOKIE = "rclone_sync_session"
 LOGIN_CSRF_COOKIE = "rclone_sync_login_csrf"
 DEFAULT_SESSION_MAX_AGE = 7 * 24 * 3600
+
+
+def account_generation(snapshot: Mapping[str, Any] | None = None) -> str:
+    """Bind short-lived grants to the current identity and credential generation."""
+    if snapshot is None:
+        # Resolve legacy empty secrets before any shared configuration lock.
+        _serializer()
+    data = get_config().snapshot() if snapshot is None else snapshot
+    web = data.get("web") or {}
+    identity = [
+        str(web.get("username") or "admin").casefold(),
+        str(web.get("secret_key") or ""),
+        str(web.get("session_version") or 1),
+        str(web.get("password_hash") or ""),
+        str(web.get("password") or ""),
+        str(web.get("webauthn_rp_id") or ""),
+        str(web.get("webauthn_origin") or ""),
+    ]
+    return hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+@contextmanager
+def account_generation_guard(
+    expected: str | None = None, *, exclusive: bool = False
+) -> Iterator[str]:
+    """Keep a final grant decision serialized with configuration rotations."""
+    _serializer()
+    with get_config().locked_snapshot(exclusive=exclusive) as snapshot:
+        current = account_generation(snapshot)
+        if expected is not None and (
+            not expected or not secrets.compare_digest(expected, current)
+        ):
+            raise ValueError(
+                "Die Freigabe wurde widerrufen. Starte den Vorgang erneut."
+            )
+        yield current
+
 
 # DB ist die primäre Sperre. Der In-Memory-Fallback schützt weiterhin, falls die
 # DB gerade nicht erreichbar ist.
@@ -130,6 +172,26 @@ def _trusted_proxy_networks() -> tuple[
                 "Ungültiger vertrauenswürdiger Proxy wird ignoriert: %r", value
             )
     return tuple(networks)
+
+
+def request_is_https(request: Request) -> bool:
+    """Trust one overwritten proto header only from an explicitly trusted peer."""
+    if request.url.scheme == "https":
+        return True
+    try:
+        peer = (
+            ipaddress.ip_address(request.client.host.split("%", 1)[0])
+            if request.client
+            else None
+        )
+    except ValueError:
+        return False
+    if peer is None or not any(
+        peer.version == network.version and peer in network
+        for network in _trusted_proxy_networks()
+    ):
+        return False
+    return request.headers.get("x-forwarded-proto", "").strip().lower() == "https"
 
 
 def client_host(request: Request) -> str:
@@ -319,7 +381,7 @@ def clear_reauth_failures(request: Request) -> None:
             _login_blocked_until.pop(key, None)
 
 
-def require_reauthentication(request: Request, username: str, password: str) -> None:
+def require_reauthentication(request: Request, username: str, password: str) -> str:
     """Prüft ein aktuelles Passwort mit persistenter Sitzung/IP-Sperre."""
 
     def rate_limited(retry_after: int) -> HTTPException:
@@ -337,7 +399,8 @@ def require_reauthentication(request: Request, username: str, password: str) -> 
     retry_after = reauth_retry_after(request)
     if retry_after:
         raise rate_limited(retry_after)
-    if not verify_password(username, password):
+    generation = verify_password_with_generation(username, password)
+    if generation is None:
         retry_after = record_reauth_failure(request)
         if retry_after:
             raise rate_limited(retry_after)
@@ -349,6 +412,7 @@ def require_reauthentication(request: Request, username: str, password: str) -> 
             },
         )
     clear_reauth_failures(request)
+    return generation
 
 
 def _constant_time_text_equal(first: str, second: str) -> bool:
@@ -359,19 +423,23 @@ def _constant_time_text_equal(first: str, second: str) -> bool:
         return False
 
 
-def verify_password(username: str, password: str) -> bool:
+def verify_password_with_generation(username: str, password: str) -> str | None:
+    """Return proof of the exact credential generation that was verified."""
     cfg = get_config()
-    cfg_user = str(cfg.get("web", "username", default="admin") or "admin")
+    observed = {"web": copy.deepcopy(cfg.get("web", default={}) or {})}
+    web = observed["web"]
+    generation = account_generation(observed)
+    cfg_user = str(web.get("username") or "admin")
     user_ok = _constant_time_text_equal(username.casefold(), cfg_user.casefold())
-    hashed = str(cfg.get("web", "password_hash", default="") or "")
+    hashed = str(web.get("password_hash") or "")
     encoded_password = password.encode("utf-8")
     if len(encoded_password) > 72:
-        return False
+        return None
 
     if not hashed:
-        plain = str(cfg.get("web", "password", default="") or "")
+        plain = str(web.get("password") or "")
         if not plain or plain == "changeme":
-            return False
+            return None
         password_ok = _constant_time_text_equal(password, plain)
         if user_ok and password_ok:
             try:
@@ -380,26 +448,48 @@ def verify_password(username: str, password: str) -> bool:
                 ).decode("ascii")
             except ValueError:
                 logger.exception("Klartext-Passwort konnte nicht migriert werden")
-                return False
+                return None
+
+            proof: dict[str, str] = {}
 
             def updater(data: dict) -> None:
                 web = data.setdefault("web", {})
                 if not isinstance(web, dict):
                     raise ValueError("web muss ein Mapping sein")
+                if not secrets.compare_digest(account_generation(data), generation):
+                    raise ValueError(
+                        "Zugangsdaten wurden während der Anmeldung geändert"
+                    )
                 web["password_hash"] = new_hash
                 web["password"] = ""
+                proof["generation"] = account_generation(data)
 
-            cfg.update(updater)
+            try:
+                cfg.update(updater)
+            except ValueError:
+                return None
             logger.info("Klartext-Passwort migriert zu bcrypt-Hash")
-            return True
-        return False
+            generation = proof["generation"]
+        else:
+            return None
 
-    try:
-        password_ok = bcrypt.checkpw(encoded_password, hashed.encode("ascii"))
-        return bool(user_ok and password_ok)
-    except (ValueError, TypeError, UnicodeError):
-        logger.warning("Ungültiger bcrypt-Hash in der Konfiguration")
-        return False
+    else:
+        try:
+            password_ok = bcrypt.checkpw(encoded_password, hashed.encode("ascii"))
+        except (ValueError, TypeError, UnicodeError):
+            logger.warning("Ungültiger bcrypt-Hash in der Konfiguration")
+            return None
+        if not user_ok or not password_ok:
+            return None
+
+    current = {"web": cfg.get("web", default={}) or {}}
+    if not secrets.compare_digest(account_generation(current), generation):
+        return None
+    return generation
+
+
+def verify_password(username: str, password: str) -> bool:
+    return verify_password_with_generation(username, password) is not None
 
 
 def create_session(username: str) -> str:

@@ -4,41 +4,29 @@ on:
   push:
     paths:
       - "ios/**"
-      - "app/main.py"
-      - "app/auth.py"
-      - "app/auth_contract.py"
-      - "app/config_store.py"
-      - "app/config_validation.py"
-      - "app/db.py"
-      - "app/job_definitions.py"
-      - "app/jobs/**"
-      - "app/security.py"
-      - "app/routes/**"
+      - "app/**"
       - "contracts/**"
-      - "tests/test_native_login_contract.py"
-      - "tests/test_native_read_contract.py"
-      - "tests/test_ios_release_version.py"
-      - "scripts/ios_release_version.py"
+      - "tests/test_native_*.py"
+      - "tests/test_ios_*.py"
+      - "tests/test_install_pinned_xcodegen.py"
+      - "scripts/ios_release*.py"
+      - "scripts/install_pinned_xcodegen.py"
+      - "requirements*.txt"
+      - "pytest.ini"
       - "codemagic.yaml"
       - ".github/workflows/ios.yml"
   pull_request:
     paths:
       - "ios/**"
-      - "app/main.py"
-      - "app/auth.py"
-      - "app/auth_contract.py"
-      - "app/config_store.py"
-      - "app/config_validation.py"
-      - "app/db.py"
-      - "app/job_definitions.py"
-      - "app/jobs/**"
-      - "app/security.py"
-      - "app/routes/**"
+      - "app/**"
       - "contracts/**"
-      - "tests/test_native_login_contract.py"
-      - "tests/test_native_read_contract.py"
-      - "tests/test_ios_release_version.py"
-      - "scripts/ios_release_version.py"
+      - "tests/test_native_*.py"
+      - "tests/test_ios_*.py"
+      - "tests/test_install_pinned_xcodegen.py"
+      - "scripts/ios_release*.py"
+      - "scripts/install_pinned_xcodegen.py"
+      - "requirements*.txt"
+      - "pytest.ini"
       - "codemagic.yaml"
       - ".github/workflows/ios.yml"
 
@@ -54,17 +42,20 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Toolchain
         run: xcodebuild -version
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
           cache: pip
       - name: Install backend contract test dependencies
-        run: python3 -m pip install -r requirements-dev.txt
-      - name: Validate shared native API contracts and release version tooling
-        run: python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_ios_release_version.py
+        run: |
+          python3 scripts/update_dependency_lock.py --check
+          python3 -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+          python3 -m pip install -r requirements-dev.txt
+      - name: Validate native API, security and release contracts
+        run: python3 -m pytest tests/test_native_login_contract.py tests/test_native_read_contract.py tests/test_install_pinned_xcodegen.py tests/test_ios_*.py
       - name: Install verified pinned XcodeGen
         run: python3 scripts/install_pinned_xcodegen.py --destination "$GITHUB_WORKSPACE/.tools"
       - name: Generate Xcode project
@@ -84,7 +75,16 @@ jobs:
             -scheme RcloneMobile \
             -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
             -derivedDataPath "$RUNNER_TEMP/ios-build" \
+            -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"
+      - name: Save native test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ios-xcresult-${{ github.sha }}
+          path: ${{ runner.temp }}/ios-tests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Inspect simulator signing for Keychain tests
         if: always()
         run: |

@@ -6,9 +6,15 @@ struct SystemView: View {
     @Binding var showingSettings: Bool
     @State private var showPauseOptions = false
     @State private var confirmResume = false
+    @State private var showRemoteSetup = false
 
     var body: some View {
         List {
+            Section("Speicher verbinden") {
+                Button { showRemoteSetup = true } label: {
+                    Label("Neues Remote einbinden", systemImage: "externaldrive.badge.plus")
+                }
+            }
             if let system = model.overview?.system {
                 Section("Server") {
                     LabeledContent("Hostname", value: system.hostname)
@@ -59,8 +65,14 @@ struct SystemView: View {
                     LoadingSection(label: "Systemdaten werden geladen …")
                 }
             }
+            Section("Informationen") {
+                NavigationLink { LegalInformationView() } label: {
+                    Label("Impressum", systemImage: "info.circle")
+                }
+            }
         }
         .navigationTitle("System")
+        .sheet(isPresented: $showRemoteSetup) { RemoteSetupView() }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
             ToolbarItem(placement: .topBarTrailing) {
@@ -87,9 +99,9 @@ struct SystemView: View {
         Section("Zeitpläne") {
             let paused = model.overview?.services.scheduler.control?.paused == true
             HStack {
-                Label(paused ? "Pausiert" : "Aktiv", systemImage: paused ? "pause.circle.fill" : "calendar.badge.clock")
+                Label(model.overview?.services.scheduler.configuredEnabled == false ? "Automatik deaktiviert" : paused ? "Pausiert" : "Aktiv", systemImage: paused ? "pause.circle.fill" : "calendar.badge.clock")
                 Spacer()
-                StatusBadge(status: paused ? "warning" : model.overview?.services.scheduler.active)
+                StatusBadge(status: model.overview?.services.scheduler.configuredEnabled == false || paused ? "warning" : model.overview?.services.scheduler.active)
             }
             if paused {
                 Button("Zeitpläne fortsetzen") { confirmResume = true }
@@ -145,12 +157,14 @@ struct WebAuthnSecurityView: View {
     @State private var credentials: [WebAuthnCredential] = []
     @State private var isLoading = false
     @State private var isRegistering = false
+    @State private var showPasswordConfirmation = false
+    @State private var currentPassword = ""
     @State private var message: SecurityMessage?
 
     var body: some View {
         List {
             Section {
-                Button { Task { await createPasskey() } } label: {
+                Button { showPasswordConfirmation = true } label: {
                     HStack(spacing: 12) {
                         if isRegistering { ProgressView() }
                         Label("Passkey in der App erstellen", systemImage: "person.badge.key.fill")
@@ -161,7 +175,7 @@ struct WebAuthnSecurityView: View {
             } header: {
                 Text("Neuer Zugang")
             } footer: {
-                Text("iOS bestätigt die Anlage mit Face ID oder deinem Gerätecode. Der private Schlüssel verlässt den Apple-Schlüsselbund nicht.")
+                Text("Bestätige zuerst dein aktuelles Serverpasswort. Danach bestätigt iOS die Anlage mit Face ID oder deinem Gerätecode. Der private Schlüssel verlässt den Apple-Schlüsselbund nicht.")
             }
 
             Section("Registrierte Zugänge") {
@@ -214,6 +228,20 @@ struct WebAuthnSecurityView: View {
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await loadCredentials() }
         .task { await loadCredentials() }
+        .onDisappear { currentPassword = "" }
+        .alert("Passkey erstellen", isPresented: $showPasswordConfirmation) {
+            SecureField("Aktuelles Serverpasswort", text: $currentPassword)
+                .textContentType(.password)
+            Button("Abbrechen", role: .cancel) { currentPassword = "" }
+            Button("Bestätigen") {
+                let password = currentPassword
+                currentPassword = ""
+                Task { await createPasskey(currentPassword: password) }
+            }
+            .disabled(currentPassword.isEmpty)
+        } message: {
+            Text("Bestätige dein aktuelles Serverpasswort, um einen neuen Zugang anzulegen.")
+        }
         .alert(item: $message) { item in
             Alert(title: Text(item.title), message: Text(item.text), dismissButton: .default(Text("OK")))
         }
@@ -252,14 +280,15 @@ struct WebAuthnSecurityView: View {
         }
     }
 
-    private func createPasskey() async {
+    private func createPasskey(currentPassword: String) async {
         guard !isRegistering else { return }
         isRegistering = true
         defer { isRegistering = false }
         do {
             try await model.registerWebAuthnCredential(
                 method: "passkey",
-                label: "Sicherpfad iPhone"
+                label: "Sicherpfad iPhone",
+                currentPassword: currentPassword
             )
             credentials = try await model.webAuthnCredentials()
             message = SecurityMessage(
@@ -298,11 +327,11 @@ private struct PushStatusView: View {
                 } label: {
                     Label("Mitteilungen aktivieren oder prüfen", systemImage: "bell.badge")
                 }
-                .accessibilityHint("Zeigt zuerst, welche Fehler gemeldet werden, und fragt danach nach der iOS-Berechtigung.")
+                .accessibilityHint("Zeigt zuerst, welche Fehler und Prüfhinweise gemeldet werden, und fragt danach nach der iOS-Berechtigung.")
             } header: {
                 Text("Dieses iPhone")
             } footer: {
-                Text("Sicherpfad informiert nur über Sicherungs- und Prüfprobleme, nicht über erfolgreiche Läufe.")
+                Text("Sicherpfad informiert über Sicherungsfehler und Prüfprobleme, auch bei begrenztem Prüfumfang. Erfolgreiche Läufe werden nicht gemeldet.")
             }
             if let status {
                 Section("Bereitschaft") {
@@ -337,12 +366,13 @@ private struct PushStatusView: View {
                         .foregroundStyle(.orange)
                     }
                 }
-                Section("Fehlerereignisse") {
+                Section("Fehler und Hinweise") {
                     if status.events.isEmpty {
                         Text("Keine Ereignisse aktiviert").foregroundStyle(.secondary)
                     } else {
                         ForEach(status.events, id: \.self) { event in
                             Label(eventLabel(event), systemImage: "exclamationmark.bubble")
+                                .foregroundStyle(event == "restore_test_warning" ? Color.orange : Color.primary)
                         }
                     }
                 }
@@ -405,6 +435,7 @@ private struct PushStatusView: View {
         case "sync_error": "Sicherungsfehler"
         case "check_error": "Prüffehler"
         case "restore_test_error": "Restore-Test fehlgeschlagen"
+        case "restore_test_warning": "Restore-Test: Prüfumfang begrenzt"
         case "pbs_error": "PBS-Fehler"
         default: event
         }

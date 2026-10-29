@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from ..config_store import get_config
+from ..pbs_identity import canonical_pbs_backup_id
 from .rclone_sync import (
     _SnapshotConfig,
     _run_rclone_command,
@@ -96,7 +97,7 @@ def _target_backup_id(settings: dict[str, Any], target: dict[str, Any]) -> str:
     # Anzeigenamen des Targets erweitert werden, da das bestehende Snapshot-
     # Historien und Retention-Gruppen verwaisen würde. Mehrere Targets benötigen
     # deshalb bereits bei der Config-Validierung explizite, eindeutige IDs.
-    return _safe_name(backup_id, "host")
+    return canonical_pbs_backup_id(backup_id)
 
 
 def build_backup_command(settings: dict[str, Any], target: dict[str, Any]) -> list[str]:

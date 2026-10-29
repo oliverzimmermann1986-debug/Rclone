@@ -1,4 +1,5 @@
 from pathlib import Path
+from fnmatch import fnmatchcase
 
 import pytest
 import yaml
@@ -61,7 +62,8 @@ def test_codemagic_verifies_fetched_main_and_exact_signed_tag_before_release_cha
     config = (root / "codemagic.yaml").read_text(encoding="utf-8")
     provenance = config.index("ios_release_preflight.py")
     version_write = config.index("ios_release_version.py")
-    verifier_install = config.index("brew install gnupg")
+    verifier_install = config.index("command -v gpg")
+    assert "brew install gnupg" not in config
 
     assert "refs/heads/main:refs/remotes/origin/main" in config
     assert "refs/tags/$CM_TAG:refs/tags/$CM_TAG" in config
@@ -136,19 +138,26 @@ def test_codemagic_uses_checksum_verified_exact_xcodegen_before_generation():
 
 def test_ios_ci_tracks_native_contract_sources():
     root = Path(__file__).parents[1]
-    workflow = (root / ".github" / "workflows" / "ios.yml").read_text(encoding="utf-8")
+    workflow = yaml.load(
+        (root / ".github/workflows/ios.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
     for expected_path in (
-        '"app/main.py"',
-        '"app/auth_contract.py"',
-        '"app/config_store.py"',
-        '"app/config_validation.py"',
-        '"app/db.py"',
-        '"app/job_definitions.py"',
-        '"app/jobs/**"',
-        '"app/routes/**"',
-        '"contracts/**"',
+        "app/main.py",
+        "app/auth_contract.py",
+        "app/config_store.py",
+        "app/config_validation.py",
+        "app/db.py",
+        "app/job_definitions.py",
+        "app/jobs/rclone_sync.py",
+        "app/routes/api_webauthn.py",
+        "contracts/native_read_contract_v1.json",
     ):
-        assert workflow.count(expected_path) == 2
+        for event in ("push", "pull_request"):
+            assert any(
+                fnmatchcase(expected_path, pattern)
+                for pattern in workflow["on"][event]["paths"]
+            ), (event, expected_path)
 
 
 def test_shared_contracts_are_copied_into_ios_test_bundle():
