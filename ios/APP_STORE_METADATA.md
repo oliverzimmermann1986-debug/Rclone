@@ -47,7 +47,7 @@ Funktionen:
 - Stillstands-Watchdog, Laufzeitgrenzen und kontrollierter Abbruch
 - Integrierte lokale Demo ohne Server oder echte Daten
 
-Sicherpfad stellt keinen Cloudspeicher bereit. Für den produktiven Einsatz benötigst du eine eigene kompatible Sicherpfad-Serverinstallation auf Basis von rclone. Passwörter werden nicht dauerhaft in der App gespeichert. Auf Wunsch speichert der Geräteschlüsselbund die Sitzung, auch für bestätigte HTTP-Verbindungen. HTTP bleibt unverschlüsselt; HTTPS wird empfohlen. Übertragungen pausieren gegebenenfalls im Hintergrund und können in der App fortgesetzt werden. Widgets zeigen den zuletzt geladenen Stand, keine ständige Serververbindung. Vollständige Stände auf dem Server sind keine externe Katastrophensicherung; die Notfallakte enthält keine Nutzdateien und ersetzt keinen Cloud-Zugang.
+Sicherpfad stellt keinen Cloudspeicher bereit. Für den produktiven Einsatz benötigst du eine eigene kompatible Sicherpfad-Serverinstallation auf Basis von rclone. Passwörter werden nicht dauerhaft in der App gespeichert. Auf Wunsch speichert der Geräteschlüsselbund ausschließlich HTTPS-Sitzungen. Lokale HTTP-Verbindungen bleiben unverschlüsselt und erfordern nach einem App-Neustart eine neue Anmeldung. Übertragungen pausieren gegebenenfalls im Hintergrund und können in der App fortgesetzt werden. Widgets zeigen den zuletzt geladenen Stand, keine ständige Serververbindung. Vollständige Stände auf dem Server sind keine externe Katastrophensicherung; die Notfallakte enthält keine Nutzdateien und ersetzt keinen Cloud-Zugang.
 
 ## App-Prüfung
 

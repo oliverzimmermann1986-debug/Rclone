@@ -1965,6 +1965,18 @@ struct RecoveryChangedItem: Decodable, Identifiable {
     }
 }
 
+struct VaultEndpointBinding: Codable, Equatable, Sendable {
+    let local: String
+    let remote: String
+    let direction: String
+
+    init(scope: VaultQueueScope) {
+        local = scope.source
+        remote = scope.target
+        direction = scope.direction.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
 struct VaultUploadRequest: Encodable {
     let identity: String
     let filename: String
@@ -1973,12 +1985,14 @@ struct VaultUploadRequest: Encodable {
     let sourceType: String
     let deviceName: String
     var localOnly: Bool = false
+    let expectedEndpoints: VaultEndpointBinding
 
     enum CodingKeys: String, CodingKey {
         case localOnly = "local_only"
         case identity, filename, size, sha256
         case sourceType = "source_type"
         case deviceName = "device_name"
+        case expectedEndpoints = "expected_endpoints"
     }
 }
 
@@ -2003,6 +2017,7 @@ struct VaultUploadStatus: Decodable, Identifiable {
     let updatedAt: Double
     let completedAt: Double?
     let error: String?
+    var endpointBinding: VaultEndpointBinding? = nil
 
     var fractionCompleted: Double {
         guard size > 0 else { return 0 }
@@ -2020,6 +2035,7 @@ struct VaultUploadStatus: Decodable, Identifiable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case completedAt = "completed_at"
+        case endpointBinding = "endpoint_binding"
     }
 }
 

@@ -28,8 +28,16 @@ from .. import __version__, protection
 from ..auth import require_auth, require_reauthentication
 from ..config_store import get_config
 from ..db import JobAlreadyRunningError, get_db
+from ..jobs import rclone_sync
+from ..jobs.job_lifecycle import BACKUP_KINDS, reconcile_locked_scope
+from ..jobs.recovery_lifecycle import (
+    RecoveryBusy,
+    RecoveryCancelled,
+    RecoveryPersistenceError,
+    check_cancelled,
+    finish_job,
+)
 from ..jobs.restore_test import _endpoints
-from ..jobs import runtime_state
 from ..jobs.locks import HeldFileLock, try_file_lock
 from ..jobs.selective_restore import (
     JOB_KIND,
@@ -337,116 +345,80 @@ class SnapshotRequest(BaseModel):
     max_total_mb: int = Field(default=5120, ge=1, le=51_200)
 
 
-def _finish_failed_recovery(database, job_id: int, error: BaseException) -> None:
-    try:
-        database.job_finish(job_id, "error", {"ok": False, "error": str(error)[:500]})
-    except Exception:
-        logger.exception("Recovery-Job %s konnte nicht abgeschlossen werden", job_id)
-
-
-def _release_recovery(lease: HeldFileLock, run_id: str, status: str) -> None:
-    try:
-        runtime_state.finish_run(run_id, status)
-    except Exception:
-        logger.exception(
-            "Recovery-Runtime %s konnte nicht abgeschlossen werden", run_id
-        )
-    finally:
-        lease.release()
-
-
-def _run_recovery_locked(lease, run_id, function, database, *args, job_id, **kwargs):
-    status = "error"
-    try:
-        result = function(database, *args, job_id=job_id, **kwargs)
-        job = database.job_get(job_id) or {}
-        status = str(job.get("status") or "error")
-        if status == "running":
-            raise RuntimeError("Recovery-Worker hat den Job nicht abgeschlossen")
-        return result
-    except BaseException as exc:
-        status = "error"
-        _finish_failed_recovery(database, job_id, exc)
-        try:
-            current = database.job_get(job_id) or {}
-            if current.get("status") and current["status"] != "running":
-                status = str(current["status"])
-        except Exception:
-            logger.exception(
-                "Recovery-Jobstatus %s konnte nicht gelesen werden", job_id
-            )
-        raise
-    finally:
-        _release_recovery(lease, run_id, status)
-
-
-def _start_recovery_job(pair) -> tuple[Any, int, HeldFileLock, str]:
-    lease = try_file_lock(runtime_state.DEFAULT_CANCEL_SCOPE)
+def _start_recovery_job() -> tuple[Any, int, HeldFileLock]:
+    lease = try_file_lock("backup")
     if lease is None:
-        raise HTTPException(
-            409,
-            "Während einer Sicherung oder Recovery läuft bereits ein anderer Prozess",
-        )
-    database = None
-    job_id = None
+        raise HTTPException(409, "Eine Sicherung oder Recovery hält den Prozess-Lock")
     try:
         database = get_db()
-        if runtime_state.active_processes(runtime_state.DEFAULT_CANCEL_SCOPE):
+        if database.job_terminal_recover_pending().get("failed"):
             raise HTTPException(
-                409, "Ein registrierter Sync-Unterprozess ist noch aktiv"
+                503, "Ein vorheriger Jobabschluss ist noch nicht gespeichert"
             )
+        if not reconcile_locked_scope(database, scope="backup", kinds=BACKUP_KINDS)[
+            "safe"
+        ]:
+            raise HTTPException(
+                409, "Ein registrierter Recovery-Prozess ist noch aktiv"
+            )
+        rclone_sync.reset_cancel()
         job_id = database.job_start(JOB_KIND, trigger="manual", exclusive_scope=True)
-        run_id = runtime_state.begin_run(
-            [str(pair.get("name") or "")], dry_run=False, kind=JOB_KIND, job_id=job_id
-        )
     except JobAlreadyRunningError as exc:
         lease.release()
         raise HTTPException(
             409, "Während einer Sicherung oder Recovery kann kein weiterer Lauf starten"
         ) from exc
-    except BaseException as exc:
+    except BaseException:
+        lease.release()
+        raise
+    return database, job_id, lease
+
+
+def _run_recovery_job(database, job_id, lease, operation, *args, **kwargs):
+    try:
+        check_cancelled()
+        result = operation(database, *args, job_id=job_id, **kwargs)
+        if (database.job_get(job_id) or {}).get("status") == "running":
+            raise RuntimeError("Recovery-Worker hat den Job nicht abgeschlossen")
+        return result
+    except RecoveryPersistenceError:
+        # A durable intent may still await replay. Do not replace the external
+        # result with a synthetic error or announce success before confirmation.
+        logger.exception("Recovery #%s: terminale Persistenz ausstehend", job_id)
+    except Exception as exc:
+        status = "cancelled" if isinstance(exc, RecoveryCancelled) else "error"
         try:
-            if database is not None and job_id is not None:
-                _finish_failed_recovery(database, job_id, exc)
+            if (database.job_get(job_id) or {}).get("status") == "running":
+                finish_job(database, job_id, status, {"ok": False, "error": str(exc)})
+        except RecoveryPersistenceError:
+            logger.exception("Recovery #%s konnte nicht abgeschlossen werden", job_id)
+    finally:
+        lease.release()
+
+
+def _queue_recovery(background, database, job_id, lease, operation, *args, **kwargs):
+    try:
+        database.audit_add(
+            "selective_recovery_started"
+            if operation is run_selective_restore
+            else "recovery_started",
+            actor="web",
+            details={"job_id": job_id, "operation": operation.__name__},
+        )
+        background.add_task(
+            _run_recovery_job, database, job_id, lease, operation, *args, **kwargs
+        )
+    except BaseException:
+        try:
+            finish_job(
+                database,
+                job_id,
+                "error",
+                {"ok": False, "error": "Recovery konnte nicht gestartet werden"},
+            )
         finally:
             lease.release()
         raise
-    return database, job_id, lease, run_id
-
-
-def _queue_recovery(background, function, config, pair, *args, **kwargs) -> int:
-    database, job_id, lease, run_id = _start_recovery_job(pair)
-    try:
-        if function is run_selective_restore:
-            database.audit_add(
-                "selective_recovery_started",
-                actor="web",
-                details={
-                    "job_id": job_id,
-                    "pair": str(pair.get("name") or ""),
-                    "items": len(args[0]),
-                    "recovery_point": kwargs["recovery_point"],
-                },
-            )
-        background.add_task(
-            _run_recovery_locked,
-            lease,
-            run_id,
-            function,
-            database,
-            config,
-            pair,
-            *args,
-            job_id=job_id,
-            **kwargs,
-        )
-    except BaseException as exc:
-        try:
-            _finish_failed_recovery(database, job_id, exc)
-        finally:
-            _release_recovery(lease, run_id, "error")
-        raise
-    return job_id
 
 
 @router.post("/snapshots", status_code=202)
@@ -455,8 +427,12 @@ def start_snapshot(
 ) -> dict[str, Any]:
     config = get_config().snapshot()
     pair = _find_pair(config, body.identity)
-    job_id = _queue_recovery(
+    database, job_id, lease = _start_recovery_job()
+    _queue_recovery(
         background,
+        database,
+        job_id,
+        lease,
         run_snapshot_capture,
         config,
         pair,
@@ -475,8 +451,12 @@ def restore_full_snapshot(
         load_manifest(config, pair, point_id)
     except SnapshotError as exc:
         raise HTTPException(400, str(exc)) from exc
-    job_id = _queue_recovery(
+    database, job_id, lease = _start_recovery_job()
+    _queue_recovery(
         background,
+        database,
+        job_id,
+        lease,
         run_snapshot_restore,
         config,
         pair,
@@ -526,6 +506,11 @@ def browse_backup(
             raise HTTPException(
                 502, "Sicherungsziel konnte nicht sicher gelesen werden"
             ) from exc
+        if not isinstance(entries, list):
+            raise HTTPException(
+                502, "Sicherungsziel hat eine ungültige Antwort geliefert"
+            )
+        truncated = truncated or len(entries) > 500
         items = [
             {
                 "name": str(item.get("Name") or ""),
@@ -618,8 +603,12 @@ def start_selective_restore(
         recovery_source = point_target(config, pair, body.point_id)
     except RecoveryPointError as exc:
         raise HTTPException(404, str(exc)) from exc
-    job_id = _queue_recovery(
+    database, job_id, lease = _start_recovery_job()
+    _queue_recovery(
         background,
+        database,
+        job_id,
+        lease,
         run_selective_restore,
         config,
         pair,
@@ -653,6 +642,8 @@ def delete_staging(
     require_reauthentication(request, user, body.current_password)
     try:
         removed = remove_staging(get_db(), get_config().snapshot(), recovery_id)
+    except RecoveryBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if not removed:

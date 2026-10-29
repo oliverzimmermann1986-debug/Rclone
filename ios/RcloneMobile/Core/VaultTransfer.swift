@@ -65,6 +65,23 @@ final class VaultTransferModel: ObservableObject {
         catch { errorMessage = error.localizedDescription }
     }
 
+    func retryEntry(_ entry: VaultQueueEntry, scope: VaultQueueScope) {
+        guard !isWorking, entry.scopeKey == scope.key, entry.requiresUserRetry else { return }
+        var retried = entry
+        retried.state = "waiting"
+        retried.lastError = nil
+        do { try queueStore.save(retried); loadQueue(scope: scope) }
+        catch { errorMessage = error.localizedDescription }
+    }
+
+    func skipEntry(_ entry: VaultQueueEntry, scope: VaultQueueScope) {
+        guard !isWorking, entry.scopeKey == scope.key else { return }
+        var skipped = entry
+        skipped.state = "skipped"
+        do { try queueStore.save(skipped); loadQueue(scope: scope) }
+        catch { errorMessage = error.localizedDescription }
+    }
+
     func enqueue(fileURL: URL, filename: String, sourceType: String, scope: VaultQueueScope, id: UUID = UUID()) async throws {
         let store = queueStore
         _ = try await Task.detached(priority: .utility) {
@@ -105,7 +122,7 @@ final class VaultTransferModel: ObservableObject {
             if displayedScope != scope { current = nil }
         }
         do {
-            for var entry in try queueStore.entries(for: scope) {
+            for var entry in try queueStore.entries(for: scope) where !entry.requiresUserRetry {
                 try checkActiveScope(isCurrentScope)
                 activeEntryID = entry.id
                 do {
@@ -113,10 +130,15 @@ final class VaultTransferModel: ObservableObject {
                     try queueStore.remove(entry)
                     refreshDisplayedQueue(fallback: scope)
                 } catch {
-                    entry.state = error is CancellationError ? "waiting" : "error"
+                    try checkScopeAfterFailure(isCurrentScope)
+                    let pauseQueue = Self.shouldPauseQueue(for: error)
+                    entry.state = pauseQueue ? "waiting" : "failed"
                     entry.lastError = error is CancellationError ? nil : error.localizedDescription
                     try queueStore.save(entry)
-                    throw error
+                    refreshDisplayedQueue(fallback: scope)
+                    if pauseQueue { throw error }
+                    // A bad file cannot prevent independent files reaching their target.
+                    await endLiveActivity(current, error: error.localizedDescription)
                 }
             }
             try checkActiveScope(isCurrentScope)
@@ -124,9 +146,40 @@ final class VaultTransferModel: ObservableObject {
         } catch is CancellationError {
             await endLiveActivity(current, cancelled: true)
         } catch {
+            guard isCurrentScope() else { return }
             errorMessage = error.localizedDescription
             await endLiveActivity(current, error: error.localizedDescription)
         }
+    }
+
+    private func checkScopeAfterFailure(_ isCurrentScope: () -> Bool) throws {
+        guard isCurrentScope() else { throw CancellationError() }
+    }
+
+    private static func shouldPauseQueue(for error: Error) -> Bool {
+        if error is CancellationError || error is URLError { return true }
+        if let error = error as? APIError {
+            switch error {
+            case .unauthenticated, .loginFailed, .loginSecurityFailed, .missingCSRF,
+                 .configReauthenticationRequired, .reauthenticationRequired,
+                 .invalidServer, .invalidResponse, .incompatibleResponse, .serverFeatureUnavailable:
+                return true
+            case .server(let status, _):
+                return status == 401 || status == 403 || status == 408 || status == 429 || status >= 500
+            default: break
+            }
+        }
+        // File protection can make every local payload temporarily unreadable.
+        if let cocoa = error as? CocoaError, cocoa.code == .fileReadNoPermission { return true }
+        return false
+    }
+
+    private static func shouldRetryChunk(for error: Error) -> Bool {
+        if let network = error as? URLError { return network.code != .cancelled }
+        if let api = error as? APIError, case .server(let status, _) = api {
+            return status == 408 || status == 429 || status >= 500
+        }
+        return false
     }
 
     private func transfer(_ entry: inout VaultQueueEntry, scope: VaultQueueScope,
@@ -142,7 +195,7 @@ final class VaultTransferModel: ObservableObject {
                 catch APIError.server(status: 404, message: _) { resumed = nil }
                 try checkActiveScope(isCurrentScope)
             }
-            if let resumed { try validate(resumed, for: entry) }
+            if let resumed { try validate(resumed, for: entry, scope: scope) }
             let statusToResume = resumed?.status == "error" ? nil : resumed
             var status: VaultUploadStatus
             if let statusToResume {
@@ -154,12 +207,14 @@ final class VaultTransferModel: ObservableObject {
                     size: size,
                     sha256: digest,
                     sourceType: entry.sourceType,
-                    deviceName: UIDevice.current.name
+                    deviceName: UIDevice.current.name,
+                    expectedEndpoints: VaultEndpointBinding(scope: scope)
                 )
                 request.localOnly = scope.localOnly == true
                 status = try await client.createVaultUpload(request)
             }
-            try validate(status, for: entry)
+            try checkActiveScope(isCurrentScope)
+            try validate(status, for: entry, scope: scope)
             try persist(status, entry: &entry)
             current = status
             await updateLiveActivity(status)
@@ -182,15 +237,16 @@ final class VaultTransferModel: ObservableObject {
                     )
                     retryCount = 0
                 } catch {
-                    guard retryCount < 3 else { throw error }
+                    guard Self.shouldRetryChunk(for: error), retryCount < 3 else { throw error }
                     retryCount += 1
                     try await Task.sleep(for: .seconds(retryCount))
                     try checkActiveScope(isCurrentScope)
                     status = try await client.getVaultUpload(uploadID: status.id)
-                    try validate(status, for: entry)
+                    try validate(status, for: entry, scope: scope)
                     try handle.seek(toOffset: UInt64(status.received))
                 }
-                try validate(status, for: entry)
+                try checkActiveScope(isCurrentScope)
+                try validate(status, for: entry, scope: scope)
                 try persist(status, entry: &entry)
                 offset = status.received
                 current = status
@@ -207,7 +263,8 @@ final class VaultTransferModel: ObservableObject {
                     throw error
                 }
             }
-            try validate(status, for: entry)
+            try checkActiveScope(isCurrentScope)
+            try validate(status, for: entry, scope: scope)
             try persist(status, entry: &entry)
             current = status
             await updateLiveActivity(status)
@@ -225,22 +282,26 @@ final class VaultTransferModel: ObservableObject {
                 } else {
                     status = try await client.getVaultUpload(uploadID: status.id)
                 }
-                try validate(status, for: entry)
+                try checkActiveScope(isCurrentScope)
+                try validate(status, for: entry, scope: scope)
                 try persist(status, entry: &entry)
                 current = status
                 await updateLiveActivity(status)
             }
             try checkActiveScope(isCurrentScope)
             guard status.status == "ready", status.verified else {
-                throw APIError.server(
-                    status: 502,
-                    message: status.error ?? "Die Zielkopie konnte nicht verifiziert werden."
-                )
+                if ["queued", "transferring"].contains(status.status) { throw URLError(.timedOut) }
+                throw VaultTransferError.verificationFailed(status.error ?? "Die Zielkopie konnte nicht verifiziert werden.")
             }
             await endLiveActivity(status)
     }
 
-    private func validate(_ status: VaultUploadStatus, for entry: VaultQueueEntry) throws {
+    private func validate(_ status: VaultUploadStatus, for entry: VaultQueueEntry, scope: VaultQueueScope) throws {
+        if let binding = status.endpointBinding, binding != VaultEndpointBinding(scope: scope) {
+            throw VaultTransferError.verificationFailed(
+                "Der Datenweg hat sich geändert. Die lokale Datei bleibt erhalten; Konfiguration neu laden und das Sicherungsziel prüfen."
+            )
+        }
         guard status.identity == entry.pairID, status.sha256.lowercased() == entry.sha256,
               status.size == entry.size, status.received >= 0, status.received <= entry.size else {
             throw APIError.invalidResponse
@@ -335,5 +396,12 @@ final class VaultTransferModel: ObservableObject {
             ActivityContent(state: state, staleDate: nil),
             dismissalPolicy: .default
         )
+    }
+}
+
+private enum VaultTransferError: LocalizedError {
+    case verificationFailed(String)
+    var errorDescription: String? {
+        switch self { case .verificationFailed(let message): return message }
     }
 }

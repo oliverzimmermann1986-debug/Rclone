@@ -80,7 +80,7 @@ def test_codemagic_verifies_fetched_main_and_exact_signed_tag_before_release_cha
     assert config.index("IMPORTED_FINGERPRINT") < provenance
     assert config.index("gpg --batch --quiet --import") < provenance
     assert provenance < version_write
-    assert "tests/test_ios_release_preflight.py" in config
+    assert "tests/test_ios_*.py" in config
 
 
 def test_codemagic_validates_live_backend_contracts_before_xcode_build():
@@ -93,7 +93,7 @@ def test_codemagic_validates_live_backend_contracts_before_xcode_build():
     contract_test_run = (
         "python3 -m pytest tests/test_native_login_contract.py "
         "tests/test_native_read_contract.py tests/test_install_pinned_xcodegen.py "
-        "tests/test_ios_release_preflight.py tests/test_ios_release_version.py"
+        "tests/test_ios_*.py"
     )
 
     assert dependency_install in normalized
@@ -115,12 +115,25 @@ def test_codemagic_uploads_public_app_store_eligible_build_without_auto_submissi
     assert "submit_to_app_store: false" in config
 
 
-def test_codemagic_pins_the_verified_simulator_image():
+def test_codemagic_pins_xcode_and_selects_an_available_simulator_by_id():
     root = Path(__file__).parents[1]
     config = (root / "codemagic.yaml").read_text(encoding="utf-8")
 
     assert "xcode: 26.4" in config
-    assert '-destination "platform=iOS Simulator,name=iPhone 17,OS=latest"' in config
+    assert (
+        'SIMULATOR_ID="$(python3 "$CM_BUILD_DIR/scripts/ios_simulator_destination.py")"'
+        in config
+    )
+    assert '-destination "platform=iOS Simulator,id=$SIMULATOR_ID"' in config
+    assert "tests/test_ios_*.py" in config
+
+
+def test_ios_ci_selects_an_available_simulator_by_id():
+    root = Path(__file__).parents[1]
+    config = (root / ".github/workflows/ios.yml").read_text(encoding="utf-8")
+
+    assert 'SIMULATOR_ID="$(python3 scripts/ios_simulator_destination.py)"' in config
+    assert '-destination "platform=iOS Simulator,id=$SIMULATOR_ID"' in config
 
 
 def test_codemagic_uses_checksum_verified_exact_xcodegen_before_generation():
@@ -154,9 +167,10 @@ def test_ios_ci_tracks_native_contract_sources():
         "contracts/native_read_contract_v1.json",
     ):
         for event in ("push", "pull_request"):
-            assert any(
-                fnmatchcase(expected_path, pattern)
-                for pattern in workflow["on"][event]["paths"]
+            trigger = workflow["on"][event]
+            patterns = trigger.get("paths") if isinstance(trigger, dict) else None
+            assert patterns is None or any(
+                fnmatchcase(expected_path, pattern) for pattern in patterns
             ), (event, expected_path)
 
 

@@ -43,6 +43,8 @@ from .auth_contract import (
 )
 from .config_store import get_config
 from .db import check_database_readonly, database_path, get_db
+from .device_vault import cleanup_vault_scratch
+from .recovery_snapshots import snapshot_root
 from .rclone_args import rclone_subprocess_env
 from .security import (
     CSRF_COOKIE,
@@ -62,6 +64,7 @@ from .routes import (
     api_push,
     api_recovery,
     api_remotes,
+    api_restore_plan,
     api_storage,
     api_test,
     api_vault,
@@ -75,6 +78,7 @@ from .jobs.job_lifecycle import (
     reconcile_locked_scope,
 )
 from .jobs.locks import file_lock_or_none
+from .jobs.restore_workspace import cleanup_orphaned_workspaces
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -232,6 +236,29 @@ def _run_push_dispatcher(stop_event: threading.Event) -> None:
         stop_event.wait(30)
 
 
+def _cleanup_restore_scratch(config: dict) -> None:
+    paths = config.get("paths") or {}
+    operations = (
+        (
+            "Restore",
+            lambda: cleanup_orphaned_workspaces(
+                Path(paths.get("temp_dir") or "/opt/rclone-sync/temp").expanduser()
+            ),
+        ),
+        ("Vault", lambda: cleanup_vault_scratch(config)),
+        ("Snapshot", lambda: cleanup_orphaned_workspaces(snapshot_root(config))),
+    )
+    for label, operation in operations:
+        try:
+            cleanup = operation()
+            if cleanup["removed"] or cleanup["failed"]:
+                logger.warning("%s scratch recovery: %s", label, cleanup)
+        except (OSError, ValueError):
+            # Cleanup is best-effort, with durable receipts retained for retry.
+            # An unavailable optional store must not prevent the web app starting.
+            logger.exception("%s scratch path could not be safely cleaned", label)
+
+
 @asynccontextmanager
 async def _lifespan(_app):
     db = get_db()
@@ -293,6 +320,8 @@ async def _lifespan(_app):
                     scope,
                     result.get("active_processes", 0),
                 )
+            elif scope == runtime_state.DEFAULT_CANCEL_SCOPE:
+                _cleanup_restore_scratch(get_config().snapshot())
     if recovered:
         logger.warning("%d verwaiste laufende Job(s) als stale markiert", recovered)
     resumed_batches = api_jobs.resume_pending_definition_batches()
@@ -586,6 +615,7 @@ app.include_router(api_pbs.router)
 app.include_router(api_push.router)
 app.include_router(api_webauthn.router)
 app.include_router(api_recovery.router)
+app.include_router(api_restore_plan.router)
 app.include_router(api_vault.router)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -776,6 +806,8 @@ def index(request: Request):
     if not session_user(token):
         return RedirectResponse(url="/login", status_code=303)
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    # Frontend patches can ship without changing the application version.
+    # Hash actual asset bytes so equal file timestamps cannot preserve old URLs.
     asset_revision = web_asset_cache_revision(STATIC_DIR, __version__)
     html = html.replace("?v=__APP_VERSION__", f"?v={asset_revision}")
     response = HTMLResponse(html)

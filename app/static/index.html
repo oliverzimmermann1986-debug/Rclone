@@ -97,6 +97,14 @@
           <button class="button secondary small" @click="loadConfig()" :disabled="configLoading" x-text="configLoading ? 'Lädt…' : 'Neu laden'"></button>
         </div>
         <div class="loading-state page-loading" x-show="configLoading && !configLoaded" role="status" aria-live="polite" x-cloak>Konfiguration wird geladen…</div>
+        <div class="connection-alert error" x-show="restoreTestStart.phase === 'unknown'" role="alert" x-cloak>
+          <span class="alert-icon" aria-hidden="true">!</span>
+          <span><strong>Startstatus unbekannt</strong><small>Die Antwort zum Restore-Drill fehlt. Der Auftrag kann bereits laufen oder abgeschlossen sein. Prüfe die Läufe, bevor du einen weiteren Drill startest.</small><small x-show="restoreTestStart.checked">Status geprüft: Es läuft kein Restore-Drill. Prüfe auch die abgeschlossenen Läufe.</small><small x-show="restoreTestStart.error" x-text="restoreTestStart.error"></small></span>
+          <div class="button-stack">
+            <button class="button secondary small" @click="reviewRestoreTestStart()" :disabled="restoreTestStart.checking" x-text="restoreTestStart.checking ? 'Prüft…' : 'Aufträge prüfen'"></button>
+            <button class="button danger small" x-show="restoreTestStart.checked" @click="retryRestoreTestStart()" :disabled="pending.restoreTest || busy()">Weiteren Drill starten</button>
+          </div>
+        </div>
         <!-- DASHBOARD -->
         <section x-show="page==='dashboard'" x-cloak>
           <div class="page-heading">
@@ -663,7 +671,7 @@
               <div><span class="section-kicker">Abdeckung</span><h3>Kopien je Datenbestand</h3><p>Nach Quellpfad gruppiert statt nach Pair — beantwortet, ob jeder Bestand mehrfach, an getrennten Orten und versioniert liegt.</p></div>
               <div class="heading-actions">
                 <button class="button secondary" @click="loadCopies()" :disabled="copies.loading" x-text="copies.loading ? 'Lädt…' : 'Aktualisieren'"></button>
-                <button class="button secondary" @click="runRestoreTest()" :disabled="busy()">Restore-Drill starten</button>
+                <button class="button secondary" @click="runRestoreTest()" :disabled="busy() || restoreTestStart.phase !== 'idle'" x-text="pending.restoreTest ? 'Start wird geprüft…' : 'Restore-Drill starten'"></button>
               </div>
             </div>
 
@@ -726,7 +734,7 @@
               <div class="form-grid three">
                 <label class="field"><span>Snapshot</span><select x-model="snapshots.restoreName" @change="loadSnapshotDiff()"><option value="">Bitte auswählen</option><template x-for="item in snapshots.items" :key="item.name"><option :value="item.name" x-text="formatDateTime(item.mtime) + ' · ' + item.name"></option></template></select></label>
                 <label class="field"><span>Aktuelles Passwort</span><input type="password" x-model="snapshots.password" autocomplete="current-password"></label>
-                <div class="field action-field"><span>Aktion</span><div class="button-row"><button class="button secondary" @click="loadSnapshotDiff()" :disabled="!snapshots.restoreName || snapshots.diff.loading" x-text="snapshots.diff.loading ? 'Vergleicht…' : 'Unterschiede anzeigen'"></button><button class="button danger" @click="restoreSnapshot()" :disabled="!snapshots.restoreName || !snapshots.password">Wiederherstellen</button></div></div>
+                <div class="field action-field"><span>Aktion</span><div class="button-row"><button class="button secondary" @click="loadSnapshotDiff()" :disabled="!snapshots.restoreName || snapshots.diff.loading" x-text="snapshots.diff.loading ? 'Vergleicht…' : 'Unterschiede anzeigen'"></button><button class="button danger" @click="restoreSnapshot()" :disabled="pending.snapshot || !snapshots.restoreName || !snapshots.password">Wiederherstellen</button></div></div>
               </div>
               <div class="snapshot-diff" x-show="snapshots.diff.data || snapshots.diff.error" x-cloak :role="snapshots.diff.error ? 'alert' : 'status'" aria-live="polite"><p class="error-text" x-show="snapshots.diff.error" x-text="snapshots.diff.error"></p><template x-if="snapshots.diff.data"><div><strong x-text="snapshots.diff.data.total + ' Änderungen' + (snapshots.diff.data.truncated ? ' (Anzeige begrenzt)' : '')"></strong><div class="snapshot-diff-list"><template x-for="change in snapshots.diff.data.changes" :key="change.path"><div><code x-text="change.path"></code><span x-text="change.snapshot"></span><b aria-hidden="true">→</b><span x-text="change.current"></span></div></template><p x-show="!snapshots.diff.data.total">Keine Unterschiede zur aktuellen Konfiguration.</p></div><small>Sensible Inhalte werden im Vergleich nur als gesetzt oder nicht gesetzt angezeigt.</small></div></template></div>
               <div class="snapshot-list"><template x-for="item in snapshots.items.slice(0,8)" :key="item.name"><div><span class="mono" x-text="item.name"></span><span x-text="formatBytes(item.size)"></span><span x-text="formatDateTime(item.mtime)"></span><span class="mono snapshot-hash" :title="item.sha256" x-text="item.sha256 ? item.sha256.slice(0,12) : '—'"></span></div></template></div>
@@ -812,6 +820,44 @@
 
                     <section class="settings-section schedule-routing">
                       <div class="settings-section-head"><div><h3>Zeitpläne werden pro Job verwaltet</h3><p>Zuordnung, Reihenfolge, Zeitplan und Wiederholung findest du gemeinsam in den Jobdefinitionen.</p></div><button type="button" class="button secondary" @click="navigate('definitions')">Jobs öffnen</button></div>
+                    </section>
+
+                    <section class="settings-section restore-plan" aria-labelledby="restore-plan-title" @input.stop="" @change.stop="">
+                      <div class="settings-section-head"><div><h3 id="restore-plan-title">Restore-Prüfplan</h3><p>Plane Stichproben mit Reserve vor dem siebentägigen Nachweisablauf. Die Änderung gilt für alle aktiven Datenwege.</p></div><button class="button secondary small" @click="reloadRestorePlan()" :disabled="restorePlan.loading || restorePlan.saving">Plan neu laden</button></div>
+                      <p x-show="restorePlan.loading" role="status">Prüfplan wird geladen…</p>
+                      <p x-show="restorePlanDirty()" role="status">Ungespeicherter Prüfplan-Entwurf. Er bleibt beim Wechsel innerhalb der Anwendung erhalten.</p>
+                      <div class="inline-error" x-show="restorePlan.error" x-text="restorePlan.error" role="alert"></div>
+                      <template x-if="restorePlan.settings">
+                        <div class="restore-plan-body">
+                          <fieldset class="restore-plan-fields" :disabled="restorePlan.saving || restorePlan.loading">
+                            <label class="check-row"><input type="checkbox" x-model="restorePlan.settings.enabled" @change="changeRestorePlan()"><span>Automatisch prüfen</span></label>
+                            <div class="form-grid two">
+                              <label class="field"><span>Rhythmus</span><select x-model="restorePlan.rhythm" @change="changeRestorePlan(true)"><option value="daily">Täglich</option><option value="weekly">Wöchentlich</option><option value="twice">Sonntag und Mittwoch</option><option value="custom">Eigener Zeitplan</option></select></label>
+                              <label class="field" x-show="restorePlan.rhythm !== 'custom'"><span>Uhrzeit</span><input type="time" x-model="restorePlan.time" @change="changeRestorePlan(true)"></label>
+                              <label class="field" x-show="restorePlan.rhythm === 'weekly'"><span>Wochentag</span><select x-model="restorePlan.weekday" @change="changeRestorePlan(true)"><option value="0">Sonntag</option><option value="1">Montag</option><option value="2">Dienstag</option><option value="3">Mittwoch</option><option value="4">Donnerstag</option><option value="5">Freitag</option><option value="6">Samstag</option></select></label>
+                              <label class="field" x-show="restorePlan.rhythm === 'custom'"><span>Zeitplan (Cron)</span><input x-model="restorePlan.settings.schedule" @input="changeRestorePlan()" placeholder="0 5 * * 0,3"></label>
+                              <label class="field"><span>Dateien je Datenweg</span><input type="number" min="1" max="500" x-model.number="restorePlan.settings.sample_files" @input="changeRestorePlan()"></label>
+                              <label class="field"><span>Datenlimit je Datenweg (MiB)</span><input type="number" min="1" max="51200" x-model.number="restorePlan.settings.max_total_mb" @input="changeRestorePlan()"></label>
+                            </div>
+                          </fieldset>
+                          <section x-show="restorePlan.conflict" aria-label="Prüfplan-Konfliktvergleich">
+                            <h4>Entwurf und aktuellen Serverstand vergleichen</h4>
+                            <p>Dein Entwurf wurde nicht gespeichert. Prüfe die Unterschiede, bevor du ihn gegen den aktuellen Stand prüfen lässt. Nur deine Änderungen werden übertragen; unveränderte Felder verwenden den aktuellen Serverwert. Erst die anschließende Übernahme speichert den Plan.</p>
+                            <ul><template x-for="item in restorePlanComparison()" :key="item.key"><li><strong x-text="item.label"></strong><br><span>Dein Entwurf: </span><span x-text="restorePlanValue(item.draft)"></span><span> · Server: </span><span x-text="restorePlanValue(item.current)"></span></li></template></ul>
+                            <p x-show="restorePlan.serverVersion">Aktuelle Server-Zeitzone: <strong x-text="restorePlan.serverVersion?.timezone"></strong></p>
+                            <div class="button-row"><button class="button secondary" @click="loadRestorePlanConflict()" :disabled="restorePlan.loading || restorePlan.saving">Serverstand zum Vergleich laden</button><button class="button secondary" @click="previewRestorePlan(true)" :disabled="!restorePlan.serverVersion || restorePlan.loading || restorePlan.saving">Entwurf gegen aktuellen Stand prüfen</button></div>
+                          </section>
+                          <div class="button-row"><button class="button secondary" @click="previewRestorePlan()" :disabled="restorePlan.saving || restorePlan.loading || restorePlan.conflict">Vorschau prüfen</button><button class="button primary" @click="saveRestorePlan()" :disabled="restorePlan.saving || restorePlan.loading || restorePlan.conflict || restorePlan.previewKey !== restorePlanKey() || !!restorePlan.error" x-text="restorePlan.saving ? 'Speichert…' : 'Prüfplan übernehmen'"></button></div>
+                          <div class="restore-plan-preview" x-show="restorePlan.previewKey === restorePlanKey() && !!restorePlan.preview" aria-live="polite">
+                            <p>Zeitzone: <strong x-text="restorePlan.preview?.timezone"></strong></p>
+                            <p x-show="restorePlan.preview?.due_now">Automatische Prüfung ist bereits fällig.</p>
+                            <ul><template x-for="timestamp in (restorePlan.preview?.next_runs || [])" :key="timestamp"><li x-text="restorePlanDate(timestamp)"></li></template></ul>
+                            <ul><template x-for="warning in (restorePlan.preview?.warnings || [])" :key="warning"><li x-text="warning"></li></template></ul>
+                            <ul><template x-for="path in (restorePlan.preview?.data_paths || [])" :key="path.id"><li><strong x-text="path.name"></strong>: <span x-text="restorePlanEvidenceLabel(path)"></span><span x-show="path.coverage_gap"> · Nachweis fehlt oder Prüflücke</span></li></template></ul>
+                          </div>
+                          <p class="muted">Mehr Daten können Cloud-Kosten verursachen. Die Vorschau ändert keine Daten; geplante Termine bestätigen keinen erfolgreichen Restore. Sicherungsjobs werden durch die Übernahme nicht verändert.</p>
+                        </div>
+                      </template>
                     </section>
 
                     <section class="settings-section schedule-section" x-show="false" aria-hidden="true">

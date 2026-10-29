@@ -21,9 +21,9 @@ import queue
 import random
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +55,7 @@ from .rclone_sync import (
     reset_cancel,
 )
 from .restore_sampling import select_budgeted_sample
+from .restore_workspace import create_workspace, forget_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ JOB_KIND = "restoretest"
 # Muss zu scheduler.RESTORE_TEST_HISTORY_KEY passen; dort importiert, um einen
 # Zirkelimport zu vermeiden.
 HISTORY_KEY = "restoretest:global"
+MANUAL_HISTORY_KEY = "restoretest:manual"
 AGGREGATE_RUN_NAME = "restore-drill"
 
 # Ein vollständiges rekursives Listing kann bei Millionen Objekten Stunden
@@ -393,20 +395,23 @@ def run_pair_restore_test(
         result.update({"ok": False, "error": f"Temp-Verzeichnis nicht nutzbar: {exc}"})
         return result
 
-    workdir = Path(
-        tempfile.mkdtemp(prefix=f"restore-{_safe_name(name)}-", dir=str(temp_root))
-    )
+    try:
+        workdir, workspace_lease = create_workspace(
+            temp_root, prefix=f"restore-{_safe_name(name)}-"
+        )
+    except OSError as exc:
+        result.update({"ok": False, "error": f"Temp-Verzeichnis nicht nutzbar: {exc}"})
+        return result
     try:
         workdir.chmod(0o700)
     except OSError:
         pass
     restored = workdir / "data"
-    restored.mkdir(parents=True, exist_ok=True)
-
-    timeout_sec = max(300, int(float(backup.get("timeout_hours", 4) or 4) * 3600))
-    max_total_bytes = int(settings["max_total_mb"]) * 1024 * 1024
-    result["budget_bytes"] = max_total_bytes
     try:
+        restored.mkdir(parents=True, exist_ok=True)
+        timeout_sec = max(300, int(float(backup.get("timeout_hours", 4) or 4) * 3600))
+        max_total_bytes = int(settings["max_total_mb"]) * 1024 * 1024
+        result["budget_bytes"] = max_total_bytes
         result["sample_status"] = "listing"
         sample = _sample_paths(
             copy_target,
@@ -695,8 +700,11 @@ def run_pair_restore_test(
         cleanup_error = ""
         try:
             shutil.rmtree(workdir)
+            forget_workspace(workdir)
         except Exception as exc:
             cleanup_error = str(exc).strip() or type(exc).__name__
+        finally:
+            workspace_lease.release()
         if cleanup_error or workdir.exists():
             if not cleanup_error:
                 cleanup_error = "Temp-Verzeichnis besteht nach der Bereinigung weiter"
@@ -753,8 +761,14 @@ def run_restore_test(
     seed: Optional[int] = None,
     reset_cancel_state: bool = True,
     config_snapshot: Optional[Mapping[str, Any]] = None,
+    job_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """Drill über alle ausgewählten Pairs. Rückgabe im Job-Summary-Format."""
+    # One identity belongs to the entire run, including notification replays.
+    # API and scheduler callers use their already reserved database job.
+    run_identity = (
+        {"job_id": job_id} if job_id is not None else {"run_id": uuid.uuid4().hex}
+    )
     snapshot = (
         copy.deepcopy(dict(config_snapshot))
         if config_snapshot is not None
@@ -812,8 +826,8 @@ def run_restore_test(
         for item in results
         if item.get("name")
     }
-    # Aggregatzeile: Der Scheduler verfolgt den Drill über einen einzigen
-    # Historienschlüssel, weil er als ein Lauf über alle Pairs ausgeführt wird.
+    # Only automatic drills advance the global schedule and its retry cursor.
+    # A manual single-pair success must not complete a failed all-pair drill.
     aggregate = {
         "name": AGGREGATE_RUN_NAME,
         "ok": ok,
@@ -823,7 +837,9 @@ def run_restore_test(
     }
     if cancelled:
         aggregate["cancelled"] = True
-    history_keys[AGGREGATE_RUN_NAME] = HISTORY_KEY
+    history_keys[AGGREGATE_RUN_NAME] = (
+        HISTORY_KEY if trigger == "scheduler" else MANUAL_HISTORY_KEY
+    )
 
     summary: dict[str, Any] = {
         "kind": JOB_KIND,
@@ -834,6 +850,7 @@ def run_restore_test(
         "verified_files": verified,
         "sampled_files": sampled,
         "history_keys": history_keys,
+        **run_identity,
     }
     if not results:
         summary["error"] = "Kein passendes Pair ausgewählt"
@@ -848,6 +865,11 @@ def run_restore_test(
 def _notify_result(summary: Mapping[str, Any], results: list[dict[str, Any]]) -> None:
     if not results or summary.get("cancelled"):
         return
+    identity = {
+        key: summary[key]
+        for key in ("job_id", "run_id")
+        if summary.get(key) is not None
+    }
     if is_partial_restore_summary(summary):
         partial_results = [item for item in results if is_verified_partial(item)]
         notify(
@@ -858,6 +880,7 @@ def _notify_result(summary: Mapping[str, Any], results: list[dict[str, Any]]) ->
                 for item in partial_results
             ),
             pairs=[str(item.get("name")) for item in partial_results],
+            **identity,
         )
         return
     failed = [
@@ -879,6 +902,7 @@ def _notify_result(summary: Mapping[str, Any], results: list[dict[str, Any]]) ->
             else "Restore-Drill fehlgeschlagen",
             "\n".join(details),
             pairs=[str(item.get("name")) for item in failed],
+            **identity,
         )
         return
     detail = "\n".join(
@@ -892,12 +916,14 @@ def _notify_result(summary: Mapping[str, Any], results: list[dict[str, Any]]) ->
         f"Restore-Drill bestanden: {summary.get('verified_files')} Dateien geprüft",
         detail,
         pairs=[str(item.get("name")) for item in results],
+        **identity,
     )
 
 
 __all__ = [
     "AGGREGATE_RUN_NAME",
     "HISTORY_KEY",
+    "MANUAL_HISTORY_KEY",
     "JOB_KIND",
     "PAIR_PREFIX",
     "restore_test_settings",
