@@ -5,14 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DETAILS = (
-    "Sicherpfad Contributors",
-    "[Anbieterangaben entfernt]",
-    "[Anschrift entfernt]",
-    "[Anschrift entfernt]",
-    "Deutschland",
-    "contact@example.invalid",
-)
+TEMPLATE_NOTICE = "keine persönlichen Anbieterangaben"
 PUBLIC_IMPRINT = "https://oliverzimmermann1986-debug.github.io/Rclone/impressum.html"
 PUBLIC_SUPPORT = "https://github.com/oliverzimmermann1986-debug/Rclone/issues"
 
@@ -33,11 +26,14 @@ def links_from(path):
     return parser.hrefs
 
 
-def test_public_imprint_contains_approved_contact_and_no_scripts():
+def test_public_project_information_is_neutral_and_has_no_scripts():
     page = (ROOT / "docs/impressum.html").read_text(encoding="utf-8")
-    assert all(detail in page for detail in DETAILS)
+    assert TEMPLATE_NOTICE in page
+    assert "eigene App oder Website" in page
     assert "<script" not in page.lower()
-    assert "mailto:contact@example.invalid" in links_from(ROOT / "docs/impressum.html")
+    assert not any(
+        href.startswith("mailto:") for href in links_from(ROOT / "docs/impressum.html")
+    )
 
 
 def test_all_public_pages_link_to_existing_imprint():
@@ -55,31 +51,29 @@ def test_web_login_and_dashboard_have_public_imprint_link():
         assert PUBLIC_SUPPORT in links_from(ROOT / "app/static" / name)
 
 
-def test_public_support_links_use_the_central_module_form():
+def test_public_support_links_use_public_project_feedback():
     for name in ("index.html", "datenschutz.html", "impressum.html"):
         path = ROOT / "docs" / name
         assert PUBLIC_SUPPORT in links_from(path)
-        assert (
-            "https://github.com/oliverzimmermann1986-debug/Rclone/issues"
-            not in path.read_text(encoding="utf-8")
-        )
+        assert not any(href.startswith("mailto:") for href in links_from(path))
     metadata = (ROOT / "ios/APP_STORE_METADATA.md").read_text(encoding="utf-8")
     assert f"- Support-URL: `{PUBLIC_SUPPORT}`" in metadata
 
 
-def test_native_imprint_is_bundled_and_reachable_before_and_after_login():
+def test_native_project_information_is_bundled_and_reachable_without_login():
     views = ROOT / "ios/RcloneMobile/Views"
     legal = (views / "LegalInformationView.swift").read_text(encoding="utf-8")
     login = (views / "LoginView.swift").read_text(encoding="utf-8")
     system = (views / "SystemView.swift").read_text(encoding="utf-8")
-    assert all(detail in legal for detail in DETAILS)
+    assert TEMPLATE_NOTICE in legal
+    assert "mailto:" not in legal
     assert PUBLIC_SUPPORT in legal
     assert ".textSelection(.enabled)" in legal
     assert "@EnvironmentObject" not in legal
-    assert 'Button("Impressum")' in login
+    assert 'Button("Projektinformationen")' in login
     assert (
         ".sheet(isPresented: $showingLegalInformation) { LegalInformationSheet() }"
         in login
     )
     assert "NavigationLink { LegalInformationView() }" in system
-    assert 'Label("Impressum", systemImage: "info.circle")' in system
+    assert 'Label("Projektinformationen", systemImage: "info.circle")' in system

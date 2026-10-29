@@ -84,7 +84,7 @@ struct LoginView: View {
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.top, 18)
-                    Button("Impressum") {
+                    Button("Projektinformationen") {
                         focusedField = nil
                         showingLegalInformation = true
                     }
