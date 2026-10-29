@@ -67,7 +67,7 @@ struct SystemView: View {
             }
             Section("Informationen") {
                 NavigationLink { LegalInformationView() } label: {
-                    Label("Impressum", systemImage: "info.circle")
+                    Label("Projektinformationen", systemImage: "info.circle")
                 }
             }
         }
