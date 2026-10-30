@@ -29,6 +29,7 @@
 - Filterbare/paginierte Jobhistorie mit Detailansicht, Logsuche und Auto-Aktualisierung
 - Lokales Auditprotokoll für Scheduler-, Konfigurations-, Start- und Recovery-Aktionen
 - Kompakter `/readyz`-Endpunkt für Uptime Kuma und Readiness-Prüfungen
+- Notfall-Lockdown, Cloud-Bitrot-Scrub, PBS-Boot-Drill, Airgap-USB, ZFS-Snapshot-Quelle und weitere Erweiterungen; Überblick unter [Betriebserweiterungen](#betriebserweiterungen)
 
 
 ## Weboberfläche
@@ -57,6 +58,28 @@ Die Oberfläche ist als Betriebszentrale statt als reine Konfigurationsmaske auf
 Produktive Aktionen bleiben bewusst visuell von Dry-Runs getrennt. Löschende Läufe zeigen weiterhin die vorhandenen Schutzbedingungen und werden serverseitig validiert; die GUI ist keine Umgehung der Sicherheitslogik.
 
 Tastaturkürzel: `Strg/Cmd + S` speichert offene Konfigurations- bzw. Filteränderungen. `/` fokussiert auf der Pair- oder Jobseite direkt die Suche.
+
+### Betriebserweiterungen
+
+Mehrere der folgenden Funktionen brauchen Rechte, die die Standard-Units nicht vergeben; die nötigen Drop-ins stehen unter [Privilegierte Erweiterungen freischalten](#privilegierte-erweiterungen-freischalten).
+
+- Der Notfall-Lockdown (Panik-Knopf) beendet laufende Läufe, pausiert den Scheduler für 31 Tage, versucht die Mountpoints aktiver Datenwege mit `require_mountpoint` schreibgeschützt neu einzuhängen und meldet alle Sitzungen ab. Auslösen und Aufheben verlangen das aktuelle Passwort. Beim Aufheben nennt die Antwort die nötigen `mount -o remount,rw`-Befehle und führt sie absichtlich nicht selbst aus.
+- Die PBS-Ansicht zeigt Belegung und Dedup-Faktor des Datastores. Die Wartungsdrossel stellt fällige rclone-Läufe des Schedulers zurück, solange auf dem PBS Garbage Collection oder Verify läuft; manuelle Läufe bleiben unberührt. Ist die PBS-API nicht erreichbar, gilt die Drossel als inaktiv (fail-open), damit Backups nicht dauerhaft warten.
+- Der QEMU-Boot-Drill holt das jüngste VM-Disk-Image einer PBS-Gruppe als temporäre Raw-Datei zurück (kein ZFS-Klon), startet es headless und gilt als bestanden, sobald der QEMU Guest Agent auf einen Ping antwortet. Der Arbeitsbereich wird in jedem Fall gelöscht, die Konsolenausgabe steht in der Job-Zusammenfassung. Abbruch und Lockdown beenden auch das Zurückholen des Images. Arbeitsbereiche, die ein hart beendeter Lauf hinterlassen hat, löscht der nächste Lauf zu Beginn (`stale_cleaned` in der Zusammenfassung).
+- Der Cloud-Bitrot-Scrub zieht eine Stichprobe aus den Cloud-Dateien, die noch keine Baseline haben oder seit `rotation_days` ungeprüft sind, die ältesten zuerst. Er bildet ihre SHA-256, vergleicht sie mit einer lokalen Baseline-Tabelle und alarmiert, wenn der Hash einer Datei mit unveränderter Größe und Änderungszeit abweicht. Die Limits in `backup.bitrot_scrub` halten den Egress klein.
+- Die GFS-Ausdünnung teilt die Versionsordner standardmäßig in 7 Tages-, 4 Wochen- und 12 Monatsstufen. Ein Ordner unter dem `backup_dir` enthält nur die Dateien, die ein Lauf verdrängt hat. Deshalb führt sie die jüngeren Ordner einer Stufe in deren ältesten Ordner zusammen (`rclone move --ignore-existing`; je Pfad bleibt die älteste Vorversion, übersprungene jüngere Duplikate werden danach gelöscht) und löscht nur Ordner, die in keine Stufe mehr fallen. Sie betrachtet nur Ordner mit Zeitstempelnamen, zeigt vorab geplante Zusammenführungen und Löschungen und dünnt von Hand nur mit Passwort aus. Ist `backup.versions_lifecycle.enabled` gesetzt, läuft sie zusätzlich nach jedem erfolgreichen produktiven Lauf ohne weitere Bestätigung; alle Versionen eines Ordners löscht sie nie, und bei aktivem Lockdown bricht sie ab. Ein globales absolutes `backup_dir`, `backup_dir1` oder `backup_dir2` (etwa `b2:versions/{date}`) ohne Pair-eigenen Wert ist für alle Datenwege dieselbe Wurzel; sie wird nicht ausgedünnt, die Vorschau meldet das als Warnung. Von Hand dünnt sie nur aus, solange kein Backup läuft, und hält dabei den Backup-Lock. Wer sie einschaltet, `keep_*`-Werte senkt oder ein `backup_dir` ändert, muss beim Speichern das aktuelle Passwort eingeben.
+- Bei Airgap-USB bindet ein Datenweg mit `airgap_device` das Gerät per `udisksctl mount` nur für die Dauer des Jobs ein. Danach folgen `sync`, Unmount und Power-off. Der lokale Pfad des Datenwegs muss auf dem Gerät liegen.
+- Mit `zfs_snapshot: true` (nur bei `direction: push`) liest rclone aus `<Mountpoint>/.zfs/snapshot/<Name>/…` statt aus dem laufenden Dateisystem. Der Snapshot wird nach dem Lauf wieder zerstört. Eigene Snapshots (`sicherpfad-…`) desselben Datasets, die älter als 24 Stunden sind, stammen aus abgebrochenen Läufen; sie werden vor dem neuen Snapshot zerstört.
+- Das S3-Object-Lock-Siegel liest die S3-Zugangsdaten aus der rclone-Konfiguration und fragt je Bucket `?object-lock` und `?versioning` per SigV4 ab. Es stuft jeden Bucket als `immutable`, `versioned`, `unprotected` oder `unknown` ein; aktives Object Lock ohne Standardregel heißt `lock_no_default`. `crypt`- oder `alias`-Remotes über S3 löst es nicht auf.
+- Bisync benennt Konfliktkopien nach ihrer Herkunft (`datei.conflict-path1-1` aus der Cloud, `datei.conflict-path2-1` von lokal). Die Konfliktauflösung behält je Datei die Fassung von Seite 1 (Cloud, path1), Seite 2 (lokal) oder beide. Ist die Herkunft nicht eindeutig, etwa bei mehreren Kopien einer Seite oder alten `conflict3`-Kopien, geht nur „Beide behalten“. Wer dabei Kopien löscht, bestätigt mit dem Passwort.
+- Nach einem Dry-Run listet die Änderungsmatrix die geplanten Änderungen, und einzelne Pfade lassen sich vor dem produktiven Lauf abwählen. Bei bisync geht das nicht, weil eine geänderte Filtermenge einen Resync erzwingen würde.
+- Der Restore-Diff vergleicht eine Datei im Staging zeilenweise mit der Live-Datei des Datenwegs. Er akzeptiert UTF-8-Textdateien bis 1 MiB und vergleicht höchstens die ersten 5000 Zeilen.
+- Der VPN-Sensor zeigt den WireGuard-Status (`wg show` braucht `CAP_NET_ADMIN`), den Tailscale-Status und TCP-Probes zu den Zielen aus `backup.vpn_probes`.
+- Die Bandbreiten-Heatmap wertet die Laufhistorie nach Wochentag und Stunde aus und schlägt für Zeitpläne mit fester Stunde ein besseres Fenster vor. Ein Vorschlag verschiebt nur die Stunde, nie die Häufigkeit, und wirkt erst, wenn der Zeitplan gespeichert wird.
+- Der Crypt-Assistent legt ein rclone-`crypt`-Remote über einem vorhandenen Basis-Remote an und zeigt die Schlüssel genau einmal an. Sie fehlen im Notfallpaket und gehören in einen Passwortmanager. „Zero-Knowledge“ gilt nur gegenüber dem Cloud-Anbieter: `rclone.conf` enthält die Schlüssel obscured, also umkehrbar verschleiert und nicht verschlüsselt.
+- Datenwege tragen bis zu 10 `tags`; die Oberfläche filtert danach und startet gleich markierte Datenwege gesammelt.
+
+Nicht umgesetzt ist eine Content-Security-Policy ohne `'unsafe-eval'`, weil die Oberfläche Alpine-Ausdrücke direkt im HTML nutzt und die CSP-Variante von Alpine sie nicht unterstützt. Die iOS-App zeigt die neuen Funktionen noch nicht.
 
 ## Native iPhone-App
 
@@ -146,6 +169,91 @@ Für jeden NAS-/Bind-Mount empfiehlt sich zusätzlich `require_mountpoint: true`
 
 Die Systemkarte zeigt Werte **innerhalb des Gasts**. Bei einem LXC werden vorhandene cgroup-v2-Limits für CPU und RAM bevorzugt; andernfalls gelten die vom Kernel sichtbaren Werte; die vollständige Proxmox-Hostauslastung wird bewusst nicht abgefragt und benötigt keine PVE-API-Zugangsdaten.
 
+### Privilegierte Erweiterungen freischalten
+
+Die mitgelieferten Units `systemd/rclone-sync-web.service` und `systemd/sync-scheduler.service` laufen mit leerem `CapabilityBoundingSet=`, `NoNewPrivileges=true`, `PrivateDevices=true` und `MemoryDenyWriteExecute=true`. Darunter scheitern fünf Erweiterungen. Alle melden den Fehler, statt ihn zu verschweigen:
+
+- Lockdown-Remount: Ohne `CAP_SYS_ADMIN` schlägt `mount -o remount,ro` fehl, und der Lockdown-Bericht führt den Mountpoint als fehlgeschlagen.
+- ZFS-Snapshot-Quelle: Ohne `/dev/zfs` kann `zfs` keinen Snapshot anlegen, der Lauf des Datenwegs scheitert.
+- Airgap-USB: Ohne `/dev/disk` und Polkit-Freigabe kann `udisksctl` das Gerät nicht einbinden.
+- Boot-Drill: Ohne `/dev/kvm` und mit `MemoryDenyWriteExecute=true` startet QEMU nicht, weil der JIT von TCG blockiert wird.
+- VPN-Sensor: `wg show` braucht `CAP_NET_ADMIN`; der Sensor meldet WireGuard als nicht verfügbar.
+
+Ein Drop-in gehört an die Unit, die den Lauf ausführt: `rclone-sync-web.service` für die Weboberfläche und manuell gestartete Läufe, `sync-scheduler.service` für geplante Läufe, `rclone-sync.service` für den manuellen Voll-Run. Wer mehrere Wege nutzt, legt es an jeder dieser Units an.
+
+```bash
+sudo systemctl edit rclone-sync-web.service
+sudo systemctl edit sync-scheduler.service
+```
+
+`systemctl edit` schreibt nach `/etc/systemd/system/<Unit>.d/override.conf`. Der Installer ersetzt nur die Unit-Dateien selbst, die Drop-ins überstehen daher ein Upgrade.
+
+Für die ZFS-Snapshot-Quelle `/dev/zfs` freigeben und dem Dienstkonto die Rechte auf das Dataset delegieren:
+
+```ini
+[Service]
+PrivateDevices=false
+DeviceAllow=/dev/zfs rw
+```
+
+```bash
+sudo zfs allow rclone-sync snapshot,destroy,mount <dataset>
+```
+
+Für Airgap-USB müssen die Gerätedateien sichtbar sein, und Polkit muss `udisksctl` für das Dienstkonto zulassen. Das Einhängeverzeichnis von udisks2 braucht Schreibrechte; es muss beim Dienststart existieren. Eine engere Variante wäre `BindReadOnlyPaths=/dev/disk` (ungeprüft).
+
+```ini
+[Service]
+PrivateDevices=false
+ReadWritePaths=/run/media/rclone-sync
+```
+
+Die Polkit-Regel (`/etc/polkit-1/rules.d/50-rclone-sync-udisks.rules`):
+
+```javascript
+polkit.addRule(function (action, subject) {
+  var allowed = [
+    "org.freedesktop.udisks2.filesystem-mount",
+    "org.freedesktop.udisks2.filesystem-mount-other-seat",
+    "org.freedesktop.udisks2.filesystem-unmount-others",
+    "org.freedesktop.udisks2.power-off-drive",
+    "org.freedesktop.udisks2.power-off-drive-other-seat"
+  ];
+  if (subject.user === "rclone-sync" && allowed.indexOf(action.id) !== -1) {
+    return polkit.Result.YES;
+  }
+});
+```
+
+Für den Boot-Drill:
+
+```ini
+[Service]
+MemoryDenyWriteExecute=false
+PrivateDevices=false
+DeviceAllow=/dev/kvm rw
+SupplementaryGroups=kvm
+```
+
+Auf dem Host müssen `qemu-system-x86` und `proxmox-backup-client` installiert sein, im Gast der `qemu-guest-agent`. Ohne dessen Antwort besteht der Drill nicht. QEMU läuft mit `-nodefaults` und ohne Netzwerkkarte, der zurückgeholte Gast kommt also nicht ins Netz. Das Image liegt unter `pbs.boot_drill.scratch_dir` (Standard `paths.temp_dir`) und braucht Platz für seine Größe plus 512 MiB; ein eigener Pfad muss in `ReadWritePaths` stehen. In einem LXC muss `/dev/kvm` zuerst vom Proxmox-Host durchgereicht werden. Ohne `/dev/kvm` bootet QEMU per TCG und deutlich langsamer; dann `pbs.boot_drill.timeout_seconds` erhöhen (Standard 60, Maximum 900).
+
+Für die PBS-Ansicht und die Wartungsdrossel ist keine Unit-Änderung nötig, aber `pbs.enabled: true` und ein API-Token mit `Datastore.Audit` auf `/datastore/<store>` sowie `Sys.Audit` auf `/system/tasks`. Bei einem selbstsignierten Zertifikat ist `pbs.fingerprint` Pflicht, sonst lehnt die Anwendung die Verbindung ab.
+
+Der VPN-Sensor läuft in der Web-Unit. Er braucht neben der Capability den Adresstyp `AF_NETLINK`, den die Standard-Unit nicht erlaubt:
+
+```ini
+[Service]
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+```
+
+In einem LXC sieht `wg` nur Schnittstellen im Netzwerk-Namespace des Containers.
+
+Für den Lockdown-Remount gibt es kein Beispiel. `CAP_SYS_ADMIN` kommt Root-Rechten sehr nahe, und ob `mount` mit einer ambienten Capability für ein Nicht-Root-Konto arbeitet, ist nicht geprüft. Ein fehlgeschlagener Remount hält die übrigen Lockdown-Schritte nicht auf. Den Schreibschutz der Mounts setzt der Betreiber dann selbst, etwa auf dem Proxmox-Host.
+
+Rechte gezielt per Drop-in an der Unit lockern, die sie braucht, und nicht in den mitgelieferten Dateien. Die Beispiele sind nicht auf einem Zielsystem getestet; Gerätepfade, Polkit-Aktionen und Gruppennamen vor dem Einsatz prüfen.
+
 ## Wichtigste Schutzmechanismen
 
 ### Löschschutz
@@ -201,6 +309,10 @@ Eine Expertenausnahme ist mit `backup.allow_unsafe_rclone_args: true` möglich, 
 - native Push-Aktionen sind an Server und aktuelle App-Sitzung gebunden; Mitteilungen älterer Server ohne diese Bindung bleiben sichtbar, lösen aber keine Aktion aus
 - rclone-Unterprozesse erhalten `RCLONE_ASK_PASSWORD=false` und können keine Dienste blockierend nach einem Passwort fragen
 - systemd-Sandbox mit leerem Capability-Set, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectProc=invisible`, deaktiviertem Uvicorn-Serverheader und restriktiven Schreibpfaden
+- der Lockdown-Aufruf dauert je nach Zahl der Prozesse und Mountpoints einige Sekunden bis etwa 30 Sekunden, weil Abbrüche zuerst geordnet erfolgen und erst danach SIGKILL folgt
+- der Lockdown-Zustand wird zuerst gesetzt; Job-Starts, Scheduler-Steuerung, Konfliktauflösung und Versions-Ausdünnung antworten daher schon während des Aufrufs mit HTTP 423, bis der Lockdown aufgehoben ist; der Server sendet das Push-Ereignis `lockdown`
+- Crypt-Schlüssel erscheinen nur einmal im Assistenten und fehlen im Notfallpaket; ohne sie sind die verschlüsselten Cloud-Daten verloren, deshalb gehören sie in einen Passwortmanager
+- die S3-Abfragen des Object-Lock-Siegels nutzen die Schlüssel aus `rclone.conf` nur serverseitig; das Siegel ist eine Momentaufnahme und wird eine Stunde zwischengespeichert (`?refresh=true` erzwingt eine neue Abfrage)
 
 Neue Push-Nutzlasten enthalten generische Titel und Texte sowie technische IDs; Job-/Datenwegnamen und rohe Fehlertexte bleiben auf dem Server. Token, Text und technische Kennungen werden über Apples APNs übertragen; Verarbeitung in den USA ist möglich. Der Serverbetreiber prüft Rechtsgrundlage und Drittlandgarantien vor Aktivierung. Geräteregistrierungen: standardmäßig 7 Tage Lease, höchstens 90; erledigte Outbox: 30 Tage. Das Systemjournal hat eine getrennte Betreiberfrist.
 Zugangsdaten werden in Nutzlasten, Logs und Support-Bundles maskiert.
@@ -349,7 +461,12 @@ Wichtige globale Werte:
 - `web.secure_cookie`: standardmäßig `auto` (Secure-Cookies bei HTTPS, direktes lokales HTTP bleibt nutzbar); hinter festem HTTPS `true` verwenden. Bei TLS-Proxys `web.trusted_proxy_ips` auf die tatsächlichen Proxy-Hops begrenzen; `X-Forwarded-Proto` wird ausschließlich von diesen Peers übernommen.
 - `web.hsts_seconds`: erst bei dauerhaftem HTTPS aktivieren
 - `web.local_browse_roots`: erlaubte lokale Browser-/Quick-Sync-Wurzeln
-- `notifications.apns`: native Fehler-Pushs mit dauerhafter Outbox, Retry und Geräte-Lease
+- `notifications.apns`: native Fehler-Pushs mit dauerhafter Outbox, Retry und Geräte-Lease; neue Events `bitrot_detected`, `boot_drill_ok`, `boot_drill_error`, `lockdown`
+- `backup.versions_lifecycle`: gestaffelte Aufbewahrung von Vorversionen (`enabled: false`, `keep_daily` 7, `keep_weekly` 4, `keep_monthly` 12; pro Pair überschreibbar)
+- `backup.bitrot_scrub`: Prüfsummen-Stichprobe gegen stille Datenfäulnis; standardmäßig aus, Lauf pro `schedule` (Standard `0 4 * * *`), begrenzt durch `sample_percent`, `max_files`, `max_total_mb`, `max_scan_files`, `rotation_days`
+- `backup.vpn_probes`: bis zu 10 Erreichbarkeitstests im Format `host:port` bzw. `[IPv6]:port`
+- `pbs.gc_throttle`: Drosselung gegenüber der PBS-Garbage-Collection (`enabled: true`, `poll_seconds` 60, Bereich 15–900)
+- `pbs.boot_drill`: Boot-Test eines PBS-Wiederherstellungspunkts, standardmäßig aus; bei `enabled` ist `group` (`vm/<id>`, `ct/<id>` oder `host/<id>`) Pflicht, bootbar sind aber nur VM-Disk-Images; weitere Felder `schedule`, `archive`, `memory_mb`, `timeout_seconds`, `scratch_dir`
 - `maintenance.job_retention_days`, `keep_latest_jobs` und `log_retention_days`: Aufbewahrung
 
 Wichtige Pair-Werte:
@@ -364,6 +481,10 @@ Wichtige Pair-Werte:
 - `min_local_files`, `min_remote_files`, `min_free_gb`: Plausibilitätsgrenzen
 - `allow_empty_remote_target`: hebt den erzwungenen Mount-Drop-Schutz für ein bewusst leeres lokales Ziel auf (`min_remote_files` bleibt dann bei 0)
 - `rclone_args`: zusätzliche, validierte Argumente
+- `airgap_device`: optionales Block-Gerät unter `/dev/` (leer = nicht gesetzt)
+- `zfs_snapshot`: ZFS-Snapshot vor dem Lauf, nur bei `direction: push` (Standard `false`)
+- `tags`: bis zu 10 Kleinbuchstaben-Marken (`a-z`, `0-9`, `_`, `-`, höchstens 24 Zeichen)
+- `versions_lifecycle`: Teil-Override des globalen Blocks für dieses Pair
 
 Sicherheitsrelevante Änderungen – etwa Benutzername, PBS-Ziel/Secret,
 lokale Browser-Wurzeln oder das Abschalten von Schutzschaltern –
@@ -430,7 +551,7 @@ RCLONE_CONFIG=/home/rclone-sync/.config/rclone/rclone.conf
 RCLONE_ASK_PASSWORD=false
 ```
 
-Das rclone-Konfigurationsverzeichnis ist gezielt beschreibbar, damit OAuth-Tokens erneuert werden können. Bei lokalen Datenpfaden außerhalb `/mnt`, `/media`, `/srv` oder `/opt/rclone-sync` müssen die `ReadWritePaths` per systemd-Drop-in ergänzt werden.
+Das rclone-Konfigurationsverzeichnis ist gezielt beschreibbar, damit OAuth-Tokens erneuert werden können. Bei lokalen Datenpfaden außerhalb `/mnt`, `/media`, `/srv` oder `/opt/rclone-sync` müssen die `ReadWritePaths` per systemd-Drop-in ergänzt werden. Erweiterungen mit höherem Rechtebedarf (ZFS, Airgap-USB, Boot-Drill, VPN-Sensor) beschreibt [Privilegierte Erweiterungen freischalten](#privilegierte-erweiterungen-freischalten).
 
 ## Reverse-Proxy
 
@@ -504,7 +625,7 @@ Wichtige Endpunkte:
 - `POST /api/jobs/definitions/{id}/run?dry_run=false`
 - `POST /api/jobs/definitions/run-all?dry_run=false`
 - `GET /api/jobs/backup/plan`
-- `POST /api/jobs/backup/run?dry_run=true`
+- `POST /api/jobs/backup/run?dry_run=true` – mit `pairs=` und Body `exclude_paths` lassen sich einzelne Pfade ausnehmen (nicht bei bisync)
 - `POST /api/jobs/backup/run-pair/{pair}?dry_run=true`
 - `POST /api/jobs/backup/cancel`
 - `POST /api/jobs/backup/check/{pair}`
@@ -524,6 +645,28 @@ Wichtige Endpunkte:
 - `GET /api/maintenance/support-bundle`
 - `GET /api/push/status`
 - `POST /api/push/test`
+- `GET /api/lockdown`
+- `POST /api/lockdown` – löst aus, verlangt Passwort (optional `reason`)
+- `POST /api/lockdown/release` – verlangt Passwort
+- `GET /api/pbs/insights`
+- `POST /api/pbs/boot-drill`
+- `GET /api/pbs/boot-drill/status`
+- `POST /api/jobs/bitrot-scrub`
+- `GET /api/jobs/bitrot-scrub/status`
+- `GET /api/jobs/bitrot-scrub/baseline`
+- `GET /api/jobs/versions/preview`
+- `POST /api/jobs/versions/prune` – verlangt Passwort
+- `GET /api/jobs/{id}/preflight`
+- `GET /api/pairs/{name}/conflicts`
+- `POST /api/pairs/{name}/conflicts/resolve` – Löschen von Kopien verlangt Passwort
+- `GET /api/recovery/staging/{id}/diff?path=`
+- `GET /api/diagnostics/vpn`
+- `GET /api/storage/object-lock`
+- `GET /api/jobs/bandwidth/heatmap`
+- `GET /api/jobs/bandwidth/suggestions`
+- `GET /api/remotes/crypt/candidates`
+- `POST /api/remotes/crypt`
+- `POST /api/remotes/crypt/{name}/verify`
 - `GET /healthz` – Prozess-Liveness
 - `GET /readyz` – DB-/Datenverzeichnis-Readiness für Uptime Kuma/systemd
 - `GET /healthz/deep` – authentifiziert

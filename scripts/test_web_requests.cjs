@@ -94,6 +94,8 @@ test('stalled overview releases refresh ownership so retry can run', async () =>
   model.refreshStatus = async () => true;
   model.loadRecent = async () => true;
   model.loadSchedulerState = async () => true;
+  model.loadLockdown = async () => true;
+  model.loadCopies = async () => true;
   model.loadOverview = async () => {
     const result = await model.api('GET', '/overview', undefined, { timeoutMs: 15, captureError: true });
     return !result.__error;

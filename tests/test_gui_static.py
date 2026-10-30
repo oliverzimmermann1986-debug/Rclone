@@ -186,7 +186,7 @@ def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
     javascript = (STATIC / "app.js").read_text(encoding="utf-8")
 
     assert (
-        "status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null }"
+        "status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null, bitrotscrub: null, bootdrill: null }"
         in javascript
     )
     assert "keep: { keep_last: 0, keep_daily: 7, keep_weekly: 4" in javascript
@@ -196,7 +196,10 @@ def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
     assert "this.pending.pbs || this.status?.pbs" in javascript
     assert "if (this.status?.pbs || this.pbs.status?.running)" in javascript
     assert 'value="pbs">PBS-Backup' in html
-    assert "['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs']" in javascript
+    assert (
+        "['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs', 'bitrotscrub', 'bootdrill']"
+        in javascript
+    )
     assert "this.status?.restoretest" in javascript
     assert "if (this.status?.restoretest) return 'Restore-Drill'" in javascript
     assert 'class="table-scroll responsive-table-wrap"' in html
@@ -264,7 +267,7 @@ def test_dialog_focus_accessibility_and_loading_contracts():
         "remoteSetupDialog",
     ):
         assert f'x-ref="{ref_name}"' in html
-    assert html.count('aria-modal="true"') == 8
+    assert html.count('aria-modal="true"') == 13
     assert "focusableElements(dialog)" in javascript
     assert "restoreDialogFocus()" in javascript
     assert "dialogFocusStack.push(document.activeElement)" in javascript
@@ -514,3 +517,115 @@ def test_canonical_jobs_ui_separates_data_paths_definitions_and_runs():
     assert 'min="1" max="10080" x-model.number="job.retry_minutes"' in html
     for heading in ("Lokaler Ordner", "Cloud-Ordner", "Dateien", "Größe", "Messalter"):
         assert f"<th>{heading}</th>" in html
+
+
+def test_lockdown_dialog_banner_and_start_lock_are_wired():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="lockdown-dialog"' in html
+    assert '@click="openLockdown()"' in html
+    assert 'class="connection-alert error lockdown-banner"' in html
+    assert '@click="releaseLockdown()"' in html
+    for method in (
+        "openLockdown",
+        "triggerLockdown",
+        "releaseLockdown",
+        "loadLockdown",
+        "startBlocked",
+    ):
+        assert (
+            f"\n    {method}(" in javascript or f"\n    async {method}(" in javascript
+        )
+    assert (
+        "this.loadLockdown()"
+        in javascript.split("async refreshAll", 1)[1].split("startSseProgress", 1)[0]
+    )
+    assert (
+        "window.location = '/login'" in javascript.split("async triggerLockdown", 1)[1]
+    )
+    # Startbuttons sperren über startBlocked(); busy() bleibt reine Laufanzeige.
+    assert ':disabled="busy()' not in html
+    assert ':disabled="startBlocked()"' in html
+
+
+def test_new_job_kinds_object_lock_column_and_system_panels():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    workspace = (STATIC / "workspace.js").read_text(encoding="utf-8")
+
+    assert "bitrotscrub: 'Bitrot-Scrub'" in javascript
+    assert "bootdrill: 'Boot-Drill'" in javascript
+    assert 'value="bitrotscrub">Bitrot-Scrub' in html
+    assert 'value="bootdrill">Boot-Drill' in html
+    # Object Lock steht als zweites Badge in „Wiederherstellbarkeit“, keine eigene Spalte.
+    assert "<th>Unveränderlichkeit</th>" not in html
+    assert '<span class="sr-only">Unveränderlichkeit: </span>' in html
+    assert "'/api/storage/object-lock'" in javascript
+    assert 'id="vpn-heading"' in html and 'id="bitrot-heading"' in html
+    assert "Bitrot-Scrub/.test(headingText(node))" in workspace
+    assert 'x-model="vpnProbesText"' in html
+    assert "draft.backup.vpn_probes = this.vpnProbesText.split" in javascript
+
+
+def test_tags_conflicts_versions_bandwidth_preflight_diff_and_crypt_are_wired():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+
+    # Tags: Eingabe, Filter und Dry-Run je Tag über den pairs-Filter.
+    assert "setPairTags(pair, $event.target.value)" in html
+    assert "runBackup(true, tagPairNames())" in html
+    assert (
+        "if (this.activeTag && !(pair.tags || []).includes(this.activeTag)) return false"
+        in javascript
+    )
+    assert "&pairs=${encodeURIComponent(pairs.join(','))}" in javascript
+    # Bisync-Konflikte: nur bisync, Löschen nur mit Passwort samt 403/429-Wiederholung.
+    assert "x-show=\"pair.direction === 'bisync'\"" in html
+    for choice in ("keep_side1", "keep_side2", "keep_both"):
+        assert f"resolveConflict(group, '{choice}')" in html
+    assert "choice === 'keep_both'" in javascript
+    assert "![403, 429].includes(result.status)" in javascript
+    # Versionsordner: Override optional, Ausdünnen nur nach Vorschau.
+    assert "toggleLifecycleOverride(pair, $event.target.checked)" in html
+    assert "delete pair.versions_lifecycle" in javascript
+    assert (
+        "versionsState[pair.name]?.data?.dry_run && (versionsPurgeCount(pair.name) > 0 || versionsMergeCount(pair.name) > 0)"
+        in html
+    )
+    assert "'/api/jobs/versions/prune'" in javascript
+    # Zusammenführen je Wurzel, Ergebnis nach dem Lauf und Lockdown-Abbruch sind sichtbar.
+    assert "versionsMergeGroups(root)" in html
+    assert "(root.merged || []).filter((item) => item.ok).length" in html
+    assert "versionsState[pair.name]?.data?.aborted === 'lockdown'" in html
+    # Bandbreite: echte Tabelle mit Textalternative je Zelle.
+    assert '<table class="heatmap">' in html
+    assert '<div class="inline-error" role="alert" x-show="bandwidth.error">' in html
+    assert "this.bandwidth.error = !heatmap" in javascript
+    assert '<span class="sr-only" x-text="heatTitle(day, hour)">' in html
+    assert "applyScheduleSuggestion(item)" in html
+    assert "Zeitplan übernommen – noch speichern" in javascript
+    # Änderungsmatrix: Abwahl nur außerhalb von bisync, Start mit exclude_paths.
+    assert "openPreflight(jobModal.job)" in html
+    assert "Bei bisync keine Abwahl möglich" in html
+    assert "{ exclude_paths: this.preflightExcludes() }" in javascript
+    # Restore-Diff: Farbe plus Symbol.
+    assert "openStagingDiff(item)" in html
+    assert "Live-Datei existiert nicht (Datei wäre neu)" in html
+    for kind in ("insert", "delete", "replace"):
+        assert f".diff-{kind} .diff-mark" in css
+    # Crypt: Schlüssel nur im State, Fertig erst nach Bestätigung, nie in Toasts/Storage.
+    assert ':disabled="!crypt.saved || crypt.busy"' in html
+    crypt_code = javascript.split("async openCrypt()", 1)[1].split(
+        "openPicker(mode, idx)", 1
+    )[0]
+    assert "this.crypt = emptyCrypt()" in crypt_code
+    assert "localStorage" not in crypt_code and "sessionStorage" not in crypt_code
+    assert not re.search(r"showToast\([^)]*keys", crypt_code)
+    # Laufstatus und Dialog-Stapelung.
+    assert "if (this.status?.bitrotscrub) return 'Bitrot-Scrub'" in javascript
+    assert "if (this.status?.bootdrill) return 'Boot-Drill'" in javascript
+    assert (
+        ".modal:has(> .confirmation-dialog, > .reauth-dialog) { z-index: 110; }" in css
+    )

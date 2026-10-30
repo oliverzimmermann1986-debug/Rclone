@@ -17,13 +17,16 @@ import tempfile
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
+from ..airgap import airgap_session
 from ..config_store import get_config
 from ..db import get_db
 from .. import protection
+from ..preflight_matrix import exclude_filter_args
 from ..rclone_args import (
     normalize_filter_aliases,
     redact_command_text,
@@ -36,6 +39,7 @@ from .log_tail import read_tail
 from .pair_planner import has_overlapping_pairs, pairs_conflict, paths_overlap
 from .scheduler import rclone_history_key
 from ..utils import bounded_number as _bounded_number
+from ..zfs_freeze import frozen_source
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,13 @@ _RESYNC_RE = re.compile(
 _STATS_RE = re.compile(
     r"Transferred:\s*([^,\n]+?)(?:\s*/\s*([^,\n]+?))?"
     r"(?:,\s*(?:([\d.]+)%|-))?(?:,\s*([^,\n]+?/s))?(?:,\s*ETA\s*(\S+))?\s*$"
+)
+# --stats-one-line (Projektstandard): "1.234 GiB / 2 GiB, 61%, 10 MiB/s, ETA 1m (xfr#3/5)",
+# bei 0 Bytes "0 B / 0 B, -, 0 B/s, ETA -"; optional mit Log-Präfix davor.
+_STATS_ONE_LINE_RE = re.compile(
+    r"(?:^|:\s)\s*([\d.]+\s*[KMGTPE]?i?B)\s*/\s*([\d.]+\s*[KMGTPE]?i?B),\s*"
+    r"(?:([\d.]+)%|-),\s*([\d.]+\s*[KMGTPE]?i?B/s),\s*ETA\s*(\S+?)"
+    r"(?:\s*\(xfr#(\d+)/(\d+)\))?\s*$"
 )
 _LOG_PREFIX_RE = re.compile(
     r"^(?:\d{4}[/.-]\d{2}[/.-]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\s+)?"
@@ -574,7 +585,9 @@ def _dedupe_single_value_rclone_args(args: list[str]) -> list[str]:
 RESERVED_SUBTREES = ("Sicherpfad", ".sicherpfad-snapshots", ".rclone-versions")
 
 
-def _protected_filter_args(args: list[str]) -> list[str]:
+def _protected_filter_args(
+    args: list[str], *, leading_rules: list[str] | None = None
+) -> list[str]:
     """Compile filters once, with reserved paths ahead of every user include.
 
     rclone groups include/exclude/filter flag types independently of CLI order.
@@ -632,8 +645,10 @@ def _protected_filter_args(args: list[str]) -> list[str]:
             groups[group].append(value.strip())
         index += 1
     rules = [f"- /{name}/**" for name in RESERVED_SUBTREES]
-    # Ausschlüsse müssen vor Einschlüssen stehen: rclone verwendet die erste
-    # passende Regel. Sonst kann ein Include geschützte Inhalte wieder öffnen.
+    # Preflight-Ausschlüsse direkt hinter den Schutzregeln. Danach Ausschlüsse
+    # vor Einschlüssen: rclone nimmt die erste passende Regel, sonst könnte ein
+    # breites Include explizite Excludes aushebeln (tests/test_reserved_paths.py).
+    rules.extend(leading_rules or [])
     ordered_groups = (
         "--exclude",
         "--exclude-from",
@@ -643,8 +658,7 @@ def _protected_filter_args(args: list[str]) -> list[str]:
         "--include-from",
     )
     for group in ordered_groups:
-        values = groups[group]
-        for value in values:
+        for value in groups[group]:
             if group.startswith("--filter"):
                 if value == "!":
                     raise ValueError(
@@ -908,6 +922,11 @@ def _global_verb_args(cfg, verb: str) -> list[str]:
         conflict = str(backup.get("conflict_resolve") or "auto").strip().lower()
         if conflict not in {"", "auto", "none"}:
             args += ["--conflict-resolve", conflict]
+        # Herkunft im Namen, je Seite eigene Nummer (a.txt.conflict-path1-1, Default
+        # --conflict-loser num); pathname überschreibt laut Doku vorhandene .path2.
+        # shortcut: Namensform nur aus https://rclone.org/bisync/ (--conflict-suffix),
+        # nicht gegen echtes rclone geprüft; ändert sie sich, conflicts.CONFLICT_RE anpassen.
+        args += ["--conflict-suffix", "conflict-path1-,conflict-path2-"]
         if backup.get("resilient", True):
             args.append("--resilient")
         if backup.get("recover", True):
@@ -1051,6 +1070,7 @@ def _build_pair_command(
     dry_run: bool,
     *,
     config_snapshot: Optional[dict[str, Any]] = None,
+    exclude_paths: list[str] | None = None,
 ) -> tuple[list[str], str, str, str]:
     remote = str(pair["remote"])
     local = str(pair["local"])
@@ -1107,7 +1127,14 @@ def _build_pair_command(
     )
     effective_args += _backup_dir_args(cfg, pair, verb, src, dst)
     effective_args = _dedupe_single_value_rclone_args(effective_args)
-    effective_args = _protected_filter_args(effective_args)
+    leading_rules: list[str] = []
+    if exclude_paths:
+        if verb == "bisync":
+            raise ValueError(
+                "Ausschlüsse sind bei bisync nicht möglich (Filteränderung erfordert Resync)"
+            )
+        leading_rules = exclude_filter_args(exclude_paths)[1::2]
+    effective_args = _protected_filter_args(effective_args, leading_rules=leading_rules)
     if verb == "bisync":
         effective_args = _bisync_filter_snapshot(effective_args, cfg)
 
@@ -1428,17 +1455,44 @@ def _precheck_pair(pair: dict[str, Any]) -> tuple[bool, str]:
 
 
 def parse_final_stats(log_tail: str) -> dict[str, Any]:
-    """Parst die letzte rclone-'Transferred:'-Zeile aus einem Log-Ausschnitt."""
+    """Parst die letzte rclone-'Transferred:'-Byte-Zeile aus einem Log-Ausschnitt.
+
+    Im mehrzeiligen Abschlussblock folgt ihr eine 'Transferred:'-Zeile mit der
+    Dateizahl; die liefert ``files_transferred``/``files_total``.
+    """
+    files: dict[str, int] = {}
     for line in reversed(log_tail.splitlines()):
         match = _STATS_RE.search(line)
-        if match:
-            return {
-                "transferred": match.group(1).strip() if match.group(1) else None,
-                "total": match.group(2).strip() if match.group(2) else None,
-                "percent": float(match.group(3)) if match.group(3) else None,
-                "speed": match.group(4).strip() if match.group(4) else None,
-                "eta": match.group(5),
-            }
+        if not match:
+            continue
+        done, total = (match.group(1) or "").strip(), (match.group(2) or "").strip()
+        if not match.group(4) and not re.search(r"\d\s*[KMGTPE]?i?B", done):
+            if not files and done.isdigit() and total.isdigit():
+                files = {"files_transferred": int(done), "files_total": int(total)}
+            continue
+        return {
+            "transferred": done or None,
+            "total": total or None,
+            "percent": float(match.group(3)) if match.group(3) else None,
+            "speed": match.group(4).strip() if match.group(4) else None,
+            "eta": match.group(5),
+            **files,
+        }
+    for line in reversed(log_tail.splitlines()):
+        match = _STATS_ONE_LINE_RE.search(line)
+        if not match:
+            continue
+        result: dict[str, Any] = {
+            "transferred": match.group(1).strip(),
+            "total": match.group(2).strip(),
+            "percent": float(match.group(3)) if match.group(3) else None,
+            "speed": match.group(4).strip(),
+            "eta": match.group(5),
+        }
+        if match.group(6):
+            result["files_transferred"] = int(match.group(6))
+            result["files_total"] = int(match.group(7))
+        return result
     return {}
 
 
@@ -1484,6 +1538,47 @@ def _sync_pair(
     max_runtime_sec: int | None,
     run_id: str,
     config_snapshot: dict[str, Any],
+    exclude_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    call = (pair, args, log_dir, dry_run, timeout_sec, max_runtime_sec, run_id)
+    if not pair.get("airgap_device"):
+        return _sync_mounted_pair(*call, config_snapshot, exclude_paths)
+    name = str(pair["name"])
+    airgap: dict[str, Any] = {}
+    try:
+        # Prechecks, Pfad-Guards und Nacharbeiten brauchen das eingebundene Gerät.
+        with airgap_session(pair) as airgap:
+            summary = _sync_mounted_pair(*call, config_snapshot, exclude_paths)
+    except (RuntimeError, ValueError) as exc:
+        logger.error("[%s] %s", name, exc)
+        summary = {
+            "name": name,
+            "remote": str(pair["remote"]),
+            "local": str(pair["local"]),
+            "log_file": "",
+            "ok": False,
+            "error": str(exc),
+            "dry_run": dry_run,
+            "skipped": True,
+        }
+        runtime_state.update_pair(run_id, name, "error", error=str(exc))
+    summary["airgap"] = airgap
+    eject_error = ((airgap or {}).get("eject") or {}).get("error")
+    if eject_error:
+        summary.setdefault("warning", f"Airgap-Gerät nicht ausgeworfen: {eject_error}")
+    return summary
+
+
+def _sync_mounted_pair(
+    pair: dict[str, Any],
+    args: list[str],
+    log_dir: Path,
+    dry_run: bool,
+    timeout_sec: int,
+    max_runtime_sec: int | None,
+    run_id: str,
+    config_snapshot: dict[str, Any],
+    exclude_paths: list[str] | None,
 ) -> dict[str, Any]:
     name = str(pair["name"])
     remote = str(pair["remote"])
@@ -1497,6 +1592,8 @@ def _sync_pair(
         "error": "",
         "dry_run": dry_run,
     }
+    if exclude_paths:
+        summary["excluded_paths"] = list(exclude_paths)
 
     runtime_state.update_pair(run_id, name, "checking")
     ok, message = _precheck_pair(pair)
@@ -1552,9 +1649,19 @@ def _sync_pair(
             }
         )
 
+    freeze = ExitStack()
+    frozen: dict[str, Any] = {"active": False, "source": local}
     try:
+        if pair.get("zfs_snapshot") and not dry_run:
+            frozen = freeze.enter_context(frozen_source(pair))
+            if frozen["active"]:
+                summary["zfs_snapshot"] = frozen
         cmd, verb, direction, mode = _build_pair_command(
-            pair, args, dry_run, config_snapshot=config_snapshot
+            {**pair, "local": frozen["source"]},
+            args,
+            dry_run,
+            config_snapshot=config_snapshot,
+            exclude_paths=exclude_paths,
         )
         summary.update(
             {
@@ -1573,7 +1680,8 @@ def _sync_pair(
                 get_db(),
                 pair=pair,
                 backup=backup,
-                source=str(cmd[-2]),
+                # Guard misst den echten Pfad, nicht den kurzlebigen Snapshot.
+                source=local if frozen["active"] else str(cmd[-2]),
                 filter_args=_filter_args(snapshot_config, pair, "sync"),
             )
             if anomaly_finding.get("blocked"):
@@ -1697,6 +1805,28 @@ def _sync_pair(
                 summary["warning"] = (
                     "Sicherung erfolgreich; vollständiger Recovery-Stand konnte nicht erstellt werden"
                 )
+        if summary["ok"] and not dry_run and not is_cancelled():
+            # Lokal: versions_lifecycle importiert aus diesem Modul.
+            from ..versions_lifecycle import apply_lifecycle
+
+            try:
+                lifecycle = apply_lifecycle(config_snapshot, pair, dry_run=False)
+            except Exception:
+                logger.exception("[%s] Versionsordner-Ausdünnung fehlgeschlagen", name)
+                summary.setdefault(
+                    "warning", "Sicherung erfolgreich; Versionsordner nicht ausgedünnt"
+                )
+            else:
+                if not lifecycle.get("skipped"):
+                    summary["versions_lifecycle"] = lifecycle
+                    if lifecycle["warnings"] or any(
+                        root.get("error") or root["failed"]
+                        for root in lifecycle["roots"]
+                    ):
+                        summary.setdefault(
+                            "warning",
+                            "Sicherung erfolgreich; Versionsordner nur teilweise ausgedünnt",
+                        )
         if not summary["ok"]:
             if summary["cancelled"]:
                 summary["error"] = "Abgebrochen"
@@ -1746,6 +1876,12 @@ def _sync_pair(
         runtime_state.update_pair(run_id, name, "error", error=summary["error"])
         return summary
     finally:
+        freeze.close()
+        if frozen.get("cleanup_error") and summary["ok"]:
+            summary.setdefault(
+                "warning",
+                "Sicherung erfolgreich; ZFS-Snapshot konnte nicht entfernt werden",
+            )
         _set_active_pair_log(name, None)
 
 
@@ -1787,6 +1923,7 @@ def run_job(
     config_revision: str | None = None,
     scheduled_slot: str | None = None,
     config_snapshot: Mapping[str, Any] | None = None,
+    exclude_paths: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     trigger = str(trigger or "manual").strip().lower()[:32] or "manual"
     cfg = get_config()
@@ -1940,6 +2077,7 @@ def run_job(
                         max_runtime_sec,
                         run_id,
                         effective_snapshot,
+                        (exclude_paths or {}).get(str(pair.get("name"))),
                     )
                     running[future] = pair
 

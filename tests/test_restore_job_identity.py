@@ -79,6 +79,8 @@ def test_scheduler_passes_reserved_job_id_into_restore_run(tmp_path, monkeypatch
     monkeypatch.setattr(scheduler_cli, "scheduler_state", lambda *_a: {"paused": False})
     monkeypatch.setattr(scheduler_cli, "find_due_pairs", lambda *_a: ([], []))
     monkeypatch.setattr(scheduler_cli, "find_due_pbs_targets", lambda *_a: ([], []))
+    monkeypatch.setattr(scheduler_cli, "bitrot_scrub_due", lambda *_a: {"due": False})
+    monkeypatch.setattr(scheduler_cli, "boot_drill_due", lambda *_a: {"due": False})
     monkeypatch.setattr(
         scheduler_cli,
         "restore_test_due",

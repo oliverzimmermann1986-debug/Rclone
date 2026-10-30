@@ -137,7 +137,7 @@
     ], (node) => {
       if (node.classList.contains('audit-panel')) return 'audit';
       if (node.classList.contains('recovery-panel') || /Logs und Datenbank/.test(headingText(node))) return 'maintenance';
-      if (node.querySelector('.copy-matrix, .copy-table') || /Kopien je Datenbestand/.test(headingText(node))) return 'copies';
+      if (node.querySelector('.copy-matrix, .copy-table') || /Kopien je Datenbestand|Bitrot-Scrub/.test(headingText(node))) return 'copies';
       return 'health';
     });
   }
