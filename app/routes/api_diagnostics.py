@@ -27,7 +27,12 @@ from ..job_definitions import (
     scheduled_data_path_ids,
     stable_data_path_id,
 )
-from ..jobs.rclone_sync import _count_files_up_to, _is_remote, build_job_plan
+from ..jobs.rclone_sync import (
+    _count_files_up_to,
+    _is_remote,
+    _SnapshotConfig,
+    build_job_plan,
+)
 from ..jobs.scheduler import next_run_after, rclone_history_key
 from ..overdue import evaluate_pair
 from ..rclone_args import rclone_subprocess_env
@@ -35,6 +40,7 @@ from ..restore_evidence import is_partial_restore_summary
 from ..scheduler_control import scheduler_state
 from ..security import require_csrf
 from ..system_info import system_snapshot
+from ..vpn_sensor import vpn_snapshot
 
 router = APIRouter(
     prefix="/api/diagnostics",
@@ -210,6 +216,59 @@ def operational_snapshot(
         return result
 
 
+def _integration_checks(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Werkzeuge und Rechte nur für tatsächlich aktivierte Zusatzfunktionen prüfen."""
+    backup = snapshot.get("backup") or {}
+    pairs = [
+        pair
+        for pair in backup.get("pairs") or []
+        if isinstance(pair, dict) and pair.get("enabled", True)
+    ]
+    checks: list[dict[str, Any]] = []
+    if any(pair.get("airgap_device") for pair in pairs):
+        checks.append(
+            _ok("Airgap", "udisksctl und findmnt vorhanden")
+            if shutil.which("udisksctl") and shutil.which("findmnt")
+            else _err(
+                "Airgap", "udisksctl/findmnt nicht installiert (udisks2, util-linux)"
+            )
+        )
+    if any(pair.get("zfs_snapshot") is True for pair in pairs):
+        checks.append(
+            _ok("ZFS", "zfs und /dev/zfs nutzbar")
+            if shutil.which("zfs") and os.access("/dev/zfs", os.R_OK | os.W_OK)
+            else _err(
+                "ZFS",
+                "zfs-Programm oder /dev/zfs nicht nutzbar: systemd-Drop-in mit "
+                "PrivateDevices=false und DeviceAllow=/dev/zfs rw sowie "
+                "'zfs allow' für den Dienstbenutzer einrichten",
+            )
+        )
+    boot_drill = (snapshot.get("pbs") or {}).get("boot_drill") or {}
+    if isinstance(boot_drill, dict) and boot_drill.get("enabled"):
+        checks.append(
+            _ok("Boot-Drill", "qemu-system-x86_64 vorhanden")
+            if shutil.which("qemu-system-x86_64")
+            else _warn("Boot-Drill", "qemu-system-x86_64 nicht installiert")
+        )
+        checks.append(
+            _warn(
+                "Boot-Drill",
+                "Standard-Unit blockiert QEMU (MemoryDenyWriteExecute/PrivateDevices); "
+                "Drop-in nötig",
+            )
+        )
+    if backup.get("vpn_probes"):
+        probes = vpn_snapshot(_SnapshotConfig(snapshot))["probes"]
+        down = [str(probe["target"]) for probe in probes if not probe["reachable"]]
+        checks.append(
+            _warn("VPN", f"Probe(s) nicht erreichbar: {', '.join(down)}")
+            if down
+            else _ok("VPN", f"{len(probes)} Probe(s) erreichbar")
+        )
+    return checks
+
+
 @router.get("/doctor")
 def doctor() -> dict[str, Any]:
     snapshot = get_config().snapshot()
@@ -260,6 +319,7 @@ def doctor() -> dict[str, Any]:
         result = _writable_dir(str(path))
         result["name"] = label
         checks.append(result)
+    checks.extend(_integration_checks(snapshot))
 
     version_check = _rclone_version_check()
     checks.append(

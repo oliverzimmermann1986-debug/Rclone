@@ -15,6 +15,8 @@ WEB_WAS_ACTIVE=0
 WEB_WAS_ENABLED=0
 SCHEDULER_TIMER_WAS_ACTIVE=0
 SCHEDULER_TIMER_WAS_ENABLED=0
+OPERATIONS_TIMER_WAS_ACTIVE=0
+OPERATIONS_TIMER_WAS_ENABLED=0
 LEGACY_TIMER_WAS_ACTIVE=0
 LEGACY_TIMER_WAS_ENABLED=0
 UNIT_STATES_CAPTURED=0
@@ -32,6 +34,8 @@ SYSTEM_TARGETS=(
   /etc/systemd/system/rclone-sync.timer
   /etc/systemd/system/sync-scheduler.service
   /etc/systemd/system/sync-scheduler.timer
+  /etc/systemd/system/sicherpfad-operations.service
+  /etc/systemd/system/sicherpfad-operations.timer
   /etc/sudoers.d/rclone-sync
 )
 RUNTIME_BACKUP_FILES=(
@@ -98,8 +102,8 @@ on_error() {
   trap - ERR
   set +e
   echo "Installation fehlgeschlagen (Zeile $line). Rollback wird versucht." >&2
-  systemctl stop sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service >/dev/null 2>&1 || true
-  for unit in sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service; do
+  systemctl stop sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service sicherpfad-operations.timer sicherpfad-operations.service >/dev/null 2>&1 || true
+  for unit in sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service sicherpfad-operations.timer sicherpfad-operations.service; do
     if systemctl is-active --quiet "$unit" 2>/dev/null; then
       echo "Rollback: Dienst $unit konnte nicht gestoppt werden." >&2
       rollback_failed=1
@@ -134,10 +138,12 @@ on_error() {
   if (( UNIT_STATES_CAPTURED )); then
     restore_enabled_state rclone-sync-web.service "$WEB_WAS_ENABLED"
     restore_enabled_state sync-scheduler.timer "$SCHEDULER_TIMER_WAS_ENABLED"
+    restore_enabled_state sicherpfad-operations.timer "$OPERATIONS_TIMER_WAS_ENABLED"
     restore_enabled_state rclone-sync.timer "$LEGACY_TIMER_WAS_ENABLED"
     if (( rollback_failed == 0 )); then
       restore_active_state rclone-sync-web.service "$WEB_WAS_ACTIVE"
       restore_active_state sync-scheduler.timer "$SCHEDULER_TIMER_WAS_ACTIVE"
+      restore_active_state sicherpfad-operations.timer "$OPERATIONS_TIMER_WAS_ACTIVE"
       restore_active_state rclone-sync.timer "$LEGACY_TIMER_WAS_ACTIVE"
     else
       echo "Rollback unvollständig; alle Anwendungsdienste bleiben gestoppt." >&2
@@ -297,6 +303,8 @@ if systemctl is-active --quiet rclone-sync-web.service 2>/dev/null; then WEB_WAS
 if systemctl is-enabled --quiet rclone-sync-web.service 2>/dev/null; then WEB_WAS_ENABLED=1; fi
 if systemctl is-active --quiet sync-scheduler.timer 2>/dev/null; then SCHEDULER_TIMER_WAS_ACTIVE=1; fi
 if systemctl is-enabled --quiet sync-scheduler.timer 2>/dev/null; then SCHEDULER_TIMER_WAS_ENABLED=1; fi
+if systemctl is-active --quiet sicherpfad-operations.timer 2>/dev/null; then OPERATIONS_TIMER_WAS_ACTIVE=1; fi
+if systemctl is-enabled --quiet sicherpfad-operations.timer 2>/dev/null; then OPERATIONS_TIMER_WAS_ENABLED=1; fi
 if systemctl is-active --quiet rclone-sync.timer 2>/dev/null; then LEGACY_TIMER_WAS_ACTIVE=1; fi
 if systemctl is-enabled --quiet rclone-sync.timer 2>/dev/null; then LEGACY_TIMER_WAS_ENABLED=1; fi
 UNIT_STATES_CAPTURED=1
@@ -310,8 +318,8 @@ if [[ -d "$APP_DIR/.git" ]]; then
 fi
 
 printf '%s\n' "🛑 Dienste für konsistentes Upgrade stoppen …"
-systemctl stop sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service >/dev/null 2>&1 || true
-for unit in sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service; do
+systemctl stop sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service sicherpfad-operations.timer sicherpfad-operations.service >/dev/null 2>&1 || true
+for unit in sync-scheduler.timer rclone-sync.timer sync-scheduler.service rclone-sync-web.service rclone-sync.service sicherpfad-operations.timer sicherpfad-operations.service; do
   if systemctl is-active --quiet "$unit" 2>/dev/null; then
     echo "Abbruch: Dienst $unit konnte vor der Datensicherung nicht gestoppt werden." >&2
     false
@@ -494,6 +502,8 @@ install -m 0644 "$APP_DIR/systemd/rclone-sync.service" /etc/systemd/system/rclon
 install -m 0644 "$APP_DIR/systemd/rclone-sync.timer" /etc/systemd/system/rclone-sync.timer
 install -m 0644 "$APP_DIR/systemd/sync-scheduler.service" /etc/systemd/system/sync-scheduler.service
 install -m 0644 "$APP_DIR/systemd/sync-scheduler.timer" /etc/systemd/system/sync-scheduler.timer
+install -m 0644 "$APP_DIR/systemd/sicherpfad-operations.service" /etc/systemd/system/sicherpfad-operations.service
+install -m 0644 "$APP_DIR/systemd/sicherpfad-operations.timer" /etc/systemd/system/sicherpfad-operations.timer
 install -m 0440 "$APP_DIR/systemd/sudoers-rclone-sync" /etc/sudoers.d/rclone-sync
 visudo -cf /etc/sudoers.d/rclone-sync >/dev/null
 systemd-analyze verify \
@@ -501,7 +511,9 @@ systemd-analyze verify \
   /etc/systemd/system/rclone-sync.service \
   /etc/systemd/system/rclone-sync.timer \
   /etc/systemd/system/sync-scheduler.service \
-  /etc/systemd/system/sync-scheduler.timer >/dev/null
+  /etc/systemd/system/sync-scheduler.timer \
+  /etc/systemd/system/sicherpfad-operations.service \
+  /etc/systemd/system/sicherpfad-operations.timer >/dev/null
 systemctl daemon-reload
 
 # Nur der Per-Pair-Scheduler darf automatisch laufen. Der Legacy-Timer würde
@@ -509,11 +521,13 @@ systemctl daemon-reload
 systemctl disable --now rclone-sync.timer >/dev/null 2>&1 || true
 systemctl enable rclone-sync-web.service
 systemctl enable --now sync-scheduler.timer
+systemctl enable --now sicherpfad-operations.timer
 systemctl restart rclone-sync-web.service
 
 sleep 1
 systemctl is-active --quiet rclone-sync-web.service
 systemctl is-active --quiet sync-scheduler.timer
+systemctl is-active --quiet sicherpfad-operations.timer
 curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8001/readyz >/dev/null
 
 # Erst nach erfolgreichem Healthcheck wird die alte Python-Umgebung verworfen.

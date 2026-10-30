@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.gzip import GZipMiddleware
 
 from . import __version__
@@ -43,6 +44,7 @@ from .auth_contract import (
 )
 from .config_store import get_config
 from .db import check_database_readonly, database_path, get_db
+from .lockdown import is_locked_down
 from .device_vault import cleanup_vault_scratch
 from .recovery_snapshots import snapshot_root
 from .rclone_args import rclone_subprocess_env
@@ -56,18 +58,34 @@ from .static_assets import AllowlistedStaticFiles, web_asset_cache_revision
 from .utils import bounded_number as _bounded_number
 from .routes import (
     api_pbs,
+    api_bandwidth,
+    api_bitrot,
+    api_boot_drill,
     api_browse,
     api_config,
+    api_conflicts,
+    api_crypt,
     api_diagnostics,
+    api_file_catalog,
     api_jobs,
+    api_lockdown,
     api_maintenance,
+    api_migrations,
+    api_operations,
+    api_object_lock,
+    api_preflight,
     api_push,
     api_recovery,
+    api_reports,
+    api_recovery_diff,
     api_remotes,
     api_restore_plan,
     api_storage,
+    api_storage_forecast,
     api_test,
     api_vault,
+    api_versions,
+    api_vpn,
     api_webauthn,
 )
 from .maintenance import run_automatic_maintenance
@@ -516,7 +534,11 @@ def _apply_security_headers(response, request: Request, request_id: str):
     ):
         response.headers.setdefault("Cache-Control", "no-store")
     elif request.url.path.startswith("/static/"):
-        response.headers.setdefault("Cache-Control", "public, max-age=86400")
+        # Unversionierte Assets (z. B. per import geladene Module) per ETag revalidieren.
+        response.headers.setdefault(
+            "Cache-Control",
+            "public, max-age=86400" if request.query_params.get("v") else "no-cache",
+        )
     if "server" in response.headers:
         del response.headers["server"]
     return response
@@ -531,6 +553,20 @@ def _error_response(request: Request, request_id: str, status_code: int, detail:
 
 class _RequestTooLarge(Exception):
     pass
+
+
+# Bleiben im Lockdown offen, damit er per Passwort-Login aufgehoben werden kann.
+_LOCKDOWN_OPEN_PATHS = frozenset(
+    {"/api/lockdown", "/api/lockdown/release", NATIVE_LOGIN_PATH}
+)
+
+
+def _lockdown_blocks() -> bool:
+    try:
+        return is_locked_down()
+    except Exception:
+        logger.exception("Lockdown-Status nicht lesbar; Anfrage wird nicht gesperrt")
+        return False
 
 
 @app.middleware("http")
@@ -557,6 +593,14 @@ async def security_middleware(request: Request, call_next):
         return _error_response(
             request, request_id, 403, "Origin-Prüfung fehlgeschlagen"
         )
+
+    if (
+        method not in {"GET", "HEAD", "OPTIONS"}
+        and request.url.path.startswith("/api/")
+        and request.url.path not in _LOCKDOWN_OPEN_PATHS
+        and await run_in_threadpool(_lockdown_blocks)
+    ):
+        return _error_response(request, request_id, 423, "Lockdown aktiv")
 
     if state_changing:
         length = request.headers.get("content-length")
@@ -617,6 +661,22 @@ app.include_router(api_webauthn.router)
 app.include_router(api_recovery.router)
 app.include_router(api_restore_plan.router)
 app.include_router(api_vault.router)
+app.include_router(api_file_catalog.router)
+app.include_router(api_migrations.router)
+app.include_router(api_operations.router)
+app.include_router(api_reports.router)
+app.include_router(api_storage_forecast.router)
+app.include_router(api_lockdown.router)
+app.include_router(api_object_lock.router)
+app.include_router(api_vpn.router)
+app.include_router(api_versions.router)
+app.include_router(api_bitrot.router)
+app.include_router(api_bandwidth.router)
+app.include_router(api_conflicts.router)
+app.include_router(api_preflight.router)
+app.include_router(api_recovery_diff.router)
+app.include_router(api_boot_drill.router)
+app.include_router(api_crypt.router)
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_ASSET_ALLOWLIST = frozenset(

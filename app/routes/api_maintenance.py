@@ -56,6 +56,40 @@ def _redact_diagnostics(value: Any) -> Any:
     return redact_secrets(value)
 
 
+def minimize_job_summaries(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Datenminimierung fürs Support-Bundle: keine Konsolenausgaben, keine Pfade."""
+    minimized: list[dict[str, Any]] = []
+    for job in jobs:
+        summary = job.get("summary")
+        if not isinstance(summary, dict):
+            minimized.append(job)
+            continue
+        summary = dict(summary)
+        if "serial_tail" in summary:
+            summary["serial_tail"] = "<entfernt>"
+        if "excluded_paths" in summary:
+            excluded = summary.pop("excluded_paths")
+            summary["excluded_paths_count"] = (
+                len(excluded) if isinstance(excluded, list) else 0
+            )
+        pairs = []
+        for pair in summary.get("pairs") or []:
+            if isinstance(pair, dict) and pair.get("mismatches"):
+                pair = {
+                    **pair,
+                    "mismatches": [
+                        {**m, "path": os.path.basename(str(m.get("path") or ""))}
+                        for m in pair["mismatches"]
+                        if isinstance(m, dict)
+                    ],
+                }
+            pairs.append(pair)
+        if pairs:
+            summary["pairs"] = pairs
+        minimized.append({**job, "summary": summary})
+    return minimized
+
+
 @router.get("/logs")
 def list_logs(
     limit: int = Query(200, ge=1, le=1000), query: str = Query("", max_length=200)
@@ -492,7 +526,7 @@ def support_bundle() -> Response:
                 str(paths.get("data_dir") or "/opt/rclone-sync/data")
             ),
             "database": {"stats": db.stats(), "integrity": db.integrity_check()},
-            "recent_jobs": db.job_list(limit=100),
+            "recent_jobs": minimize_job_summaries(db.job_list(limit=100)),
             "recent_audit_events": db.audit_list(limit=100),
             "log_inventory": logs,
         }

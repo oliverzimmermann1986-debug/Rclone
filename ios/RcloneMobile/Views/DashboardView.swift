@@ -25,6 +25,17 @@ struct DashboardView: View {
                     Section("Aktiver Lauf") {
                         liveProgress
                     }
+                } else if let active = model.activeBackupScopeJob {
+                    Section("Aktiver Lauf") {
+                        Label("\(active.kindLabel) #\(active.id)", systemImage: active.kind == "migration" ? "externaldrive" : "arrow.triangle.2.circlepath")
+                            .font(.headline)
+                        Text("Gestartet: \(AppFormat.date(active.startedAt))").font(.caption).foregroundStyle(.secondary)
+                        if case let .failed(message) = model.currentJobsState {
+                            Label("Laufstatus veraltet: \(message)", systemImage: "wifi.exclamationmark").font(.caption).foregroundStyle(.orange)
+                        }
+                        Button("Lauf öffnen") { model.requestRunNavigation(id: active.id) }
+                        Button("Abbruch anfordern", role: .destructive) { confirmCancel = true }
+                    }
                 }
 
                 if model.batchIsRunning || !model.batchDefinitions.isEmpty {
@@ -188,6 +199,7 @@ struct DashboardView: View {
                     Image(systemName: "play.fill")
                 }
                 .accessibilityLabel("Alle Jobs starten")
+                .disabled(model.backupScopeIsRunning)
             }
         }
         .refreshable { await model.refresh() }
@@ -235,7 +247,7 @@ struct DashboardView: View {
             model.setSceneActive(scenePhase == .active)
             while !Task.isCancelled {
                 await model.refreshProgress()
-                let interval: Duration = model.progress?.running == true ? .seconds(5) : .seconds(15)
+                let interval: Duration = model.backupScopeIsRunning ? .seconds(5) : .seconds(15)
                 try? await Task.sleep(for: interval)
             }
         }

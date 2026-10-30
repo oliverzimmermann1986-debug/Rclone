@@ -79,7 +79,7 @@ function runScenario(newerServer = false) {
   const model = window.app();
   model.init();
   assert.equal(model.originalInitCalled, true);
-  const groupCounts = { dashboard: 4, doctor: 4, recovery: 4 };
+  const groupCounts = { dashboard: 4, doctor: 5, recovery: 4 };
   for (const [name, count] of Object.entries(groupCounts)) {
     const tabs = Array.from(document.querySelectorAll(`[data-workspace-page="${name}"] > .workspace-tabs button`));
     assert.equal(tabs.length, count, `${name} view count`);

@@ -39,6 +39,7 @@ from ..jobs.recovery_lifecycle import (
 )
 from ..jobs.restore_test import _endpoints
 from ..jobs.locks import HeldFileLock, try_file_lock
+from ..lockdown import is_locked_down
 from ..jobs.selective_restore import (
     JOB_KIND,
     list_staging,
@@ -362,6 +363,8 @@ def _start_recovery_job() -> tuple[Any, int, HeldFileLock]:
                 409, "Ein registrierter Recovery-Prozess ist noch aktiv"
             )
         rclone_sync.reset_cancel()
+        if is_locked_down():
+            raise HTTPException(423, "Lockdown aktiv")
         job_id = database.job_start(JOB_KIND, trigger="manual", exclusive_scope=True)
     except JobAlreadyRunningError as exc:
         lease.release()

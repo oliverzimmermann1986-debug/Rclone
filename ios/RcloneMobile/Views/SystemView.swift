@@ -10,6 +10,11 @@ struct SystemView: View {
 
     var body: some View {
         List {
+            Section("Schutz und Planung") {
+                NavigationLink { ProtectionToolsView() } label: {
+                    Label("Schutzwerkzeuge und Berichte", systemImage: "shield.lefthalf.filled")
+                }
+            }
             Section("Speicher verbinden") {
                 Button { showRemoteSetup = true } label: {
                     Label("Neues Remote einbinden", systemImage: "externaldrive.badge.plus")

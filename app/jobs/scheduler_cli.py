@@ -8,15 +8,24 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 from ..config_store import get_config
 from ..db import get_db
 from ..job_definitions import data_paths_by_id
+from ..lockdown import is_locked_down
 from ..overdue import check_and_notify as check_overdue
+from ..pbs_api import maintenance_active, throttle_settings
 from ..scheduler_control import scheduler_state
 from . import runtime_state
+from .bitrot_scrub import AGGREGATE_RUN_NAME as BITROT_AGGREGATE_NAME
+from .bitrot_scrub import BITROT_HISTORY_KEY, bitrot_scrub_due, run_bitrot_scrub
+from .bitrot_scrub import JOB_KIND as BITROT_JOB_KIND
+from .boot_drill import BOOT_DRILL_HISTORY_KEY, boot_drill_due, run_boot_drill
+from .boot_drill import JOB_KIND as BOOT_DRILL_JOB_KIND
+from .boot_drill import RUN_NAME as BOOT_DRILL_RUN_NAME
 from .job_lifecycle import (
     BACKUP_KINDS,
     PBS_KINDS,
@@ -39,6 +48,77 @@ from .scheduler import (
 )
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+_THROTTLE_SINCE_KEY = "pbs_throttle_since"
+_MAINTENANCE_KEY = "pbs_maintenance_check"
+# Länger zurückgestellt würde eine hängende PBS-Wartung die Offsite-Kopien aushebeln.
+_MAX_THROTTLE_SECONDS = 6 * 3600
+
+
+def _pbs_maintenance(db, settings: dict) -> dict:
+    """maintenance_active mit DB-Cache: die CLI ist jede Minute ein neuer Prozess."""
+    now = time.time()
+    cached = db.runtime_get(_MAINTENANCE_KEY)
+    try:  # DB-Inhalt ist nur Daten: alles Unerwartete heißt neu abfragen.
+        age = now - float(cached["checked_at"])
+        if 0 <= age < throttle_settings(settings)["poll_seconds"]:
+            return {
+                "active": cached.get("active") is True,
+                "tasks": [t for t in cached.get("tasks") or [] if isinstance(t, dict)],
+                "error": cached.get("error"),
+            }
+    except (TypeError, KeyError, ValueError, AttributeError):
+        pass
+    result = maintenance_active(settings)
+    db.runtime_set(
+        _MAINTENANCE_KEY,
+        {
+            "checked_at": now,
+            "active": result.get("active") is True,
+            "tasks": result.get("tasks") or [],
+            "error": result.get("error"),
+        },
+    )
+    return result
+
+
+def _pbs_throttle(db, settings: dict, due: bool) -> bool:
+    """True, wenn fällige rclone-Läufe wegen PBS-GC/Verify zurückgestellt werden."""
+    if not (settings.get("enabled") and throttle_settings(settings)["enabled"]):
+        if due:  # Drossel aus: kein alter Zeitstempel für eine spätere Wartung
+            db.runtime_delete(_THROTTLE_SINCE_KEY)
+        return False
+    try:
+        since = float(db.runtime_get(_THROTTLE_SINCE_KEY) or 0)
+    except (TypeError, ValueError):
+        since = 0.0
+    # Auch ohne fällige Pairs, solange ein Zeitstempel steht: sonst bliebe er nach
+    # Wartungsende hängen und die nächste Wartung würde sofort übersteuert.
+    if not (due or since):
+        return False
+    maintenance = _pbs_maintenance(db, settings)
+    if not maintenance["active"]:
+        db.runtime_delete(_THROTTLE_SINCE_KEY)
+        return False
+    if not due:
+        return False
+    now = time.time()
+    if not since:
+        since = now
+        db.runtime_set(_THROTTLE_SINCE_KEY, now)
+    _configure_logging(None)
+    logger = logging.getLogger("scheduler_cli")
+    if now - since > _MAX_THROTTLE_SECONDS:
+        logger.warning(
+            "PBS-Wartung seit >6 h aktiv: rclone-Läufe werden nicht "
+            "länger zurückgestellt"
+        )
+        db.runtime_delete(_THROTTLE_SINCE_KEY)
+        return False
+    logger.info(
+        "PBS-Wartung aktiv (GC/Verify): rclone-Läufe zurückgestellt (%s)",
+        ", ".join(sorted({str(t.get("type")) for t in maintenance["tasks"]})),
+    )
+    return True
 
 
 def _job_status(summary: dict) -> str:
@@ -256,6 +336,108 @@ def _reconcile_available_scopes(db) -> None:
                 )
 
 
+def _run_global_drill(
+    db,
+    cfg,
+    log_dir: Path,
+    *,
+    label: str,
+    scope: str,
+    kinds: tuple[str, ...],
+    kind: str,
+    log_scope: str,
+    run_name: str,
+    history_key: str,
+    due_check,
+    run,
+) -> int:
+    """Globaler Einzellauf (Bitrot-Scrub, Boot-Drill) im exklusiven Scope; liefert rc."""
+    logger = logging.getLogger("scheduler_cli")
+    logger.info("%s ist fällig", label)
+    with file_lock_or_none(scope) as got_lock:
+        if got_lock is None:
+            logger.warning("Scope %s belegt - %s verschoben", scope, label)
+            return 0
+        if not reconcile_locked_scope(db, scope=scope, kinds=kinds).get("safe"):
+            logger.error(
+                "Registrierter Unterprozess im Scope %s ist noch aktiv; %s abgebrochen",
+                scope,
+                label,
+            )
+            return 1
+        snapshot, config_revision = _snapshot_with_revision(cfg)
+        due_state = due_check(snapshot, db)
+        if not due_state.get("due"):
+            logger.info("%s-Fälligkeit nach Lock-Erwerb bereits erledigt", label)
+            return 0
+        slot = str(due_state.get("scheduled_slot") or "")
+        scheduler_slots = {run_name: slot} if slot else {}
+        reset_cancel(scope)
+        # Nach dem Reset: ein später gesetztes Lockdown-Cancel bleibt so wirksam.
+        if is_locked_down(db):
+            logger.warning("Lockdown aktiv: %s übersprungen", label)
+            return 0
+        # log_scope = Loggername des Moduls (app.jobs.<log_scope>) für den Joblog-Filter.
+        job_log_file = _job_log_file(log_dir, kind, run_name)
+        job_log_handler = _attach_job_log(job_log_file, log_scope)
+        try:
+            job_id = db.job_start(
+                kind,
+                log_file=str(job_log_file),
+                attempts=[
+                    {
+                        "name": run_name,
+                        "history_key": history_key,
+                        "scheduled_slot": slot,
+                        "trigger": "scheduler",
+                    }
+                ],
+                exclusive_scope=True,
+                config_revision=config_revision,
+            )
+        except Exception:
+            _detach_job_log(job_log_handler)
+            raise
+        external_result = None
+        try:
+            summary = run(snapshot)
+            summary = _with_metadata(
+                summary,
+                history_keys={
+                    **(summary.get("history_keys") or {}),
+                    run_name: history_key,
+                },
+                scheduler_slots=scheduler_slots,
+            )
+            status_name = _job_status(summary)
+            external_result = (status_name, summary)
+            _finish_external_result(db, job_id, status_name, summary)
+            logger.info("%s fertig: %s", label, status_name)
+            return 0 if status_name in {"ok", "warning"} else 1
+        except Exception as e:
+            logger.exception("%s gescheitert: %s", label, e)
+            if external_result is not None:
+                logger.error(
+                    "Externer Lauf #%s beendet; terminaler DB-Abschluss bleibt ausstehend",
+                    job_id,
+                )
+            else:
+                db.job_finish(
+                    job_id,
+                    "error",
+                    {
+                        "ok": False,
+                        "error": str(e),
+                        "trigger": "scheduler",
+                        "history_keys": {run_name: history_key},
+                        "scheduler_slots": scheduler_slots,
+                    },
+                )
+            return 1
+        finally:
+            _detach_job_log(job_log_handler)
+
+
 def main() -> int:
     cfg = get_config()
     scheduler_snapshot, scheduler_config_revision = _snapshot_with_revision(cfg)
@@ -294,6 +476,13 @@ def main() -> int:
                     "Ausbleib-Alarm für %s", ", ".join(reported)
                 )
 
+    if is_locked_down(db):
+        _configure_logging(None)
+        logging.getLogger("scheduler_cli").warning(
+            "Notfall-Lockdown aktiv: keine Läufe gestartet"
+        )
+        return 0
+
     control = scheduler_state(db)
     if control.get("paused"):
         _configure_logging(None)
@@ -319,10 +508,22 @@ def main() -> int:
                 if isinstance(pair, dict)
             ],
         )
+    deferred = _pbs_throttle(db, scheduler_snapshot.get("pbs") or {}, bool(due))
+    if deferred:
+        # Drills im Backup-Scope warten mit (not due), sonst liefen sie in der Wartung.
+        due = []
     pbs_due, _pbs_status = find_due_pbs_targets(cfg, db)
     restore_due = restore_test_due(cfg, db) if backup_enabled else {"due": False}
+    bitrot_due = bitrot_scrub_due(cfg, db) if backup_enabled else {"due": False}
+    boot_due = boot_drill_due(cfg, db)
 
-    if not due and not pbs_due and not restore_due.get("due"):
+    if not (
+        due
+        or pbs_due
+        or restore_due.get("due")
+        or bitrot_due.get("due")
+        or boot_due.get("due")
+    ):
         # Normalfall: kein Logfile pro Minute erzeugen.
         _configure_logging(None)
         logging.getLogger("scheduler_cli").info(
@@ -390,6 +591,9 @@ def main() -> int:
                     # beim atomaren Batch-Start entfernt. Ein danach gesetzter
                     # Abbruch bleibt fuer alle Folgedefinitionen sichtbar.
                     reset_cancel()
+                    if is_locked_down(db):
+                        logger.warning("Lockdown aktiv: rclone-Phase übersprungen")
+                        return rc
                     for index, definition in enumerate(due_definitions):
                         if index > 0 and is_cancelled():
                             logger.warning(
@@ -554,6 +758,9 @@ def main() -> int:
                 ) = _attempt_metadata(pbs_due, _pbs_status)
                 pbs_run_names = [str(item["name"]) for item in pbs_attempts]
                 reset_cancel(PBS_CANCEL_SCOPE)
+                if is_locked_down(db):
+                    logger.warning("Lockdown aktiv: PBS-Phase übersprungen")
+                    return rc
                 job_log_file = _job_log_file(
                     log_dir,
                     "pbs",
@@ -619,7 +826,7 @@ def main() -> int:
     # Der Drill teilt sich den Backup-Scope. Lief in diesem Tick bereits ein
     # Sync, wartet er auf den nächsten — seine Fälligkeit bleibt bestehen, weil
     # kein Lauf verbucht wurde.
-    if restore_due.get("due") and not due:
+    if restore_due.get("due") and not (due or deferred):
         logger.info("Restore-Drill ist fällig")
         with file_lock_or_none("backup") as got_lock:
             if got_lock is None:
@@ -647,6 +854,9 @@ def main() -> int:
                 history_keys = {RESTORE_AGGREGATE_NAME: RESTORE_TEST_HISTORY_KEY}
                 scheduler_slots = {RESTORE_AGGREGATE_NAME: slot} if slot else {}
                 reset_cancel()
+                if is_locked_down(db):
+                    logger.warning("Lockdown aktiv: Restore-Drill übersprungen")
+                    return rc
                 job_log_file = _job_log_file(
                     log_dir,
                     RESTORE_JOB_KIND,
@@ -721,6 +931,47 @@ def main() -> int:
                         rc = 1
                 finally:
                     _detach_job_log(job_log_handler)
+
+    # Wie der Restore-Drill: teilt sich den Backup-Scope und wartet auf den
+    # nächsten Tick, wenn in diesem bereits ein Sync fällig war.
+    if bitrot_due.get("due") and not (due or deferred):
+        rc |= _run_global_drill(
+            db,
+            cfg,
+            log_dir,
+            label="Bitrot-Scrub",
+            scope=runtime_state.DEFAULT_CANCEL_SCOPE,
+            kinds=BACKUP_KINDS,
+            kind=BITROT_JOB_KIND,
+            log_scope=BITROT_JOB_KIND,
+            run_name=BITROT_AGGREGATE_NAME,
+            history_key=BITROT_HISTORY_KEY,
+            due_check=bitrot_scrub_due,
+            run=lambda snapshot: run_bitrot_scrub(
+                trigger="scheduler",
+                reset_cancel_state=False,
+                config_snapshot=snapshot,
+            ),
+        )
+
+    # Teilt sich den PBS-Scope; nach einem PBS-Backup in diesem Tick erst beim nächsten.
+    if boot_due.get("due") and not pbs_due:
+        rc |= _run_global_drill(
+            db,
+            cfg,
+            log_dir,
+            label="Boot-Drill",
+            scope=PBS_CANCEL_SCOPE,
+            kinds=PBS_KINDS,
+            kind=BOOT_DRILL_JOB_KIND,
+            log_scope=BOOT_DRILL_JOB_KIND,
+            run_name=BOOT_DRILL_RUN_NAME,
+            history_key=BOOT_DRILL_HISTORY_KEY,
+            due_check=boot_drill_due,
+            run=lambda snapshot: run_boot_drill(
+                trigger="scheduler", config_snapshot=snapshot
+            ),
+        )
 
     return rc
 

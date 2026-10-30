@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
+from .. import pbs_api
 from ..auth import require_auth
 from ..config_store import get_config
 from ..db import JobAlreadyRunningError, get_db
@@ -16,6 +18,7 @@ from ..jobs import pbs_backup, rclone_sync, runtime_state
 from ..jobs.job_lifecycle import PBS_KINDS, reconcile_locked_scope
 from ..jobs.locks import HeldFileLock, try_file_lock
 from ..jobs.scheduler import next_run_after, pbs_history_key
+from ..lockdown import is_locked_down
 from ..security import require_csrf
 
 logger = logging.getLogger(__name__)
@@ -26,6 +29,8 @@ router = APIRouter(
 )
 
 _lock = threading.Lock()
+_INSIGHTS_TTL_SECONDS = 60.0
+_insights_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _audit_best_effort(event: str, details: dict[str, Any]) -> None:
@@ -106,6 +111,42 @@ def pbs_status() -> dict[str, Any]:
     }
 
 
+@router.get("/insights")
+def pbs_insights(refresh: bool = False) -> dict[str, Any]:
+    """Speicher, Dedup und laufende Wartung des PBS-Datastores (60 s gecacht)."""
+    settings = pbs_backup.pbs_settings()
+    repository = str(settings.get("repository") or "").strip()
+    if not bool(settings.get("enabled", False)) or not repository:
+        return {"enabled": False}
+    now = time.time()
+    cached = _insights_cache.get(repository)
+    if not refresh and cached and 0 <= now - cached[0] < _INSIGHTS_TTL_SECONDS:
+        return cached[1]
+    try:
+        repo = pbs_api.parse_repository(repository)
+    except ValueError:
+        repo = {}
+    storage = pbs_api.datastore_status(settings)
+    if "error" not in storage:
+        total, used = storage.get("total"), storage.get("used")
+        storage["percent_used"] = (
+            round(used / total * 100, 1) if total and used is not None else None
+        )
+    # Gleicher Host und Token: nach einem Fehler nicht erneut auf den Timeout warten.
+    dedup = dict(storage) if "error" in storage else pbs_api.gc_status(settings)
+    result = {
+        "enabled": True,
+        "host": repo.get("host"),
+        "datastore": repo.get("datastore"),
+        "storage": storage,
+        "dedup": dedup,
+        "maintenance": pbs_api.maintenance_active(settings, now=now),
+        "gc_throttle": pbs_api.throttle_settings(settings),
+    }
+    _insights_cache[repository] = (now, result)
+    return result
+
+
 def _run_thread(
     job_id: int,
     targets_filter: Optional[list[str]],
@@ -167,6 +208,8 @@ def _run_thread(
 
 @router.post("/run")
 def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
+    if is_locked_down():
+        raise HTTPException(423, "Lockdown aktiv")
     config_snapshot, config_revision = get_config().snapshot_with_revision()
     settings = pbs_backup.pbs_settings(rclone_sync._SnapshotConfig(config_snapshot))
     if not bool(settings.get("enabled", False)):
@@ -225,6 +268,9 @@ def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
                 "Ein registrierter PBS-Unterprozess ist noch aktiv",
             )
         rclone_sync.reset_cancel(pbs_backup.PBS_CANCEL_SCOPE)
+        # Nach dem Reset prüfen, damit ein parallel gesetztes Lockdown-Cancel greift.
+        if is_locked_down():
+            raise HTTPException(423, "Lockdown aktiv")
         job_id = db.job_start(
             pbs_backup.JOB_KIND,
             attempts=attempts,
@@ -280,7 +326,12 @@ def pbs_run(payload: PbsRunPayload) -> dict[str, Any]:
 
 @router.post("/cancel")
 def pbs_cancel(response: Response) -> dict[str, Any]:
-    running = get_db().job_running(pbs_backup.JOB_KIND)
+    db = get_db()
+    running = None
+    for kind in PBS_KINDS:
+        running = db.job_running(kind)
+        if running:
+            break
     if not running and not runtime_state.active_processes(pbs_backup.PBS_CANCEL_SCOPE):
         return {"ok": False, "error": "Kein laufender PBS-Job"}
     result = rclone_sync.cancel_job(pbs_backup.PBS_CANCEL_SCOPE)

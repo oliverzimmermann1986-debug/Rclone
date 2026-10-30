@@ -116,6 +116,9 @@ def test_scheduler_cancel_survives_first_definition_and_skips_followups(
             return value
 
     class Db:
+        def runtime_delete(self, _key):  # PBS-Drossel räumt ihren Zeitstempel auf
+            pass
+
         def __init__(self):
             self.started = []
             self.finished = []
@@ -153,6 +156,7 @@ def test_scheduler_cancel_survives_first_definition_and_skips_followups(
     monkeypatch.setattr(scheduler_cli, "_configure_logging", lambda _path=None: None)
     monkeypatch.setattr(scheduler_cli, "check_overdue", lambda *_args: [])
     monkeypatch.setattr(scheduler_cli, "scheduler_state", lambda _db: {"paused": False})
+    monkeypatch.setattr(scheduler_cli, "is_locked_down", lambda _db: False)
     monkeypatch.setattr(
         scheduler_cli,
         "find_due_pairs",
@@ -392,6 +396,7 @@ def test_disabled_rclone_backup_does_not_disable_pbs_scheduler(tmp_path, monkeyp
     monkeypatch.setattr(scheduler_cli, "get_db", lambda: database)
     monkeypatch.setattr(scheduler_cli, "_configure_logging", lambda _path=None: None)
     monkeypatch.setattr(scheduler_cli, "scheduler_state", lambda _db: {"paused": False})
+    monkeypatch.setattr(scheduler_cli, "is_locked_down", lambda _db: False)
     monkeypatch.setattr(
         scheduler_cli,
         "find_due_pairs",
@@ -504,6 +509,7 @@ def test_scheduler_does_not_retry_backup_when_only_pbs_prune_failed(
     monkeypatch.setattr(scheduler_cli, "get_db", lambda: database)
     monkeypatch.setattr(scheduler_cli, "_configure_logging", lambda _path=None: None)
     monkeypatch.setattr(scheduler_cli, "scheduler_state", lambda _db: {"paused": False})
+    monkeypatch.setattr(scheduler_cli, "is_locked_down", lambda _db: False)
     monkeypatch.setattr(
         scheduler_cli,
         "find_due_pairs",
@@ -548,6 +554,9 @@ def test_unsafe_backup_scope_does_not_block_independent_pbs_scope(
             return value
 
     class Db:
+        def runtime_delete(self, _key):  # PBS-Drossel räumt ihren Zeitstempel auf
+            pass
+
         def __init__(self):
             self.started = []
             self.finished = []
@@ -579,6 +588,7 @@ def test_unsafe_backup_scope_does_not_block_independent_pbs_scope(
     monkeypatch.setattr(scheduler_cli, "_configure_logging", lambda _path=None: None)
     monkeypatch.setattr(scheduler_cli, "check_overdue", lambda *_args: [])
     monkeypatch.setattr(scheduler_cli, "scheduler_state", lambda _db: {"paused": False})
+    monkeypatch.setattr(scheduler_cli, "is_locked_down", lambda _db: False)
     monkeypatch.setattr(
         scheduler_cli,
         "find_due_pairs",
@@ -638,6 +648,9 @@ def test_scheduler_rechecks_due_state_after_scope_lock(tmp_path, monkeypatch):
             return value
 
     class Db:
+        def runtime_delete(self, _key):  # PBS-Drossel räumt ihren Zeitstempel auf
+            pass
+
         def jobs_mark_all_running_stale(self, **_kwargs):
             return 0
 
@@ -665,6 +678,7 @@ def test_scheduler_rechecks_due_state_after_scope_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler_cli, "get_db", Db)
     monkeypatch.setattr(scheduler_cli, "_configure_logging", lambda _path=None: None)
     monkeypatch.setattr(scheduler_cli, "scheduler_state", lambda _db: {"paused": False})
+    monkeypatch.setattr(scheduler_cli, "is_locked_down", lambda _db: False)
     monkeypatch.setattr(
         scheduler_cli, "find_due_pairs", lambda *_args, **_kwargs: next(due_results)
     )

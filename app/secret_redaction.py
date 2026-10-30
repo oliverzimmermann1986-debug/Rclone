@@ -97,7 +97,7 @@ def is_secret_key(key: object) -> bool:
     """Classify secret-bearing field names without substring false positives."""
 
     raw = str(key).strip().casefold()
-    if raw in _SENSITIVE_HEADER_NAMES:
+    if raw in _SENSITIVE_HEADER_NAMES or raw == "secret_url":
         return True
     words = _key_words(key)
     if not words:

@@ -134,10 +134,12 @@
       ['copies', 'Kopien & Schutz', 'Sicherungsziele und offene Schutzlücken je Datenbestand.'],
       ['maintenance', 'Wartung', 'Logs, Datenbank und geschützte Konfigurationsstände verwalten.'],
       ['audit', 'Aktivitäten', 'Bedien- und Konfigurationsaktionen nachvollziehen.'],
+      ['tools', 'Betriebswerkzeuge', 'Dateisuche, Speicherprognose, Ausfallwächter, Zielwechsel und Schutzberichte.'],
     ], (node) => {
+      if (node.classList.contains('protection-tools-panel')) return 'tools';
       if (node.classList.contains('audit-panel')) return 'audit';
       if (node.classList.contains('recovery-panel') || /Logs und Datenbank/.test(headingText(node))) return 'maintenance';
-      if (node.querySelector('.copy-matrix, .copy-table') || /Kopien je Datenbestand/.test(headingText(node))) return 'copies';
+      if (node.querySelector('.copy-matrix, .copy-table') || /Kopien je Datenbestand|Bitrot-Scrub/.test(headingText(node))) return 'copies';
       return 'health';
     });
   }

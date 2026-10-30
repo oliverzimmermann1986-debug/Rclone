@@ -24,14 +24,25 @@ _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
 # sich aber bewusst den Backup-Scope: Ein Drill während eines laufenden Syncs
 # würde einen inkonsistenten Zwischenstand prüfen und Bandbreite streitig machen.
-_BACKUP_SCOPE_KINDS = ("backup", "check", "quicksync", "restoretest", "recovery")
+_BACKUP_SCOPE_KINDS = (
+    "backup",
+    "check",
+    "quicksync",
+    "restoretest",
+    "recovery",
+    "bitrotscrub",
+    "migration",
+)
 _JOB_SCOPE_KINDS = {
     "backup": _BACKUP_SCOPE_KINDS,
     "check": _BACKUP_SCOPE_KINDS,
     "quicksync": _BACKUP_SCOPE_KINDS,
     "restoretest": _BACKUP_SCOPE_KINDS,
     "recovery": _BACKUP_SCOPE_KINDS,
-    "pbs": ("pbs",),
+    "bitrotscrub": _BACKUP_SCOPE_KINDS,
+    "migration": _BACKUP_SCOPE_KINDS,
+    "pbs": ("pbs", "bootdrill"),
+    "bootdrill": ("pbs", "bootdrill"),
 }
 
 
@@ -268,6 +279,17 @@ CREATE TABLE IF NOT EXISTS native_webauthn_registrations (
 );
 CREATE INDEX IF NOT EXISTS idx_native_webauthn_registrations_expiry
 ON native_webauthn_registrations(expires_at);
+
+CREATE TABLE IF NOT EXISTS file_hash_baseline (
+    pair_key TEXT NOT NULL,
+    path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    modtime TEXT NOT NULL,
+    recorded_at REAL NOT NULL,
+    last_verified_at REAL,
+    PRIMARY KEY(pair_key, path)
+);
 """
 
 
@@ -3740,6 +3762,84 @@ class Database:
                 (cutoff, keep),
             )
             return int(cursor.rowcount or 0)
+
+    def hash_baseline_get_many(
+        self, pair_key: str, paths: Iterable[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        wanted = list(dict.fromkeys(str(path) for path in paths))
+        result: Dict[str, Dict[str, Any]] = {}
+        with self.conn() as connection:
+            for offset in range(0, len(wanted), 500):
+                chunk = wanted[offset : offset + 500]
+                marks = ",".join("?" for _ in chunk)
+                for row in connection.execute(
+                    "SELECT * FROM file_hash_baseline "
+                    f"WHERE pair_key=? AND path IN ({marks})",
+                    (pair_key, *chunk),
+                ):
+                    result[row["path"]] = dict(row)
+        return result
+
+    def hash_baseline_upsert(
+        self, pair_key: str, rows: Iterable[Mapping[str, Any]]
+    ) -> None:
+        """Neue oder geänderte Datei: Baseline ersetzen, Prüfstand zurücksetzen."""
+        now = time.time()
+        values = [
+            (
+                pair_key,
+                str(row["path"]),
+                str(row["sha256"]),
+                int(row["size"]),
+                str(row["modtime"]),
+                now,
+            )
+            for row in rows
+        ]
+        with self.conn() as connection:
+            connection.executemany(
+                "INSERT INTO file_hash_baseline "
+                "(pair_key, path, sha256, size, modtime, recorded_at, last_verified_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, NULL) "
+                "ON CONFLICT(pair_key, path) DO UPDATE SET "
+                "sha256=excluded.sha256, size=excluded.size, modtime=excluded.modtime, "
+                "recorded_at=excluded.recorded_at, last_verified_at=NULL",
+                values,
+            )
+
+    def hash_baseline_touch(
+        self, pair_key: str, paths: Iterable[str], verified_at: float
+    ) -> None:
+        with self.conn() as connection:
+            connection.executemany(
+                "UPDATE file_hash_baseline SET last_verified_at=? "
+                "WHERE pair_key=? AND path=?",
+                [(float(verified_at), pair_key, str(path)) for path in paths],
+            )
+
+    def hash_baseline_prune(self, pair_key: str, max_rows: int = 50_000) -> int:
+        """Verwirft über ``max_rows`` hinaus die zuletzt verifizierten Zeilen."""
+        # Behalten wird, was am längsten ungeprüft ist: Das ist als Nächstes fällig.
+        # recorded_at ersetzt eine fehlende Verifikation (Baseline = erster Hash).
+        with self.conn() as connection:
+            cursor = connection.execute(
+                "DELETE FROM file_hash_baseline WHERE pair_key=? AND path NOT IN "
+                "(SELECT path FROM file_hash_baseline WHERE pair_key=? "
+                "ORDER BY COALESCE(last_verified_at, recorded_at) ASC LIMIT ?)",
+                (pair_key, pair_key, max(0, int(max_rows))),
+            )
+            return int(cursor.rowcount or 0)
+
+    def hash_baseline_stats(self, pair_key: str) -> Dict[str, Any]:
+        with self.conn() as connection:
+            row = connection.execute(
+                'SELECT COUNT(*) AS "rows", MIN(recorded_at) AS oldest_recorded_at, '
+                "MAX(recorded_at) AS newest_recorded_at, "
+                "MIN(last_verified_at) AS oldest_verified_at "
+                "FROM file_hash_baseline WHERE pair_key=?",
+                (pair_key,),
+            ).fetchone()
+        return dict(row)
 
     def integrity_check(self) -> Dict[str, Any]:
         with self.conn() as connection:

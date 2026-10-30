@@ -1129,12 +1129,55 @@ struct JobSearchResponse: Decodable {
     let offset: Int
 }
 
+struct CurrentJobsResponse: Decodable {
+    let backup: JobRecord?
+    let check: JobRecord?
+    let quickSync: JobRecord?
+    let restoreTest: JobRecord?
+    let recovery: JobRecord?
+    let pbs: JobRecord?
+    let bitrotScrub: JobRecord?
+    let bootDrill: JobRecord?
+    let migration: JobRecord?
+
+    init(backup: JobRecord? = nil, check: JobRecord? = nil, quickSync: JobRecord? = nil,
+         restoreTest: JobRecord? = nil, recovery: JobRecord? = nil, pbs: JobRecord? = nil,
+         bitrotScrub: JobRecord? = nil, bootDrill: JobRecord? = nil, migration: JobRecord? = nil) {
+        self.backup = backup; self.check = check; self.quickSync = quickSync
+        self.restoreTest = restoreTest; self.recovery = recovery; self.pbs = pbs
+        self.bitrotScrub = bitrotScrub; self.bootDrill = bootDrill; self.migration = migration
+    }
+    enum CodingKeys: String, CodingKey {
+        case backup, check, recovery, pbs, migration
+        case quickSync = "quicksync", restoreTest = "restoretest", bitrotScrub = "bitrotscrub", bootDrill = "bootdrill"
+    }
+    var backupScopeJobs: [JobRecord] {
+        [backup, check, quickSync, restoreTest, recovery, bitrotScrub, migration]
+            .compactMap { $0 }.filter { $0.status == "running" }
+    }
+}
+
 struct JobRecord: Decodable, Identifiable {
     var summary: [String: JSONValue]? = nil
     var displayStatus: String? = nil
     var dryRun: Bool? = nil
     var isDryRun: Bool { dryRun == true || summary?["dry_run"] == .bool(true) }
     var effectiveStatus: String { displayStatus ?? status }
+    static let backupScopeKinds: Set<String> = ["backup", "check", "quicksync", "restoretest", "recovery", "bitrotscrub", "migration"]
+    var kindLabel: String {
+        switch kind {
+        case "backup": "Sicherung"
+        case "check": "Prüfung"
+        case "quicksync": "Quick Sync"
+        case "restoretest": "Restore-Test"
+        case "recovery": "Recovery"
+        case "pbs": "PBS"
+        case "bitrotscrub": "Bitrot-Prüfung"
+        case "bootdrill": "Boot-Drill"
+        case "migration": "Zielwechsel"
+        default: "Lauf"
+        }
+    }
     let id: Int
     let kind: String
     let status: String

@@ -97,6 +97,15 @@
           <button class="button secondary small" @click="loadConfig()" :disabled="configLoading" x-text="configLoading ? 'Lädt…' : 'Neu laden'"></button>
         </div>
         <div class="loading-state page-loading" x-show="configLoading && !configLoaded" role="status" aria-live="polite" x-cloak>Konfiguration wird geladen…</div>
+        <div class="connection-alert error lockdown-banner" x-show="lockdownState.active" role="status" x-cloak>
+          <span class="alert-icon" aria-hidden="true">!</span>
+          <span><strong x-text="'Lockdown aktiv seit ' + formatDateTime(lockdownState.since) + ' (' + (lockdownState.reason || 'ohne Grund') + ', ausgelöst von ' + (lockdownState.actor || 'unbekannt') + ')'"></strong><small>Neue Läufe sind gesperrt, die Automatik ist pausiert.</small></span>
+          <button class="button danger small" @click="releaseLockdown()">Lockdown aufheben</button>
+        </div>
+        <div class="alert info lockdown-steps" x-show="lockdownSteps.length" role="status" x-cloak>
+          <span class="alert-icon" aria-hidden="true">i</span>
+          <div class="stack"><span><strong>Schreibschutz von Hand zurücknehmen</strong><small>Diese Mounts wurden beim Lockdown schreibgeschützt eingehängt. Führe die Befehle als root auf dem Server aus, sobald die Ursache geklärt ist.</small></span><pre class="code-block" x-text="lockdownSteps.join('\n')"></pre><div class="button-row"><button class="button secondary small" @click="copyLockdownSteps()">Befehle kopieren</button><button class="button ghost small" @click="lockdownSteps = []">Hinweis ausblenden</button></div></div>
+        </div>
         <div class="connection-alert error" x-show="restoreTestStart.phase === 'unknown'" role="alert" x-cloak>
           <span class="alert-icon" aria-hidden="true">!</span>
           <span><strong>Startstatus unbekannt</strong><small>Die Antwort zum Restore-Drill fehlt. Der Auftrag kann bereits laufen oder abgeschlossen sein. Prüfe die Läufe, bevor du einen weiteren Drill startest.</small><small x-show="restoreTestStart.checked">Status geprüft: Es läuft kein Restore-Drill. Prüfe auch die abgeschlossenen Läufe.</small><small x-show="restoreTestStart.error" x-text="restoreTestStart.error"></small></span>
@@ -114,9 +123,10 @@
               <p>Synchronisationen, Container-Ressourcen und letzte Ergebnisse auf einer Seite.</p>
             </div>
             <div class="heading-actions">
-              <button class="button secondary" @click="loadPlan(true)" :disabled="pending.plan || busy()" x-text="pending.plan ? 'Plan wird geladen…' : 'Plan prüfen'"></button>
+              <button class="button secondary" @click="loadPlan(true)" :disabled="pending.plan || startBlocked()" x-text="pending.plan ? 'Plan wird geladen…' : 'Plan prüfen'"></button>
               <button class="button secondary" @click="openQuick()">Quick-Sync</button>
-              <button class="button primary" @click="runBackup(true)" :disabled="busy()" x-text="pending.backup ? 'Startet…' : 'Dry-Run starten'"></button>
+              <button class="button primary" @click="runBackup(true)" :disabled="startBlocked()" x-text="pending.backup ? 'Startet…' : 'Dry-Run starten'"></button>
+              <button class="button danger" @click="openLockdown()" :disabled="lockdownState.active">Notfall-Lockdown</button>
             </div>
           </div>
 
@@ -181,7 +191,7 @@
             <div class="table-scroll responsive-table-wrap" tabindex="0" aria-label="Übersicht der Sicherungskopien">
               <table class="table copy-table responsive-table">
                 <thead><tr><th>Datenweg</th><th>Lokaler Ordner</th><th>Cloud-Ordner</th><th>Dateien</th><th>Größe</th><th>Messalter</th><th>Wiederherstellbarkeit</th></tr></thead>
-                <tbody><template x-for="entry in storagePairs()" :key="entry.name"><tr><td data-label="Datenweg"><strong x-text="entry.name"></strong></td><td data-label="Lokaler Ordner"><button class="path-copy mono" @click="copyPath(copyFolder(entry, 'local'))" :disabled="!copyFolder(entry, 'local')" :aria-label="'Lokalen Pfad kopieren: ' + (copyFolder(entry, 'local') || 'nicht verfügbar')" :title="copyPathTitle(copyFolder(entry, 'local'))" x-text="copyFolder(entry, 'local')"></button><small class="error-text" x-show="copySideError(entry, 'local')" x-text="copySideError(entry, 'local')"></small></td><td data-label="Cloud-Ordner"><button class="path-copy mono" @click="copyPath(copyFolder(entry, 'cloud'))" :disabled="!copyFolder(entry, 'cloud')" :aria-label="'Cloud-Pfad kopieren: ' + (copyFolder(entry, 'cloud') || 'nicht verfügbar')" :title="copyPathTitle(copyFolder(entry, 'cloud'))" x-text="copyFolder(entry, 'cloud')"></button><small class="error-text" x-show="copySideError(entry, 'cloud')" x-text="copySideError(entry, 'cloud')"></small></td><td data-label="Dateien" x-text="copyMetric(entry, 'count')"></td><td data-label="Größe"><span x-text="copyMetric(entry, 'bytes')"></span><span class="copy-delta" x-show="copyDelta(entry)" :title="'Bestandsgröße: ' + formatBytes(copyDelta(entry)?.source || 0) + ' · Zielgröße: ' + formatBytes(copyDelta(entry)?.target || 0)"><span><i :style="`width:${copyDelta(entry)?.sourceWidth || 0}%`"></i></span><small x-text="copyDelta(entry)?.coverage + '% Ziel/Quelle'"></small></span></td><td data-label="Messalter" x-text="copyMetric(entry, 'age')"></td><td data-label="Wiederherstellbarkeit"><span class="badge restore-evidence" :class="restoreEvidence(entry).state" :title="restoreEvidence(entry).title" role="status" x-text="restoreEvidenceLabel(entry)"></span></td></tr></template></tbody>
+                <tbody><template x-for="entry in storagePairs()" :key="entry.name"><tr><td data-label="Datenweg"><strong x-text="entry.name"></strong></td><td data-label="Lokaler Ordner"><button class="path-copy mono" @click="copyPath(copyFolder(entry, 'local'))" :disabled="!copyFolder(entry, 'local')" :aria-label="'Lokalen Pfad kopieren: ' + (copyFolder(entry, 'local') || 'nicht verfügbar')" :title="copyPathTitle(copyFolder(entry, 'local'))" x-text="copyFolder(entry, 'local')"></button><small class="error-text" x-show="copySideError(entry, 'local')" x-text="copySideError(entry, 'local')"></small></td><td data-label="Cloud-Ordner"><button class="path-copy mono" @click="copyPath(copyFolder(entry, 'cloud'))" :disabled="!copyFolder(entry, 'cloud')" :aria-label="'Cloud-Pfad kopieren: ' + (copyFolder(entry, 'cloud') || 'nicht verfügbar')" :title="copyPathTitle(copyFolder(entry, 'cloud'))" x-text="copyFolder(entry, 'cloud')"></button><small class="error-text" x-show="copySideError(entry, 'cloud')" x-text="copySideError(entry, 'cloud')"></small></td><td data-label="Dateien" x-text="copyMetric(entry, 'count')"></td><td data-label="Größe"><span x-text="copyMetric(entry, 'bytes')"></span><span class="copy-delta" x-show="copyDelta(entry)" :title="'Bestandsgröße: ' + formatBytes(copyDelta(entry)?.source || 0) + ' · Zielgröße: ' + formatBytes(copyDelta(entry)?.target || 0)"><span><i :style="`width:${copyDelta(entry)?.sourceWidth || 0}%`"></i></span><small x-text="copyDelta(entry)?.coverage + '% Ziel/Quelle'"></small></span></td><td data-label="Messalter" x-text="copyMetric(entry, 'age')"></td><td data-label="Wiederherstellbarkeit"><span class="badge restore-evidence" :class="restoreEvidence(entry).state" :title="restoreEvidence(entry).title" role="status" x-text="restoreEvidenceLabel(entry)"></span> <span class="badge compact" x-show="!['n/a', '—'].includes(objectLockBadge(entry).label)" :class="objectLockBadge(entry).tone" :title="objectLockBadge(entry).title"><span class="sr-only">Unveränderlichkeit: </span><span x-text="objectLockBadge(entry).label"></span><span class="sr-only" x-text="' – ' + objectLockBadge(entry).title"></span></span></td></tr></template></tbody>
               </table>
             </div>
             <div class="loading-state compact-loading" x-show="storageState === 'loading'" role="status" aria-live="polite" x-text="storageStatusText()"></div>
@@ -189,10 +199,16 @@
             <div class="empty-state compact" x-show="storageState === 'loaded' && !storagePairs().length"><strong>Noch keine Kopien</strong><span>Lege zuerst einen Datenweg an.</span><button class="button secondary" @click="navigate('pairs')">Zu Datenwegen</button></div>
           </article>
 
-          <article class="panel" x-show="config.pbs?.enabled" aria-labelledby="pbs-targets-heading">
-            <div class="panel-head"><div><span class="section-kicker">Proxmox Backup Server</span><h3 id="pbs-targets-heading">PBS-Targets</h3></div><div class="heading-actions"><button class="button secondary" @click="loadPbsStatus()" :disabled="pbs.loading" x-text="pbs.loading ? 'Lädt…' : 'Aktualisieren'"></button><button class="button danger" x-show="pbs.status?.running" @click="cancelPbs()" :disabled="pending.pbsCancel" x-text="pending.pbsCancel ? 'Bricht ab…' : 'PBS abbrechen'"></button><button class="button primary" @click="runPbs()" :disabled="pbs.status?.running || pending.pbs || configLoading" x-text="pending.pbs ? 'Startet…' : (pbs.status?.running ? 'Sicherung läuft…' : 'Alle sichern')"></button></div></div>
+          <article class="panel stack" x-show="config.pbs?.enabled" aria-labelledby="pbs-targets-heading">
+            <div class="panel-head"><div><span class="section-kicker">Proxmox Backup Server</span><h3 id="pbs-targets-heading">PBS-Targets</h3></div><div class="heading-actions"><button class="button secondary" @click="loadPbsStatus(); loadPbsInsights()" :disabled="pbs.loading" x-text="pbs.loading ? 'Lädt…' : 'Aktualisieren'"></button><button class="button danger" x-show="pbs.status?.running" @click="cancelPbs()" :disabled="pending.pbsCancel" x-text="pending.pbsCancel ? 'Bricht ab…' : 'PBS abbrechen'"></button><button class="button primary" @click="runPbs()" :disabled="pbs.status?.running || pending.pbs || configLoading || lockdownState.active" x-text="pending.pbs ? 'Startet…' : (pbs.status?.running ? 'Sicherung läuft…' : 'Alle sichern')"></button></div></div>
             <div class="loading-state compact-loading" x-show="pbs.loading && !pbs.status" role="status">PBS-Status wird geladen…</div>
             <div class="inline-error" x-show="pbs.status && !pbs.status.client_available" role="alert">proxmox-backup-client ist nicht installiert.</div>
+            <div class="metric-grid small-metrics" x-show="pbsInsights?.enabled" role="group" aria-label="Speicher und Deduplizierung des PBS-Datastores">
+              <article class="metric-card"><div class="metric-head"><span>Belegung</span></div><strong class="metric-value" :class="(pbsInsights?.storage?.percent_used || 0) >= 90 && 'error'" x-text="pbsInsights?.storage?.error ? '—' : metricPercent(pbsInsights?.storage?.percent_used)"></strong><span class="metric-sub" x-text="pbsInsights?.storage?.error || (formatBytes(pbsInsights?.storage?.used) + ' von ' + formatBytes(pbsInsights?.storage?.total) + ' · ' + (pbsInsights?.datastore || 'Datastore') + ((pbsInsights?.storage?.percent_used || 0) >= 90 ? ' · kritisch' : ((pbsInsights?.storage?.percent_used || 0) >= 80 ? ' · knapp' : '')))"></span></article>
+              <article class="metric-card"><div class="metric-head"><span>Dedup-Faktor</span></div><strong class="metric-value" x-text="pbsDedupText()"></strong><span class="metric-sub" x-text="pbsInsights?.dedup?.error || ('Letzte Garbage Collection: ' + formatDateTime(pbsInsights?.dedup?.last_run))"></span></article>
+              <article class="metric-card"><div class="metric-head"><span>Eingespart</span></div><strong class="metric-value" x-text="pbsInsights?.dedup?.error ? '—' : formatBytes(pbsInsights?.dedup?.saved_bytes)"></strong><span class="metric-sub" x-text="pbsInsights?.dedup?.error ? 'Nicht verfügbar' : ('Freigabe ausstehend: ' + formatBytes(pbsInsights?.dedup?.pending_bytes))"></span></article>
+              <article class="metric-card"><div class="metric-head"><span>Wartung</span></div><span class="metric-value text"><span class="badge compact" :class="pbsMaintenance().tone" x-text="pbsMaintenance().label"></span></span><span class="metric-sub" x-text="pbsMaintenance().text"></span></article>
+            </div>
             <div class="table-scroll responsive-table-wrap" x-show="(pbs.status?.targets || []).length" tabindex="0" aria-label="PBS-Targets">
             <table class="table responsive-table">
               <thead><tr><th>Target</th><th>Pfade</th><th>Zeitplan</th><th>Letzter Erfolg</th><th></th></tr></thead>
@@ -202,12 +218,25 @@
                   <td data-label="Pfade" class="mono" x-text="(target.paths || []).join(', ')"></td>
                   <td data-label="Zeitplan" class="mono" x-text="target.schedule"></td>
                   <td data-label="Letzter Erfolg" x-text="formatDateTime(target.last_success)"></td>
-                  <td data-label="Aktion"><button class="button secondary" @click="runPbs(target.name)" :disabled="pbs.status?.running || pending.pbs" :aria-label="'PBS-Target ' + target.name + ' sichern'">Sichern</button></td>
+                  <td data-label="Aktion"><button class="button secondary" @click="runPbs(target.name)" :disabled="pbs.status?.running || pending.pbs || lockdownState.active" :aria-label="'PBS-Target ' + target.name + ' sichern'">Sichern</button></td>
                 </tr>
               </template></tbody>
             </table>
             </div>
             <p x-show="!(pbs.status?.targets || []).length">Keine Targets konfiguriert — unter Einstellungen → Proxmox Backup anlegen.</p>
+            <div class="boot-drill stack" x-show="config.pbs?.boot_drill?.enabled" role="group" aria-labelledby="boot-drill-heading">
+              <div class="panel-head"><div><h4 id="boot-drill-heading" class="subheading">Boot-Drill</h4><p>Startet das jüngste Backup der Gruppe <span class="mono" x-text="config.pbs?.boot_drill?.group || '—'"></span> isoliert in QEMU und wartet auf den Guest Agent.</p></div><button class="button secondary" @click="runBootDrill()" :disabled="bootDrill?.running || pending.bootDrill || pbs.status?.running || lockdownState.active" x-text="bootDrill?.running ? 'Boot-Drill läuft…' : (pending.bootDrill ? 'Startet…' : 'Boot-Drill starten')"></button></div>
+              <dl class="system-facts">
+                <div><dt>Ergebnis</dt><dd><span class="badge compact" :class="bootDrillBadge().tone" aria-live="polite" x-text="bootDrillBadge().label"></span></dd></div>
+                <div><dt>Snapshot</dt><dd x-text="bootDrillLast()?.snapshot || '—'"></dd></div>
+                <div><dt>Archiv</dt><dd x-text="bootDrillLast()?.archive || '—'"></dd></div>
+                <div><dt>Bis Guest Agent</dt><dd x-text="bootDrillLast()?.seconds_to_agent != null ? bootDrillLast().seconds_to_agent + ' s' : '—'"></dd></div>
+                <div><dt>KVM</dt><dd x-text="bootDrillLast() ? (bootDrillLast().kvm ? 'Ja' : 'Nein, emuliert') : '—'"></dd></div>
+                <div><dt>Nächster Termin</dt><dd x-text="scheduleNextText(bootDrill)"></dd></div>
+              </dl>
+              <p class="error-text" x-show="bootDrillLast()?.error" x-text="bootDrillLast()?.error"></p>
+              <details class="disclosure" x-show="bootDrillLast()?.serial_tail"><summary>Konsolenausgabe</summary><div class="disclosure-body"><pre class="code-block" x-text="bootDrillLast()?.serial_tail"></pre></div></details>
+            </div>
           </article>
 
           <div class="dashboard-grid">
@@ -224,7 +253,7 @@
 
               <template x-if="!busy()">
                 <div class="safe-actions hero-actions">
-                  <button class="action-tile recommended" @click="runBackup(true)" :disabled="pending.backup">
+                  <button class="action-tile recommended" @click="runBackup(true)" :disabled="pending.backup || lockdownState.active">
                     <span class="action-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span></span>
                     <span><strong>Dry-Run</strong><small>Änderungen prüfen, nichts schreiben</small></span>
                   </button>
@@ -232,7 +261,7 @@
                     <span class="action-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></svg></span></span>
                     <span><strong>Ausführungsplan</strong><small>Befehle und Warnungen ansehen</small></span>
                   </button>
-                  <button class="action-tile danger-zone" @click="runBackup(false)" :disabled="pending.backup">
+                  <button class="action-tile danger-zone" @click="runBackup(false)" :disabled="pending.backup || lockdownState.active">
                     <span class="action-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg></span></span>
                     <span><strong>Produktiv starten</strong><small>Aktive Pairs wirklich ausführen</small></span>
                   </button>
@@ -315,7 +344,7 @@
                   </div>
                   <p class="error-text" x-show="pair.error" x-text="pair.error"></p>
                   <div class="health-actions">
-                    <button @click="runSinglePair(pair.name, true)" :disabled="busy()">Dry-Run</button>
+                    <button @click="runSinglePair(pair.name, true)" :disabled="startBlocked()">Dry-Run</button>
                     <button @click="showJob({id: pair.job_id})" x-show="pair.job_id">Details</button>
                   </div>
                 </div>
@@ -349,7 +378,7 @@
         <section x-show="page==='pairs'" x-cloak>
           <div class="page-heading">
             <div><h2>Datenwege verwalten</h2><p>Quelle, Ziel, Übertragungsart und Schutzregeln. Zeitpläne werden getrennt unter Jobs verwaltet.</p></div>
-            <div class="heading-actions"><button class="button secondary" @click="testRclone()" :disabled="configLoading || !configLoaded">Remotes testen</button><button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading || !configLoaded" x-text="configValidation.loading ? 'Prüfung…' : 'Konfiguration prüfen'"></button><button class="button secondary" @click="saveConfig()" :disabled="!configDirty || pending.save || configLoading" x-text="pending.save ? 'Speichert…' : 'Speichern'"></button><button class="button primary" @click="addPair()" :disabled="configLoading || !configLoaded">Sicheres Pair hinzufügen</button></div>
+            <div class="heading-actions"><button type="button" class="button secondary" @click="openProtectionTools('migration')">Sicherungsziel wechseln</button><button class="button secondary" @click="testRclone()" :disabled="configLoading || !configLoaded">Remotes testen</button><button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading || !configLoaded" x-text="configValidation.loading ? 'Prüfung…' : 'Konfiguration prüfen'"></button><button class="button secondary" @click="saveConfig()" :disabled="!configDirty || pending.save || configLoading" x-text="pending.save ? 'Speichert…' : 'Speichern'"></button><button class="button primary" @click="addPair()" :disabled="configLoading || !configLoaded">Sicheres Pair hinzufügen</button></div>
           </div>
 
           <div class="toolbar panel slim">
@@ -360,6 +389,11 @@
             <div class="pair-template-action"><select x-model="newPairPreset" aria-label="Vorlage für neues Pair"><option value="push-copy">Backup: Lokaler Pfad → Remote-Pfad (Copy)</option><option value="pull-copy">Restore: Remote-Pfad → Lokaler Pfad (Copy)</option><option value="bisync">Bidirektional (Bi-Sync)</option><option value="push-sync">Mirror: Lokaler Pfad → Remote-Pfad (Sync)</option><option value="pbs">Backup: Lokale Pfade → Proxmox Backup Server</option></select><button class="button secondary small" @click="addPair(newPairPreset)">Aus Vorlage</button></div>
             <div class="toolbar-actions"><button class="button ghost small" @click="setAllPairsOpen(true)">Alle öffnen</button><button class="button ghost small" @click="setAllPairsOpen(false)">Alle schließen</button><button class="button ghost small" @click="loadPairSizes()" :disabled="storageLoading" x-text="storageLoading ? 'Berechne…' : 'Größen berechnen'"></button></div>
             <div class="toolbar-meta"><span x-text="visiblePairCount()"></span> von <span x-text="config.backup.pairs.length"></span></div>
+          </div>
+
+          <div class="toolbar panel slim" x-show="pairTags().length" x-cloak>
+            <div class="job-filter-chips" role="group" aria-label="Datenwege nach Tag filtern"><button type="button" :aria-pressed="!activeTag" :class="!activeTag && 'active'" @click="activeTag = ''">Alle</button><template x-for="tag in pairTags()" :key="tag"><button type="button" :aria-pressed="activeTag === tag" :class="activeTag === tag && 'active'" @click="activeTag = tag" x-text="tag"></button></template></div>
+            <div class="toolbar-actions" x-show="activeTag"><button class="button secondary small" @click="runBackup(true, tagPairNames())" :disabled="startBlocked() || !tagPairNames().length" x-text="'Dry-Run für Tag „' + activeTag + '“ starten'"></button><small class="muted" x-show="!tagPairNames().length">Kein aktiver Datenweg mit diesem Tag.</small></div>
           </div>
 
           <div class="toolbar panel slim" x-show="selectedPairCount() > 0" x-cloak>
@@ -403,6 +437,8 @@
                   <label class="switch" title="Pair aktivieren/deaktivieren"><input type="checkbox" x-model="pair.enabled"><span></span><em x-text="pair.enabled ? 'Aktiv' : 'Aus'"></em></label>
                 </div>
 
+                <ul class="pair-tags" x-show="(pair.tags || []).length" aria-label="Tags"><template x-for="tag in (pair.tags || [])" :key="tag"><li x-text="tag"></li></template></ul>
+
                 <div class="pair-warning-row" x-show="pairIssues(pair).length || pairRuntimeIssue(pair)">
                   <template x-for="issue in pairIssues(pair)" :key="issue"><span class="issue-chip" x-text="issue"></span></template>
                   <span class="issue-chip" :class="pairRuntimeIssueLevel(pair)" x-show="pairRuntimeIssue(pair)" x-text="pairRuntimeIssue(pair)"></span>
@@ -415,10 +451,11 @@
                 </div>
 
                 <div class="pair-quick-actions">
-                  <button @click="runSinglePair(pair.name, true)" :disabled="busy() || !pair.name">Dry-Run</button>
-                  <button class="danger" @click="runSinglePair(pair.name, false)" :disabled="busy() || !pair.name || !pair.enabled">Produktiv</button>
-                  <button @click="checkPair(pair.name)" :disabled="busy() || !pair.name">Read-only Check</button>
+                  <button @click="runSinglePair(pair.name, true)" :disabled="startBlocked() || !pair.name">Dry-Run</button>
+                  <button class="danger" @click="runSinglePair(pair.name, false)" :disabled="startBlocked() || !pair.name || !pair.enabled">Produktiv</button>
+                  <button @click="checkPair(pair.name)" :disabled="startBlocked() || !pair.name">Read-only Check</button>
                   <button @click="testPair(idx)">Entwurf testen</button>
+                  <button @click="openConflicts(pair.name)" x-show="pair.direction === 'bisync'" :disabled="!pair.name" :aria-label="'Konflikte prüfen' + (conflictCounts[pair.name] !== undefined ? ': ' + conflictCounts[pair.name] + ' offen' : '')">Konflikte prüfen <span class="badge compact" :class="conflictCounts[pair.name] ? 'warn' : 'ok'" x-show="conflictCounts[pair.name] !== undefined" x-text="conflictCounts[pair.name]" aria-hidden="true"></span></button>
                   <span class="pair-last" x-show="pairLastRun(pair)?.last_run">Letzter Lauf: <strong x-text="formatTs(pairLastRun(pair)?.last_run)"></strong></span>
                   <span class="pair-last" x-show="pairLastRun(pair)?.next_run">Nächster Lauf: <strong x-text="formatTs(pairLastRun(pair)?.next_run)"></strong></span>
                 </div>
@@ -448,6 +485,7 @@
                     <label class="field"><span x-text="pair.two_way ? 'Seite A · lokal oder Cloud' : 'Quelle · lokal oder Cloud'"></span><div class="input-action"><input class="mono" x-model="pair.source" @input="syncPairDirection(pair)" placeholder="/mnt/nas/fotos oder pcloud:/Fotos" :aria-label="pair.two_way ? 'Seite A' : 'Quelle'"><button @click.prevent="openPicker('source-remote', idx)" aria-label="Cloud-Remote als Quelle durchsuchen">Cloud</button><button @click.prevent="openPicker('source-local', idx)" aria-label="Lokalen Quellordner wählen">Lokal</button></div></label>
                     <label class="field"><span x-text="pair.two_way ? 'Seite B · lokal oder Cloud' : 'Ziel · lokal, Cloud oder PBS'"></span><div class="input-action"><input class="mono" x-model="pair.target" @input="syncPairDirection(pair)" placeholder="/mnt/usb1/fotos oder pcloud:/Backup" :aria-label="pair.two_way ? 'Seite B' : 'Ziel'"><button @click.prevent="openPicker('target-remote', idx)" aria-label="Cloud-Remote als Ziel durchsuchen">Cloud</button><button @click.prevent="openPicker('target-local', idx)" aria-label="Lokalen Zielordner wählen">Lokal</button><button x-show="!pair.two_way" @click.prevent="convertPairToPbs(idx)" aria-label="Pair in PBS-Backup umwandeln">PBS</button></div></label>
                   </div>
+                  <label class="field"><span>Tags (durch Komma getrennt)</span><input :value="(pair.tags || []).join(', ')" @change="setPairTags(pair, $event.target.value)" placeholder="z. B. fotos, nas" autocomplete="off" spellcheck="false"><small>Kleinbuchstaben, Ziffern, _ und -; höchstens 10. Über der Liste filtern und je Tag einen Dry-Run starten.</small></label>
 
                   </div>
 
@@ -504,6 +542,39 @@
                   </details>
                   </div>
 
+                  <div class="pair-section">
+                  <h4 class="pair-section-title">Versionsordner (GFS)</h4>
+                  <label class="check-row"><input type="checkbox" :checked="!!pair.versions_lifecycle" @change="toggleLifecycleOverride(pair, $event.target.checked)"><span><strong>Globale Regel überschreiben</strong><small x-text="pair.versions_lifecycle ? 'Eigene Aufbewahrung für die Versionsablagen dieses Datenwegs.' : 'Es gilt die globale Regel unter Einstellungen → Scheduler & Leistung.'"></small></span></label>
+                  <template x-if="pair.versions_lifecycle"><div class="form-grid four">
+                    <label class="check-row"><input type="checkbox" x-model="pair.versions_lifecycle.enabled"><span><strong>Ausdünnen aktiv</strong><small>Gelöschte Versionsordner sind endgültig weg.</small></span></label>
+                    <label class="field"><span>Tagesstände</span><div class="number-with-unit"><input type="number" min="0" max="365" x-model.number="pair.versions_lifecycle.keep_daily"><span>Tage</span></div></label>
+                    <label class="field"><span>Wochenstände</span><div class="number-with-unit"><input type="number" min="0" max="104" x-model.number="pair.versions_lifecycle.keep_weekly"><span>Wochen</span></div></label>
+                    <label class="field"><span>Monatsstände</span><div class="number-with-unit"><input type="number" min="0" max="120" x-model.number="pair.versions_lifecycle.keep_monthly"><span>Monate</span></div></label>
+                  </div></template>
+                  <div class="button-row">
+                    <button type="button" class="button secondary small" @click="loadVersionsPreview(pair.name)" :disabled="!pair.name || versionsState[pair.name]?.loading" x-text="versionsState[pair.name]?.loading ? 'Prüft…' : 'Vorschau'"></button>
+                    <button type="button" class="button danger small" x-show="versionsState[pair.name]?.data?.dry_run && (versionsPurgeCount(pair.name) > 0 || versionsMergeCount(pair.name) > 0)" @click="pruneVersions(pair.name)" :disabled="versionsState[pair.name]?.loading || lockdownState.active">Jetzt ausdünnen</button>
+                    <small class="muted" aria-live="polite" x-text="versionsSummary(pair.name)"></small>
+                    <small class="muted" x-show="configDirty">Vorschau und Ausdünnen nutzen die gespeicherte Konfiguration.</small>
+                  </div>
+                  <p class="error-text" role="alert" x-show="versionsState[pair.name]?.error" x-text="versionsState[pair.name]?.error"></p>
+                  <template x-if="versionsState[pair.name]?.data"><div class="stack">
+                    <p class="error-text" role="alert" x-show="versionsState[pair.name]?.data?.aborted === 'lockdown'">Wegen des Lockdowns abgebrochen. Erledigte Schritte stehen unten, alle übrigen Ordner blieben unverändert.</p>
+                    <p class="muted" x-show="versionsState[pair.name]?.data?.skipped">Lifecycle ist für diesen Datenweg deaktiviert.</p>
+                    <p class="muted" x-show="!versionsState[pair.name]?.data?.skipped && !(versionsState[pair.name]?.data?.roots || []).length">Keine Versionsablage mit {date} gefunden.</p>
+                    <ul class="bitrot-list" x-show="(versionsState[pair.name]?.data?.warnings || []).length"><template x-for="warning in (versionsState[pair.name]?.data?.warnings || [])" :key="warning"><li x-text="warning"></li></template></ul>
+                    <template x-for="root in (versionsState[pair.name]?.data?.roots || [])" :key="root.root"><div class="versions-root">
+                      <code x-text="root.root"></code>
+                      <p x-text="root.total + ' Versionsordner · ' + (root.keep || []).length + ' behalten · ' + (versionsState[pair.name]?.data?.dry_run ? versionsMerges(root).length + ' zusammenführen · ' + (root.purge || []).length + ' zu löschen' : (root.merged || []).filter((item) => item.ok).length + ' zusammengeführt · ' + (root.purged || []).length + ' gelöscht')"></p>
+                      <p class="error-text" x-show="root.error" x-text="root.error"></p>
+                      <details class="disclosure" x-show="versionsState[pair.name]?.data?.dry_run && versionsMerges(root).length"><summary x-text="'Zusammenführen: ' + versionsMerges(root).length + ' Ordner → ' + versionsMergeGroups(root).length + ' Vertreter'"></summary><div class="disclosure-body"><ul class="bitrot-list"><template x-for="group in versionsMergeGroups(root)" :key="group.into"><li><code x-text="group.into"></code> ← <span class="mono" x-text="group.from.join(', ')"></span></li></template></ul></div></details>
+                      <details class="disclosure" x-show="!versionsState[pair.name]?.data?.dry_run && (root.merged || []).length"><summary x-text="'Zusammengeführt: ' + (root.merged || []).filter((item) => item.ok).length + ' von ' + (root.merged || []).length"></summary><div class="disclosure-body"><ul class="bitrot-list"><template x-for="item in (root.merged || [])" :key="item.from"><li><code x-text="item.from"></code> → <code x-text="item.into"></code> <small x-text="item.ok ? 'erledigt' : (item.error || 'nicht abgeschlossen')"></small></li></template></ul></div></details>
+                      <details class="disclosure" x-show="versionsState[pair.name]?.data?.dry_run && (root.purge || []).length"><summary>Zu löschende Ordner anzeigen</summary><div class="disclosure-body"><ul class="bitrot-list"><template x-for="name in (root.purge || [])" :key="name"><li><code x-text="name"></code></li></template></ul></div></details>
+                      <ul class="bitrot-list error-text" x-show="(root.failed || []).length"><template x-for="item in (root.failed || [])" :key="item.name"><li><code x-text="item.name"></code> <span x-text="item.error"></span></li></template></ul>
+                    </div></template>
+                  </div></template>
+                  </div>
+
                   <div class="test-result" x-show="testResults[idx]" :class="testResults[idx]?.ok ? 'ok' : 'error'">
                     <strong x-text="testResults[idx]?.message || testResults[idx]?.error || 'Test läuft…'"></strong><small x-show="testResults[idx]?.tested_unsaved">Aktueller GUI-Entwurf wurde geprüft.</small>
                   </div>
@@ -521,7 +592,7 @@
               <article class="panel">
                 <div class="panel-head">
                   <div><span class="badge ok">PBS</span> <strong x-text="target.name || 'Neues PBS-Backup'"></strong><small> · Lokale Pfade → Datastore-Snapshot (Versionierung, Dedup und Aufbewahrung übernimmt der PBS)</small></div>
-                  <button class="button secondary small" @click="runPbs(target.name)" :disabled="!target.name || configDirty" :title="configDirty ? 'Erst speichern' : 'Jetzt sichern'">Sichern</button>
+                  <button class="button secondary small" @click="runPbs(target.name)" :disabled="!target.name || configDirty || lockdownState.active" :title="configDirty ? 'Erst speichern' : 'Jetzt sichern'">Sichern</button>
                 </div>
                   <div class="form-grid three" style="align-items:start;">
                     <label class="field"><span>Name</span><input x-model="target.name" @input="markConfigDirty()" placeholder="dokumente"></label>
@@ -570,7 +641,7 @@
                   <div class="form-grid three disclosure-body"><label class="field"><span>Ausführung</span><select x-model="job.execution_mode" @change="normalizeJobDefinition(job)"><option value="sequential">Nacheinander</option><option value="parallel">Parallel</option></select></label><label class="field"><span>Maximal parallel</span><input type="number" min="1" x-model.number="job.max_parallel" :disabled="job.execution_mode==='sequential'"></label><label class="field"><span>Wiederholung nach Fehler</span><input type="number" min="1" max="10080" x-model.number="job.retry_minutes"><small>Wartezeit in Minuten bis zum nächsten Versuch.</small></label></div>
                 </details>
 
-                <div class="definition-actions"><button class="button secondary" @click="planJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id">Plan</button><button class="button secondary" @click="runJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id">Dry-Run</button><button class="button danger" @click="runJobDefinition(job, false)" :disabled="pending.definition || configDirty || !job.id || !job.enabled">Produktiv</button><button class="button ghost" @click="removeJobDefinition(idx)">Entfernen</button><small x-show="configDirty || !job.id">Vor Plan oder Start speichern.</small></div>
+                <div class="definition-actions"><button class="button secondary" @click="planJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id">Plan</button><button class="button secondary" @click="runJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id || lockdownState.active">Dry-Run</button><button class="button danger" @click="runJobDefinition(job, false)" :disabled="pending.definition || configDirty || !job.id || !job.enabled || lockdownState.active">Produktiv</button><button class="button ghost" @click="removeJobDefinition(idx)">Entfernen</button><small x-show="configDirty || !job.id">Vor Plan oder Start speichern.</small></div>
               </article>
             </template>
           </div>
@@ -580,6 +651,38 @@
             <div class="timeline-axis"><template x-for="hour in [0, 6, 12, 18, 24]" :key="hour"><span :style="`left:${timelineHourPosition(hour)}%`" x-text="String(hour).padStart(2,'0') + ':00'"></span></template></div>
             <template x-for="row in jobTimeline.rows" :key="row.id"><div class="timeline-row"><strong x-text="row.name"></strong><div class="timeline-track"><template x-for="(run, runIndex) in row.runs" :key="runIndex"><i :style="`left:${run.position}%`" :title="formatDateTime(run.timestamp)" :aria-label="'Geplant ' + formatDateTime(run.timestamp)"></i></template></div><small x-show="row.error" x-text="row.error"></small></div></template>
             <p class="muted" x-show="!jobTimeline.loading && !jobTimeline.rows.length">Keine aktivierten, geplanten Jobs.</p>
+          </article>
+          <article class="panel stack" aria-labelledby="bandwidth-heading">
+            <div class="panel-head"><div><h3 id="bandwidth-heading">Bandbreite &amp; Zeitfenster</h3><p>Mittlerer Durchsatz erfolgreicher produktiver Läufe je Wochentag und Startstunde<span x-show="bandwidth.heatmap?.timezone" x-text="' (' + bandwidth.heatmap?.timezone + ')'"></span>. Daraus entstehen Vorschläge für günstigere Startzeiten.</p></div>
+              <div class="heading-actions"><select x-model.number="bandwidth.days" @change="loadBandwidth()" aria-label="Auswertungszeitraum"><option value="30">30 Tage</option><option value="90">90 Tage</option><option value="180">180 Tage</option></select><button class="button secondary small" @click="loadBandwidth()" :disabled="bandwidth.loading" x-text="bandwidth.loading ? 'Lädt…' : 'Aktualisieren'"></button></div></div>
+            <div class="loading-state compact-loading" x-show="bandwidth.loading && !bandwidth.heatmap" role="status">Bandbreite wird ausgewertet…</div>
+            <div class="inline-error" role="alert" x-show="bandwidth.error">Bandbreitendaten konnten nicht geladen werden.</div>
+            <p class="muted" x-show="bandwidth.heatmap && !bandwidth.max">Im gewählten Zeitraum gibt es noch keine messbaren produktiven Läufe.</p>
+            <div class="table-scroll" x-show="bandwidth.heatmap && bandwidth.max" tabindex="0" aria-label="Durchsatz je Wochentag und Startstunde">
+              <table class="heatmap">
+                <caption class="sr-only">Mittlerer Durchsatz je Wochentag (Zeilen) und Startstunde (Spalten)</caption>
+                <thead><tr><th scope="col"><span class="sr-only">Wochentag</span></th><template x-for="hour in 24" :key="hour"><th scope="col" x-text="String(hour - 1).padStart(2, '0')"></th></template></tr></thead>
+                <tbody><template x-for="(row, day) in (bandwidth.heatmap?.cells || [])" :key="day"><tr><th scope="row" x-text="['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'][day]"></th><template x-for="(value, hour) in row" :key="hour"><td :class="value === null && 'empty'" :style="value === null ? '' : `--heat:${(value / bandwidth.max).toFixed(3)}`" :title="heatTitle(day, hour)"><span class="sr-only" x-text="heatTitle(day, hour)"></span></td></template></tr></template></tbody>
+              </table>
+            </div>
+            <div class="heatmap-legend" x-show="bandwidth.max"><span>Langsam</span><i aria-hidden="true"></i><span x-text="'Schnell · bis ' + formatBytes(bandwidth.max) + '/s'"></span><span><b aria-hidden="true"></b>Keine Messung</span></div>
+            <template x-if="bandwidth.suggestions"><div class="stack">
+              <h4 class="subheading">Vorschläge</h4>
+              <p class="muted" x-show="(bandwidth.suggestions?.windows || []).length" x-text="'Günstigste Zeitfenster: ' + (bandwidth.suggestions?.windows || []).map((item) => item.label).join(' · ')"></p>
+              <p class="muted" x-show="!(bandwidth.suggestions?.schedules || []).length">Für die aktuellen Zeitpläne gibt es keinen besseren Startzeitpunkt.</p>
+              <div class="table-scroll responsive-table-wrap" x-show="(bandwidth.suggestions?.schedules || []).length" tabindex="0" aria-label="Zeitplan-Vorschläge">
+                <table class="table responsive-table">
+                  <thead><tr><th>Job</th><th>Aktuell</th><th>Vorschlag</th><th>Begründung</th><th><span class="sr-only">Aktion</span></th></tr></thead>
+                  <tbody><template x-for="item in (bandwidth.suggestions?.schedules || [])" :key="item.definition_id"><tr>
+                    <td data-label="Job"><strong x-text="item.name || item.definition_id"></strong></td>
+                    <td data-label="Aktuell"><span x-text="humanCron(item.current_schedule)"></span> <code x-text="item.current_schedule"></code></td>
+                    <td data-label="Vorschlag"><span x-text="humanCron(item.proposed_schedule)"></span> <code x-text="item.proposed_schedule"></code></td>
+                    <td data-label="Begründung" x-text="item.reason"></td>
+                    <td data-label="Aktion"><button class="button secondary small" @click="applyScheduleSuggestion(item)" :disabled="suggestionApplied(item)" :aria-label="(suggestionApplied(item) ? 'Übernommen: ' : 'Übernehmen: ') + (item.name || 'Job')" x-text="suggestionApplied(item) ? 'Übernommen' : 'Übernehmen'"></button></td>
+                  </tr></template></tbody>
+                </table>
+              </div>
+            </div></template>
           </article>
           <div class="empty-state" x-show="!jobDefinitions.loading && !(config.backup.jobs || []).length"><strong>Noch keine Jobs</strong><span>Lege einen Job an und weise mindestens einen Datenweg zu.</span><button class="button primary" @click="addJobDefinition()">Ersten Job anlegen</button></div>
         </section>
@@ -601,7 +704,7 @@
           <div class="toolbar panel slim jobs-toolbar">
             <label class="search-field job-search"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg></span><input id="job-search" x-model="jobs.q" @input.debounce.350ms="loadJobs(true)" placeholder="Job, Datenweg, Fehler oder Lauf-ID" aria-label="Läufe durchsuchen"></label>
             <div class="job-filter-chips" role="group" aria-label="Schnellfilter für Läufe"><button type="button" :aria-pressed="!jobs.kind && !jobs.status" :class="!jobs.kind && !jobs.status && 'active'" @click="setJobFilter('', '')">Alle</button><button type="button" :aria-pressed="jobs.status==='error'" :class="jobs.status==='error' && 'active'" @click="setJobFilter('', 'error')">Nur Fehler</button><button type="button" :aria-pressed="jobs.status==='running'" :class="jobs.status==='running' && 'active'" @click="setJobFilter('', 'running')">Laufend</button><button type="button" :aria-pressed="jobs.kind==='quicksync'" :class="jobs.kind==='quicksync' && 'active'" @click="setJobFilter('quicksync', '')">Quick-Sync</button><button type="button" :aria-pressed="jobs.kind==='pbs'" :class="jobs.kind==='pbs' && 'active'" @click="setJobFilter('pbs', '')">PBS</button></div>
-            <select x-model="jobs.kind" @change="loadJobs(true)" aria-label="Jobtyp filtern"><option value="">Alle Typen</option><option value="backup">Backup</option><option value="check">Check</option><option value="quicksync">Quick-Sync</option><option value="pbs">PBS-Backup</option><option value="restoretest">Restore-Drill</option></select>
+            <select x-model="jobs.kind" @change="loadJobs(true)" aria-label="Jobtyp filtern"><option value="">Alle Typen</option><option value="backup">Backup</option><option value="check">Check</option><option value="quicksync">Quick-Sync</option><option value="pbs">PBS-Backup</option><option value="restoretest">Restore-Drill</option><option value="bitrotscrub">Bitrot-Scrub</option><option value="bootdrill">Boot-Drill</option><option value="migration">Zielwechsel</option><option value="recovery">Wiederherstellung</option></select>
             <select x-model="jobs.status" @change="loadJobs(true)" aria-label="Jobstatus filtern"><option value="">Alle Status</option><option value="running">Läuft</option><option value="ok">Erfolgreich</option><option value="warning">Mit Hinweis</option><option value="error">Fehler</option><option value="skipped">Übersprungen</option><option value="cancelled">Abgebrochen</option><option value="stale">Verwaist</option></select>
             <select x-model.number="jobs.limit" @change="loadJobs(true)" aria-label="Jobs pro Seite"><option :value="25">25 pro Seite</option><option :value="50">50 pro Seite</option><option :value="100">100 pro Seite</option></select>
             <div class="toolbar-meta">Seite <span x-text="jobPage()"></span> von <span x-text="jobPages()"></span></div>
@@ -629,9 +732,117 @@
         <!-- DOCTOR -->
         <section x-show="page==='doctor'" x-cloak>
           <div class="page-heading">
-            <div><h2>System</h2><p>Dienste, Ressourcen, Datenbank und Schutzregeln prüfen.</p><button type="button" class="button secondary" @click="openRemoteSetup($event.currentTarget)">Neues Remote einbinden</button></div>
+            <div><h2>System</h2><p>Dienste, Ressourcen, Datenbank und Schutzregeln prüfen.</p><div class="button-row"><button type="button" class="button secondary" @click="openRemoteSetup($event.currentTarget)">Neues Remote einbinden</button><button type="button" class="button secondary" @click="openCrypt()">Verschlüsseltes Remote anlegen</button></div></div>
             <div class="heading-actions"><button class="button secondary" @click="navigate('recovery')">Wiederherstellung</button><button class="button secondary" @click="navigate('settings')">Einstellungen</button><button class="button secondary" @click="downloadSupportBundle()">Support-Bundle</button><button class="button primary" @click="loadDoctor()" :disabled="doctor.loading"><span x-text="doctor.loading ? 'Prüfung läuft…' : 'Vollständige Prüfung'"></span></button></div>
           </div>
+
+          <article class="panel protection-tools-panel" id="protection-tools-panel" aria-labelledby="protection-tools-title">
+            <div class="panel-head"><div><span class="section-kicker">Vorsorgen und wiederfinden</span><h3 id="protection-tools-title">Betriebswerkzeuge</h3><p class="muted">Sicherungsstände durchsuchen, Reserven beobachten und Änderungen kontrolliert vorbereiten.</p></div></div>
+            <nav class="protection-tool-nav" aria-label="Betriebswerkzeug auswählen">
+              <button type="button" class="button secondary small" @click="toolsSelect('search')" :aria-pressed="protectionTools.tab === 'search'">Dateisuche</button>
+              <button type="button" class="button secondary small" @click="toolsSelect('forecast')" :aria-pressed="protectionTools.tab === 'forecast'">Speicherprognose</button>
+              <button type="button" class="button secondary small" @click="toolsSelect('monitor')" :aria-pressed="protectionTools.tab === 'monitor'">Ausfallwächter</button>
+              <button type="button" class="button secondary small" @click="toolsSelect('migration')" :aria-pressed="protectionTools.tab === 'migration'">Zielwechsel</button>
+              <button type="button" class="button secondary small" @click="toolsSelect('reports')" :aria-pressed="protectionTools.tab === 'reports'">Schutzberichte</button>
+            </nav>
+            <div class="alert err" role="alert" x-show="protectionTools.error" x-cloak><span x-text="protectionTools.error"></span></div>
+            <div class="alert ok" role="status" x-show="protectionTools.notice" x-cloak><span x-text="protectionTools.notice"></span></div>
+            <p class="muted" role="status" x-show="protectionTools.busy">Anfrage läuft …</p>
+
+            <div class="stack protection-tool-body" x-show="protectionTools.tab === 'search'">
+              <div><h4>Datei in Sicherungen finden</h4><p class="muted">Die Suche liest Dateinamen und gespeicherte Manifeste. Umfang und Nachweis bleiben pro Stand sichtbar.</p></div>
+              <form class="form-grid" @submit.prevent="searchBackupFiles()">
+                <label class="field"><span>Dateiname enthält</span><input x-model="protectionTools.search.query" minlength="2" maxlength="120" placeholder="Zum Beispiel Rechnung.pdf" autocomplete="off" required></label>
+                <label class="field"><span>Datenweg eingrenzen</span><select x-model="protectionTools.search.identity"><option value="">Alle Datenwege</option><template x-for="pair in config.backup.pairs" :key="pair.id || pair.name"><option :value="pair.id || pair.name" x-text="pair.name"></option></template></select></label>
+                <label class="field"><span>Restore-Grenze in MiB</span><input type="number" x-model.number="protectionTools.search.max_total_mb" min="1" max="51200"><small>Gilt für das spätere Zurückholen, nicht für die Dateisuche.</small></label>
+                <div class="field"><span>Suche starten</span><button class="button primary" type="submit" :disabled="protectionTools.busy">Sicherungsstände durchsuchen</button></div>
+              </form>
+              <template x-if="protectionTools.search.results"><div class="stack">
+                <p class="muted" x-text="(protectionTools.search.results.scanned_points || 0) + ' Stände · ' + (protectionTools.search.results.scanned_files || 0) + ' Dateieinträge durchsucht'"></p>
+                <p class="alert warn" x-show="protectionTools.search.results.truncated">Die Suche hat ihre Umfangsgrenze erreicht. Datenweg oder Dateiname genauer eingrenzen.</p>
+                <template x-for="(warning, index) in protectionTools.search.results.warnings || []" :key="index"><p class="muted" x-text="warning"></p></template>
+                <div class="table-scroll responsive-table-wrap"><table class="table responsive-table protection-tool-table"><thead><tr><th>Datei</th><th>Sicherungsstand</th><th>Nachweis</th><th>Aktion</th></tr></thead><tbody>
+                  <template x-for="item in protectionTools.search.results.items || []" :key="item.identity + ':' + item.point_id + ':' + item.path"><tr>
+                    <td data-label="Datei"><strong class="protection-file-path" x-text="item.path"></strong><small class="muted" x-text="item.pair + ' · ' + formatBytes(item.size_bytes || 0)"></small></td>
+                    <td data-label="Sicherungsstand" x-text="item.point_label"></td><td data-label="Nachweis"><span x-text="item.verification === 'metadata_only' ? 'Dateimetadaten' : 'Gespeicherter Manifest-Nachweis'"></span><small class="muted" x-show="item.point_kind === 'archive'">Änderungsarchiv · unvollständiger Stand</small></td>
+                    <td data-label="Aktion"><button type="button" class="button secondary small" @click="restoreFoundFile(item)" :disabled="!item.restorable || protectionTools.busy || startBlocked()">In Staging zurückholen</button></td>
+                  </tr></template>
+                </tbody></table></div>
+                <p class="empty-state" x-show="!(protectionTools.search.results.items || []).length">Keine passende Datei im durchsuchten Umfang gefunden.</p>
+                <button type="button" class="button secondary" x-show="protectionTools.search.results.next_cursor" @click="searchBackupFiles(true)" :disabled="protectionTools.busy">Weitere Stände durchsuchen</button>
+              </div></template>
+            </div>
+
+            <div class="stack protection-tool-body" x-show="protectionTools.tab === 'forecast'">
+              <div class="panel-head"><div><h4>Speicherreserve und Wachstum</h4><p class="muted">Die Prognose entsteht aus echten Messwerten. Fehlende Quoten und kurze Messreihen werden ausdrücklich ausgewiesen.</p></div><div class="button-row"><button type="button" class="button secondary small" @click="loadToolsForecast()" :disabled="protectionTools.busy">Aktualisieren</button><button type="button" class="button primary small" @click="sampleToolsForecast()" :disabled="protectionTools.busy">Jetzt messen</button></div></div>
+              <div class="table-scroll responsive-table-wrap"><table class="table responsive-table protection-tool-table"><thead><tr><th>Ziel</th><th>Belegt / Kapazität</th><th>Prognose</th><th>Messung</th></tr></thead><tbody>
+                <template x-for="item in protectionTools.forecast.items" :key="item.identity"><tr>
+                  <td data-label="Ziel"><button type="button" class="button secondary small" @click="loadForecastHistory(item.identity)" x-text="item.label"></button><small class="muted" x-text="({configured_target:'Budget des Zielordners',remote_account:'Kontingent des Cloud-Kontos',filesystem:'Kapazität des Dateisystems'})[item.measurement_scope] || ''"></small></td>
+                  <td data-label="Belegt / Kapazität"><div><span x-text="item.used_bytes == null ? 'Unbekannt' : formatBytes(item.used_bytes)"></span> / <span x-text="item.total_bytes == null ? 'Quote unbekannt' : formatBytes(item.total_bytes)"></span></div></td>
+                  <td data-label="Prognose"><strong :class="['warning','full'].includes(item.state) ? 'text-danger' : ''" x-text="forecastStateLabel(item.state)"></strong><small class="muted" x-show="item.days_to_full != null" x-text="'Voraussichtlich voll in ' + Math.round(item.days_to_full || 0) + ' Tagen'"></small><small class="muted" x-text="item.reason"></small></td>
+                  <td data-label="Messung"><span x-text="toolsDate(item.observed_at)"></span><small class="muted" x-text="item.samples + ' Messwerte'"></small></td>
+                </tr></template>
+              </tbody></table></div>
+              <p class="empty-state" x-show="!protectionTools.forecast.items.length">Noch keine Ziele geladen. Eine Messreihe benötigt mindestens drei Tageswerte.</p>
+              <div class="protection-history" x-show="protectionTools.forecast.selected">
+                <h4>Gemessene Belegung</h4><form class="form-grid" x-show="protectionTools.forecast.selected.endsWith(':remote')" @submit.prevent="saveForecastCapacity()"><label class="field"><span>Budget des Zielordners in GiB</span><input type="number" x-model="protectionTools.forecast.capacityGiB" min="0.001" step="any" placeholder="Zum Beispiel 1000"><small>Mit Vorgabe wird der Zielordner gemessen; sonst das Cloud-Konto. Leer speichern entfernt die Vorgabe.</small></label><div class="field"><span>Prognosegrundlage</span><button type="submit" class="button secondary" :disabled="protectionTools.busy">Kapazität speichern</button></div></form><svg x-show="protectionTools.forecast.history.length" viewBox="0 0 360 100" role="img" aria-label="Verlauf der gemessenen Speicherbelegung"><polyline :points="forecastPolyline()" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/></svg>
+                <p class="muted" x-show="protectionTools.forecast.history.length">Relativer Verlauf der ausgewählten Messreihe. Die Kapazitätsprognose berücksichtigt Messdauer und Schwankungen.</p>
+                <p class="empty-state" x-show="!protectionTools.forecast.history.length">Für dieses Ziel liegen noch keine Messwerte vor.</p>
+                <div class="table-scroll responsive-table-wrap"><table class="table responsive-table"><thead><tr><th>Zeitpunkt</th><th>Belegt</th><th>Frei</th></tr></thead><tbody><template x-for="item in protectionTools.forecast.history.slice(-10)" :key="item.observed_at"><tr><td data-label="Zeitpunkt" x-text="toolsDate(item.observed_at)"></td><td data-label="Belegt" x-text="formatBytes(item.used_bytes || 0)"></td><td data-label="Frei" x-text="item.free_bytes == null ? 'Unbekannt' : formatBytes(item.free_bytes)"></td></tr></template></tbody></table></div>
+              </div>
+            </div>
+
+            <div class="stack protection-tool-body" x-show="protectionTools.tab === 'monitor'">
+              <div><h4>Unabhängiger Ausfallwächter</h4><p class="muted">Ein separater Dienst sendet Lebenszeichen an deinen externen Wächter. Dort werden Intervall, Toleranz und Alarmempfänger eingerichtet.</p></div>
+              <dl class="protection-facts"><div><dt>Letztes bestätigtes Lebenszeichen</dt><dd x-text="toolsDate(protectionTools.heartbeat?.last_success_at)"></dd></div><div><dt>Status</dt><dd x-text="protectionTools.heartbeat?.blocked_by_lockdown ? 'Durch Lockdown angehalten' : ({ok:'Empfänger bestätigt',error:'Versandfehler',disabled:'Deaktiviert',unconfigured:'Adresse fehlt',pending:'Erstes Lebenszeichen ausstehend'})[protectionTools.heartbeat?.state] || 'Noch nicht geladen'"></dd></div></dl>
+              <p class="alert warn" x-show="protectionTools.heartbeat?.last_error" x-text="protectionTools.heartbeat?.last_error"></p>
+              <label class="check-row"><input type="checkbox" x-model="protectionTools.heartbeatDraft.enabled"><span>Lebenszeichen automatisch senden</span></label>
+              <div class="form-grid">
+                <label class="field"><span>Geheime HTTPS-Ping-Adresse</span><input type="password" x-model="protectionTools.heartbeatDraft.secret_url" autocomplete="new-password" spellcheck="false" placeholder="https://…"><small x-text="protectionTools.operations?.heartbeat?.url_configured ? 'Adresse gespeichert. Leer lassen, um sie beizubehalten.' : 'Die Ping-Adresse wird im externen Wächter erzeugt.'"></small></label>
+                <label class="field"><span>Intervall in Sekunden</span><input type="number" x-model.number="protectionTools.heartbeatDraft.period_seconds" min="60" max="3600"><small>Beim Empfänger mindestens drei Intervalle Toleranz vorsehen.</small></label>
+              </div>
+              <details class="disclosure"><summary>Selbst gehosteter Empfänger</summary><div class="disclosure-body"><label class="check-row"><input type="checkbox" x-model="protectionTools.heartbeatDraft.allow_private_hosts"><span>HTTPS-Empfänger in privaten Netzen zulassen</span></label><p class="muted">Der Empfänger sollte auf einem unabhängigen System laufen. HTTPS-Zertifikate werden weiterhin geprüft.</p></div></details>
+              <div class="button-row"><button type="button" class="button primary" @click="saveToolsOperations()" :disabled="protectionTools.busy || !protectionTools.operations">Einstellungen speichern</button><button type="button" class="button secondary" @click="testToolsHeartbeat()" :disabled="protectionTools.busy || !protectionTools.operations?.heartbeat?.url_configured">Gespeicherten Empfänger testen</button></div>
+            </div>
+
+            <div class="stack protection-tool-body" x-show="protectionTools.tab === 'migration'">
+              <div><h4>Sicherungsziel kontrolliert wechseln</h4><p class="muted">1. Vorschau prüfen · 2. Kopieren und zurücklesen · 3. Bewusst umschalten. Unterstützt Push-Datenwege und leere Ziele. Gebundene Vault-Belege und externe Versionsarchive benötigen eine getrennte Übernahme.</p></div>
+              <form class="form-grid" @submit.prevent="previewTargetMigration()">
+                <label class="field"><span>Datenweg</span><select x-model="protectionTools.migration.identity" @change="invalidateMigrationPlan()" required :disabled="['running','switching'].includes(protectionTools.migration.plan?.status)"><option value="">Bitte auswählen</option><template x-for="pair in config.backup.pairs.filter(item => item.direction === 'push')" :key="pair.id || pair.name"><option :value="pair.id || pair.name" x-text="pair.name"></option></template></select></label>
+                <label class="field"><span>Neues leeres Ziel</span><input class="mono" x-model="protectionTools.migration.target" @input="invalidateMigrationPlan()" placeholder="neue-cloud:backup/daten" required :disabled="['running','switching'].includes(protectionTools.migration.plan?.status)"></label>
+                <label class="field"><span>Maximaler Umfang in MiB</span><input type="number" x-model.number="protectionTools.migration.max_total_mb" @input="invalidateMigrationPlan()" min="1" max="51200" required :disabled="['running','switching'].includes(protectionTools.migration.plan?.status)"></label>
+                <div class="field"><span>Planung</span><button type="submit" class="button primary" :disabled="protectionTools.busy || ['running','switching'].includes(protectionTools.migration.plan?.status) || startBlocked()">Vorschau erstellen</button></div>
+              </form>
+              <template x-if="protectionTools.migration.plan"><div class="stack protection-migration-plan">
+                <h4 x-text="migrationStatusLabel(protectionTools.migration.plan.status)"></h4>
+                <dl class="protection-facts"><div><dt>Bisheriges Ziel</dt><dd class="mono" x-text="protectionTools.migration.plan.source"></dd></div><div><dt>Neues Ziel</dt><dd class="mono" x-text="protectionTools.migration.plan.target"></dd></div><div><dt>Geplanter Umfang</dt><dd x-text="protectionTools.migration.plan.files + ' Dateien · ' + formatBytes(protectionTools.migration.plan.total_bytes || 0)"></dd></div><div><dt>Gültig bis</dt><dd x-text="toolsDate(protectionTools.migration.plan.expires_at)"></dd></div></dl>
+                <template x-for="(warning,index) in protectionTools.migration.plan.warnings || []" :key="index"><p class="alert warn" x-text="warning"></p></template>
+                <p class="alert err" x-show="protectionTools.migration.plan.error" x-text="protectionTools.migration.plan.error"></p>
+                <div class="button-row"><button type="button" class="button primary" x-show="protectionTools.migration.plan.status === 'preview'" @click="runTargetMigration()" :disabled="protectionTools.busy || startBlocked()">Kopieren und prüfen</button><button type="button" class="button danger" x-show="protectionTools.migration.plan.status === 'verified'" @click="switchTargetMigration()" :disabled="protectionTools.busy || configDirty || startBlocked()">Geprüftes Ziel umschalten</button><button type="button" class="button secondary" @click="refreshTargetMigration()" :disabled="protectionTools.busy">Status aktualisieren</button></div>
+                <p class="muted" x-show="['running','switching'].includes(protectionTools.migration.plan.status)">Der Lauf wird auf dem Server weitergeführt. Ein Abbruch ist über die Laufsteuerung möglich.</p>
+              </div></template>
+              <details class="disclosure"><summary @click="loadToolsMigrations()">Vorbereitete Zielwechsel</summary><div class="disclosure-body stack"><template x-for="item in protectionTools.migration.items" :key="item.id"><button type="button" class="button secondary" @click="protectionTools.migration.plan = item; refreshTargetMigration()" x-text="item.pair + ' · ' + migrationStatusLabel(item.status)"></button></template><p class="muted" x-show="!protectionTools.migration.items.length">Noch kein Zielwechsel vorbereitet.</p></div></details>
+            </div>
+
+            <div class="stack protection-tool-body" x-show="protectionTools.tab === 'reports'">
+              <div class="panel-head"><div><h4>Wöchentliche Schutzberichte</h4><p class="muted">Berichte fassen die letzte abgeschlossene Woche zusammen: Sicherungsläufe, Restore-Nachweise und Speicherreserven. Dateinamen, Pfade und rohe Fehlertexte werden ausgelassen.</p></div><button type="button" class="button primary small" @click="generateWeeklyReport()" :disabled="protectionTools.busy">Bericht jetzt erstellen</button></div>
+              <template x-if="protectionTools.reportPreview"><div class="protection-report-preview stack">
+                <h4 x-text="protectionTools.reportPreview.period_label"></h4><p class="muted" x-show="protectionTools.reportDelivery" x-text="'E-Mail-Status: ' + (({sent:'Versendet',pending:'Vorgemerkt',sending:'Versand läuft',retrying:'Erneuter Versuch geplant',failed:'Fehlgeschlagen',disabled:'Versand deaktiviert'})[protectionTools.reportDelivery?.state] || 'Noch nicht versendet')"></p>
+                <dl class="protection-facts"><div><dt>Erfolgreiche Läufe</dt><dd x-text="protectionTools.reportPreview.summary.jobs.successful"></dd></div><div><dt>Fehler / Hinweise</dt><dd x-text="protectionTools.reportPreview.summary.jobs.failed + ' / ' + protectionTools.reportPreview.summary.jobs.warnings"></dd></div><div><dt>Gültige Restore-Nachweise</dt><dd x-text="protectionTools.reportPreview.summary.protection.valid_restore_paths"></dd></div></dl>
+                <template x-for="(note,index) in protectionTools.reportPreview.summary.notes || []" :key="index"><p class="muted" x-text="note"></p></template>
+                <div class="button-row"><button type="button" class="button secondary" @click="downloadWeeklyReport(protectionTools.reportPreview)">PDF herunterladen</button><button type="button" class="button secondary" @click="sendWeeklyReport(protectionTools.reportPreview)" :disabled="protectionTools.busy || !protectionTools.operations?.weekly_report?.email?.enabled">Per E-Mail senden</button></div>
+              </div></template>
+              <label class="check-row"><input type="checkbox" x-model="protectionTools.reportDraft.enabled"><span>Bericht automatisch nach Zeitplan erstellen</span></label>
+              <div class="form-grid"><label class="field"><span>Zeitplan (Cron)</span><input class="mono" x-model="protectionTools.reportDraft.schedule" placeholder="0 8 * * 1"><small>Standard: montags um 08:00 Uhr.</small></label><label class="field"><span>Zeitzone</span><input x-model="protectionTools.reportDraft.timezone" placeholder="Europe/Berlin"></label><label class="field"><span>Berichte aufbewahren (Wochen)</span><input type="number" x-model.number="protectionTools.reportDraft.retention_weeks" min="4" max="104"></label></div>
+              <details class="disclosure"><summary>E-Mail-Versand einrichten</summary><div class="disclosure-body stack">
+                <label class="check-row"><input type="checkbox" x-model="protectionTools.reportDraft.email.enabled"><span>Automatisch erstellte Berichte per E-Mail senden</span></label>
+                <div class="form-grid"><label class="field"><span>SMTP-Host</span><input x-model="protectionTools.reportDraft.email.host" autocomplete="off"></label><label class="field"><span>Port</span><input type="number" x-model.number="protectionTools.reportDraft.email.port" min="1" max="65535"></label><label class="field"><span>Verschlüsselung</span><select x-model="protectionTools.reportDraft.email.encryption"><option value="starttls">STARTTLS</option><option value="tls">TLS direkt</option></select></label><label class="field"><span>SMTP-Benutzername</span><input x-model="protectionTools.reportDraft.email.username" autocomplete="off"></label><label class="field"><span>SMTP-Passwort</span><input type="password" x-model="protectionTools.reportDraft.email.password" autocomplete="new-password"><small>Leer lassen, um das gespeicherte Passwort beizubehalten.</small></label><label class="field"><span>Absenderadresse</span><input type="email" x-model="protectionTools.reportDraft.email.from_address"></label><label class="field"><span>Empfängeradressen</span><textarea x-model="protectionTools.reportRecipients" rows="2" placeholder="admin@example.org"></textarea><small>Mehrere Adressen durch Komma trennen, höchstens zehn Empfänger.</small></label></div>
+              </div></details>
+              <div class="button-row"><button type="button" class="button primary" @click="saveToolsOperations()" :disabled="protectionTools.busy || !protectionTools.operations">Einstellungen speichern</button><button type="button" class="button secondary" @click="loadToolsOperations()" :disabled="protectionTools.busy">Berichte und Einstellungen neu laden</button></div>
+              <div class="table-scroll responsive-table-wrap"><table class="table responsive-table"><thead><tr><th>Berichtswoche</th><th>Erstellt</th><th>Aktionen</th></tr></thead><tbody><template x-for="report in protectionTools.reports" :key="report.id"><tr><td data-label="Berichtswoche"><button type="button" class="button secondary small" @click="protectionTools.reportPreview = report; protectionTools.reportDelivery = null" x-text="report.period_label"></button></td><td data-label="Erstellt" x-text="toolsDate(report.generated_at)"></td><td data-label="Aktionen"><button type="button" class="button secondary small" @click="downloadWeeklyReport(report)">PDF</button></td></tr></template></tbody></table></div>
+              <p class="empty-state" x-show="!protectionTools.reports.length">Noch kein Bericht erstellt.</p>
+            </div>
+          </article>
 
           <div class="metric-grid">
             <article class="metric-card"><div class="metric-head"><span>Virtualisierung</span></div><strong class="metric-value text" x-text="overview.data?.system?.virtualization || '—'"></strong><span class="metric-sub" x-text="overview.data?.system?.hostname || '—'"></span></article>
@@ -666,12 +877,65 @@
 
           <article class="panel" x-show="!doctor.data && !doctor.loading"><div class="empty-state compact"><strong>Noch keine vollständige Prüfung</strong><span>Die Prüfung testet Konfiguration, rclone, systemd, Mountpoints, Sentinel-Dateien und Löschschutz.</span><button class="button primary" @click="loadDoctor()">Prüfung starten</button></div></article>
 
+          <article class="panel stack" aria-labelledby="vpn-heading">
+            <div class="panel-head"><div><h3 id="vpn-heading">VPN-Tunnel</h3><p>WireGuard-Handshakes, Tailscale-Geräte und die Erreichbarkeit der Prüfziele aus <button type="button" class="button ghost small" @click="selectSettingsTab('general'); navigate('settings')">Einstellungen → Allgemein</button>.</p></div><button class="button secondary" @click="loadVpn(true)" :disabled="vpn.loading" x-text="vpn.loading ? 'Prüft…' : 'Aktualisieren'"></button></div>
+            <div class="loading-state compact-loading" x-show="vpn.loading && !vpn.data" role="status">VPN-Status wird geprüft…</div>
+            <div class="inline-error" role="alert" x-show="vpn.error">VPN-Status konnte nicht geladen werden.</div>
+            <div class="stack" x-show="vpn.data">
+              <h4 class="subheading">WireGuard</h4>
+              <p class="muted" x-show="!vpn.data?.wireguard?.available" x-text="'Nicht verfügbar' + (vpn.data?.wireguard?.error ? ': ' + vpn.data.wireguard.error : '')"></p>
+              <p class="muted" x-show="vpn.data?.wireguard?.available && !wireguardPeers().length">Keine Peers eingerichtet.</p>
+              <div class="table-scroll responsive-table-wrap" x-show="wireguardPeers().length" tabindex="0" aria-label="WireGuard-Peers">
+                <table class="table responsive-table">
+                  <thead><tr><th>Schnittstelle</th><th>Peer</th><th>Endpunkt</th><th>Erlaubte IPs</th><th>Letzter Handshake</th><th>Empfangen / Gesendet</th></tr></thead>
+                  <tbody><template x-for="peer in wireguardPeers()" :key="peer.iface + peer.public_key_short"><tr>
+                    <td data-label="Schnittstelle" class="mono" x-text="peer.iface"></td>
+                    <td data-label="Peer" class="mono" x-text="peer.public_key_short"></td>
+                    <td data-label="Endpunkt" class="mono" x-text="peer.endpoint || '—'"></td>
+                    <td data-label="Erlaubte IPs" class="mono" x-text="(peer.allowed_ips || []).join(', ') || '—'"></td>
+                    <td data-label="Letzter Handshake"><span class="badge compact" :class="handshakeState(peer.handshake_age_seconds).tone" x-text="handshakeState(peer.handshake_age_seconds).label"></span></td>
+                    <td data-label="Empfangen / Gesendet" x-text="formatBytes(peer.rx_bytes) + ' / ' + formatBytes(peer.tx_bytes)"></td>
+                  </tr></template></tbody>
+                </table>
+              </div>
+              <h4 class="subheading">Tailscale</h4>
+              <p class="muted" x-show="!vpn.data?.tailscale?.available" x-text="'Nicht verfügbar' + (vpn.data?.tailscale?.error ? ': ' + vpn.data.tailscale.error : '')"></p>
+              <p x-show="vpn.data?.tailscale?.self"><span class="badge compact" :class="vpn.data?.tailscale?.self?.online ? 'ok' : 'error'" x-text="vpn.data?.tailscale?.self?.online ? 'Online' : 'Offline'"></span> <span x-text="'Dieser Server: ' + (vpn.data?.tailscale?.self?.hostname || '—')"></span> <span class="mono" x-text="(vpn.data?.tailscale?.self?.tailscale_ips || []).join(', ')"></span></p>
+              <div class="table-scroll responsive-table-wrap" x-show="(vpn.data?.tailscale?.peers || []).length" tabindex="0" aria-label="Tailscale-Geräte">
+                <table class="table responsive-table">
+                  <thead><tr><th>Gerät</th><th>System</th><th>Status</th><th>Zuletzt gesehen</th><th>Empfangen / Gesendet</th></tr></thead>
+                  <tbody><template x-for="peer in (vpn.data?.tailscale?.peers || [])" :key="peer.hostname"><tr>
+                    <td data-label="Gerät"><strong x-text="peer.hostname || '—'"></strong></td>
+                    <td data-label="System" x-text="peer.os || '—'"></td>
+                    <td data-label="Status"><span class="badge compact" :class="peer.online ? 'ok' : 'neutral'" x-text="peer.online ? 'Online' : 'Offline'"></span></td>
+                    <td data-label="Zuletzt gesehen" x-text="peer.online ? 'Jetzt' : (peer.last_seen ? formatDateTime(Date.parse(peer.last_seen) / 1000) : '—')"></td>
+                    <td data-label="Empfangen / Gesendet" x-text="formatBytes(peer.rx_bytes) + ' / ' + formatBytes(peer.tx_bytes)"></td>
+                  </tr></template></tbody>
+                </table>
+              </div>
+              <h4 class="subheading">Prüfziele</h4>
+              <p class="muted" x-show="!(vpn.data?.probes || []).length">Keine Prüfziele eingetragen. <button type="button" class="button ghost small" @click="selectSettingsTab('general'); navigate('settings')">In Einstellungen → Allgemein ergänzen</button></p>
+              <div class="table-scroll responsive-table-wrap" x-show="(vpn.data?.probes || []).length" tabindex="0" aria-label="VPN-Prüfziele">
+                <table class="table responsive-table">
+                  <thead><tr><th>Ziel</th><th>Erreichbarkeit</th><th>Latenz</th><th>Fehler</th></tr></thead>
+                  <tbody><template x-for="probe in (vpn.data?.probes || [])" :key="probe.target"><tr>
+                    <td data-label="Ziel" class="mono" x-text="probe.target"></td>
+                    <td data-label="Erreichbarkeit"><span class="badge compact" :class="probe.reachable ? 'ok' : 'error'" x-text="probe.reachable ? 'Erreichbar' : 'Nicht erreichbar'"></span></td>
+                    <td data-label="Latenz" x-text="probe.latency_ms != null ? Math.round(probe.latency_ms) + ' ms' : '—'"></td>
+                    <td data-label="Fehler" x-text="probe.error || '—'"></td>
+                  </tr></template></tbody>
+                </table>
+              </div>
+              <small class="muted" aria-live="polite" x-text="'Stand: ' + formatDateTime(vpn.data?.checked_at)"></small>
+            </div>
+          </article>
+
           <article class="panel">
             <div class="panel-head">
               <div><span class="section-kicker">Abdeckung</span><h3>Kopien je Datenbestand</h3><p>Nach Quellpfad gruppiert statt nach Pair — beantwortet, ob jeder Bestand mehrfach, an getrennten Orten und versioniert liegt.</p></div>
               <div class="heading-actions">
                 <button class="button secondary" @click="loadCopies()" :disabled="copies.loading" x-text="copies.loading ? 'Lädt…' : 'Aktualisieren'"></button>
-                <button class="button secondary" @click="runRestoreTest()" :disabled="busy() || restoreTestStart.phase !== 'idle'" x-text="pending.restoreTest ? 'Start wird geprüft…' : 'Restore-Drill starten'"></button>
+                <button class="button secondary" @click="runRestoreTest()" :disabled="startBlocked() || restoreTestStart.phase !== 'idle'" x-text="pending.restoreTest ? 'Start wird geprüft…' : 'Restore-Drill starten'"></button>
               </div>
             </div>
 
@@ -703,6 +967,34 @@
               </table>
             </div>
             <div class="empty-state compact" x-show="copies.data && !(copies.data?.sources || []).length"><strong>Keine aktiven Pairs</strong><span>Sobald ein Pair aktiv ist, erscheint sein Datenbestand hier.</span></div>
+          </article>
+
+          <article class="panel stack" aria-labelledby="bitrot-heading">
+            <div class="panel-head"><div><h3 id="bitrot-heading">Cloud-Bitrot-Scrub</h3><p>Liest regelmäßig eine Stichprobe der Cloud-Kopien und vergleicht ihre SHA-256 mit der gespeicherten Baseline. Eine Abweichung bei gleicher Größe und Änderungszeit deutet auf eine stille Veränderung beim Anbieter.</p></div><div class="heading-actions"><button class="button secondary" @click="loadBitrot()" :disabled="bitrot.loading" x-text="bitrot.loading ? 'Lädt…' : 'Aktualisieren'"></button><button class="button secondary" @click="runBitrotScrub()" :disabled="pending.bitrot || bitrot.data?.last_job?.status === 'running' || startBlocked()" x-text="pending.bitrot ? 'Startet…' : 'Scrub jetzt starten'"></button></div></div>
+            <div class="inline-error" role="alert" x-show="bitrot.error">Bitrot-Status konnte nicht geladen werden.</div>
+            <div class="metric-grid small-metrics" x-show="bitrot.data" aria-live="polite">
+              <article class="metric-card"><div class="metric-head"><span>Letzter Lauf</span></div><strong class="metric-value text" x-text="bitrot.data?.last_job ? statusLabel(bitrot.data.last_job.status) : '—'"></strong><span class="metric-sub" x-text="formatTs(bitrot.data?.last_job?.started_at)"></span></article>
+              <article class="metric-card"><div class="metric-head"><span>Bestätigt</span></div><strong class="metric-value" x-text="bitrot.data?.last_job?.summary?.verified_files ?? '—'"></strong><span class="metric-sub" x-text="'von ' + (bitrot.data?.last_job?.summary?.sampled_files ?? '—') + ' Dateien der Stichprobe'"></span></article>
+              <article class="metric-card"><div class="metric-head"><span>Abweichungen</span></div><strong class="metric-value" :class="bitrot.data?.last_job?.summary?.mismatch_files > 0 && 'error'" x-text="bitrot.data?.last_job?.summary?.mismatch_files ?? '—'"></strong><span class="metric-sub" x-text="bitrot.data?.last_job?.summary?.error || (bitrot.data?.last_job?.summary?.mismatch_files > 0 ? 'Betroffene Dateien neu sichern' : 'Keine stille Veränderung erkannt')"></span></article>
+              <article class="metric-card"><div class="metric-head"><span>Nächster Termin</span></div><strong class="metric-value text" x-text="scheduleNextText(bitrot.data)"></strong><span class="metric-sub" x-text="humanCron(bitrot.data?.settings?.schedule)"></span></article>
+            </div>
+            <p class="muted" x-show="bitrot.data?.settings" x-text="bitrotSettingsText()"></p>
+            <div class="alert error" x-show="bitrotMismatches(bitrot.data?.last_job?.summary).length" role="status">
+              <span class="alert-icon" aria-hidden="true">!</span>
+              <div><strong>Abweichende Prüfsummen</strong><ul class="bitrot-list"><template x-for="item in bitrotMismatches(bitrot.data?.last_job?.summary).slice(0, 20)" :key="item.pair + item.path"><li><span x-text="item.pair + ': '"></span><code x-text="item.path"></code><small class="mono" x-text="'erwartet ' + String(item.expected || '').slice(0, 12) + '… · aktuell ' + String(item.actual || '').slice(0, 12) + '…'"></small></li></template></ul><button type="button" class="button ghost small" x-show="bitrotMismatches(bitrot.data?.last_job?.summary).length > 20" @click="showJob({ id: bitrot.data?.last_job?.id })" x-text="'und ' + (bitrotMismatches(bitrot.data?.last_job?.summary).length - 20) + ' weitere – vollständige Liste im Lauf #' + bitrot.data?.last_job?.id"></button></div>
+            </div>
+            <div class="table-scroll responsive-table-wrap" x-show="bitrotPairs().length" tabindex="0" aria-label="Baseline je Cloud-Datenweg">
+              <table class="table responsive-table">
+                <thead><tr><th>Datenweg</th><th>Cloud-Ziel</th><th>Baseline</th><th></th></tr></thead>
+                <tbody><template x-for="pair in bitrotPairs()" :key="pair.name"><tr>
+                  <td data-label="Datenweg"><strong x-text="pair.name"></strong></td>
+                  <td data-label="Cloud-Ziel" class="mono" x-text="copyFolder(pair, 'cloud')"></td>
+                  <td data-label="Baseline" aria-live="polite" x-text="bitrotBaselineText(pair.name)"></td>
+                  <td data-label="Aktion"><button class="button secondary small" @click="loadBitrotBaseline(pair.name)" :aria-label="'Baseline für ' + pair.name + ' anzeigen'">Baseline</button></td>
+                </tr></template></tbody>
+              </table>
+            </div>
+            <p class="muted" x-show="!bitrotPairs().length">Kein aktiver Datenweg mit Cloud-Ziel.</p>
           </article>
 
           <article class="panel">
@@ -745,22 +1037,22 @@
         <section x-show="page==='recovery'" x-cloak>
           <div class="page-heading">
             <div><h2>Wiederherstellungs-Center</h2><p>Stände prüfen und ausgewählte Dateien zuerst in ein geschütztes Staging zurückholen.</p></div>
-            <div class="heading-actions"><button class="button secondary" @click="navigate('doctor')">Systemdiagnose</button><button class="button secondary" @click="loadRecovery()" :disabled="recovery.loading">Aktualisieren</button><button class="button primary" @click="startFullSnapshot()" :disabled="!recovery.pair || busy()">Recovery-Punkt erstellen</button></div>
+            <div class="heading-actions"><button type="button" class="button secondary" @click="openProtectionTools('search')">Datei in Sicherungen suchen</button><button class="button secondary" @click="navigate('doctor')">Systemdiagnose</button><button class="button secondary" @click="loadRecovery()" :disabled="recovery.loading">Aktualisieren</button><button class="button primary" @click="startFullSnapshot()" :disabled="!recovery.pair || startBlocked()">Recovery-Punkt erstellen</button></div>
           </div>
           <div class="inline-error" x-show="recovery.error" role="alert" x-text="recovery.error"></div>
           <article class="panel recovery-browser-panel">
             <div class="form-grid three recovery-controls">
               <label class="field"><span>Datenweg</span><select x-model="recovery.pair" @change="selectRecoveryPair(recovery.pair)"><option value="">Kein Datenweg verfügbar</option><template x-for="pair in (config.backup?.pairs || [])" :key="pair.name"><option :value="pair.name" x-text="pair.name"></option></template></select></label>
               <label class="field"><span>Wiederherstellungspunkt</span><select x-model="recovery.pointId" @change="recovery.path='';recovery.selectedPaths=[];recovery.diff=null;loadRecoveryBrowse('')"><option value="">Bitte auswählen</option><template x-for="point in recovery.points" :key="point.id"><option :value="point.id" x-text="point.label || point.id"></option></template></select><small x-text="recovery.points.find(p => p.id === recovery.pointId)?.warning || ''"></small></label>
-              <div class="field action-field"><span>Aktionen</span><div class="button-row"><button class="button secondary" @click="loadRecoveryDiff()" :disabled="!recovery.pointId || recovery.pointId==='current'">Vergleichen</button><button class="button secondary" @click="startFullStagedRestore(recovery.pointId)" :disabled="!recovery.pointId || !recovery.pointId.startsWith('full-') || busy()">Vollständig ins Staging</button></div></div>
+              <div class="field action-field"><span>Aktionen</span><div class="button-row"><button class="button secondary" @click="loadRecoveryDiff()" :disabled="!recovery.pointId || recovery.pointId==='current'">Vergleichen</button><button class="button secondary" @click="startFullStagedRestore(recovery.pointId)" :disabled="!recovery.pointId || !recovery.pointId.startsWith('full-') || startBlocked()">Vollständig ins Staging</button></div></div>
             </div>
             <div class="recovery-browser-head"><nav class="picker-breadcrumbs" aria-label="Recovery-Pfad"><template x-for="(crumb, crumbIndex) in recoveryBreadcrumbs()" :key="crumb.path"><span class="picker-crumb"><button type="button" @click="loadRecoveryBrowse(crumb.path)" :disabled="recovery.loading || crumb.path===recovery.path" x-text="crumb.label"></button><span x-show="crumbIndex < recoveryBreadcrumbs().length - 1" aria-hidden="true">/</span></span></template></nav><label class="field recovery-size-limit"><span>Limit dieser Anfrage (MiB)</span><input type="number" min="1" max="51200" x-model.number="recovery.maxTotalMb"></label></div>
             <div class="recovery-file-list" :aria-busy="recovery.loading"><div class="loading-state" x-show="recovery.loading" role="status">Bestand wird geladen…</div><template x-for="item in recovery.items" :key="item.path"><div class="recovery-file-row"><template x-if="item.is_dir"><button type="button" class="picker-open" @click="loadRecoveryBrowse(item.path)"><span class="folder-icon" aria-hidden="true">□</span><span><strong x-text="item.name"></strong><small>Ordner öffnen</small></span></button></template><template x-if="!item.is_dir"><label class="check-row"><input type="checkbox" :checked="recovery.selectedPaths.includes(item.path)" :disabled="recovery.selectedPaths.length>=100 && !recovery.selectedPaths.includes(item.path)" @change="toggleRecoveryPath(item.path, $event.target.checked)"><span><strong class="mono" x-text="item.name"></strong><small x-text="item.size === null || item.size === undefined ? 'Größe unbekannt' : formatBytes(item.size)"></small></span></label></template></div></template><div class="empty-state compact" x-show="!recovery.loading && !recovery.error && !recovery.items.length"><strong>Keine Einträge an diesem Ort</strong></div></div>
-            <div class="recovery-browser-footer"><span x-text="recovery.selectedPaths.length + ' Einträge ausgewählt · höchstens 100'"></span><button class="button primary" @click="startSelectiveRestore()" :disabled="!recovery.selectedPaths.length || busy()">Auswahl ins Staging wiederherstellen</button></div>
+            <div class="recovery-browser-footer"><span x-text="recovery.selectedPaths.length + ' Einträge ausgewählt · höchstens 100'"></span><button class="button primary" @click="startSelectiveRestore()" :disabled="!recovery.selectedPaths.length || startBlocked()">Auswahl ins Staging wiederherstellen</button></div>
           </article>
           <article class="panel snapshot-diff" x-show="recovery.diff" x-cloak><div class="panel-head"><div><h3>Bestandsvergleich</h3><p x-text="recovery.diff?.warning || ('Vergleich per ' + (recovery.diff?.verification || 'Metadaten'))"></p></div></div><p role="status" x-show="recovery.diff?.truncated">Der Vergleich wurde begrenzt. Weitere Änderungen können fehlen.</p><div class="diff-counts"><span x-text="(recovery.diff?.counts?.added || 0) + ' neu'"></span><span x-text="(recovery.diff?.counts?.changed || 0) + ' geändert'"></span><span x-text="(recovery.diff?.counts?.removed || 0) + ' fehlen im aktuellen Stand'"></span></div><div class="snapshot-diff-list"><template x-for="item in [...(recovery.diff?.added || []).map(item=>({...item, kind:'Neu'})), ...(recovery.diff?.changed || []).map(item=>({...item, kind:'Geändert'})), ...(recovery.diff?.removed || []).map(item=>({...item, kind:'Fehlt'})), ...(recovery.diff?.unverified || []).map(item=>({...item, kind:'Ungeprüft'}))].slice(0,500)" :key="item.kind + item.path"><div><code x-text="item.path"></code><span x-text="item.kind"></span><span x-text="item.size === undefined ? '' : formatBytes(item.size)"></span></div></template></div></article>
           <div class="recovery-secondary-grid">
-            <article class="panel"><div class="panel-head"><div><h3>Staging-Bereich</h3><p>Wiederhergestellte Daten bleiben getrennt von den produktiven Ordnern.</p></div></div><div class="empty-state compact" x-show="!recovery.staging.length"><strong>Keine Staging-Wiederherstellungen</strong></div><template x-for="item in recovery.staging" :key="item.id"><div class="recovery-record"><strong x-text="item.pair + ' · Job #' + item.job_id"></strong><span class="badge" :class="item.verified ? 'ok' : item.status" x-text="item.verified ? 'Prüfsumme bestätigt' : (item.status || 'In Bearbeitung')"></span><small x-text="formatDateTime(item.created_at) + ' · ' + (item.files || 0) + ' Dateien · ' + formatBytes(item.bytes || 0)"></small><code class="mono" x-text="item.staging_path || 'Ziel wird vorbereitet'"></code><button type="button" class="button secondary small" x-show="item.status !== 'running'" @click="removeRecoveryStaging(item)">Staging entfernen</button></div></template></article>
+            <article class="panel"><div class="panel-head"><div><h3>Staging-Bereich</h3><p>Wiederhergestellte Daten bleiben getrennt von den produktiven Ordnern.</p></div></div><div class="empty-state compact" x-show="!recovery.staging.length"><strong>Keine Staging-Wiederherstellungen</strong></div><template x-for="item in recovery.staging" :key="item.id"><div class="recovery-record"><strong x-text="item.pair + ' · Job #' + item.job_id"></strong><span class="badge" :class="item.verified ? 'ok' : item.status" x-text="item.verified ? 'Prüfsumme bestätigt' : (item.status || 'In Bearbeitung')"></span><small x-text="formatDateTime(item.created_at) + ' · ' + (item.files || 0) + ' Dateien · ' + formatBytes(item.bytes || 0)"></small><code class="mono" x-text="item.staging_path || 'Ziel wird vorbereitet'"></code><div class="input-action staging-diff" x-show="item.status !== 'running' && item.staging_path"><label class="field"><span>Datei mit Live-Stand vergleichen</span><input class="mono" x-model="stagingDiffPaths[item.id]" @keydown.enter.prevent="openStagingDiff(item)" placeholder="Relativer Pfad, z. B. ordner/datei.txt" spellcheck="false"></label><button type="button" @click="openStagingDiff(item)" :disabled="!(stagingDiffPaths[item.id] || '').trim()" :aria-label="'Staging ' + item.pair + ' mit Live-Stand vergleichen'">Vergleichen</button></div><button type="button" class="button secondary small" x-show="item.status !== 'running'" @click="removeRecoveryStaging(item)">Staging entfernen</button></div></template></article>
             <article class="panel"><div class="panel-head"><div><h3>Quarantäne</h3><p>Unerwartete Quellenänderungen müssen geprüft und mit Passwort bestätigt werden.</p></div></div><div class="empty-state compact" x-show="!recovery.quarantine.length"><strong>Keine aktiven Quarantänen</strong></div><template x-for="item in recovery.quarantine" :key="item.history_key"><div class="recovery-record"><strong x-text="item.pair"></strong><span class="badge warn" x-text="item.reason === 'unexpected_source_drop' ? 'Unerwarteter Quellenrückgang' : 'Quelle weicht vom bestätigten Bestand ab'"></span><small x-text="formatDateTime(item.detected_at)"></small><p x-text="'Dateirückgang: ' + (item.file_drop_percent ?? '–') + ' % · Größenrückgang: ' + (item.size_drop_percent ?? '–') + ' %'"></p><p x-text="'Dateien: ' + (item.previous_count ?? '–') + ' → ' + (item.current_count ?? '–') + ' · Größe: ' + formatBytes(item.previous_bytes || 0) + ' → ' + formatBytes(item.current_bytes || 0)"></p><p>Mount, Quellpfad und Bestand außerhalb der Anwendung prüfen. Die Freigabe erlaubt wieder produktive Läufe mit möglichen Löschungen.</p><button class="button secondary small" @click="acknowledgeQuarantine(item)">Prüfen und Quarantäne bestätigen</button></div></template></article>
           </div>
           <article class="panel handover-panel"><div class="panel-head"><div><h3>Verschlüsseltes Notfallpaket</h3><p>Die Passphrase wird nicht in das Paket geschrieben. Bewahre sie getrennt und offline auf. Die Akte rettet ausschließlich inventarisierte Vault-Dateien, deren Zielkopien noch erreichbar sind; sie ersetzt kein vollständiges Serverbackup.</p></div></div><div class="form-grid two"><label class="field"><span>Aktuelles Passwort</span><input type="password" autocomplete="current-password" x-model="recovery.handover.password"></label><label class="field"><span>Passphrase · mindestens 12 Zeichen</span><input type="password" autocomplete="new-password" x-model="recovery.handover.passphrase" minlength="12"></label><label class="field"><span>Passphrase wiederholen</span><input type="password" autocomplete="new-password" x-model="recovery.handover.repeat"></label></div><label class="check-row"><input type="checkbox" x-model="recovery.handover.includePaths"><span><strong>Pfade in das Paket aufnehmen</strong><small>Pfade sind betriebliche Informationen. Nur aktivieren, wenn die Empfängerperson sie benötigt.</small></span></label><div class="button-row"><button class="button primary" @click="downloadRecoveryHandover()">Verschlüsseltes Paket herunterladen</button><button class="button secondary" @click="printHandoverKey()">Separaten Passphrase-Beleg drucken</button></div></article>
@@ -802,6 +1094,7 @@
                 <div class="form-grid two"><label class="field"><span>Web-Benutzername</span><input x-model="config.web.username" readonly aria-readonly="true"><small>Aus Sicherheitsgründen nur über den vorgesehenen Account-/CLI-Flow ändern.</small></label><label class="field"><span>Zeitzone</span><input x-model="config.backup.timezone" @input.debounce.400ms="refreshSchedulePreview()" placeholder="Europe/Berlin"><small>Bestimmt, wann Cron-Zeitpläne im Proxmox-Gast ausgeführt werden.</small></label></div>
                 <div class="form-grid three"><label class="field"><span>Datenverzeichnis</span><input class="mono" x-model="config.paths.data_dir"></label><label class="field"><span>Logverzeichnis</span><input class="mono" x-model="config.paths.logs_dir"></label><label class="field"><span>Temporäres Verzeichnis</span><input class="mono" x-model="config.paths.temp_dir"></label></div>
                 <div class="form-grid two"><label class="field"><span>Erlaubte Hosts · einer pro Zeile</span><textarea class="mono" x-model="allowedHostsText" rows="5" placeholder="backup.example.de"></textarea><small>Für produktive Reverse-Proxys konkrete Hostnamen statt * eintragen.</small></label><label class="field"><span>Lokale Browser-Wurzeln · eine pro Zeile</span><textarea class="mono" x-model="browseRootsText" rows="5" placeholder="/mnt"></textarea><small>Quick-Sync und Dateiauswahl bleiben auf diese Wurzeln beschränkt.</small></label></div>
+                <div class="form-grid one"><label class="field"><span>VPN-Prüfziele</span><textarea class="mono" x-model="vpnProbesText" rows="4" placeholder="10.8.0.1:8007" spellcheck="false" autocomplete="off"></textarea><small>host:port, eines pro Zeile, höchstens 10 Ziele. System → VPN-Tunnel prüft sie per TCP-Verbindung.</small></label></div>
               </article>
 
               <article class="scheduler-settings" id="settings-panel-scheduler" role="tabpanel" aria-labelledby="settings-tab-scheduler" x-show="settingsTab==='scheduler'" @input="markConfigDirty()" @change="markConfigDirty()">
@@ -933,6 +1226,31 @@
                         <label class="maintenance-toggle"><input type="checkbox" x-model="config.maintenance.auto_prune"><span class="toggle-visual"></span><span><strong>Automatisch aufräumen</strong><small>Wartung nach erfolgreichen Scheduler-Läufen ausführen.</small></span></label>
                       </div>
                     </section>
+
+                    <section class="settings-section">
+                      <div class="settings-section-head"><div><h3>Versionsordner nach GFS ausdünnen</h3><p>Behält in den Versionsablagen (--backup-dir mit {date}) die jüngste Version je Tag, Woche und Monat und löscht ältere Zwischenstände nach einem Lauf.</p></div></div>
+                      <label class="check-row feature-check"><input type="checkbox" x-model="config.backup.versions_lifecycle.enabled"><span><strong>Versionsordner automatisch ausdünnen</strong><small>Gelöschte Versionsordner sind endgültig weg. Die neueste Version bleibt immer erhalten.</small></span></label>
+                      <div class="retention-grid">
+                        <label class="field"><span>Tagesstände behalten</span><div class="number-with-unit"><input type="number" min="0" max="365" x-model.number="config.backup.versions_lifecycle.keep_daily"><span>Tage</span></div></label>
+                        <label class="field"><span>Wochenstände behalten</span><div class="number-with-unit"><input type="number" min="0" max="104" x-model.number="config.backup.versions_lifecycle.keep_weekly"><span>Wochen</span></div></label>
+                        <label class="field"><span>Monatsstände behalten</span><div class="number-with-unit"><input type="number" min="0" max="120" x-model.number="config.backup.versions_lifecycle.keep_monthly"><span>Monate</span></div></label>
+                      </div>
+                    </section>
+
+                    <section class="settings-section">
+                      <div class="settings-section-head"><div><h3>Cloud-Bitrot-Scrub</h3><p>Liest regelmäßig eine Stichprobe der Cloud-Kopien und vergleicht ihre SHA-256 mit der gespeicherten Baseline. Jeder Lauf lädt Daten beim Anbieter herunter und kann Abruf- und Egress-Kosten verursachen.</p></div></div>
+                      <label class="check-row feature-check"><input type="checkbox" x-model="config.backup.bitrot_scrub.enabled"><span><strong>Scrub nach Zeitplan ausführen</strong><small>Ergebnis und manueller Start unter System → Kopien &amp; Schutz → Cloud-Bitrot-Scrub.</small></span></label>
+                      <div class="form-grid three">
+                        <label class="field"><span>Zeitplan</span><input class="mono" x-model="config.backup.bitrot_scrub.schedule" placeholder="0 4 * * *" spellcheck="false"><small>Cron-Ausdruck oder <code>manual</code> für nur manuell · <span x-text="humanCron(config.backup.bitrot_scrub.schedule)"></span></small></label>
+                        <label class="field"><span>Stichprobe</span><div class="number-with-unit"><input type="number" min="1" max="100" x-model.number="config.backup.bitrot_scrub.sample_percent"><span>%</span></div><small>Anteil der fälligen Dateien je Lauf.</small></label>
+                        <label class="field"><span>Erneut fällig nach</span><div class="number-with-unit"><input type="number" min="1" max="365" x-model.number="config.backup.bitrot_scrub.rotation_days"><span>Tagen</span></div><small>Bestätigte Dateien ruhen so lange.</small></label>
+                      </div>
+                      <div class="form-grid three">
+                        <label class="field"><span>Höchstens Dateien je Lauf</span><input type="number" min="1" max="5000" x-model.number="config.backup.bitrot_scrub.max_files"></label>
+                        <label class="field"><span>Höchstens Download je Lauf</span><div class="number-with-unit"><input type="number" min="1" max="10240" x-model.number="config.backup.bitrot_scrub.max_total_mb"><span>MB</span></div><small>Begrenzt Datenmenge und Kosten.</small></label>
+                        <label class="field"><span>Höchstens gelistete Dateien</span><input type="number" min="100" max="1000000" x-model.number="config.backup.bitrot_scrub.max_scan_files"><small>Obergrenze der Dateiliste, aus der die Stichprobe gezogen wird.</small></label>
+                      </div>
+                    </section>
                   </div>
 
                   <aside class="scheduler-summary-card">
@@ -978,7 +1296,7 @@
                 <label class="field"><span>Filterregeln</span><textarea class="mono code-editor" x-model="filterFile.content" @input="filterFile.dirty=true" rows="22" placeholder="- .DS_Store&#10;- Thumbs.db&#10;- *.tmp"></textarea><small><code>-</code> schließt aus, <code>+</code> schließt ein. Änderungen an Bi-Sync-Filtern können einen kontrollierten Resync erfordern.</small></label>
               </article>
 
-              <article class="panel" id="settings-panel-pbs" role="tabpanel" aria-labelledby="settings-tab-pbs" x-show="settingsTab==='pbs'" @input="markConfigDirty()" @change="markConfigDirty()">
+              <article class="panel stack" id="settings-panel-pbs" role="tabpanel" aria-labelledby="settings-tab-pbs" x-show="settingsTab==='pbs'" @input="markConfigDirty()" @change="markConfigDirty()">
                 <div class="panel-head"><div><span class="section-kicker">Proxmox Backup Server</span><h3>Dateibasierte Backups per proxmox-backup-client</h3></div><span class="badge" :class="pbs.status ? (pbs.status.client_available ? 'ok' : 'skipped') : 'neutral'" x-text="pbs.status ? (pbs.status.client_available ? 'Client installiert' : 'Client fehlt') : '–'"></span></div>
                 <label class="check-row feature-check"><input type="checkbox" x-model="config.pbs.enabled"><span><strong>PBS-Integration aktivieren</strong><small>Sichert die Pfade der Targets als .pxar-Archive in den Datastore. Dedup, Verschlüsselung und Verify übernimmt PBS.</small></span></label>
                 <div class="form-grid two">
@@ -995,6 +1313,22 @@
                   <label class="field"><span>Keep daily / weekly</span><div class="number-with-unit compact dual-number"><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_daily" aria-label="Tägliche PBS-Sicherungen behalten"><span aria-hidden="true">/</span><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_weekly" aria-label="Wöchentliche PBS-Sicherungen behalten"></div><small>0 = kein automatisches Prune.</small></label>
                   <label class="field"><span>Keep monthly / yearly</span><div class="number-with-unit compact dual-number"><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_monthly" aria-label="Monatliche PBS-Sicherungen behalten"><span aria-hidden="true">/</span><input type="number" min="0" max="3650" x-model.number="config.pbs.keep.keep_yearly" aria-label="Jährliche PBS-Sicherungen behalten"></div></label>
                 </div>
+                <h4 class="subheading">Rücksicht auf PBS-Wartung</h4>
+                <label class="check-row feature-check"><input type="checkbox" x-model="config.pbs.gc_throttle.enabled"><span><strong>rclone-Läufe während PBS-GC/Verify zurückstellen</strong><small>Solange der PBS eine Garbage Collection oder ein Verify ausführt, warten rclone-Läufe, damit Datastore und Netz nicht doppelt belastet werden.</small></span></label>
+                <div class="form-grid three"><label class="field"><span>Prüfintervall</span><div class="number-with-unit compact"><input type="number" min="15" max="900" x-model.number="config.pbs.gc_throttle.poll_seconds"><span>Sek.</span></div><small>15 bis 900 Sekunden.</small></label></div>
+                <h4 class="subheading">Boot-Drill</h4>
+                <label class="check-row feature-check"><input type="checkbox" x-model="config.pbs.boot_drill.enabled"><span><strong>Boot-Drill aktivieren</strong><small>Holt das jüngste Disk-Image einer Gruppe aus dem PBS, startet es ohne Netzwerk in QEMU und meldet, ob der Guest Agent antwortet.</small></span></label>
+                <div class="form-grid three">
+                  <label class="field"><span>Gruppe</span><input class="mono" x-model="config.pbs.boot_drill.group" placeholder="vm/100"><small>vm/&lt;id&gt;, ct/&lt;id&gt; oder host/&lt;id&gt;.</small></label>
+                  <label class="field"><span>Zeitplan</span><input class="mono" x-model="config.pbs.boot_drill.schedule" placeholder="manual" spellcheck="false"><small>Cron-Ausdruck oder <code>manual</code> für nur manuell · <span x-text="humanCron(config.pbs.boot_drill.schedule)"></span></small></label>
+                  <label class="field"><span>Archiv (optional)</span><input class="mono" x-model="config.pbs.boot_drill.archive" placeholder="drive-scsi0.img.fidx"><small>Leer = erstes Disk-Image im Snapshot.</small></label>
+                </div>
+                <div class="form-grid three">
+                  <label class="field"><span>Arbeitsspeicher</span><div class="number-with-unit"><input type="number" min="256" max="65536" x-model.number="config.pbs.boot_drill.memory_mb"><span>MB</span></div></label>
+                  <label class="field"><span>Zeitlimit bis Guest Agent</span><div class="number-with-unit"><input type="number" min="10" max="900" x-model.number="config.pbs.boot_drill.timeout_seconds"><span>Sek.</span></div></label>
+                  <label class="field"><span>Arbeitsverzeichnis</span><input class="mono" x-model="config.pbs.boot_drill.scratch_dir" placeholder="/opt/rclone-sync/temp" spellcheck="false"><small>Absoluter Pfad mit Platz für das ganze Disk-Image. Leer = Temporäres Verzeichnis (paths.temp_dir).</small></label>
+                </div>
+                <div class="inherit-note"><strong>Voraussetzungen:</strong> QEMU im Gast und Zugriff auf /dev/kvm; beides muss die systemd-Unit freigeben. Ohne /dev/kvm läuft der Drill emuliert und deutlich langsamer. <strong>Datenschutz:</strong> Das Image enthält Produktivdaten und wird nach dem Drill gelöscht. Die gespeicherte Konsolenausgabe kann Hostnamen enthalten.</div>
                 <div class="inherit-note"><strong>Targets:</strong> PBS-Backups legst du im Pair-Konfigurator an (Seite „Pairs" → Vorlage „Backup: Lokale Pfade → Proxmox Backup Server").</div>
                 <div class="inherit-note" x-show="pbs.status && !pbs.status.client_available"><strong>Hinweis:</strong> proxmox-backup-client ist im Container nicht installiert. Installationsbefehle stehen in config.example.yaml bzw. am Ende von scripts/install.sh.</div>
               </article>
@@ -1041,6 +1375,21 @@
     </div>
   </div>
 
+  <!-- Notfall-Lockdown -->
+  <div class="modal" x-show="lockdownDialog.show" @click.self="closeLockdown()" x-cloak>
+    <form class="modal-dialog reauth-dialog" id="lockdown-dialog" x-ref="lockdownDialog" role="dialog" aria-modal="true" aria-labelledby="lockdown-dialog-title" aria-describedby="lockdown-dialog-message" tabindex="-1" @submit.prevent="triggerLockdown()" :aria-busy="lockdownDialog.submitting">
+      <div class="modal-head"><h3 id="lockdown-dialog-title">Notfall-Lockdown auslösen</h3><button type="button" class="icon-button" @click="closeLockdown()" :disabled="lockdownDialog.submitting" aria-label="Lockdown-Dialog schließen">×</button></div>
+      <div class="modal-content stack">
+        <p id="lockdown-dialog-message" class="confirmation-message">Für den Verdachtsfall, etwa Ransomware oder einen kompromittierten Zugang. Der Lockdown beendet alle laufenden Übertragungen, pausiert die Automatik, versucht die Backup-Mounts schreibgeschützt einzuhängen und meldet alle Sitzungen ab. Neue Läufe bleiben gesperrt, bis du den Lockdown aufhebst.</p>
+        <label class="field"><span>Grund (optional)</span><input x-model="lockdownDialog.reason" maxlength="300" placeholder="z. B. verdächtige Dateiänderungen auf dem NAS" :disabled="lockdownDialog.submitting" data-dialog-initial-focus><small>Höchstens 300 Zeichen. Erscheint im Banner und im Aktivitätsprotokoll.</small></label>
+        <label class="field"><span>Aktuelles Passwort</span><input type="password" x-model="lockdownDialog.password" autocomplete="current-password" required :disabled="lockdownDialog.submitting"></label>
+        <div class="inline-error" x-show="lockdownDialog.error" role="alert" x-text="lockdownDialog.error"></div>
+        <p x-show="lockdownDialog.submitting" role="status">Lockdown läuft. Das kann bis zu einer halben Minute dauern…</p>
+      </div>
+      <div class="modal-footer"><button type="button" class="button secondary" @click="closeLockdown()" :disabled="lockdownDialog.submitting">Abbrechen</button><button type="submit" class="button danger" :disabled="lockdownDialog.submitting || !lockdownDialog.password" x-text="lockdownDialog.submitting ? 'Wird ausgelöst…' : 'Lockdown auslösen'"></button></div>
+    </form>
+  </div>
+
   <!-- Ausführungsplan -->
   <div class="modal" x-show="plan.data" @click.self="closePlan()" x-cloak>
     <div class="modal-dialog wide" x-ref="planDialog" role="dialog" aria-modal="true" aria-labelledby="plan-dialog-title" tabindex="-1">
@@ -1067,7 +1416,7 @@
         <label class="check-row"><input type="checkbox" x-model="quick.dry_run"><span><strong>Dry-Run</strong><small>Nur anzeigen, welche Änderungen ausgeführt würden.</small></span></label>
         <div class="safety-box" x-show="['sync','bisync'].includes(quick.mode) && !quick.dry_run"><div><strong>Löschschutz erforderlich</strong><span>Produktive Mirror-Läufe benötigen eine Freigabe und feste Obergrenze.</span></div><label class="field compact-field"><span>Max. Löschungen</span><input type="number" min="0" max="10000000" x-model.number="quick.max_delete"></label><label class="switch"><input type="checkbox" x-model="quick.allow_delete"><span></span><em>Freigeben</em></label></div>
       </div>
-      <div class="modal-footer"><button class="button secondary" @click="closeQuick()">Abbrechen</button><button class="button primary" @click="runQuickSync()" :disabled="busy() || pending.quick || !quick.remote || !quick.local" x-text="pending.quick ? 'Startet…' : 'Quick-Sync starten'"></button></div>
+      <div class="modal-footer"><button class="button secondary" @click="closeQuick()">Abbrechen</button><button class="button primary" @click="runQuickSync()" :disabled="startBlocked() || pending.quick || !quick.remote || !quick.local" x-text="pending.quick ? 'Startet…' : 'Quick-Sync starten'"></button></div>
     </div>
   </div>
 
@@ -1149,9 +1498,12 @@
       <div class="modal-content job-detail-content">
         <div class="loading-state modal-loading" x-show="jobModal.loading" role="status" aria-live="polite">Jobdetails werden geladen…</div>
         <div class="job-detail-facts"><div><small>Jobdefinition</small><strong x-text="jobModal.job?.definition_name || 'Manueller Lauf'"></strong></div><div><small>Konfigurationsstand</small><strong class="mono" x-text="jobModal.job?.config_revision || '—'"></strong></div><div><small>Gestartet</small><strong x-text="formatDateTime(jobModal.job?.started_at)"></strong></div><div><small>Beendet</small><strong x-text="formatDateTime(jobModal.job?.ended_at)"></strong></div><div><small>Dauer</small><strong x-text="jobModal.job?.ended_at ? formatDur(jobModal.job.ended_at-jobModal.job.started_at) : 'Läuft'"></strong></div><div><small>Log</small><strong x-text="jobModal.job?.log_file ? 'Vorhanden' : 'Kein Log'"></strong></div></div>
-        <div class="button-row" x-show="canRetryJob(jobModal.job)"><button class="button primary" @click="retryJob(jobModal.job)" :disabled="pending.retry" x-text="pending.retry ? 'Startet…' : 'Job erneut starten'"></button><small>Nur mit unveränderter Jobdefinition und gleichem Konfigurationsstand.</small></div>
+        <div class="button-row" x-show="canRetryJob(jobModal.job)"><button class="button primary" @click="retryJob(jobModal.job)" :disabled="pending.retry || lockdownState.active" x-text="pending.retry ? 'Startet…' : 'Job erneut starten'"></button><small>Nur mit unveränderter Jobdefinition und gleichem Konfigurationsstand.</small></div>
+        <div class="button-row" x-show="jobModal.job?.dry_run && ['backup', 'quicksync'].includes(jobModal.job?.kind)"><button class="button secondary" @click="openPreflight(jobModal.job)" :disabled="jobModal.job?.status === 'running'">Änderungsmatrix</button><small>Geplante Kopien, Löschungen und Verschiebungen dieses Dry-Runs prüfen und einzelne Pfade vor dem produktiven Start abwählen.</small></div>
         <div class="button-row" x-show="quickPromotion?.jobId===jobModal.job?.id && jobModal.job?.status==='ok'"><button class="button secondary" @click="promoteQuickSync()">Als deaktivierten Datenweg übernehmen</button><small>Der Entwurf wird nicht automatisch aktiviert. Prüfe Richtung, Pfade und Schutzregeln vor dem Speichern.</small></div>
         <div class="inline-error" x-show="jobModal.job?.kind === 'backup' && ['error','cancelled','stale'].includes(jobModal.job?.status) && !canRetryJob(jobModal.job)">Dieser ältere Lauf ist nicht sicher an eine Jobdefinition gebunden. Prüfe den aktuellen Jobplan und starte ihn dort neu.</div>
+        <div class="job-detail-facts" x-show="jobModal.job?.kind === 'bootdrill' && jobModal.job?.summary"><div><small>Bootfähig</small><strong x-text="jobModal.job?.summary?.bootable ? 'Ja' : 'Nein'"></strong></div><div><small>Snapshot</small><strong class="mono" x-text="jobModal.job?.summary?.snapshot || '—'"></strong></div><div><small>Bis Guest Agent</small><strong x-text="jobModal.job?.summary?.seconds_to_agent != null ? jobModal.job.summary.seconds_to_agent + ' s' : '—'"></strong></div><div><small>KVM</small><strong x-text="jobModal.job?.summary?.kvm ? 'Ja' : 'Nein, emuliert'"></strong></div></div>
+        <div class="alert error" x-show="jobModal.job?.kind === 'bitrotscrub' && bitrotMismatches(jobModal.job?.summary).length"><span class="alert-icon" aria-hidden="true">!</span><div><strong x-text="'Abweichende Prüfsummen: ' + bitrotMismatches(jobModal.job?.summary).length"></strong><ul class="bitrot-list"><template x-for="item in bitrotMismatches(jobModal.job?.summary)" :key="item.pair + item.path"><li><span x-text="item.pair + ': '"></span><code x-text="item.path"></code><small class="mono" x-text="'erwartet ' + String(item.expected || '').slice(0, 12) + '… · aktuell ' + String(item.actual || '').slice(0, 12) + '…'"></small></li></template></ul></div></div>
         <div class="job-detail-grid">
           <div><h4 class="subheading">Zusammenfassung</h4><pre class="code-block summary-json" x-text="prettyJson(jobModal.job?.summary)"></pre></div>
           <div class="log-pane"><div class="log-toolbar"><h4 class="subheading">Logausgabe</h4><label class="search-field compact-search"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg></span><input x-model="jobModal.logSearch" placeholder="Im Log suchen" aria-label="Logausgabe durchsuchen"></label><label class="auto-refresh"><input type="checkbox" x-model="jobModal.autoRefresh"> Automatisch aktualisieren</label><button class="button ghost" @click="jumpToLogError()" :disabled="jobModal.logLoading">Zum Fehler</button><button class="button ghost" @click="loadJobLog()" :disabled="jobModal.logLoading" x-text="jobModal.logLoading ? 'Lädt…' : 'Neu laden'"></button><button class="button ghost" @click="copyLog()" :disabled="jobModal.logLoading">Kopieren</button><button class="button ghost" @click="downloadJobLog()" :disabled="!jobModal.job?.log_file">Download</button></div><pre class="code-block live-log" :aria-busy="jobModal.logLoading"><span x-show="jobModal.logLoading">Log wird geladen…</span><template x-if="!jobModal.logLoading"><template x-for="(line, lineIndex) in filteredLogLines()" :key="lineIndex"><span class="live-log-line" :class="line.level" x-text="line.text + (lineIndex < filteredLogLines().length - 1 ? '\n' : '')"></span></template></template><span x-show="!jobModal.logLoading && !filteredLog()">(kein Loginhalt)</span></pre></div>
@@ -1159,6 +1511,153 @@
       </div>
       <div class="modal-footer"><button class="button secondary" @click="closeJob()">Schließen</button></div>
     </div>
+  </div>
+
+  <!-- Bisync-Konflikte -->
+  <div class="modal" x-show="conflictDialog.show" @click.self="closeConflicts()" x-cloak>
+    <div class="modal-dialog wide" id="conflict-dialog" x-ref="conflictDialog" role="dialog" aria-modal="true" aria-labelledby="conflict-dialog-title" tabindex="-1" :aria-busy="conflictDialog.loading || conflictDialog.busy">
+      <div class="modal-head"><h3 id="conflict-dialog-title" x-text="'Bisync-Konflikte · ' + conflictDialog.pair"></h3><button class="icon-button" @click="closeConflicts()" :disabled="conflictDialog.busy" aria-label="Konfliktansicht schließen" data-dialog-initial-focus>×</button></div>
+      <div class="modal-content stack">
+        <div class="loading-state" x-show="conflictDialog.loading" role="status">Konfliktkopien werden auf beiden Seiten gesucht…</div>
+        <div class="inline-error" role="alert" x-show="conflictDialog.error" x-text="conflictDialog.error"></div>
+        <div class="alert error" role="alert" x-show="conflictDialog.stepErrors.length"><span class="alert-icon" aria-hidden="true">!</span><div><strong>Nicht alle Schritte waren erfolgreich</strong><ul class="bitrot-list"><template x-for="(message, index) in conflictDialog.stepErrors" :key="index"><li x-text="message"></li></template></ul></div></div>
+        <div class="alert warn" role="status" x-show="conflictDialog.data?.truncated || conflictDialog.data?.skipped"><span class="alert-icon" aria-hidden="true">△</span><span x-text="[conflictDialog.data?.truncated ? 'Es werden nicht alle Konflikte angezeigt. Nach dem Auflösen erneut prüfen.' : '', conflictDialog.data?.skipped ? conflictDialog.data.skipped + ' Konfliktkopien mit ungewöhnlichen Pfaden wurden übersprungen.' : ''].filter(Boolean).join(' ')"></span></div>
+        <div class="empty-state compact" x-show="conflictDialog.data && !(conflictDialog.data?.groups || []).length"><strong>Keine Konflikte</strong><span>Auf beiden Seiten liegen keine Konfliktkopien.</span></div>
+        <p class="muted" id="conflict-delete-hint" x-show="(conflictDialog.data?.groups || []).length">„Cloud-“ oder „Lokale Version behalten“ löscht die übrigen Kopien und verlangt dein Passwort.</p>
+        <template x-for="group in (conflictDialog.data?.groups || [])" :key="group.base_path">
+          <section class="conflict-group" :aria-label="'Konflikt ' + group.base_path">
+            <h4 class="mono conflict-path" x-text="group.base_path"></h4>
+            <div class="conflict-sides">
+              <template x-for="side in ['side1', 'side2']" :key="side"><div class="conflict-side">
+                <strong x-text="side === 'side1' ? 'Seite 1 · Cloud' : 'Seite 2 · lokal'"></strong>
+                <small class="mono" x-text="conflictDialog.data?.[side]"></small>
+                <p x-text="'Live-Datei: ' + (group.live ? conflictFileText(group.live[side]) : 'nicht geprüft')"></p>
+                <ul class="bitrot-list" x-show="group[side].length"><template x-for="file in group[side]" :key="file.name"><li><code x-text="file.name"></code> <small x-text="conflictFileText(file)"></small></li></template></ul>
+                <small class="muted" x-show="!group[side].length">Keine Konfliktkopie auf dieser Seite.</small>
+              </div></template>
+            </div>
+            <div class="button-row">
+              <button class="button danger small" @click="resolveConflict(group, 'keep_side1')" :disabled="conflictDialog.busy || lockdownState.active" :aria-label="'Cloud-Version behalten: ' + group.base_path" aria-describedby="conflict-delete-hint">Cloud-Version behalten</button>
+              <button class="button danger small" @click="resolveConflict(group, 'keep_side2')" :disabled="conflictDialog.busy || lockdownState.active" :aria-label="'Lokale Version behalten: ' + group.base_path" aria-describedby="conflict-delete-hint">Lokale Version behalten</button>
+              <button class="button secondary small" @click="resolveConflict(group, 'keep_both')" :disabled="conflictDialog.busy || lockdownState.active">Beide behalten</button>
+            </div>
+          </section>
+        </template>
+      </div>
+      <div class="modal-footer"><button class="button secondary" @click="closeConflicts()" :disabled="conflictDialog.busy">Schließen</button></div>
+    </div>
+  </div>
+
+  <!-- Änderungsmatrix eines Dry-Runs -->
+  <div class="modal" x-show="preflight.show" @click.self="closePreflight()" x-cloak>
+    <div class="modal-dialog extra-wide" id="preflight-dialog" x-ref="preflightDialog" role="dialog" aria-modal="true" aria-labelledby="preflight-dialog-title" tabindex="-1" :aria-busy="preflight.loading">
+      <div class="modal-head"><h3 id="preflight-dialog-title" x-text="'Änderungsmatrix' + (preflight.jobId ? ' · Dry-Run #' + preflight.jobId : '')"></h3><button class="icon-button" @click="closePreflight()" aria-label="Änderungsmatrix schließen" data-dialog-initial-focus>×</button></div>
+      <div class="modal-content stack">
+        <div class="loading-state" x-show="preflight.loading" role="status">Änderungen werden aus dem Dry-Run-Log gelesen…</div>
+        <div class="inline-error" role="alert" x-show="preflight.error" x-text="preflight.error"></div>
+        <p class="muted" x-show="preflight.data && preflight.kind === 'backup'">Angehakte Zeilen werden beim produktiven Start ausgeführt, abgewählte Pfade für diesen Lauf ausgenommen (höchstens 200 je Datenweg).</p>
+        <template x-for="pair in (preflight.data?.pairs || [])" :key="pair.name || 'quicksync'">
+          <section class="stack">
+            <div class="panel-head"><div><h4 class="subheading" x-text="pair.name || 'Quick-Sync'"></h4><small class="muted" x-text="(pair.direction || '—') + ' · ' + (pair.mode || '—')"></small></div>
+              <div class="check-counts" x-show="pair.matrix"><span class="badge compact ok" x-text="'Kopie ' + (pair.matrix?.counts?.copies || 0)"></span><span class="badge compact error" x-text="'Löschen ' + (pair.matrix?.counts?.deletes || 0)"></span><span class="badge compact warn" x-text="'Verschieben ' + (pair.matrix?.counts?.moves || 0)"></span><span class="badge compact neutral" x-text="'Sonstiges ' + (pair.matrix?.counts?.other || 0)"></span></div></div>
+            <p class="error-text" x-show="pair.error" x-text="pair.error"></p>
+            <p class="muted" x-show="!pair.error && !pair.matrix">Für diesen Datenweg liegt kein Dry-Run-Log vor.</p>
+            <p class="muted" x-show="pair.matrix && !(pair.rows || []).length">Keine Änderungen geplant.</p>
+            <p class="muted" x-show="pair.matrix?.truncated">Die Liste ist gekürzt; die Zähler umfassen alle geplanten Änderungen.</p>
+            <p class="muted" x-show="pair.direction === 'bisync' && (pair.rows || []).length">Bei bisync keine Abwahl möglich.</p>
+            <div class="table-scroll responsive-table-wrap" x-show="(pair.rows || []).length" tabindex="0" :aria-label="'Geplante Änderungen ' + (pair.name || 'Quick-Sync')">
+              <table class="table responsive-table">
+                <thead><tr><th x-show="preflight.kind === 'backup' && pair.direction !== 'bisync'">Ausführen</th><th>Art</th><th>Pfad</th><th>Details</th></tr></thead>
+                <tbody><template x-for="(row, rowIndex) in (pair.rows || [])" :key="rowIndex"><tr>
+                  <td data-label="Ausführen" x-show="preflight.kind === 'backup' && pair.direction !== 'bisync'"><input type="checkbox" :checked="!preflight.excluded[pair.name]?.[row.path]" @change="preflight.excluded[pair.name][row.path] = !$event.target.checked" :aria-label="row.label + ' ausführen: ' + row.path"></td>
+                  <td data-label="Art"><span class="badge compact" :class="row.tone" x-text="row.label"></span></td>
+                  <td data-label="Pfad" class="mono path-cell" x-text="row.path"></td>
+                  <td data-label="Details" class="path-cell" x-text="row.detail"></td>
+                </tr></template></tbody>
+              </table>
+            </div>
+          </section>
+        </template>
+      </div>
+      <div class="modal-footer">
+        <small class="muted" x-show="preflight.kind === 'quicksync'">Für den produktiven Lauf Quick-Sync ohne Dry-Run erneut starten.</small>
+        <small class="muted" x-show="preflightExcludedCount()" x-text="preflightExcludedCount() + ' Pfade abgewählt'"></small>
+        <button class="button secondary" @click="closePreflight()">Schließen</button>
+        <button class="button danger" x-show="preflight.kind === 'backup' && (preflight.data?.pairs || []).length" @click="startPreflightRun()" :disabled="startBlocked()"><span x-show="!pending.backup">Produktiv starten</span><span x-show="pending.backup">Startet…</span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Restore-Diff: Staging gegen Live-Datei -->
+  <div class="modal" x-show="diffDialog.show" @click.self="closeDiff()" x-cloak>
+    <div class="modal-dialog extra-wide" id="diff-dialog" x-ref="diffDialog" role="dialog" aria-modal="true" aria-labelledby="diff-dialog-title" tabindex="-1" :aria-busy="diffDialog.loading">
+      <div class="modal-head"><div><h3 id="diff-dialog-title">Staging gegen Live-Datei</h3><p class="mono path-cell" x-text="diffDialog.path"></p></div><button class="icon-button" @click="closeDiff()" aria-label="Vergleich schließen" data-dialog-initial-focus>×</button></div>
+      <div class="modal-content stack">
+        <div class="loading-state" x-show="diffDialog.loading" role="status">Dateien werden verglichen…</div>
+        <div class="inline-error" role="alert" x-show="diffDialog.error" x-text="diffDialog.error"></div>
+        <template x-if="diffDialog.data"><div class="stack">
+          <div class="alert info" x-show="!diffDialog.data?.right"><span class="alert-icon" aria-hidden="true">i</span><span>Live-Datei existiert nicht (Datei wäre neu).</span></div>
+          <p role="status" x-text="'Gleich: ' + (diffDialog.data?.stats?.equal || 0) + ' · − nur im Staging: ' + (diffDialog.data?.stats?.delete || 0) + ' · + nur live: ' + (diffDialog.data?.stats?.insert || 0) + ' · ~ geändert: ' + (diffDialog.data?.stats?.replace || 0)"></p>
+          <p class="muted" x-show="diffDialog.data?.truncated">Der Vergleich ist gekürzt; weitere Unterschiede werden nicht angezeigt.</p>
+          <div class="table-scroll" tabindex="0" aria-label="Zeilenvergleich">
+            <table class="diff-table">
+              <thead><tr><th scope="col" class="diff-no">Zeile<span class="sr-only"> (Staging)</span></th><th scope="col"><span class="sr-only">Änderung</span></th><th scope="col" x-text="'Staging · ' + formatBytes(diffDialog.data?.left?.size) + ' · ' + formatDateTime(diffDialog.data?.left?.mtime)"></th><th scope="col" class="diff-no">Zeile<span class="sr-only"> (live)</span></th><th scope="col" x-text="diffDialog.data?.right ? 'Live · ' + formatBytes(diffDialog.data?.right.size) + ' · ' + formatDateTime(diffDialog.data?.right.mtime) : 'Live · nicht vorhanden'"></th></tr></thead>
+              <tbody><template x-for="(row, index) in (diffDialog.data?.rows || [])" :key="index"><tr :class="'diff-' + row.type">
+                <td class="diff-no" x-text="row.left_no ?? ''"></td>
+                <td class="diff-mark"><span aria-hidden="true" x-text="({ insert: '+', delete: '−', replace: '~' })[row.type] || ''"></span><span class="sr-only" x-text="({ insert: 'Nur live', delete: 'Nur im Staging', replace: 'Geändert' })[row.type] || ''"></span></td>
+                <td class="diff-text" :title="row.left_no != null ? 'Staging-Zeile ' + row.left_no : null" x-text="row.left ?? ''"></td>
+                <td class="diff-no" x-text="row.right_no ?? ''"></td>
+                <td class="diff-text" :title="row.right_no != null ? 'Live-Zeile ' + row.right_no : null" x-text="row.right ?? ''"></td>
+              </tr></template></tbody>
+            </table>
+          </div>
+        </div></template>
+      </div>
+      <div class="modal-footer"><button class="button secondary" @click="closeDiff()">Schließen</button></div>
+    </div>
+  </div>
+
+  <!-- Verschlüsseltes Remote (rclone crypt) -->
+  <div class="modal" x-show="crypt.show" @click.self="closeCrypt()" x-cloak>
+    <form class="modal-dialog" id="crypt-dialog" x-ref="cryptDialog" role="dialog" aria-modal="true" aria-labelledby="crypt-dialog-title" tabindex="-1" @submit.prevent="crypt.step < 3 && cryptNext()" :aria-busy="crypt.busy" autocomplete="off">
+      <div class="modal-head"><h3 id="crypt-dialog-title">Verschlüsseltes Remote anlegen</h3><button type="button" class="icon-button" @click="closeCrypt()" :disabled="crypt.busy" aria-label="Assistent schließen">×</button></div>
+      <div class="modal-content stack">
+        <ol class="crypt-steps" aria-label="Fortschritt">
+          <li :class="crypt.step === 1 ? 'active' : 'done'" :aria-current="crypt.step === 1 ? 'step' : null"><span class="icon" aria-hidden="true" x-show="crypt.step > 1"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>1 · Ziel<span class="sr-only" x-show="crypt.step > 1"> – erledigt</span></li>
+          <li :class="crypt.step === 2 ? 'active' : (crypt.step > 2 ? 'done' : '')" :aria-current="crypt.step === 2 ? 'step' : null"><span class="icon" aria-hidden="true" x-show="crypt.step > 2"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>2 · Optionen<span class="sr-only" x-show="crypt.step > 2"> – erledigt</span></li>
+          <li :class="crypt.step === 3 && 'active'" :aria-current="crypt.step === 3 ? 'step' : null">3 · Schlüssel sichern</li>
+        </ol>
+        <div class="stack" x-show="crypt.step === 1">
+          <p>Legt ein rclone-crypt-Remote auf einem vorhandenen Cloud-Remote an. Dateien werden auf diesem Server verschlüsselt, bevor sie hochgeladen werden.</p>
+          <label class="field"><span>Name des neuen Remotes</span><input x-model.trim="crypt.name" maxlength="64" placeholder="cloud-verschluesselt" autocomplete="off" spellcheck="false" data-dialog-initial-focus><small>2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche.</small></label>
+          <label class="field"><span>Basis-Remote</span><select x-model="crypt.base_remote"><option value="">Bitte auswählen</option><template x-for="item in crypt.candidates" :key="item.name"><option :value="item.name" x-text="item.name + ' · ' + item.type"></option></template></select><small x-show="!crypt.busy && !crypt.error && !crypt.candidates.length">Kein Cloud-Remote vorhanden – zuerst ein Remote anlegen.</small></label>
+          <label class="field"><span>Pfad im Basis-Remote</span><input class="mono" x-model="crypt.base_path" placeholder="backup/verschluesselt" spellcheck="false"><small>Leer = Wurzel des Basis-Remotes. Ein eigener Ordner trennt verschlüsselte von unverschlüsselten Daten.</small></label>
+        </div>
+        <div class="stack" x-show="crypt.step === 2">
+          <label class="field"><span>Dateinamen verschlüsseln</span><select x-model="crypt.filename_encryption"><option value="standard">Standard – vollständig verschlüsselt (empfohlen)</option><option value="obfuscate">Verschleiert – nur leichte Umkodierung</option><option value="off">Aus – Namen bleiben lesbar</option></select></label>
+          <label class="check-row"><input type="checkbox" x-model="crypt.directory_name_encryption"><span><strong>Verzeichnisnamen verschlüsseln</strong><small>Empfohlen. Wirkt nur zusammen mit verschlüsselten Dateinamen.</small></span></label>
+          <details class="disclosure"><summary>Eigene Schlüssel verwenden (optional)</summary><div class="disclosure-body form-grid one">
+            <label class="field"><span>Schlüssel (password)</span><input type="password" x-model="crypt.password" autocomplete="new-password" spellcheck="false"><small>Mindestens 16 Zeichen. Leer lassen, dann erzeugt der Server einen zufälligen Schlüssel.</small></label>
+            <label class="field"><span>Salt (password2)</span><input type="password" x-model="crypt.password2" autocomplete="new-password" spellcheck="false"><small>Mindestens 16 Zeichen. Leer lassen, dann wird er erzeugt.</small></label>
+          </div></details>
+        </div>
+        <div class="stack" x-show="crypt.step === 3" x-ref="cryptResult" tabindex="-1">
+          <div class="alert warn" x-show="crypt.result?.warning"><span class="alert-icon" aria-hidden="true">△</span><span x-text="crypt.result?.warning"></span></div>
+          <div class="field"><span id="crypt-password-label">Schlüssel (password)</span><pre id="crypt-password" class="code-block crypt-key" role="group" aria-labelledby="crypt-password-label" x-text="crypt.result?.keys?.password"></pre><button type="button" class="button secondary small" @click="copyCryptKey('password')" aria-describedby="crypt-password-label">Schlüssel kopieren</button></div>
+          <div class="field"><span id="crypt-password2-label">Salt (password2)</span><pre id="crypt-password2" class="code-block crypt-key" role="group" aria-labelledby="crypt-password2-label" x-text="crypt.result?.keys?.password2"></pre><button type="button" class="button secondary small" @click="copyCryptKey('password2')" aria-describedby="crypt-password2-label">Salt kopieren</button></div>
+          <label class="check-row"><input type="checkbox" x-model="crypt.saved"><span><strong>Ich habe beide Schlüssel im Passwortmanager gesichert</strong><small>Ohne sie lassen sich die Daten nach einem Verlust dieses Servers nicht entschlüsseln.</small></span></label>
+          <div class="button-row"><button type="button" class="button secondary small" @click="verifyCrypt()" :disabled="crypt.busy" x-text="crypt.busy ? 'Prüft…' : 'Remote prüfen'"></button><span class="badge compact" role="status" x-show="crypt.verify" :class="crypt.verify?.ok ? 'ok' : 'error'" x-text="crypt.verify?.ok ? 'Lesbar' : 'Nicht lesbar'"></span><small class="error-text" x-show="crypt.verify && !crypt.verify.ok && crypt.verify.text !== 'Nicht lesbar'" x-text="crypt.verify?.text"></small></div>
+          <p>Datenwege nutzen jetzt <code x-text="(crypt.result?.name || '') + ':'"></code> als Cloud-Ordner. Basis: <code x-text="crypt.result?.remote"></code></p>
+        </div>
+        <p class="inline-error" role="alert" x-show="crypt.error" x-text="crypt.error"></p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="button secondary" x-show="crypt.step === 2" @click="crypt.step = 1; crypt.error = ''" :disabled="crypt.busy">Zurück</button>
+        <button type="button" class="button secondary" x-show="crypt.step < 3" @click="closeCrypt()" :disabled="crypt.busy">Abbrechen</button>
+        <button type="submit" class="button primary" x-show="crypt.step < 3" :disabled="crypt.busy || (crypt.step === 1 && !crypt.candidates.length)" x-text="crypt.busy ? 'Bitte warten…' : (crypt.step === 1 ? 'Weiter' : 'Remote anlegen')"></button>
+        <button type="button" class="button primary" x-show="crypt.step === 3" @click="closeCrypt()" :disabled="!crypt.saved || crypt.busy">Fertig</button>
+      </div>
+    </form>
   </div>
 
   <div class="unsaved-bar" x-show="configDirty || filterFile.dirty" x-cloak>

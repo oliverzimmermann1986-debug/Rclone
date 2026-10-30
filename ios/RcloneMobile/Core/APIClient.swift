@@ -110,6 +110,8 @@ enum APIError: LocalizedError, Equatable {
 }
 
 protocol APIClientProtocol: AnyObject {
+    func protectionTool(_ request: ProtectionToolRequest) async throws -> ProtectionToolDocument
+    func downloadProtectionReport(id: Int) async throws -> URL
     func getRecoveryStaging() async throws -> RecoveryStagingResponse
     func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse
     func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse
@@ -154,6 +156,7 @@ protocol APIClientProtocol: AnyObject {
     func changePassword(current: String, new: String) async throws -> PasswordChangeResponse
     func downloadSupportBundle() async throws -> URL
     func getJobs(limit: Int) async throws -> JobSearchResponse
+    func getCurrentJobs() async throws -> CurrentJobsResponse
     func searchJobs(kind: String?, status: String?, query: String, limit: Int, offset: Int) async throws -> JobSearchResponse
     func downloadJobsCSV(kind: String?, status: String?, query: String) async throws -> URL
     func getJob(id: Int) async throws -> JobRecord
@@ -205,6 +208,15 @@ protocol APIClientProtocol: AnyObject {
 }
 
 extension APIClientProtocol {
+    func getCurrentJobs() async throws -> CurrentJobsResponse {
+        throw APIError.serverFeatureUnavailable(feature: "Aktuelle Läufe")
+    }
+    func protectionTool(_ request: ProtectionToolRequest) async throws -> ProtectionToolDocument {
+        throw APIError.serverFeatureUnavailable(feature: "Schutzwerkzeuge")
+    }
+    func downloadProtectionReport(id: Int) async throws -> URL {
+        throw APIError.serverFeatureUnavailable(feature: "Wöchentliche Schutzberichte")
+    }
     func getRecoveryStaging() async throws -> RecoveryStagingResponse { throw APIError.serverFeatureUnavailable(feature: "Recovery-Staging") }
     func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
     func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
@@ -1029,6 +1041,13 @@ final class APIClient: APIClientProtocol {
         )
     }
 
+    func getCurrentJobs() async throws -> CurrentJobsResponse {
+        do { return try await get("/api/jobs/status/current") }
+        catch let APIError.server(status, _) where status == 404 || status == 405 {
+            throw APIError.serverFeatureUnavailable(feature: "Aktuelle Läufe")
+        }
+    }
+
     func getJobs(limit: Int = 50) async throws -> JobSearchResponse {
         try await get("/api/jobs/search?limit=\(limit)")
     }
@@ -1174,6 +1193,26 @@ final class APIClient: APIClientProtocol {
         if sessionPersistence?.save(cookies, for: baseURL, replacingSession: persistedSessionValue) == true {
             persistedSessionValue = value
         }
+    }
+
+    func protectionTool(_ tool: ProtectionToolRequest) async throws -> ProtectionToolDocument {
+        var request = URLRequest(url: url(for: tool.path))
+        request.httpMethod = tool.method
+        request.timeoutInterval = 45
+        if let body = try tool.encodedBody() {
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        if tool.method != "GET" {
+            request.setValue(origin, forHTTPHeaderField: "Origin")
+            try addCSRF(to: &request)
+        }
+        return try await send(request)
+    }
+
+    func downloadProtectionReport(id: Int) async throws -> URL {
+        guard id > 0 else { throw APIError.invalidResponse }
+        return try await download("/api/reports/weekly/\(id)/pdf", filename: "Sicherpfad-Schutzbericht-\(id).pdf")
     }
 
     private func get<T: Decodable>(_ path: String, timeout: TimeInterval? = nil) async throws -> T {

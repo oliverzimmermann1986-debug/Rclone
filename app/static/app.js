@@ -23,8 +23,27 @@ function app() {
   const ui = window.RcloneUI;
   const safeStoredValue = ui.storedChoice;
 
+  const emptyCrypt = () => ({
+    show: false, step: 1, busy: false, error: '', candidates: [], name: '', base_remote: '', base_path: '',
+    filename_encryption: 'standard', directory_name_encryption: true, password: '', password2: '',
+    result: null, saved: false, verify: null,
+  });
+  const lifecycleDefaults = { enabled: false, keep_daily: 7, keep_weekly: 4, keep_monthly: 12 };
+  const scrubDefaults = { enabled: false, schedule: '0 4 * * *', sample_percent: 2, max_files: 200, max_total_mb: 256, max_scan_files: 20000, rotation_days: 30 };
+  const gcThrottleDefaults = { enabled: true, poll_seconds: 60 };
+  const bootDrillDefaults = { enabled: false, schedule: 'manual', group: '', archive: '', memory_mb: 1024, timeout_seconds: 60, scratch_dir: '' };
+
   return {
     page: 'dashboard',
+    protectionTools: {
+      tab: 'search', busy: false, error: '', notice: '', operations: null,
+      search: { query: '', identity: '', results: null, max_total_mb: 512 },
+      forecast: { items: [], selected: '', history: [], revision: '', capacityGiB: '' },
+      heartbeat: null, heartbeatDraft: { enabled: false, secret_url: '', period_seconds: 60, timeout_seconds: 5, allow_private_hosts: false },
+      reports: [], reportPreview: null, reportDelivery: null, reportRecipients: '',
+      reportDraft: { enabled: false, schedule: '0 8 * * 1', timezone: 'Europe/Berlin', retention_weeks: 52, email: { enabled: false, host: '', port: 587, encryption: 'starttls', username: '', password: '', from_address: '', to_addresses: [], timeout_seconds: 10 } },
+      migration: { identity: '', target: '', max_total_mb: 5120, plan: null, items: [] }, migrationTimer: null,
+    },
     remoteSetup: { show: false, busy: false, name: '', provider: '', providers: [], providerQuery: '', showAllProviders: false, advanced: false, completed: '', session: null, answer: '', error: '' },
     pages: ['dashboard', 'pairs', 'definitions', 'runs', 'doctor', 'settings', 'recovery'],
     settingsTabs: ['general', 'scheduler', 'security', 'filters', 'account', 'pbs'],
@@ -46,6 +65,7 @@ function app() {
       backup: false, plan: false, quick: false, pbs: false, pbsCancel: false,
       save: false, validate: false, filter: false, password: false, definition: false, retry: false,
       restoreTest: false, snapshot: false,
+      bootDrill: false, bitrot: false,
     },
     restoreTestStart: { phase: 'idle', pairName: '', checked: false, checking: false, error: '' },
     currentPasswordDialog: { show: false, password: '', error: '' },
@@ -58,7 +78,7 @@ function app() {
     },
 
     overview: { loading: false, data: null },
-    status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null },
+    status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null, bitrotscrub: null, bootdrill: null, migration: null, recovery: null },
     progress: null,
     sse: null,
     storageLoading: false,
@@ -76,6 +96,7 @@ function app() {
       backup: {
         pairs: [], jobs: [], rclone_args: [], tuning: {},
         timeout_hours: 4, max_runtime_hours: 0,
+        versions_lifecycle: { ...lifecycleDefaults }, bitrot_scrub: { ...scrubDefaults },
       },
       notifications: {},
       maintenance: {},
@@ -83,6 +104,7 @@ function app() {
         enabled: false, repository: '', password: '', fingerprint: '',
         namespace: '', backup_id: '', timeout_hours: 4,
         keep: { keep_last: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 0 },
+        gc_throttle: { ...gcThrottleDefaults }, boot_drill: { ...bootDrillDefaults },
         targets: [],
       },
     },
@@ -141,6 +163,25 @@ function app() {
     commandPalette: { show: false, query: '' },
     toast: { show: false, msg: '', type: 'ok', timer: null },
 
+    lockdownState: { active: false },
+    lockdownDialog: { show: false, reason: '', password: '', error: '', submitting: false },
+    lockdownSteps: [],
+    vpnProbesText: '',
+    pbsInsights: null,
+    bootDrill: null,
+    bitrot: { loading: false, error: false, data: null, baselines: {} },
+    vpn: { loading: false, error: false, data: null },
+    activeTag: '',
+    conflictCounts: {},
+    conflictDialog: { show: false, loading: false, pair: '', data: null, error: '', stepErrors: [], busy: false },
+    versionsState: {},
+    bandwidth: { loading: false, error: false, days: 90, heatmap: null, suggestions: null, max: 0 },
+    preflight: { show: false, loading: false, kind: '', jobId: null, data: null, excluded: {}, error: '' },
+    stagingDiffPaths: {},
+    diffDialog: { show: false, loading: false, data: null, error: '', path: '' },
+    crypt: emptyCrypt(),
+    objectLock: null,
+
     async init() {
       this.theme = safeStoredValue('rclone-sync-theme', ['system', 'dark', 'light'], 'system');
       this.density = safeStoredValue('rclone-sync-density', ['comfortable', 'compact'], ui.prefersCompact() ? 'compact' : 'comfortable');
@@ -150,7 +191,7 @@ function app() {
         ['all', 'enabled', 'disabled', 'issues', 'destructive'],
         'all',
       );
-      this.jobs.kind = safeStoredValue('rclone-sync-job-kind', ['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs'], '');
+      this.jobs.kind = safeStoredValue('rclone-sync-job-kind', ['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs', 'bitrotscrub', 'bootdrill'], '');
       this.jobs.status = safeStoredValue(
         'rclone-sync-job-status',
         ['', 'running', 'ok', 'error', 'warning', 'skipped', 'cancelled', 'stale'],
@@ -220,7 +261,7 @@ function app() {
       });
       await this.loadConfig(true);
       await this.refreshAll(false);
-      if (this.page === 'dashboard') { await this.loadStorage(false); await this.loadCopies(); }
+      if (this.page === 'dashboard') { this.loadObjectLock(); await this.loadStorage(false); await this.loadCopies(); }
       else this.loadPage(this.page, true);
       this.startPolling();
     },
@@ -229,13 +270,14 @@ function app() {
       if (this.refreshing) return false;
       this.refreshing = true;
       try {
-        const tasks = [this.refreshStatus(true)];
+        const tasks = [this.refreshStatus(true), this.loadLockdown()];
         // Die teure Übersicht ist nur auf dem Dashboard sichtbar. Andere
         // Bereiche aktualisieren ausschließlich die dort benötigten Daten.
         if (this.page === 'dashboard') {
           tasks.push(this.loadOverview(true));
           tasks.push(this.loadRecent(true), this.loadSchedulerState(true), this.loadCopies());
-          if (this.config.pbs?.enabled) tasks.push(this.loadPbsStatus(true));
+          // Insights nicht abwarten: ein langsamer PBS-Host soll die Aktualisierung nicht blockieren.
+          if (this.config.pbs?.enabled) { tasks.push(this.loadPbsStatus(true)); this.loadPbsInsights(); }
         } else if (this.page === 'doctor' || this.page === 'settings') {
           tasks.push(this.loadSchedulerState(true));
         }
@@ -361,16 +403,18 @@ function app() {
       if (page === 'dashboard') {
         this.loadOverview(true); this.loadRecent(true); this.loadStorage(false);
         if (!configAlreadyLoaded && !this.configLoaded) this.loadConfig(true);
-        if (this.config?.pbs?.enabled) this.loadPbsStatus();
+        if (this.config?.pbs?.enabled) { this.loadPbsStatus(); this.loadPbsInsights(); }
+        if (!this.objectLock) this.loadObjectLock();
       } else if (page === 'pairs') {
         if (!configAlreadyLoaded) this.loadConfig();
       } else if (page === 'definitions') {
         if (!configAlreadyLoaded) this.loadConfig();
         this.loadJobDefinitions(true);
+        this.loadBandwidth();
       } else if (page === 'runs') {
         this.loadJobs(true);
       } else if (page === 'doctor') {
-        this.loadOverview(true); if (!configAlreadyLoaded) this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadCopies(); this.loadSchedulerState(true); this.loadPushStatus(true);
+        this.loadOverview(true); if (!configAlreadyLoaded) this.loadConfig(); this.loadDoctor(); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots(); this.loadAudit(); this.loadCopies(); this.loadSchedulerState(true); this.loadPushStatus(true); this.loadVpn(); this.loadBitrot();
       } else if (page === 'recovery') {
         if (!configAlreadyLoaded) await this.loadConfig();
         this.loadRecovery();
@@ -602,19 +646,21 @@ function app() {
     busy() {
       return Boolean(
         this.pending.backup || this.pending.quick || this.pending.pbs || this.pending.restoreTest ||
-        this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.pbs,
+        this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.pbs ||
+        this.status?.bitrotscrub || this.status?.bootdrill,
       );
     },
 
     rcloneBusy() {
       return Boolean(
         this.pending.backup || this.pending.quick || this.pending.restoreTest ||
-        this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest,
+        this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.migration || this.status?.recovery || this.status?.bitrotscrub,
       );
     },
 
     runningJob() {
-      return this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.pbs || null;
+      return this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.pbs ||
+        this.status?.bitrotscrub || this.status?.bootdrill || this.status?.migration || this.status?.recovery || null;
     },
 
     runningKind() {
@@ -623,6 +669,10 @@ function app() {
       if (this.status?.check) return 'Check';
       if (this.status?.quicksync) return 'Quick-Sync';
       if (this.status?.restoretest) return 'Restore-Drill';
+      if (this.status?.bitrotscrub) return 'Bitrot-Scrub';
+      if (this.status?.bootdrill) return 'Boot-Drill';
+      if (this.status?.migration) return 'Zielwechsel';
+      if (this.status?.recovery) return 'Wiederherstellung';
       if (this.pending.restoreTest) return 'Restore-Drill';
       if (this.pending.backup) return 'Backup';
       if (this.pending.quick) return 'Quick-Sync';
@@ -950,16 +1000,17 @@ function app() {
       return await this.saveConfig();
     },
 
-    async runBackup(dryRun) {
+    async runBackup(dryRun, pairs = null) {
       if (this.pending.backup) return;
       if (!(await this.ensureConfigSavedForRun())) return;
       if (!dryRun && !(await this.requestConfirmation(
-        'Produktiven Lauf für alle aktiven Pairs starten? Prüfe vorher möglichst den Plan oder einen Dry-Run.',
+        `Produktiven Lauf für ${pairs?.join(', ') || 'alle aktiven Pairs'} starten? Prüfe vorher möglichst den Plan oder einen Dry-Run.`,
         { title: 'Produktiven Lauf starten', confirmLabel: 'Produktiv starten' },
       ))) return;
       this.pending.backup = true;
       try {
-        const result = await this.api('POST', `/api/jobs/backup/run?dry_run=${dryRun}`);
+        const scope = pairs ? `&pairs=${encodeURIComponent(pairs.join(','))}` : '';
+        const result = await this.api('POST', `/api/jobs/backup/run?dry_run=${dryRun}${scope}`);
         if (result?.ok) {
           this.showToast(dryRun ? 'Dry-Run gestartet' : 'Backup gestartet');
           setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
@@ -1311,6 +1362,10 @@ function app() {
       result.pbs.keep.keep_weekly ??= 4;
       result.pbs.keep.keep_monthly ??= 6;
       result.pbs.keep.keep_yearly ??= 0;
+      result.pbs.gc_throttle = { ...gcThrottleDefaults, ...result.pbs.gc_throttle };
+      result.pbs.boot_drill = { ...bootDrillDefaults, ...result.pbs.boot_drill };
+      result.backup.versions_lifecycle = { ...lifecycleDefaults, ...result.backup.versions_lifecycle };
+      result.backup.bitrot_scrub = { ...scrubDefaults, ...result.backup.bitrot_scrub };
       result.pbs.targets ||= [];
       for (const target of result.pbs.targets) {
         target.pathsText = (target.paths || []).join('\n');
@@ -1322,6 +1377,7 @@ function app() {
       this.rcloneArgsText = (result.backup.rclone_args || []).join('\n');
       this.allowedHostsText = (result.web.allowed_hosts || []).join('\n');
       this.browseRootsText = (result.web.local_browse_roots || []).join('\n');
+      this.vpnProbesText = (result.backup.vpn_probes || []).join('\n');
       this.syncScheduleEditorFromCron();
       this.performancePreset = this.detectPerformancePreset();
       this.configDirty = false;
@@ -1420,6 +1476,7 @@ function app() {
       draft.backup.rclone_args = this.rcloneArgsText.split('\n').map((value) => value.trim()).filter(Boolean);
       draft.web.allowed_hosts = this.allowedHostsText.split('\n').map((value) => value.trim()).filter(Boolean);
       draft.web.local_browse_roots = this.browseRootsText.split('\n').map((value) => value.trim()).filter(Boolean);
+      draft.backup.vpn_probes = this.vpnProbesText.split('\n').map((value) => value.trim()).filter(Boolean);
       for (const target of (draft.pbs?.targets || [])) delete target.pathsText;
       for (const pair of (draft.backup?.pairs || [])) {
         const source = (pair.source ?? pair.local ?? '').trim();
@@ -2001,6 +2058,7 @@ function app() {
       if (this.pairFilter === 'disabled' && pair.enabled) return false;
       if (this.pairFilter === 'destructive' && !(pair.direction === 'bisync' || pair.mode === 'sync')) return false;
       if (this.pairFilter === 'issues' && this.pairIssues(pair).length === 0 && !this.pairRuntimeIssue(pair)) return false;
+      if (this.activeTag && !(pair.tags || []).includes(this.activeTag)) return false;
       return true;
     },
 
@@ -2018,6 +2076,8 @@ function app() {
       if (destructive && pair.enabled && !pair.allow_delete) issues.push('Löschen nicht freigegeben');
       if (destructive && pair.enabled && (pair.max_delete === '' || pair.max_delete === null || pair.max_delete === undefined || Number(pair.max_delete) < 0)) issues.push('Löschlimit fehlt');
       if (pair.require_mountpoint && !String(pair.mountpoint || '').trim()) issues.push('Mountpoint fehlt');
+      const tags = pair.tags || [];
+      if (tags.length > 10 || tags.some((tag) => !/^[a-z0-9][a-z0-9_-]{0,23}$/.test(tag))) issues.push('Tags ungültig (a–z, 0–9, _ und -, höchstens 10)');
       return issues;
     },
 
@@ -2211,6 +2271,7 @@ function app() {
     async loadPairSizes() {
       if (this.storageLoading) return;
       this.storageLoading = true;
+      this.loadObjectLock();
       try {
         const result = await this.loadStorage(true, true);
         if (result?.pairs) {
@@ -3320,6 +3381,11 @@ function app() {
       if (this.commandPalette.show) return this.$refs.commandPaletteDialog;
       if (this.confirmationDialog.show) return this.$refs.confirmationDialog;
       if (this.currentPasswordDialog.show) return this.$refs.currentPasswordDialog;
+      if (this.lockdownDialog.show) return this.$refs.lockdownDialog;
+      if (this.preflight.show) return this.$refs.preflightDialog;
+      if (this.conflictDialog.show) return this.$refs.conflictDialog;
+      if (this.diffDialog.show) return this.$refs.diffDialog;
+      if (this.crypt.show) return this.$refs.cryptDialog;
       if (this.jobModal.show) return this.$refs.jobDialog;
       if (this.picker.show) return this.$refs.pickerDialog;
       if (this.quickModal.show) return this.$refs.quickDialog;
@@ -3472,6 +3538,11 @@ function app() {
       if (this.remoteSetup.show) this.closeRemoteSetup();
       else if (this.confirmationDialog.show) this.respondConfirmation(false);
       else if (this.currentPasswordDialog.show) this.cancelCurrentPassword();
+      else if (this.lockdownDialog.show) this.closeLockdown();
+      else if (this.preflight.show) this.closePreflight();
+      else if (this.conflictDialog.show) this.closeConflicts();
+      else if (this.diffDialog.show) this.closeDiff();
+      else if (this.crypt.show) this.closeCrypt();
       else if (this.jobModal.show) this.closeJob();
       else if (this.picker.show) this.closePicker();
       else if (this.quickModal.show) this.closeQuick();
@@ -3599,7 +3670,7 @@ function app() {
     },
 
     kindLabel(kind) {
-      return ({ backup: 'Backup', check: 'Check', quicksync: 'Quick-Sync', pbs: 'PBS-Backup', restoretest: 'Restore-Drill' })[kind] || kind || 'Job';
+      return ({ backup: 'Backup', check: 'Check', quicksync: 'Quick-Sync', pbs: 'PBS-Backup', restoretest: 'Restore-Drill', bitrotscrub: 'Bitrot-Scrub', bootdrill: 'Boot-Drill', migration: 'Zielwechsel', recovery: 'Wiederherstellung' })[kind] || kind || 'Job';
     },
 
     directionLabel(pair) {
@@ -3627,6 +3698,882 @@ function app() {
     prettyJson(value) {
       return JSON.stringify(value || {}, null, 2);
     },
+
+    startBlocked() {
+      return this.busy() || this.lockdownState.active;
+    },
+
+    errorText(result) {
+      const detail = result?.detail;
+      const text = typeof detail === 'string' ? detail : (detail?.message || 'Aktion fehlgeschlagen');
+      return detail?.retry_after_seconds ? `${text} · erneut möglich in ${detail.retry_after_seconds} s` : text;
+    },
+
+    async withCurrentPassword(message, send) {
+      for (;;) {
+        const password = await this.requestCurrentPassword(message);
+        if (!password) return null;
+        const result = await send(password);
+        if (!result?.__error || ![403, 429].includes(result.status)) return result;
+        message = this.errorText(result);
+      }
+    },
+
+    async loadLockdown() {
+      const result = await this.api('GET', '/api/lockdown', undefined, { silent: true, requestKey: 'lockdown' });
+      if (this.isStale(result)) return undefined;
+      if (result) this.lockdownState = result;
+      return !!result;
+    },
+
+    openLockdown() {
+      this.lockdownDialog = { show: true, reason: '', password: '', error: '', submitting: false };
+      this.openDialog('lockdownDialog');
+    },
+
+    closeLockdown() {
+      if (!this.lockdownDialog.show || this.lockdownDialog.submitting) return;
+      this.lockdownDialog = { show: false, reason: '', password: '', error: '', submitting: false };
+      this.restoreDialogFocus();
+    },
+
+    async triggerLockdown() {
+      const dialog = this.lockdownDialog;
+      if (dialog.submitting || !dialog.password) return;
+      dialog.submitting = true;
+      dialog.error = '';
+      // Der Server beendet Läufe und remountet Mounts; das kann ~30 s dauern.
+      const result = await this.api('POST', '/api/lockdown', { password: dialog.password, reason: dialog.reason.trim() }, { silent: true, captureError: true, timeoutMs: 120000 });
+      dialog.password = '';
+      dialog.submitting = false;
+      if (!result) return;
+      if (result.__error) { dialog.error = this.errorText(result); return; }
+      this.lockdownDialog.show = false;
+      this.showToast('Lockdown ausgelöst · alle Sitzungen wurden abgemeldet', 'warn');
+      setTimeout(() => { window.location = '/login'; }, 1500);
+    },
+
+    async releaseLockdown() {
+      let message = 'Aktuelles Passwort eingeben, um den Lockdown aufzuheben.';
+      for (;;) {
+        const password = await this.requestCurrentPassword(message);
+        if (!password) return;
+        const result = await this.api('POST', '/api/lockdown/release', { password }, { silent: true, captureError: true });
+        if (!result) return;
+        if (!result.__error) {
+          this.lockdownSteps = result.manual_steps || [];
+          this.showToast(result.released ? 'Lockdown aufgehoben · Automatik läuft wieder' : 'Es war kein Lockdown aktiv');
+          await Promise.all([this.loadLockdown(), this.loadSchedulerState(true)]);
+          return;
+        }
+        message = this.errorText(result);
+        // Falsches Passwort oder Sperrfrist: erneut fragen, alles andere melden.
+        if (![403, 429].includes(result.status)) { this.showToast(message, 'err'); return; }
+      }
+    },
+
+    async copyLockdownSteps() {
+      try { await navigator.clipboard.writeText(this.lockdownSteps.join('\n')); this.showToast('Befehle kopiert'); }
+      catch (_) { this.showToast('Befehle konnten nicht kopiert werden', 'err'); }
+    },
+
+    async loadPbsInsights() {
+      const [insights, drill] = await Promise.all([
+        this.api('GET', '/api/pbs/insights', undefined, { silent: true, requestKey: 'pbs-insights', timeoutMs: 70000 }),
+        this.config.pbs?.boot_drill?.enabled
+          ? this.api('GET', '/api/pbs/boot-drill/status', undefined, { silent: true, requestKey: 'boot-drill' })
+          : null,
+      ]);
+      if (insights && !insights.__stale) this.pbsInsights = insights;
+      if (drill && !drill.__stale) this.bootDrill = drill;
+    },
+
+    pbsDedupText() {
+      const factor = Number(this.pbsInsights?.dedup?.dedup_factor);
+      return factor > 0 ? `${factor.toLocaleString('de-DE', { maximumFractionDigits: 1 })}×` : '—';
+    },
+
+    pbsMaintenance() {
+      const maintenance = this.pbsInsights?.maintenance;
+      if (!maintenance || (maintenance.error && !maintenance.active)) {
+        return { tone: 'neutral', label: 'Unbekannt', text: maintenance?.error || 'Noch nicht geprüft' };
+      }
+      if (!maintenance.active) return { tone: 'ok', label: 'Keine Wartung', text: 'Kein GC oder Verify aktiv' };
+      const types = [...new Set((maintenance.tasks || []).map((task) => (task.type === 'garbage_collection' ? 'Garbage Collection' : 'Verify')))].join(', ') || 'Wartung';
+      const hold = this.pbsInsights?.gc_throttle?.enabled ? ' · rclone-Läufe werden zurückgestellt' : '';
+      return { tone: 'warn', label: 'Wartung aktiv', text: types + hold };
+    },
+
+    bootDrillLast() {
+      const last = this.bootDrill?.last;
+      return last?.summary || last || null;
+    },
+
+    bootDrillBadge() {
+      const last = this.bootDrillLast();
+      if (this.bootDrill?.running) return { tone: 'running', label: 'Läuft' };
+      if (!last) return { tone: 'neutral', label: 'Nie gelaufen' };
+      return last.bootable ? { tone: 'ok', label: 'Bootfähig ✓' } : { tone: 'error', label: 'Nicht bootfähig !' };
+    },
+
+    scheduleNextText(state) {
+      if (state?.due?.next_run) return this.formatDateTime(state.due.next_run);
+      return state?.settings?.enabled ? 'Nur manuell' : 'Deaktiviert';
+    },
+
+    async runBootDrill() {
+      if (this.pending.bootDrill || this.bootDrill?.running) return;
+      this.pending.bootDrill = true;
+      try {
+        const result = await this.api('POST', '/api/pbs/boot-drill');
+        if (result?.job_id) {
+          this.bootDrill = { ...this.bootDrill, running: true };
+          this.showToast(`Boot-Drill gestartet (Lauf #${result.job_id})`);
+        }
+      } finally {
+        this.pending.bootDrill = false;
+      }
+    },
+
+    async loadObjectLock() {
+      // Backend cached 1 h; daher nur beim ersten Lagebild und bei expliziter Größenmessung.
+      const result = await this.api('GET', '/api/storage/object-lock', undefined, { silent: true, requestKey: 'object-lock', timeoutMs: 70000 });
+      if (result && !result.__stale) this.objectLock = result;
+    },
+
+    objectLockBadge(entry) {
+      const cloud = this.copyFolder(entry, 'cloud');
+      const [remote, ...rest] = cloud.split(':');
+      const bucket = rest.join(':').replace(/^\/+/, '').split('/')[0];
+      if (!rest.length || !bucket) return { tone: 'neutral', label: 'n/a', title: 'Kein S3-Ziel' };
+      if (!this.objectLock) return { tone: 'neutral', label: '—', title: 'Noch nicht geprüft' };
+      // Wie s3_object_lock._targets: Optionen nach Komma gehören nicht zum Remote-Namen.
+      const match = (this.objectLock.buckets || []).find((item) => item.remote === remote.split(',')[0] && item.bucket === bucket);
+      if (!match) return { tone: 'neutral', label: this.objectLock.error ? '—' : 'n/a', title: this.objectLock.error || 'Kein S3-Ziel' };
+      const tone = { immutable: 'ok', unprotected: 'warn' }[match.level] || 'neutral';
+      return { tone, label: match.level === 'unknown' ? '—' : match.label, title: match.error || match.hint || match.label };
+    },
+
+    pairTags() {
+      return [...new Set((this.config.backup?.pairs || []).flatMap((pair) => pair.tags || []))].sort();
+    },
+
+    tagPairNames() {
+      return (this.config.backup?.pairs || []).filter((pair) => pair.enabled && pair.name && (pair.tags || []).includes(this.activeTag)).map((pair) => pair.name);
+    },
+
+    setPairTags(pair, text) {
+      pair.tags = [...new Set(String(text || '').split(',').map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
+      this.markConfigDirty();
+    },
+
+    async openConflicts(name) {
+      if (!name) return;
+      this.conflictDialog = { show: true, loading: true, pair: name, data: null, error: '', stepErrors: [], busy: false };
+      this.openDialog('conflictDialog');
+      const result = await this.api('GET', `/api/pairs/${encodeURIComponent(name)}/conflicts`, undefined, { silent: true, captureError: true, requestKey: 'conflicts', timeoutMs: 120000 });
+      if (this.isStale(result) || this.conflictDialog.pair !== name) return;
+      this.conflictDialog.loading = false;
+      if (!result || result.__error) { this.conflictDialog.error = result ? this.errorText(result) : ''; return; }
+      this.conflictDialog.data = result;
+      this.conflictCounts[name] = result.groups.length;
+    },
+
+    closeConflicts() {
+      if (!this.conflictDialog.show || this.conflictDialog.busy) return;
+      requestControllers.get('conflicts')?.abort();
+      this.conflictDialog.show = false;
+      this.restoreDialogFocus();
+    },
+
+    conflictFileText(file) {
+      if (!file) return 'Nicht vorhanden';
+      return `${this.formatBytes(file.size)} · ${file.modtime ? this.formatDateTime(Date.parse(file.modtime) / 1000) : '—'}`;
+    },
+
+    async resolveConflict(group, choice) {
+      const dialog = this.conflictDialog;
+      if (dialog.busy) return;
+      const url = `/api/pairs/${encodeURIComponent(dialog.pair)}/conflicts/resolve`;
+      const send = (password) => this.api('POST', url, { base_path: group.base_path, choice, ...(password ? { password } : {}) }, { silent: true, captureError: true });
+      dialog.busy = true;
+      dialog.error = '';
+      dialog.stepErrors = [];
+      try {
+        const result = choice === 'keep_both'
+          ? await send()
+          : await this.withCurrentPassword(`Die Konfliktkopien von „${group.base_path}“ werden gelöscht. Aktuelles Passwort zur Bestätigung eingeben.`, send);
+        if (!result) return;
+        if (result.__error) { dialog.error = this.errorText(result); return; }
+        dialog.stepErrors = (result.steps || []).filter((step) => step.error).map((step) => step.error);
+        if (result.completed) {
+          dialog.data.groups = dialog.data.groups.filter((item) => item.base_path !== group.base_path);
+          this.conflictCounts[dialog.pair] = dialog.data.groups.length;
+          this.showToast(`Konflikt „${group.base_path}“ aufgelöst`);
+        }
+      } finally {
+        dialog.busy = false;
+      }
+    },
+
+    toggleLifecycleOverride(pair, enabled) {
+      if (enabled) pair.versions_lifecycle = { ...this.config.backup.versions_lifecycle };
+      else delete pair.versions_lifecycle;
+      this.markConfigDirty();
+    },
+
+    async loadVersionsPreview(name) {
+      if (!name) return;
+      this.versionsState[name] = { loading: true, data: null, error: '' };
+      const result = await this.api('GET', `/api/jobs/versions/preview?pair=${encodeURIComponent(name)}`, undefined, { silent: true, captureError: true, requestKey: `versions-${name}`, timeoutMs: 120000 });
+      if (this.isStale(result)) return;
+      this.versionsState[name] = result?.__error
+        ? { loading: false, data: null, error: this.errorText(result) }
+        : { loading: false, data: result, error: '' };
+    },
+
+    versionsPurgeCount(name) {
+      return (this.versionsState[name]?.data?.roots || []).reduce((sum, root) => sum + (root.purge?.length || 0), 0);
+    },
+
+    versionsMerges(root) {
+      const merge = root?.merge || [];
+      return Array.isArray(merge) ? merge : Object.entries(merge).flatMap(([into, younger]) => younger.map((from) => ({ into, from })));
+    },
+
+    versionsMergeGroups(root) {
+      const groups = new Map();
+      for (const item of this.versionsMerges(root)) groups.set(item.into, [...(groups.get(item.into) || []), item.from]);
+      return [...groups].map(([into, from]) => ({ into, from }));
+    },
+
+    versionsMergeCount(name) {
+      return (this.versionsState[name]?.data?.roots || []).reduce((sum, root) => sum + this.versionsMerges(root).length, 0);
+    },
+
+    versionsSummary(name) {
+      const data = this.versionsState[name]?.data;
+      if (!data?.dry_run || !(data.roots || []).length) return '';
+      return `Vorschau: ${this.versionsMergeCount(name)} zusammenführen · ${this.versionsPurgeCount(name)} löschen`;
+    },
+
+    async pruneVersions(name) {
+      const state = this.versionsState[name];
+      const count = this.versionsPurgeCount(name);
+      const merges = this.versionsMergeCount(name);
+      if (!(count + merges) || state.loading) return;
+      state.loading = true;
+      state.error = '';
+      const plan = [
+        merges && `${merges} Versionsordner werden in ihren älteren Vertreter zusammengeführt`,
+        count && `${count} Versionsordner werden endgültig gelöscht`,
+      ].filter(Boolean).join(', ');
+      try {
+        const result = await this.withCurrentPassword(
+          `„${name}“: ${plan}. Aktuelles Passwort zur Bestätigung eingeben.`,
+          (password) => this.api('POST', '/api/jobs/versions/prune', { pair: name, password }, { silent: true, captureError: true, timeoutMs: 300000 }),
+        );
+        if (!result) return;
+        if (result.__error) { state.error = this.errorText(result); return; }
+        state.data = result;
+        const purged = (result.roots || []).reduce((sum, root) => sum + (root.purged?.length || 0), 0);
+        const failed = (result.roots || []).reduce((sum, root) => sum + (root.failed?.length || 0), 0);
+        const merged = (result.roots || []).reduce((sum, root) => sum + (root.merged || []).filter((item) => item.ok).length, 0);
+        const outcome = `${merged} Versionsordner zusammengeführt, ${purged} gelöscht${failed ? `, ${failed} fehlgeschlagen` : ''}`;
+        this.showToast(result.aborted ? `Ausdünnen wegen Lockdown abgebrochen: ${outcome}` : outcome, failed || result.aborted ? 'warn' : 'ok');
+      } finally {
+        state.loading = false;
+      }
+    },
+
+    async openCrypt() {
+      this.crypt = { ...emptyCrypt(), show: true, busy: true };
+      this.openDialog('cryptDialog');
+      const result = await this.api('GET', '/api/remotes/crypt/candidates', undefined, { silent: true, captureError: true });
+      this.crypt.busy = false;
+      if (!result || result.__error) { this.crypt.error = result ? this.errorText(result) : ''; return; }
+      this.crypt.candidates = result.candidates || [];
+    },
+
+    async cryptNext() {
+      const state = this.crypt;
+      if (state.busy) return;
+      state.error = '';
+      if (state.step === 1) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$/.test(state.name)) { state.error = 'Remote-Name: 2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche.'; return; }
+        if (!state.base_remote) { state.error = 'Bitte ein Basis-Remote auswählen.'; return; }
+        state.step = 2;
+        return;
+      }
+      if ([state.password, state.password2].some((key) => key && key.length < 16)) { state.error = 'Eigene Schlüssel brauchen mindestens 16 Zeichen.'; return; }
+      state.busy = true;
+      const result = await this.api('POST', '/api/remotes/crypt', {
+        name: state.name, base_remote: state.base_remote, base_path: state.base_path.trim(),
+        filename_encryption: state.filename_encryption, directory_name_encryption: state.directory_name_encryption,
+        ...(state.password ? { password: state.password } : {}), ...(state.password2 ? { password2: state.password2 } : {}),
+      }, { silent: true, captureError: true, timeoutMs: 70000 });
+      state.busy = false;
+      if (!result) return;
+      if (result.__error) { state.error = this.errorText(result); return; }
+      state.password = '';
+      state.password2 = '';
+      state.result = result;
+      state.step = 3;
+      this.$nextTick(() => this.$refs.cryptResult?.focus());
+    },
+
+    async copyCryptKey(key) {
+      try { await navigator.clipboard.writeText(this.crypt.result?.keys?.[key] || ''); this.showToast('Schlüssel kopiert'); }
+      catch (_) { this.showToast('Kopieren nicht möglich – Schlüssel bitte manuell markieren', 'err'); }
+    },
+
+    async verifyCrypt() {
+      const state = this.crypt;
+      if (!state.result || state.busy) return;
+      state.busy = true;
+      const result = await this.api('POST', `/api/remotes/crypt/${encodeURIComponent(state.result.name)}/verify`, undefined, { silent: true, captureError: true, timeoutMs: 70000 });
+      state.busy = false;
+      if (result) state.verify = result.__error ? { ok: false, text: this.errorText(result) } : { ok: Boolean(result.ok), text: result.ok ? 'Lesbar' : 'Nicht lesbar' };
+    },
+
+    async closeCrypt() {
+      if (!this.crypt.show || this.crypt.busy) return;
+      if (this.crypt.result && !this.crypt.saved && !(await this.requestConfirmation(
+        'Die Schlüssel werden nur jetzt angezeigt. Geht die Serverkonfiguration verloren, sind die verschlüsselten Daten ohne sie unwiederbringlich verloren. Trotzdem schließen?',
+        { title: 'Schlüssel noch nicht gesichert', confirmLabel: 'Trotzdem schließen' },
+      ))) return;
+      this.crypt = emptyCrypt();
+      this.restoreDialogFocus();
+    },
+
+    async loadBandwidth() {
+      this.bandwidth.loading = true;
+      const [heatmap, suggestions] = await Promise.all([
+        this.api('GET', `/api/jobs/bandwidth/heatmap?days=${this.bandwidth.days}`, undefined, { silent: true, requestKey: 'bandwidth-heatmap' }),
+        this.api('GET', '/api/jobs/bandwidth/suggestions', undefined, { silent: true, requestKey: 'bandwidth-suggestions' }),
+      ]);
+      if (this.isStale(heatmap)) return;
+      this.bandwidth.error = !heatmap;
+      if (heatmap) {
+        this.bandwidth.heatmap = heatmap;
+        this.bandwidth.max = Math.max(0, ...heatmap.cells.flat().filter((value) => value !== null));
+      }
+      if (suggestions && !this.isStale(suggestions)) this.bandwidth.suggestions = suggestions;
+      this.bandwidth.loading = false;
+    },
+
+    heatTitle(day, hour) {
+      const value = this.bandwidth.heatmap?.cells?.[day]?.[hour];
+      const samples = this.bandwidth.heatmap?.samples?.[day]?.[hour] || 0;
+      const slot = `${['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'][day]}, ${String(hour).padStart(2, '0')}:00 Uhr`;
+      if (value === null || value === undefined) return `${slot}: keine Messung`;
+      return `${slot}: ${this.formatBytes(value)}/s · ${samples} ${samples === 1 ? 'Messung' : 'Messungen'}`;
+    },
+
+    suggestionApplied(item) {
+      return (this.config.backup?.jobs || []).find((job) => job.id === item.definition_id)?.schedule === item.proposed_schedule;
+    },
+
+    applyScheduleSuggestion(item) {
+      const job = (this.config.backup?.jobs || []).find((entry) => entry.id === item.definition_id);
+      if (!job) { this.showToast('Job nicht mehr vorhanden – Vorschläge aktualisieren', 'warn'); return; }
+      job.schedule = item.proposed_schedule;
+      this.markConfigDirty();
+      this.loadJobScheduleTimeline();
+      this.showToast('Zeitplan übernommen – noch speichern');
+    },
+
+    async openPreflight(job) {
+      if (!job?.id) return;
+      this.preflight = { show: true, loading: true, kind: job.kind, jobId: job.id, data: null, excluded: {}, error: '' };
+      this.openDialog('preflightDialog');
+      const result = await this.api('GET', `/api/jobs/${job.id}/preflight`, undefined, { silent: true, captureError: true, requestKey: 'preflight', timeoutMs: 60000 });
+      if (this.isStale(result) || this.preflight.jobId !== job.id) return;
+      this.preflight.loading = false;
+      if (!result || result.__error) { this.preflight.error = result ? this.errorText(result) : ''; return; }
+      const groups = [['copies', 'Kopie', 'ok'], ['deletes', 'Löschen', 'error'], ['moves', 'Verschieben', 'warn'], ['other', 'Sonstiges', 'neutral']];
+      const excluded = {};
+      for (const pair of result.pairs || []) {
+        pair.rows = groups.flatMap(([key, label, tone]) => (pair.matrix?.[key] || []).map((row) => ({
+          path: row.path, key, label, tone,
+          detail: key === 'moves' ? `→ ${row.to || '—'}` : (key === 'other' ? row.action : this.formatBytes(row.size_bytes)),
+        })));
+        excluded[pair.name] = {};
+      }
+      this.preflight.excluded = excluded;
+      this.preflight.data = result;
+    },
+
+    preflightExcludes() {
+      const excludes = {};
+      for (const [name, paths] of Object.entries(this.preflight.excluded)) {
+        const selected = Object.keys(paths).filter((path) => paths[path]);
+        if (selected.length) excludes[name] = selected;
+      }
+      return excludes;
+    },
+
+    preflightExcludedCount() {
+      return Object.values(this.preflightExcludes()).reduce((sum, paths) => sum + paths.length, 0);
+    },
+
+    async startPreflightRun() {
+      const state = this.preflight;
+      const names = (state.data?.pairs || []).map((pair) => pair.name).filter(Boolean);
+      if (!names.length || this.pending.backup) return;
+      const skipped = this.preflightExcludedCount();
+      if (!(await this.requestConfirmation(
+        `Produktiven Lauf für ${names.join(', ')} starten?${skipped ? `\n\n${skipped} abgewählte Pfade werden ausgenommen.` : ''}`,
+        { title: 'Produktiven Lauf starten', confirmLabel: 'Produktiv starten' },
+      ))) return;
+      this.pending.backup = true;
+      state.error = '';
+      try {
+        const result = await this.api(
+          'POST',
+          `/api/jobs/backup/run?dry_run=false&pairs=${encodeURIComponent(names.join(','))}`,
+          { exclude_paths: this.preflightExcludes() },
+          { silent: true, captureError: true },
+        );
+        if (!result) return;
+        if (result.__error) { state.error = this.errorText(result); return; }
+        if (result.ok) {
+          this.showToast('Backup gestartet');
+          this.closePreflight();
+          this.closeJob();
+          setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
+        }
+      } finally {
+        this.pending.backup = false;
+      }
+    },
+
+    closePreflight() {
+      if (!this.preflight.show) return;
+      requestControllers.get('preflight')?.abort();
+      this.preflight = { show: false, loading: false, kind: '', jobId: null, data: null, excluded: {}, error: '' };
+      this.restoreDialogFocus();
+    },
+
+    async loadVpn(refresh = false) {
+      this.vpn.loading = true;
+      const result = await this.api('GET', `/api/diagnostics/vpn${refresh ? '?refresh=1' : ''}`, undefined, { silent: !refresh, requestKey: 'vpn', timeoutMs: 60000 });
+      if (this.isStale(result)) return;
+      this.vpn.error = !result;
+      if (result) this.vpn.data = result;
+      this.vpn.loading = false;
+    },
+
+    wireguardPeers() {
+      return (this.vpn.data?.wireguard?.interfaces || []).flatMap((iface) => (iface.peers || []).map((peer) => ({ ...peer, iface: iface.name })));
+    },
+
+    handshakeState(age) {
+      if (age === null || age === undefined) return { tone: 'error', label: 'Nie' };
+      return age <= 180
+        ? { tone: 'ok', label: `vor ${this.formatDur(age)}` }
+        : { tone: 'warn', label: `Veraltet · vor ${this.formatDur(age)}` };
+    },
+
+    async loadBitrot() {
+      this.bitrot.loading = true;
+      const result = await this.api('GET', '/api/jobs/bitrot-scrub/status', undefined, { silent: true, requestKey: 'bitrot-status' });
+      if (this.isStale(result)) return;
+      this.bitrot.error = !result;
+      if (result) this.bitrot.data = result;
+      this.bitrot.loading = false;
+    },
+
+    bitrotPairs() {
+      return (this.config.backup?.pairs || []).filter((pair) => pair.enabled && pair.name && this.copyFolder(pair, 'cloud') !== '—');
+    },
+
+    bitrotMismatches(summary) {
+      return (summary?.pairs || []).flatMap((pair) => (pair.mismatches || []).map((item) => ({ ...item, pair: pair.name })));
+    },
+
+    bitrotSettingsText() {
+      const s = this.bitrot.data?.settings;
+      if (!s) return '';
+      return `Stichprobe ${s.sample_percent} % der fälligen Dateien · höchstens ${s.max_files} Dateien und ${s.max_total_mb} MB je Lauf · geprüfte Dateien sind nach ${s.rotation_days} Tagen wieder fällig`;
+    },
+
+    bitrotBaselineText(name) {
+      const base = this.bitrot.baselines[name];
+      if (!base) return 'Noch nicht abgefragt';
+      if (base.error) return base.error;
+      if (!base.rows) return 'Noch keine Prüfsummen erfasst';
+      return `${Number(base.rows).toLocaleString('de-DE')} Prüfsummen · erfasst seit ${this.formatDateTime(base.oldest_recorded_at)} · älteste Bestätigung ${this.formatDateTime(base.oldest_verified_at)}`;
+    },
+
+    async runBitrotScrub() {
+      if (this.pending.bitrot) return;
+      if (!(await this.requestConfirmation(
+        'Bitrot-Scrub für alle aktiven Cloud-Datenwege starten?\n\nEine Stichprobe wird aus der Cloud gelesen und per SHA-256 mit der gespeicherten Baseline verglichen. Das erzeugt Abruf- und Egress-Kosten beim Anbieter. Inhalte werden nicht gespeichert.',
+        { title: 'Bitrot-Scrub starten', confirmLabel: 'Scrub starten', tone: 'primary' },
+      ))) return;
+      this.pending.bitrot = true;
+      try {
+        const result = await this.api('POST', '/api/jobs/bitrot-scrub', { pairs: null });
+        if (result?.ok) {
+          this.showToast(`Bitrot-Scrub gestartet (Lauf #${result.job_id})`);
+          this.loadBitrot();
+        }
+      } finally {
+        this.pending.bitrot = false;
+      }
+    },
+
+    async loadBitrotBaseline(name) {
+      const result = await this.api('GET', `/api/jobs/bitrot-scrub/baseline?pair=${encodeURIComponent(name)}`, undefined, { silent: true, captureError: true });
+      if (result) this.bitrot.baselines[name] = result.__error ? { error: this.errorText(result) } : result;
+    },
+
+    async openStagingDiff(item) {
+      const path = String(this.stagingDiffPaths[item.id] || '').trim();
+      if (!path) return;
+      this.diffDialog = { show: true, loading: true, data: null, error: '', path };
+      this.openDialog('diffDialog');
+      const result = await this.api('GET', `/api/recovery/staging/${encodeURIComponent(item.id)}/diff?path=${encodeURIComponent(path)}`, undefined, { silent: true, captureError: true, requestKey: 'staging-diff' });
+      if (this.isStale(result) || !this.diffDialog.show) return;
+      this.diffDialog.loading = false;
+      if (!result || result.__error) { this.diffDialog.error = result ? this.errorText(result) : ''; return; }
+      this.diffDialog.data = result;
+    },
+
+    closeDiff() {
+      if (!this.diffDialog.show) return;
+      requestControllers.get('staging-diff')?.abort();
+      this.diffDialog = { show: false, loading: false, data: null, error: '', path: '' };
+      this.restoreDialogFocus();
+    },
+    async toolsRequest(method, path, payload, key = 'protection-tools', timeoutMs = 70000) {
+      const result = await this.api(method, path, payload, { captureError: true, silent: true, requestKey: key, timeoutMs });
+      if (this.isStale(result)) return null;
+      if (!result || result.__error) {
+        const detail = result?.detail;
+        this.protectionTools.error = typeof detail === 'string' ? detail : detail?.message || 'Die Anfrage konnte nicht abgeschlossen werden.';
+        return null;
+      }
+      return result;
+    },
+
+    async openProtectionTools(tab = 'search') {
+      await this.navigate('doctor');
+      this.workspaceSelect?.('doctor', 'tools');
+      this.protectionTools.tab = tab;
+      this.protectionTools.error = '';
+      this.protectionTools.notice = '';
+      if (tab === 'forecast') await this.loadToolsForecast();
+      else if ((tab === 'monitor' || tab === 'reports') && !this.protectionTools.operations) await this.loadToolsOperations();
+      else if (tab === 'migration') await this.loadToolsMigrations();
+    },
+
+    toolsSelect(tab) { return this.openProtectionTools(tab); },
+
+    async searchBackupFiles(more = false) {
+      if (this.protectionTools.busy) return;
+      const query = this.protectionTools.search.query.trim();
+      if (query.length < 2) { this.protectionTools.error = 'Mindestens zwei Zeichen des Dateinamens eingeben.'; return; }
+      const searchKey = JSON.stringify([query, this.protectionTools.search.identity]);
+      if (more && this.protectionTools.search.key !== searchKey) { this.protectionTools.error = 'Für den geänderten Suchbegriff zuerst eine neue Suche starten.'; return; }
+      const previous = more ? this.protectionTools.search.results : null;
+      if (!more) this.protectionTools.search.results = null;
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const params = new URLSearchParams({ query, limit: '50' });
+        if (previous?.next_cursor) params.set('cursor', previous.next_cursor);
+        if (this.protectionTools.search.identity) params.set('identity', this.protectionTools.search.identity);
+        const result = await this.toolsRequest('GET', `/api/recovery/files/search?${params}`, undefined, 'backup-file-search');
+        if (result) {
+          if (previous) {
+            const items = [...(previous.items || []), ...(result.items || [])];
+            result.items = [...new Map(items.map(item => [JSON.stringify([item.identity,item.point_id,item.path]),item])).values()];
+            result.scanned_points = (previous.scanned_points || 0) + (result.scanned_points || 0);
+            result.scanned_files = (previous.scanned_files || 0) + (result.scanned_files || 0);
+            result.warnings = [...new Set([...(previous.warnings || []), ...(result.warnings || [])])];
+          }
+          this.protectionTools.search.results = result; this.protectionTools.search.key = searchKey;
+        }
+      } finally { this.protectionTools.busy = false; }
+    },
+
+    async restoreFoundFile(item) {
+      if (!item.restorable || this.protectionTools.busy || this.startBlocked()) return;
+      const budget = Number(this.protectionTools.search.max_total_mb);
+      if (!Number.isInteger(budget) || budget < 1 || budget > 51200 || Number(item.size_bytes || 0) > budget * 1024 * 1024) { this.protectionTools.error = 'Die Restore-Grenze in MiB muss für die gewählte Datei ausreichen (höchstens 51200 MiB).'; return; }
+      const accepted = await this.requestConfirmation(`„${item.path}“ aus „${item.point_label}“ getrennt in den Staging-Bereich zurückholen?`, { title: 'Datei wiederherstellen', confirmLabel: 'In Staging zurückholen', tone: 'primary' });
+      if (!accepted) return;
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const result = await this.toolsRequest('POST', '/api/recovery/restore', { ...item.restore_request, max_total_mb: budget }, 'file-search-restore');
+        if (result?.ok) {
+          this.protectionTools.notice = `Wiederherstellung als Lauf #${result.job_id} gestartet. Das Prüfergebnis erscheint im Staging-Bereich.`;
+          this.showToast(this.protectionTools.notice);
+        }
+      } finally { this.protectionTools.busy = false; }
+    },
+
+    async loadToolsForecast() {
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const result = await this.toolsRequest('GET', '/api/storage/forecast', undefined, 'storage-forecast');
+        if (result) { this.protectionTools.forecast.items = result.items || []; this.protectionTools.forecast.revision = result._revision || ''; }
+      } finally { this.protectionTools.busy = false; }
+    },
+
+    async sampleToolsForecast() {
+      if (this.protectionTools.busy) return;
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const result = await this.toolsRequest('POST', '/api/storage/forecast/sample', {}, 'storage-forecast-sample');
+        if (result) {
+          this.protectionTools.forecast.items = result.items || [];
+          this.protectionTools.notice = `${result.sampled || 0} Messung(en) gespeichert. Eine Prognose braucht mindestens drei tägliche Messwerte.`;
+          this.protectionTools.forecast.revision = result._revision || this.protectionTools.forecast.revision;
+          if (Number(result.errors) > 0) this.protectionTools.error = `${result.errors} Messung(en) fehlgeschlagen. Die Gründe stehen bei den Zielen.`;
+        }
+      } finally { this.protectionTools.busy = false; }
+    },
+
+    async loadForecastHistory(identity) {
+      const result = await this.toolsRequest('GET', `/api/storage/forecast/history?identity=${encodeURIComponent(identity)}`, undefined, 'storage-forecast-history');
+      if (result) {
+        this.protectionTools.forecast.selected = identity;
+        const item = this.protectionTools.forecast.items.find(item => item.identity === identity);
+        this.protectionTools.forecast.capacityGiB = item?.capacity_bytes == null ? '' : item.capacity_bytes / 1024 ** 3;
+        this.protectionTools.forecast.history = result.items || [];
+      }
+    },
+
+    forecastStateLabel(state) {
+      return ({ unknown: 'Kapazität unbekannt', insufficient_samples: 'Messreihe wird aufgebaut', not_growing: 'Kein anhaltendes Wachstum', uncertain: 'Trend noch unsicher', ok: 'Ausreichende Reserve', warning: 'Kapazität wird knapp', full: 'Ziel voll', stale: 'Messung veraltet', error: 'Messung fehlgeschlagen' })[state] || state;
+    },
+
+    toolsDate(timestamp) { return timestamp ? new Date(timestamp * 1000).toLocaleString('de-DE') : 'Noch nicht vorhanden'; },
+
+    forecastPolyline() {
+      const rows = this.protectionTools.forecast.history.filter((row) => Number.isFinite(row.used_bytes));
+      if (!rows.length) return '';
+      const low = Math.min(...rows.map((row) => row.used_bytes));
+      const span = Math.max(1, Math.max(...rows.map((row) => row.used_bytes)) - low);
+      return rows.map((row, index) => `${12 + index * 336 / Math.max(1, rows.length - 1)},${88 - (row.used_bytes - low) * 72 / span}`).join(' ');
+    },
+
+    async loadToolsOperations() {
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const [settings, heartbeat, reports, latest] = await Promise.all([
+          this.toolsRequest('GET', '/api/operations/settings', undefined, 'operations-settings'),
+          this.toolsRequest('GET', '/api/operations/heartbeat', undefined, 'heartbeat-status'),
+          this.toolsRequest('GET', '/api/reports/weekly/history', undefined, 'weekly-report-history'),
+          this.toolsRequest('GET', '/api/reports/weekly', undefined, 'weekly-report-latest'),
+        ]);
+        if (settings) {
+          this.protectionTools.operations = settings;
+          this.protectionTools.heartbeatDraft = { ...settings.heartbeat, secret_url: '' };
+          const weekly = settings.weekly_report;
+          this.protectionTools.reportDraft = { ...weekly, email: { ...weekly.email, password: '' } };
+          this.protectionTools.reportRecipients = (weekly.email.to_addresses || []).join(', ');
+        }
+        if (heartbeat) this.protectionTools.heartbeat = heartbeat;
+        if (reports) this.protectionTools.reports = reports.items || [];
+        if (latest?.latest && (!this.protectionTools.reportPreview || this.protectionTools.reportPreview.id === latest.latest.id)) { this.protectionTools.reportPreview = latest.latest; this.protectionTools.reportDelivery = latest.delivery; }
+      } finally { this.protectionTools.busy = false; }
+    },
+
+    async saveToolsOperations() {
+      if (this.protectionTools.busy || !this.protectionTools.operations) return;
+      if (this.configDirty) { this.protectionTools.error = 'Zuerst die offenen Konfigurationsänderungen speichern oder verwerfen.'; return; }
+      const password = await this.requestCurrentPassword('Ausfallwächter und Berichtversand mit dem aktuellen Serverpasswort bestätigen.');
+      if (!password) return;
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const heartbeat = { ...this.protectionTools.heartbeatDraft };
+        delete heartbeat.url_configured;
+        if (!heartbeat.secret_url) delete heartbeat.secret_url;
+        const weekly = { ...this.protectionTools.reportDraft, email: { ...this.protectionTools.reportDraft.email } };
+        delete weekly.email.password_set;
+        weekly.email.to_addresses = this.protectionTools.reportRecipients.split(/[,;\n]/).map((item) => item.trim()).filter(Boolean);
+        if (!weekly.email.password) delete weekly.email.password;
+        const result = await this.toolsRequest('PUT', '/api/operations/settings', { expected_revision: this.protectionTools.operations._revision, current_password: password, heartbeat, weekly_report: weekly }, 'operations-save');
+        if (result) {
+          this.protectionTools.notice = 'Einstellungen gespeichert. Der unabhängige Minutentakt übernimmt die aktivierten Aufgaben.';
+          await this.loadConfig(true);
+        }
+      } finally { this.protectionTools.busy = false; }
+      if (!this.protectionTools.error) await this.loadToolsOperations();
+    },
+
+    async testToolsHeartbeat() {
+      if (this.protectionTools.busy) return;
+      const password = await this.requestCurrentPassword('Ein Lebenszeichen an die gespeicherte Ping-Adresse senden.');
+      if (!password) return;
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const result = await this.toolsRequest('POST', '/api/operations/heartbeat/test', { current_password: password }, 'heartbeat-test');
+        if (result) {
+          this.protectionTools.notice = result.ok === false ? 'Lebenszeichen noch nicht bestätigt. Status und Fehlermeldung prüfen.' : 'Lebenszeichen verarbeitet. Den Empfang beim unabhängigen Wächter prüfen.';
+          this.protectionTools.heartbeat = await this.toolsRequest('GET', '/api/operations/heartbeat', undefined, 'heartbeat-status');
+        }
+      } finally { this.protectionTools.busy = false; }
+    },
+
+    async generateWeeklyReport() {
+      if (this.protectionTools.busy) return;
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const result = await this.toolsRequest('POST', '/api/reports/weekly/generate', {}, 'weekly-report-generate');
+        if (result?.report) {
+          this.protectionTools.reportPreview = result.report;
+          this.protectionTools.reportDelivery = result.delivery || null;
+          this.protectionTools.notice = 'Bericht für die letzte abgeschlossene Woche erstellt.';
+          const history = await this.toolsRequest('GET', '/api/reports/weekly/history', undefined, 'weekly-report-history');
+          if (history) this.protectionTools.reports = history.items || [];
+        }
+      } finally { this.protectionTools.busy = false; }
+    },
+
+    async sendWeeklyReport(report) {
+      if (this.protectionTools.busy) return;
+      const password = await this.requestCurrentPassword('Diesen Schutzbericht an die gespeicherten E-Mail-Empfänger senden.');
+      if (!password) return;
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const result = await this.toolsRequest('POST', `/api/reports/weekly/${encodeURIComponent(report.id)}/send`, { current_password: password }, 'weekly-report-send');
+        if (result) {
+          this.protectionTools.reportDelivery = result.delivery || null;
+          if (result.ok === false) { this.protectionTools.notice = ''; this.protectionTools.error = result.delivery?.last_error || result.error || 'Der E-Mail-Versand ist fehlgeschlagen. SMTP-Einstellungen und Zustellstatus prüfen.'; }
+          else this.protectionTools.notice = result.delivery?.state === 'sent' ? 'Schutzbericht per E-Mail versendet.' : 'Bericht zum Versand vorgemerkt. Zustellstatus prüfen.';
+        }
+      } finally { this.protectionTools.busy = false; }
+    },
+
+    async downloadWeeklyReport(report) {
+      if (this.protectionTools.busy) return;
+      this.protectionTools.busy = true; this.protectionTools.error = '';
+      const controller = new AbortController();
+      const deadline = window.setTimeout(() => controller.abort(), 30000);
+      try {
+        const response = await fetch(`/api/reports/weekly/${encodeURIComponent(report.id)}/pdf`, { credentials: 'same-origin', redirect: 'error', signal: controller.signal });
+        if (!response.ok || !(response.headers.get('content-type') || '').includes('application/pdf')) throw new Error('PDF nicht verfügbar. Anmeldung und Bericht prüfen.');
+        const blob = await response.blob();
+        if (blob.size > 8 * 1024 * 1024) throw new Error('Der PDF-Bericht überschreitet die zulässige Größe.');
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url; link.download = `Sicherpfad-Schutzbericht-${report.week_start}.pdf`;
+        document.body.append(link); link.click(); link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (error) {
+        this.protectionTools.error = error.name === 'AbortError' ? 'Zeitüberschreitung beim PDF-Download.' : error.message;
+      } finally { window.clearTimeout(deadline); this.protectionTools.busy = false; }
+    },
+
+    async saveForecastCapacity() {
+      const forecast = this.protectionTools.forecast;
+      if (!forecast.selected || this.protectionTools.busy) return;
+      if (this.configDirty) { this.protectionTools.error = 'Zuerst die offenen Konfigurationsänderungen speichern.'; return; }
+      const bytes = forecast.capacityGiB === '' ? null : Math.round(Number(forecast.capacityGiB) * 1024 ** 3);
+      if (bytes !== null && (!Number.isSafeInteger(bytes) || bytes <= 0)) { this.protectionTools.error = 'Eine positive Kapazität in GiB eingeben.'; return; }
+      this.protectionTools.busy = true; this.protectionTools.error = '';
+      try {
+        const result = await this.toolsRequest('PUT', '/api/storage/forecast/capacity', { identity: forecast.selected, capacity_bytes: bytes, expected_revision: forecast.revision }, 'storage-capacity');
+        if (result) { forecast.items = result.items || []; forecast.revision = result._revision; this.protectionTools.notice = 'Kapazitätsvorgabe gespeichert.'; await this.loadConfig(true); await this.loadForecastHistory(forecast.selected); }
+      } finally { this.protectionTools.busy = false; }
+    },
+
+    async loadToolsMigrations() {
+      const result = await this.toolsRequest('GET', '/api/migrations', undefined, 'target-migrations');
+      if (result) this.protectionTools.migration.items = result.items || [];
+    },
+
+    invalidateMigrationPlan() {
+      window.clearTimeout(this.protectionTools.migrationTimer);
+      this.protectionTools.migration.plan = null;
+      this.protectionTools.error = '';
+    },
+
+    async previewTargetMigration() {
+      if (this.protectionTools.busy) return;
+      if (this.configDirty || !this.config?._revision) { this.protectionTools.error = 'Zuerst die aktuelle Konfiguration laden und offene Änderungen speichern.'; return; }
+      const draft = this.protectionTools.migration;
+      const payload = { identity: draft.identity, target: draft.target.trim(), expected_revision: this.config._revision, max_total_mb: Number(draft.max_total_mb) };
+      if (!payload.identity || !payload.target) { this.protectionTools.error = 'Datenweg und neues Sicherungsziel auswählen.'; return; }
+      const key = JSON.stringify(payload);
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const result = await this.toolsRequest('POST', '/api/migrations/preview', payload, 'target-migration-preview', 120000);
+        const current = this.protectionTools.migration;
+        const currentKey = JSON.stringify({ identity: current.identity, target: current.target.trim(), expected_revision: this.config._revision, max_total_mb: Number(current.max_total_mb) });
+        if (result && key === currentKey) current.plan = result.plan || result;
+      } finally { this.protectionTools.busy = false; }
+    },
+
+    async runTargetMigration() {
+      const plan = this.protectionTools.migration.plan;
+      if (!plan || plan.status !== 'preview' || this.protectionTools.busy || this.startBlocked()) return;
+      if (!await this.requestConfirmation(`${plan.files} Dateien (${this.formatBytes(plan.total_bytes)}) nach „${plan.target}“ kopieren und vollständig zurücklesen? Die Umschaltung folgt nach der Prüfung als eigener Schritt.`, { title: 'Zielwechsel vorbereiten', confirmLabel: 'Kopieren und prüfen', tone: 'primary' })) return;
+      const password = await this.requestCurrentPassword('Kopieren und Prüfen des neuen Sicherungsziels bestätigen.');
+      if (!password) return;
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const result = await this.toolsRequest('POST', `/api/migrations/${encodeURIComponent(plan.id)}/run`, { current_password: password }, 'target-migration-run');
+        if (result) this.protectionTools.migration.plan = result.plan || result;
+      } finally { this.protectionTools.busy = false; }
+      if (!this.protectionTools.error) await this.refreshTargetMigration();
+    },
+
+    async refreshTargetMigration(id = this.protectionTools.migration.plan?.id) {
+      if (!id) return;
+      window.clearTimeout(this.protectionTools.migrationTimer);
+      const previous = this.protectionTools.migration.plan?.status;
+      const result = await this.toolsRequest('GET', `/api/migrations/${encodeURIComponent(id)}`, undefined, 'target-migration-status');
+      if (result && (!this.protectionTools.migration.plan || this.protectionTools.migration.plan.id === id)) {
+        this.protectionTools.migration.plan = result.plan || result;
+        if ((result.plan || result).status === 'switched' && previous !== 'switched') {
+          this.protectionTools.notice = 'Sicherungsziel umgeschaltet. Die ursprüngliche Kopie bleibt erhalten.';
+          if (!this.configDirty) await this.loadConfig(true);
+        }
+      }
+      if (['running','switching'].includes(this.protectionTools.migration.plan?.status)) this.protectionTools.migrationTimer = window.setTimeout(() => {
+        if (this.page === 'doctor' && this.protectionTools.tab === 'migration' && document.visibilityState !== 'hidden') this.refreshTargetMigration(id);
+      }, 2500);
+    },
+
+    async switchTargetMigration() {
+      const plan = this.protectionTools.migration.plan;
+      if (!plan || plan.status !== 'verified' || this.protectionTools.busy || this.configDirty || this.startBlocked()) return;
+      if (!await this.requestConfirmation(`Den Datenweg „${plan.pair}“ nach erneuter Prüfung auf „${plan.target}“ umstellen? Künftige Läufe verwenden dann dieses Ziel.`, { title: 'Sicherungsziel umschalten', confirmLabel: 'Ziel umschalten' })) return;
+      const password = await this.requestCurrentPassword('Die Umschaltung mit dem aktuellen Serverpasswort bestätigen.');
+      if (!password) return;
+      this.protectionTools.busy = true;
+      this.protectionTools.error = '';
+      try {
+        const result = await this.toolsRequest('POST', `/api/migrations/${encodeURIComponent(plan.id)}/switch`, { current_password: password, expected_revision: plan.config_revision }, 'target-migration-switch', 120000);
+        if (result) {
+          this.protectionTools.migration.plan = result.plan || result;
+          this.protectionTools.notice = (result.plan || result).status === 'switched' ? 'Sicherungsziel umgeschaltet. Die ursprüngliche Kopie bleibt erhalten.' : 'Abschlussprüfung gestartet. Die Umschaltung wird nach erfolgreicher Prüfung bestätigt.';
+          if ((result.plan || result).status === 'switched') await this.loadConfig(true);
+        }
+      } finally { this.protectionTools.busy = false; }
+      if (!this.protectionTools.error) await this.refreshTargetMigration();
+    },
+
+    migrationStatusLabel(status) {
+      return ({ preview: 'Vorschau bereit', planned: 'Vorschau bereit', ready: 'Vorschau bereit', running: 'Kopieren und Prüfen läuft', switching: 'Abschlussprüfung und Umschaltung läuft', verified: 'Neue Kopie geprüft', switched: 'Ziel umgeschaltet', error: 'Fehlgeschlagen', failed: 'Fehlgeschlagen', cancelled: 'Abgebrochen', expired: 'Vorschau abgelaufen' })[status] || status;
+    },
+
   };
 }
 

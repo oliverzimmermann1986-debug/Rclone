@@ -160,6 +160,9 @@ private struct RunsListView: View {
                     Text("Restore-Test").tag("restoretest")
                     Text("Recovery").tag("recovery")
                     Text("PBS").tag("pbs")
+                    Text("Zielwechsel").tag("migration")
+                    Text("Bitrot-Prüfung").tag("bitrotscrub")
+                    Text("Boot-Drill").tag("bootdrill")
                 }
                 Picker("Status", selection: $status) {
                     Text("Alle").tag("")
@@ -315,26 +318,14 @@ private struct RunRow: View {
         if let definitionName = job.definitionName, !definitionName.isEmpty {
             return definitionName
         }
-        switch job.kind {
-        case "backup":
-            return "Sicherung #\(job.id)"
-        case "check":
-            return "Prüfung #\(job.id)"
-        case "pbs":
-            return "PBS #\(job.id)"
-        case "restoretest":
-            return "Restore-Test #\(job.id)"
-        case "recovery":
-            return "Recovery #\(job.id)"
-        default:
-            return "Lauf #\(job.id)"
-        }
+        return "\(job.kindLabel) #\(job.id)"
     }
     private var symbol: String {
         switch job.kind {
         case "check": "checkmark.shield"
         case "restoretest": "arrow.counterclockwise.circle"
         case "recovery": "lifepreserver"
+        case "migration": "externaldrive"
         default: "arrow.triangle.2.circlepath"
         }
     }
@@ -352,6 +343,8 @@ struct RunDetailView: View {
     @State private var logDownloadURL: URL?
     @State private var showRetryConfirmation = false
     @State private var isRetrying = false
+    @State private var confirmCancel = false
+    @State private var actionBinding: ProtectionToolServerBinding?
 
     var body: some View {
         List {
@@ -360,7 +353,7 @@ struct RunDetailView: View {
                 if currentJob.isDryRun { Label("Probelauf – keine produktive Sicherung", systemImage: "testtube.2") }
                 LabeledContent("Gestartet", value: AppFormat.date(detail?.startedAt ?? job.startedAt))
                 LabeledContent("Dauer", value: AppFormat.duration(start: detail?.startedAt ?? job.startedAt, end: detail?.endedAt ?? job.endedAt))
-                LabeledContent("Typ", value: (detail?.kind ?? job.kind).uppercased())
+                LabeledContent("Typ", value: currentJob.kindLabel)
                 if let definitionName = currentJob.definitionName, !definitionName.isEmpty {
                     LabeledContent("Job", value: definitionName)
                 }
@@ -418,6 +411,12 @@ struct RunDetailView: View {
                     }
                 }
             }
+            if currentJob.status == "running" && JobRecord.backupScopeKinds.contains(currentJob.kind) {
+                Section("Aktiver Lauf") {
+                    Button("Abbruch anfordern", role: .destructive) { confirmCancel = true }
+                        .disabled(actionBinding?.matches(model) != true)
+                }
+            }
             Section("Protokoll") {
                 if isLogLoading {
                     ProgressView("Protokoll wird geladen …")
@@ -445,6 +444,7 @@ struct RunDetailView: View {
         .navigationTitle("Lauf #\(job.id)")
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            actionBinding = .init(model)
             if model.isDemoMode {
                 detail = job
                 log = "Demo-Protokoll\nÜbertragung abgeschlossen\nPrüfungen: erfolgreich"
@@ -475,6 +475,13 @@ struct RunDetailView: View {
         } message: {
             Text("Der Server startet nur dieselbe Jobdefinition, wenn sich die Konfiguration seit diesem Lauf nicht geändert hat. Andernfalls musst du zuerst einen neuen Plan prüfen.")
         }
+        .confirmationDialog("Aktiven Lauf abbrechen?", isPresented: $confirmCancel, titleVisibility: .visible) {
+            Button("Abbruch anfordern", role: .destructive) {
+                guard actionBinding?.matches(model) == true else { return }
+                Task { _ = await model.cancelBackup(); await loadDetail() }
+            }
+            Button("Weiterlaufen lassen", role: .cancel) {}
+        } message: { Text("Der Server beendet den aktuellen Lauf im Sicherungsbereich. Bereits abgeschlossene Übertragungen können bestehen bleiben.") }
     }
 
     private var currentJob: JobRecord { detail ?? job }

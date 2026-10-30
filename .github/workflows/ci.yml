@@ -93,7 +93,9 @@ jobs:
             systemd/rclone-sync.service \
             systemd/rclone-sync.timer \
             systemd/sync-scheduler.service \
-            systemd/sync-scheduler.timer
+            systemd/sync-scheduler.timer \
+            systemd/sicherpfad-operations.service \
+            systemd/sicherpfad-operations.timer
 
   web:
     runs-on: ubuntu-24.04

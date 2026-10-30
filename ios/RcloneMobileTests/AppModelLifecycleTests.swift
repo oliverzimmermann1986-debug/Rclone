@@ -922,6 +922,80 @@ final class AppModelLifecycleTests: XCTestCase {
         await model.logout()
     }
 
+    func testMigrationBlocksBackupAndRestoreStartsWithoutBackupProgress() async {
+        let client = StubAPIClient()
+        client.currentJobsResponse = CurrentJobsResponse(migration: .fixture(id: 301, status: "running", definitionID: "", kind: "migration"))
+        let model = AppModel(defaults: makeDefaults()) { _ in client }
+        await model.login(server: "https://backup.example", username: "admin", password: "fixture")
+
+        XCTAssertEqual(model.progress?.running, false)
+        XCTAssertEqual(model.activeBackupScopeJob?.id, 301)
+        XCTAssertTrue(model.backupScopeIsRunning)
+        XCTAssertFalse(model.canStartRestoreTest)
+        let started = await model.runAllJobDefinitions()
+        let restored = await model.runRestoreTest(pair: "Fotos")
+        XCTAssertFalse(started)
+        XCTAssertFalse(restored)
+        XCTAssertEqual(client.runAllCallCount, 0)
+        XCTAssertTrue(client.restorePairs.isEmpty)
+
+        client.cancelResponse = ActionResponse(ok: true, jobID: nil, error: nil)
+        client.currentJobsResponse = CurrentJobsResponse()
+        let cancelled = await model.cancelBackup()
+        XCTAssertTrue(cancelled)
+        XCTAssertEqual(client.cancelCallCount, 1)
+        XCTAssertFalse(model.backupScopeIsRunning)
+        XCTAssertTrue(model.canStartRestoreTest)
+        await model.logout()
+    }
+
+    func testOldServerCurrentJobsCannotReplaceNewServersMigration() async {
+        let old = StubAPIClient()
+        old.currentJobsResponse = CurrentJobsResponse()
+        let fresh = StubAPIClient()
+        fresh.currentJobsResponse = CurrentJobsResponse(migration: .fixture(id: 302, status: "running", definitionID: "", kind: "migration"))
+        let model = AppModel(defaults: makeDefaults()) { url in url.host == "old.example" ? old : fresh }
+        await model.login(server: "https://old.example", username: "admin", password: "fixture")
+        let suspended = expectation(description: "Old server status suspended")
+        let gate = PushRevocationGate(suspended: suspended)
+        old.currentJobsResponse = CurrentJobsResponse(migration: .fixture(id: 301, status: "running", definitionID: "", kind: "migration"))
+        old.currentJobsGate = gate
+        let pending = Task { await model.refreshCurrentJobs() }
+        await fulfillment(of: [suspended], timeout: 2)
+        await model.login(server: "https://fresh.example", username: "admin", password: "fixture")
+        await gate.release()
+        await pending.value
+        XCTAssertEqual(model.activeBackupScopeJob?.id, 302)
+        XCTAssertEqual(model.currentJobsState, .loaded)
+        await model.logout()
+    }
+
+    func testOldMigrationToolResponseCannotReplaceNewServersDocuments() async {
+        let old = StubAPIClient()
+        let fresh = StubAPIClient()
+        old.toolResponse = .init(["id": .string("old-plan")])
+        fresh.toolResponse = .init(["id": .string("new-plan")])
+        let model = AppModel(defaults: makeDefaults()) { url in url.host == "old.example" ? old : fresh }
+        await model.login(server: "https://old.example", username: "admin", password: "fixture")
+        let tools = ProtectionToolsSession()
+        tools.reset(for: model)
+        let suspended = expectation(description: "Old preview suspended")
+        let gate = PushRevocationGate(suspended: suspended)
+        old.toolGate = gate
+        let pending = Task { await tools.call(.previewMigration(identity: "old-path", target: "old-target:", revision: "r1", maxTotalMB: 512), model: model) }
+        await fulfillment(of: [suspended], timeout: 2)
+        await model.login(server: "https://fresh.example", username: "admin", password: "fixture")
+        tools.reset(for: model)
+        _ = await tools.call(.migrations, model: model)
+        await gate.release()
+        let stale = await pending.value
+        XCTAssertNil(stale)
+        XCTAssertEqual(tools["data"].string("id"), "new-plan")
+        XCTAssertEqual(fresh.toolRequests.count, 1)
+        XCTAssertEqual(fresh.toolRequests.first?.path, "/api/migrations")
+        await model.logout()
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suite = "AppModelLifecycleTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -931,6 +1005,13 @@ final class AppModelLifecycleTests: XCTestCase {
 }
 
 private final class StubAPIClient: APIClientProtocol {
+    var currentJobsResponse: CurrentJobsResponse?
+    var currentJobsGate: PushRevocationGate?
+    var toolResponse: ProtectionToolDocument?
+    var toolGate: PushRevocationGate?
+    var toolRequests: [ProtectionToolRequest] = []
+    var cancelResponse: ActionResponse?
+    var cancelCallCount = 0
     var configError: Error?
     var logoutResult = LogoutResult(
         globalRevocation: true,
@@ -1060,6 +1141,21 @@ private final class StubAPIClient: APIClientProtocol {
     }
     func downloadSupportBundle() async throws -> URL { throw APIError.invalidResponse }
 
+    func getCurrentJobs() async throws -> CurrentJobsResponse {
+        let response = currentJobsResponse
+        if let gate = currentJobsGate { currentJobsGate = nil; await gate.wait() }
+        guard let response else { throw APIError.serverFeatureUnavailable(feature: "Aktuelle Läufe") }
+        return response
+    }
+
+    func protectionTool(_ request: ProtectionToolRequest) async throws -> ProtectionToolDocument {
+        toolRequests.append(request)
+        let response = toolResponse
+        if let gate = toolGate { toolGate = nil; await gate.wait() }
+        guard let response else { throw APIError.serverFeatureUnavailable(feature: "Schutzwerkzeuge") }
+        return response
+    }
+
     func getJobs(limit: Int) async throws -> JobSearchResponse {
         jobsCallCount += 1
         if !jobResults.isEmpty { return jobResults.removeFirst() }
@@ -1107,7 +1203,11 @@ private final class StubAPIClient: APIClientProtocol {
     }
 
     func runBackup(pair: String?, dryRun: Bool) async throws -> ActionResponse { throw APIError.invalidResponse }
-    func cancelBackup() async throws -> ActionResponse { throw APIError.invalidResponse }
+    func cancelBackup() async throws -> ActionResponse {
+        cancelCallCount += 1
+        guard let cancelResponse else { throw APIError.invalidResponse }
+        return cancelResponse
+    }
     func runPBS(target: String?) async throws -> ActionResponse { throw APIError.invalidResponse }
     func cancelPBS() async throws -> ActionResponse { throw APIError.invalidResponse }
     func pauseScheduler(minutes: Int) async throws -> SchedulerControl { throw APIError.invalidResponse }
@@ -1197,10 +1297,10 @@ private extension BackupProgress {
 }
 
 private extension JobRecord {
-    static func fixture(id: Int, status: String, definitionID: String, startedAt: Double? = nil) -> JobRecord {
+    static func fixture(id: Int, status: String, definitionID: String, startedAt: Double? = nil, kind: String = "backup") -> JobRecord {
         JobRecord(
             id: id,
-            kind: "backup",
+            kind: kind,
             status: status,
             startedAt: startedAt ?? Date().timeIntervalSince1970,
             endedAt: status == "running" ? nil : Date().timeIntervalSince1970,

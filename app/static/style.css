@@ -38,6 +38,7 @@
   --danger-soft:   #fdecee;
 
   /* Aliasnamen, die im Markup und in Altregeln vorkommen */
+  --warn:          var(--warning);
   --primary:       #2f6feb;
   --primary-hover: #1f5ed4;
   --primary-soft:  #eaf1fe;
@@ -1157,6 +1158,8 @@ input[type="checkbox"], input[type="radio"] {
 }
 /* Hinweise hängen unter dem Namen, darum links auf dessen Textkante. */
 .pair-warning-row { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 16px 10px 39px; }
+.pair-tags { display: flex; gap: 5px; flex-wrap: wrap; margin: 0; padding: 0 16px 10px 39px; list-style: none; }
+.pair-tags li { padding: 2px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text-soft); font-size: 11.5px; }
 
 /* Aktionsstreifen als Kartenfuß: abgesetzte Fläche, damit die Schaltflächen
    nicht frei im Kartenkörper schweben. */
@@ -2354,6 +2357,70 @@ html[data-density="compact"] .job-row { min-height: 54px; }
 .job-meta,
 .auto-refresh {
   font-size: 12px;
+}
+/* Notfall-Lockdown, PBS-Insights, VPN und Bitrot-Scrub */
+.stack > * + * { margin-top: 14px; }
+.stack > .subheading:not(:first-child) { margin-top: 24px; }
+.lockdown-banner { margin-bottom: 18px; border-color: var(--danger); }
+.lockdown-banner .alert-icon { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
+.lockdown-steps { margin-bottom: 18px; }
+.lockdown-steps .code-block { margin-bottom: 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+.boot-drill { padding-top: 16px; border-top: 1px solid var(--border); }
+.bitrot-list { display: grid; gap: 6px; margin: 8px 0 0; padding-left: 18px; }
+.bitrot-list code { overflow-wrap: anywhere; }
+.bitrot-list small { color: var(--text-soft); }
+@media (max-width: 720px) {
+  .lockdown-banner { grid-template-columns: auto minmax(0, 1fr); }
+  .lockdown-banner > .button { grid-column: 1 / -1; }
+}
+
+/* Tags, Konflikte, Versionsordner, Bandbreite, Restore-Diff und Crypt-Assistent */
+/* Bestätigungen und Passwortabfragen liegen immer über anderen Dialogen. */
+.modal:has(> .confirmation-dialog, > .reauth-dialog) { z-index: 110; }
+.modal-footer > small { margin-right: auto; }
+.path-cell { overflow-wrap: anywhere; word-break: break-word; }
+.conflict-group { padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); }
+.conflict-group > * + * { margin-top: 10px; }
+.conflict-path { font-size: 13px; overflow-wrap: anywhere; }
+.conflict-sides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.conflict-side { display: grid; align-content: start; gap: 4px; min-width: 0; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface-2); }
+.conflict-side small.mono, .conflict-side code { overflow-wrap: anywhere; }
+.conflict-side p { color: var(--text-soft); font-size: 12.5px; }
+.versions-root { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); }
+.versions-root code { overflow-wrap: anywhere; }
+.heatmap { min-width: 620px; border-collapse: separate; border-spacing: 2px; font-size: 11px; }
+.heatmap th { color: var(--text-faint); font-weight: 600; font-variant-numeric: tabular-nums; text-align: center; }
+.heatmap th[scope="row"] { position: sticky; left: 0; z-index: 1; padding-right: 6px; background: var(--surface); text-align: left; }
+.heatmap td { width: 22px; height: 22px; border-radius: 3px; background: color-mix(in srgb, var(--primary) calc(var(--heat, 0) * 88% + 8%), var(--surface)); }
+.heatmap td.empty, .heatmap-legend b { background: repeating-linear-gradient(135deg, var(--border-strong) 0 1px, transparent 1px 4px); box-shadow: inset 0 0 0 1px var(--border); }
+.heatmap-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text-soft); font-size: 12px; }
+.heatmap-legend i { width: 120px; height: 10px; border-radius: 999px; background: linear-gradient(90deg, color-mix(in srgb, var(--primary) 8%, var(--surface)), var(--primary)); }
+.heatmap-legend b { display: inline-block; width: 12px; height: 12px; margin-right: 5px; border-radius: 3px; vertical-align: -2px; }
+.diff-table { width: 100%; min-width: 720px; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; }
+.diff-table th { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text-soft); font-family: var(--font); font-weight: 600; text-align: left; }
+.diff-table td { padding: 1px 8px; vertical-align: top; }
+.diff-no { width: 1%; color: var(--text-faint); font-variant-numeric: tabular-nums; text-align: right; user-select: none; }
+.diff-mark { width: 1%; font-weight: 700; text-align: center; }
+.diff-text { width: 49%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-insert { background: var(--ok-soft); }
+.diff-insert .diff-mark { color: var(--ok); }
+.diff-delete { background: var(--danger-soft); }
+.diff-delete .diff-mark { color: var(--danger); }
+.diff-replace { background: var(--warning-soft); }
+.diff-replace .diff-mark { color: var(--warning); }
+@media (max-width: 720px) {
+  .diff-table { min-width: 0; }
+  .diff-no { display: none; }
+}
+.staging-diff { align-items: flex-end; }
+.staging-diff .field { flex: 1; }
+.crypt-steps { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; list-style: none; }
+.crypt-steps li { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-soft); font-size: 12px; }
+.crypt-steps li.active { border-color: var(--primary); color: var(--primary); font-weight: 650; }
+.crypt-steps li.done { color: var(--text); }
+.crypt-key { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+@media (max-width: 720px) {
+  .conflict-sides { grid-template-columns: 1fr; }
 }
 .remote-setup-help {
   margin: 0;

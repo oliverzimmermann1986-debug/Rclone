@@ -1,3 +1,5 @@
+import pytest
+
 from app.routes import api_jobs
 
 
@@ -254,44 +256,49 @@ def test_cancel_covers_every_backup_scope_kind():
     assert "restoretest" in BACKUP_KINDS
 
 
-def test_restoretest_is_supported_by_history_filters_and_current_status(monkeypatch):
+@pytest.mark.parametrize(
+    "kind", ["restoretest", "bitrotscrub", "bootdrill", "migration"]
+)
+def test_drill_kinds_are_supported_by_history_filters_and_current_status(
+    monkeypatch, kind
+):
     running = {
         "id": 42,
-        "kind": "restoretest",
+        "kind": kind,
         "status": "running",
         "started_at": 123.0,
     }
 
     class FakeDB:
-        def job_running(self, kind):
-            return running if kind == "restoretest" else None
+        def job_running(self, requested_kind):
+            return running if requested_kind == kind else None
 
         def job_list(self, **kwargs):
-            assert kwargs.get("kind") == "restoretest"
+            assert kwargs.get("kind") == kind
             return [running]
 
         def job_count(self, **kwargs):
-            assert kwargs.get("kind") == "restoretest"
+            assert kwargs.get("kind") == kind
             return 1
 
         def job_search(self, **kwargs):
-            assert kwargs.get("kind") == "restoretest"
+            assert kwargs.get("kind") == kind
             return [running], 1
 
         def job_iter(self, **kwargs):
-            assert kwargs.get("kind") == "restoretest"
+            assert kwargs.get("kind") == kind
             yield running
 
     monkeypatch.setattr(api_jobs, "get_db", lambda: FakeDB())
 
-    assert api_jobs.list_jobs(kind="restoretest") == [running]
-    assert api_jobs.search_jobs(kind="restoretest") == {
+    assert api_jobs.list_jobs(kind=kind) == [running]
+    assert api_jobs.search_jobs(kind=kind) == {
         "items": [running],
         "total": 1,
         "limit": 50,
         "offset": 0,
     }
-    assert api_jobs.export_jobs_csv(kind="restoretest").status_code == 200
+    assert api_jobs.export_jobs_csv(kind=kind).status_code == 200
     current = api_jobs.status_current()
-    assert current["restoretest"] == running
+    assert current[kind] == running
     assert current["backup"] is None
