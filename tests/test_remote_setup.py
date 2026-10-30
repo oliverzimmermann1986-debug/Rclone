@@ -198,6 +198,101 @@ def test_rclone_error_can_be_answered_again(client, fake_rclone, monkeypatch):
     assert not result["ready"]
 
 
+def test_guided_mode_skips_optional_defaults_but_keeps_pcloud_region(
+    client, fake_rclone, monkeypatch
+):
+    original = remotes._rc
+    automatic = []
+    questions = iter(
+        [
+            {"State": "client", "Option": {"Name": "client_id", "Default": ""}},
+            {
+                "State": "secret",
+                "Option": {"Name": "client_secret", "IsPassword": True},
+            },
+            {
+                "State": "region",
+                "Option": {
+                    "Name": "hostname",
+                    "Advanced": True,
+                    "Default": "api.pcloud.com",
+                },
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        remotes, "providers", lambda: {"providers": [{"name": "pcloud"}]}
+    )
+
+    def rc(method, payload=None, config=None):
+        if method == "config/create" and config:
+            return {
+                "State": "optional",
+                "Option": {"Name": "pacer_min_sleep", "Advanced": True, "Default": 0},
+            }
+        if method == "config/update":
+            automatic.append(payload["opt"]["result"])
+            return next(questions)
+        return original(method, payload, config)
+
+    monkeypatch.setattr(remotes, "_rc", rc)
+    response = client.post(
+        "/api/remotes/setup", json={"name": "cloud", "provider": "pcloud"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["option"]["name"] == "hostname"
+    assert automatic == ["0", "", ""]
+
+
+@pytest.mark.parametrize("provider,advanced", [("drive", False), ("pcloud", True)])
+def test_client_configuration_is_kept_when_needed(
+    client, fake_rclone, monkeypatch, provider, advanced
+):
+    original = remotes._rc
+    monkeypatch.setattr(
+        remotes, "providers", lambda: {"providers": [{"name": provider}]}
+    )
+
+    def rc(method, payload=None, config=None):
+        if method == "config/create" and config:
+            return {"State": "client", "Option": {"Name": "client_id", "Default": ""}}
+        return original(method, payload, config)
+
+    monkeypatch.setattr(remotes, "_rc", rc)
+    response = client.post(
+        "/api/remotes/setup",
+        json={"name": "cloud", "provider": provider, "advanced": advanced},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["option"]["name"] == "client_id"
+
+
+def test_guided_mode_does_not_hide_an_invalid_advanced_answer(
+    client, fake_rclone, monkeypatch
+):
+    setup = begin(client)
+    original = remotes._rc
+
+    def rc(method, payload=None, config=None):
+        if method == "config/update":
+            return {
+                "State": "retry",
+                "Error": "private-canary",
+                "Option": {"Name": "custom", "Advanced": True},
+            }
+        return original(method, payload, config)
+
+    monkeypatch.setattr(remotes, "_rc", rc)
+    response = client.post(
+        f"/api/remotes/setup/{setup['id']}/answer",
+        json={"answer": "bad", "step": setup["step"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["error"]
+    assert response.json()["option"]["name"] == "custom"
+    assert not response.json()["ready"]
+
+
 @pytest.mark.skipif(not shutil.which("rclone"), reason="rclone binary unavailable")
 @pytest.mark.parametrize("provider", ["pcloud", "drive", "onedrive"])
 def test_real_cloud_setup_uses_remote_authorization(

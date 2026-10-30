@@ -35,6 +35,7 @@ _MAX_SESSIONS = 8
 class StartRemote(BaseModel):
     name: str
     provider: str
+    advanced: bool = False
 
 
 class RemoteAnswer(BaseModel):
@@ -54,6 +55,7 @@ class Setup:
     step: int = 0
     error: bool = False
     timer: threading.Timer | None = None
+    advanced: bool = False
 
     @property
     def config(self) -> str:
@@ -165,11 +167,49 @@ def _view(key: str, setup: Setup) -> dict:
     }
 
 
+def _default_answer(option: dict) -> str:
+    value = option.get("Default")
+    if value is None:
+        return ""
+    return str(value).lower() if isinstance(value, bool) else str(value)
+
+
+def _automatic_answer(setup: Setup, result: dict) -> str | None:
+    if not result.get("State") or result.get("Error"):
+        return None
+    option = result.get("Option") or {}
+    name = option.get("Name", "")
+    # A browser on the server is not the browser on the user's computer.
+    if name == "config_is_local":
+        return "false"
+    if name == "config_advanced":
+        return str(setup.advanced).lower()
+    if setup.advanced or option.get("Required"):
+        return None
+    # Remote pCloud authorization needs the account's region explicitly.
+    if setup.provider == "pcloud" and name == "hostname":
+        return None
+    # Google is retiring the shared client: do not silently select it.
+    if setup.provider == "drive" and name in {"client_id", "client_secret"}:
+        return None
+    optional = name in {
+        "client_id",
+        "client_secret",
+        "root_folder_id",
+        "service_account_file",
+        "bearer_token",
+    }
+    if option.get("Advanced") or optional:
+        if option.get("IsPassword") and _default_answer(option):
+            return None
+        return _default_answer(option)
+    return None
+
+
 def _advance(setup: Setup, result: dict) -> None:
-    # Always use remote authorization: a browser on the server is not the client.
-    for _ in range(5):
-        option = result.get("Option") or {}
-        if not result.get("State") or option.get("Name") != "config_is_local":
+    for _ in range(128):
+        automatic = _automatic_answer(setup, result)
+        if automatic is None:
             break
         result = _rc(
             "config/update",
@@ -182,11 +222,13 @@ def _advance(setup: Setup, result: dict) -> None:
                     "obscure": True,
                     "continue": True,
                     "state": result["State"],
-                    "result": "false",
+                    "result": automatic,
                 },
             },
             setup.config,
         )
+    else:
+        raise HTTPException(502, "Zu viele automatische Einrichtungsschritte")
     setup.state = result.get("State", "")
     setup.option = result.get("Option") or {}
     setup.step += 1
@@ -235,6 +277,7 @@ def start(payload: StartRemote, request: Request) -> dict:
             payload.name,
             payload.provider,
             tempfile.TemporaryDirectory(prefix="sicherpfad-remote-"),
+            advanced=payload.advanced,
         )
         key = secrets.token_urlsafe(32)
         _setups[key] = setup
