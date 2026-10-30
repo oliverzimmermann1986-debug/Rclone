@@ -17,6 +17,7 @@ from croniter import croniter
 
 from .job_definitions import legacy_job_definitions, stable_job_id
 from .pbs_identity import canonical_pbs_backup_id
+from .operations_config import normalize_operations_config
 from .rclone_args import UnsafeRcloneArgument, validate_rclone_args
 from .security import (
     DEFAULT_HIDDEN_REMOTE_PATHS,
@@ -26,7 +27,16 @@ from .security import (
 )
 
 _KNOWN_SECTIONS = frozenset(
-    {"web", "paths", "backup", "notifications", "pbs", "maintenance", "schema_version"}
+    {
+        "web",
+        "paths",
+        "backup",
+        "notifications",
+        "pbs",
+        "maintenance",
+        "reports",
+        "schema_version",
+    }
 )
 _KNOWN_WEB_KEYS = frozenset(
     {
@@ -1626,6 +1636,8 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
                 "notifications.apns.events muss mindestens ein Event enthalten"
             )
     notifications["apns"] = apns
+
+    normalize_operations_config(cfg, errors, number=_number, boolean=_boolean)
 
     maintenance = cfg.setdefault("maintenance", {})
     if not isinstance(maintenance, dict):

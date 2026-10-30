@@ -186,7 +186,7 @@ def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
     javascript = (STATIC / "app.js").read_text(encoding="utf-8")
 
     assert (
-        "status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null, bitrotscrub: null, bootdrill: null }"
+        "status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null, bitrotscrub: null, bootdrill: null, migration: null, recovery: null }"
         in javascript
     )
     assert "keep: { keep_last: 0, keep_daily: 7, keep_weekly: 4" in javascript

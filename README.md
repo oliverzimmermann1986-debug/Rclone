@@ -81,6 +81,67 @@ Mehrere der folgenden Funktionen brauchen Rechte, die die Standard-Units nicht v
 
 Nicht umgesetzt ist eine Content-Security-Policy ohne `'unsafe-eval'`, weil die Oberfläche Alpine-Ausdrücke direkt im HTML nutzt und die CSP-Variante von Alpine sie nicht unterstützt. Die iOS-App zeigt die neuen Funktionen noch nicht.
 
+### Dateisuche, Ausfallwächter und Betriebswerkzeuge
+
+Unter **System → Betriebswerkzeuge** stehen Dateisuche, Speicherprognose,
+Ausfallwächter, Zielwechsel und wöchentliche Schutzberichte bereit. Dieselben
+Werkzeuge sind nativ in der iPhone-App unter **System → Betriebswerkzeuge**
+erreichbar.
+
+- **Dateisuche:** Dateinamen über aktuelle Kopien, Änderungsarchive und vollständige
+  Sicherungsstände suchen. Jede Anfrage ist begrenzt; „Weitere Stände durchsuchen“
+  setzt die Suche fort. Angezeigte Warnungen und Umfangsgrenzen gehören zum
+  Ergebnis. Ein vorhandener Manifest-Hash belegt gespeicherte Metadaten, keine
+  erneute Prüfung der aktuellen Zielbytes. Änderungsarchive sind unvollständige
+  Stände. Gefundene Dateien werden über den bestehenden geprüften Staging-Restore
+  zurückgeholt; die Restore-Grenze bleibt ausdrücklich wählbar.
+- **Speicherprognose:** Tägliche, dauerhaft gespeicherte Messungen der lokalen
+  Volumes und verfügbaren Cloud-Kontingente. Mindestens drei Tageswerte über zwei
+  Tage sind für einen Trend erforderlich. Unbekannte Quoten, schwankende Trends
+  und veraltete Messungen werden nicht als freie Kapazität ausgegeben. Eine
+  eigene Budgetvorgabe ist für den konfigurierten Cloud-Zielordner möglich; in
+  diesem Fall wird dessen Bestand separat gemessen. Ohne Budget beziehen sich
+  Cloud-Kontingente auf das Konto beziehungsweise Volume, nicht ausschließlich
+  auf den ausgewählten Unterordner.
+- **Ausfallwächter:** Bei einem unabhängigen Heartbeat-Empfänger eine geheime
+  HTTPS-Ping-Adresse erzeugen und hier speichern. Intervall und mindestens drei
+  Intervalle Toleranz sowie die tatsächlichen Alarmempfänger werden beim
+  Empfänger eingerichtet. Ein eigener Minutentakt sendet die Lebenszeichen auch
+  während langer Sicherungen. Der Empfänger benötigt ein unabhängiges System,
+  um einen vollständigen Ausfall dieses Servers melden zu können. Auslösen und
+  Konfiguration verlangen Passwortbestätigung; URL und SMTP-Passwort werden nie
+  in Statusantworten oder Support-Exporten ausgegeben. Lockdown hält ausgehende
+  Integrationen an; bei geplanter Wartung den externen Wächter passend pausieren.
+- **Zielwechsel:** Einen Push-Datenweg auf ein leeres lokales oder Cloud-Ziel
+  vorbereiten, Kopie vollständig zurücklesen und erst danach bewusst umschalten.
+  Auch vor der Umschaltung werden die Inhalte erneut geprüft. Beide langen
+  Schritte laufen als abbrechbare Jobs im bestehenden Backup-Scope. Konfiguration,
+  Sitzungsgeneration und Ziele bleiben an die geprüfte Vorschau gebunden. Die
+  ursprüngliche Kopie bleibt erhalten. Bisync-/Pull-/Airgap-Datenwege, gebundene
+  Vault-Belege und externe Versionsarchive benötigen eine getrennte Übernahme
+  und werden in dieser Fassung ausdrücklich abgewiesen. Vollständige lokale
+  Stände bleiben über einen gesondert signierten Migrationsnachweis zugänglich;
+  ihre unveränderten Manifeste werden als historische Bindung ausgewiesen und
+  zählen nicht als aktueller Restore-Nachweis des neuen Ziels. Nachweis und
+  privater Signierschlüssel gehören gemeinsam in die Sicherung des Datenverzeichnisses. Der bestätigte Umfang
+  ist begrenzt (standardmäßig 5 GiB, höchstens 50 GiB).
+- **Schutzberichte:** Die letzte abgeschlossene Kalenderwoche in der gewählten
+  Zeitzone als Zusammenfassung und PDF erstellen. Der Bericht enthält aggregierte
+  Laufzahlen, Schutz-/Restore-Nachweise und Speicherreserven, keine Dateinamen,
+  Pfade oder rohen Logtexte. Standardmäßig sind automatische Erstellung und
+  E-Mail-Versand aus. SMTP verwendet geprüftes TLS beziehungsweise STARTTLS;
+  manueller Versand verlangt eine separate Passwortbestätigung. Zustellfehler
+  bleiben sichtbar und automatische Wiederholungen sind begrenzt.
+
+Der Installer richtet `sicherpfad-operations.timer` und
+`sicherpfad-operations.service` zusätzlich zum Backup-Scheduler ein. Der separate
+Minutentakt führt `python -m app.operations_cli` aus und ist von pausierten oder
+lang laufenden Backup-Jobs unabhängig. Die Einstellungen liegen unter
+`notifications.heartbeat`, `backup.storage_forecast` und `reports.weekly`;
+[config/config.example.yaml](config/config.example.yaml) enthält deaktivierte
+Beispiele für ausgehende Integrationen. Der Quelltext installiert keinen externen
+Heartbeat-Empfänger und richtet kein fremdes E-Mail-Konto ein.
+
 ## Native iPhone-App
 
 Unter [`ios/`](ios/) liegt eine dependency-freie SwiftUI-App ab iOS 17. Sie bietet das verdichtete Lagebild, lokale/cloudseitige Kopien mit Dateizahl und Größe, Jobs, Live-Fortschritt samt Watchdog-Status und Abbruch, Laufhistorie mit Logs und sicherem Retry, getrennte Datenwege, Push-Diagnose, Scheduler-Wartungsfenster, Systemdiagnose und PBS-Starts. Das native Recovery Center ergänzt Offline-Notfallkarte, selektive Staging-Restores, verschlüsselte Übergabe, Schutzkalender und Serverprofile ohne Passwortspeicherung. Widget, Live Activity, Siri-Kurzbefehle und interaktive Fehler-Pushs bilden eigene iOS-Systemoberflächen. Seltene oder riskante Aktionen öffnen in nativen Detailansichten und Bestätigungsdialogen.
@@ -540,6 +601,7 @@ Der Timer startet jede Minute einen kurzen Scheduler-Tick. Dieser entscheidet pr
 |---|---|---|
 | `rclone-sync-web.service` | FastAPI-Web-UI auf Port 8001 | aktiv |
 | `sync-scheduler.timer` | prüft jede Minute fällige Jobdefinitionen | aktiv |
+| `sicherpfad-operations.timer` | unabhängige Lebenszeichen, Speichermessungen und Schutzberichte | aktiv |
 | `sync-scheduler.service` | führt einen Scheduler-Tick aus | timer-gesteuert |
 | `rclone-sync.service` | manueller Voll-Run aller aktiven Jobdefinitionen | inaktiv |
 | `rclone-sync.timer` | alter täglicher Voll-Run | deaktiviert |

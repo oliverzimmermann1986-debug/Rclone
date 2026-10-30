@@ -48,12 +48,12 @@ struct DataPathsScreen: View {
                                 Label("Prüfen", systemImage: "checkmark.shield")
                             }
                             .tint(.blue)
-                            .disabled(configurationDraft.isDirty)
+                            .disabled(configurationDraft.isDirty || model.backupScopeIsRunning)
                             Button { pendingPathAction = .restore(pair) } label: {
                                 Label("Restore-Test", systemImage: "arrow.uturn.backward.circle")
                             }
                             .tint(.orange)
-                            .disabled(configurationDraft.isDirty)
+                            .disabled(configurationDraft.isDirty || !model.canStartRestoreTest)
                         }
                     }
                     .onDelete(perform: deletePairs)
@@ -70,7 +70,7 @@ struct DataPathsScreen: View {
                 Button { confirmFullRestoreTest = true } label: {
                     Label("Systemweiten Restore-Test starten", systemImage: "arrow.counterclockwise.circle")
                 }
-                .disabled(configurationDraft.isDirty)
+                .disabled(configurationDraft.isDirty || !model.canStartRestoreTest)
             }
         }
         .listStyle(.insetGrouped)
@@ -254,7 +254,7 @@ struct JobsScreen: View {
                                 pendingRun = PendingJobRun(definition: definition, dryRun: true)
                             } label: { Label("Test", systemImage: "play.circle") }
                                 .tint(.orange)
-                                .disabled(configurationDraft.isDirty)
+                                .disabled(configurationDraft.isDirty || model.backupScopeIsRunning)
                         }
                     }
                 }

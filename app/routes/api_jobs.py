@@ -69,6 +69,7 @@ _ALLOWED_JOB_KINDS = {
     "pbs",
     "bitrotscrub",
     "bootdrill",
+    "migration",
 }
 
 _locks: dict[str, threading.Lock] = {"backup": threading.Lock()}
@@ -1903,9 +1904,11 @@ def status_current() -> dict[str, Any]:
             "check": db.job_running("check"),
             "quicksync": db.job_running("quicksync"),
             "restoretest": db.job_running("restoretest"),
+            "recovery": db.job_running("recovery"),
             "pbs": db.job_running("pbs"),
             "bitrotscrub": db.job_running("bitrotscrub"),
             "bootdrill": db.job_running("bootdrill"),
+            "migration": db.job_running("migration"),
         }
     )
 

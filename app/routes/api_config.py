@@ -253,6 +253,19 @@ def _versions_weakened(old: dict[str, Any], new: dict[str, Any]) -> bool:
 def _sensitive_config_changed(
     old_data: dict[str, Any], new_data: dict[str, Any]
 ) -> bool:
+    try:
+        old_clean, _ = validate_config(old_data)
+        new_clean, _ = validate_config(new_data)
+    except ConfigValidationError:
+        pass  # malformed changes receive the ordinary validation error below
+    else:
+        if (
+            old_clean["notifications"]["heartbeat"]
+            != new_clean["notifications"]["heartbeat"]
+        ):
+            return True
+        if old_clean["reports"]["weekly"] != new_clean["reports"]["weekly"]:
+            return True
     old_web = old_data.get("web") if isinstance(old_data.get("web"), dict) else {}
     new_web = new_data.get("web") if isinstance(new_data.get("web"), dict) else {}
     if (

@@ -1,0 +1,11 @@
+[Unit]
+Description=Sicherpfad independent operational minute tick
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+Persistent=true
+Unit=sicherpfad-operations.service
+
+[Install]
+WantedBy=timers.target

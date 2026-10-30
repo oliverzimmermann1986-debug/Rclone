@@ -60,6 +60,13 @@ paths:
   recovery_dir: /opt/rclone-sync/data/recovery
 
 backup:
+  # Tägliche Kapazitätsmessungen; ein belastbarer Trend braucht mehrere Tage.
+  storage_forecast:
+    enabled: true
+    sample_interval_hours: 24
+    warning_days: 30
+    history_days: 180
+    capacities: {}  # optional: "<Datenweg-ID>:remote": Kapazität in Bytes
   enabled: true
   timezone: Europe/Berlin
   max_parallel: 2
@@ -285,6 +292,14 @@ backup:
   resync_mode: path1
 
 notifications:
+  # Unabhängiger Wächter: geheime HTTPS-Ping-Adresse des Empfängers.
+  # Der Empfänger alarmiert bei ausbleibenden Lebenszeichen; TLS bleibt geprüft.
+  heartbeat:
+    enabled: false
+    secret_url: ""
+    period_seconds: 60
+    timeout_seconds: 5
+    allow_private_hosts: false
   # Native iPhone-Pushs bei Fehlern. AuthKey_XXXXXXXXXX.p8 mit Modus 0600
   # innerhalb von paths.data_dir ablegen. Team-ID und Key-ID stammen aus dem
   # Apple Developer Portal; der Schlüssel selbst gehört nie ins Git-Repository.
@@ -360,3 +375,21 @@ pbs:
   #    mountpoint: /mnt/nas
   #    sentinel_file: .rclone-sync-ready
   #    min_files: 1
+
+# Berichte für die letzte abgeschlossene Woche; Versand wird separat aktiviert.
+reports:
+  weekly:
+    enabled: false
+    schedule: "0 8 * * 1"
+    timezone: Europe/Berlin
+    retention_weeks: 52
+    email:
+      enabled: false
+      host: ""
+      port: 587
+      encryption: starttls  # oder tls für direktes TLS, häufig Port 465
+      username: ""
+      password: ""
+      from_address: ""
+      to_addresses: []
+      timeout_seconds: 10

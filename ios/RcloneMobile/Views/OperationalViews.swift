@@ -62,7 +62,7 @@ struct QuickSyncView: View {
                 Button(dryRun ? "Probelauf starten" : "Quick Sync starten") {
                     if dryRun { start() } else { confirmProductive = true }
                 }
-                .disabled(validationMessage != nil)
+                .disabled(validationMessage != nil || model.backupScopeIsRunning)
             }
         }
         .navigationTitle("Quick Sync")

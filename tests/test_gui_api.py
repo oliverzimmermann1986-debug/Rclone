@@ -256,7 +256,9 @@ def test_cancel_covers_every_backup_scope_kind():
     assert "restoretest" in BACKUP_KINDS
 
 
-@pytest.mark.parametrize("kind", ["restoretest", "bitrotscrub", "bootdrill"])
+@pytest.mark.parametrize(
+    "kind", ["restoretest", "bitrotscrub", "bootdrill", "migration"]
+)
 def test_drill_kinds_are_supported_by_history_filters_and_current_status(
     monkeypatch, kind
 ):

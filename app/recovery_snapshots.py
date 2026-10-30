@@ -465,6 +465,8 @@ def public_snapshot(manifest: Mapping[str, Any]) -> dict:
             "files",
             "storage",
             "verification",
+            "historical_binding",
+            "current_restore_proof",
         )
     }
 
@@ -546,6 +548,20 @@ def load_manifest(
         raise SnapshotError(
             "Vollständiger Stand nicht gefunden oder beschädigt"
         ) from exc
+    historical_binding = False
+    if (
+        isinstance(value, dict)
+        and not allow_previous_binding
+        and value.get("fingerprint") != pair_fingerprint(pair)
+    ):
+        from .migration_lineage import accepts
+
+        try:
+            historical_binding = accepts(config, pair, value)
+        except (ValueError, OSError) as exc:
+            raise SnapshotError(
+                "Vollständiger Stand gehört nicht zu diesem Datenweg; historische Bindung ist nicht verifiziert"
+            ) from exc
     if (
         not isinstance(value, dict)
         or value.get("schema") != "sicherpfad-full-snapshot-v1"
@@ -553,6 +569,7 @@ def load_manifest(
         or (
             not allow_previous_binding
             and value.get("fingerprint") != pair_fingerprint(pair)
+            and not historical_binding
         )
         or (
             allow_previous_binding
@@ -589,6 +606,8 @@ def load_manifest(
         or len(entries) != value.get("files")
     ):
         raise SnapshotError("Recovery-Manifest ist unvollständig")
+    if historical_binding:
+        value = {**value, "historical_binding": True, "current_restore_proof": False}
     return value
 
 
@@ -665,6 +684,8 @@ def run_snapshot_restore(
         root = staging_root(config, pair=pair)
         work = root / record["id"]
         manifest = load_manifest(config, pair, point_id)
+        if manifest.get("historical_binding"):
+            record.update(historical_binding=True, current_restore_proof=False)
         total = manifest["total_bytes"]
         if total > max(1, min(max_total_mb, 51_200)) * 1024 * 1024:
             raise SnapshotError(

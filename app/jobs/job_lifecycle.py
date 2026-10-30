@@ -18,6 +18,7 @@ BACKUP_KINDS = (
     "restoretest",
     "recovery",
     "bitrotscrub",
+    "migration",
 )
 PBS_KINDS = ("pbs", "bootdrill")
 

@@ -31,6 +31,7 @@ _BACKUP_SCOPE_KINDS = (
     "restoretest",
     "recovery",
     "bitrotscrub",
+    "migration",
 )
 _JOB_SCOPE_KINDS = {
     "backup": _BACKUP_SCOPE_KINDS,
@@ -39,6 +40,7 @@ _JOB_SCOPE_KINDS = {
     "restoretest": _BACKUP_SCOPE_KINDS,
     "recovery": _BACKUP_SCOPE_KINDS,
     "bitrotscrub": _BACKUP_SCOPE_KINDS,
+    "migration": _BACKUP_SCOPE_KINDS,
     "pbs": ("pbs", "bootdrill"),
     "bootdrill": ("pbs", "bootdrill"),
 }

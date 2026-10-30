@@ -66,17 +66,22 @@ from .routes import (
     api_conflicts,
     api_crypt,
     api_diagnostics,
+    api_file_catalog,
     api_jobs,
     api_lockdown,
     api_maintenance,
+    api_migrations,
+    api_operations,
     api_object_lock,
     api_preflight,
     api_push,
     api_recovery,
+    api_reports,
     api_recovery_diff,
     api_remotes,
     api_restore_plan,
     api_storage,
+    api_storage_forecast,
     api_test,
     api_vault,
     api_versions,
@@ -656,6 +661,11 @@ app.include_router(api_webauthn.router)
 app.include_router(api_recovery.router)
 app.include_router(api_restore_plan.router)
 app.include_router(api_vault.router)
+app.include_router(api_file_catalog.router)
+app.include_router(api_migrations.router)
+app.include_router(api_operations.router)
+app.include_router(api_reports.router)
+app.include_router(api_storage_forecast.router)
 app.include_router(api_lockdown.router)
 app.include_router(api_object_lock.router)
 app.include_router(api_vpn.router)
