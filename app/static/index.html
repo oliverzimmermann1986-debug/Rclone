@@ -629,7 +629,7 @@
         <!-- DOCTOR -->
         <section x-show="page==='doctor'" x-cloak>
           <div class="page-heading">
-            <div><h2>System</h2><p>Dienste, Ressourcen, Datenbank und Schutzregeln prüfen.</p><button type="button" class="button secondary" @click="openRemoteSetup()">Neues Remote einbinden</button></div>
+            <div><h2>System</h2><p>Dienste, Ressourcen, Datenbank und Schutzregeln prüfen.</p><button type="button" class="button secondary" @click="openRemoteSetup($event.currentTarget)">Neues Remote einbinden</button></div>
             <div class="heading-actions"><button class="button secondary" @click="navigate('recovery')">Wiederherstellung</button><button class="button secondary" @click="navigate('settings')">Einstellungen</button><button class="button secondary" @click="downloadSupportBundle()">Support-Bundle</button><button class="button primary" @click="loadDoctor()" :disabled="doctor.loading"><span x-text="doctor.loading ? 'Prüfung läuft…' : 'Vollständige Prüfung'"></span></button></div>
           </div>
 
@@ -1072,28 +1072,55 @@
   </div>
 
   <!-- Remote setup uses the questions provided by the installed rclone. -->
-  <div class="modal" x-show="remoteSetup.show" x-cloak @click.self="closeRemoteSetup()">
-    <form class="modal-dialog" x-ref="remoteSetupDialog" role="dialog" aria-modal="true" aria-labelledby="remote-setup-title" tabindex="-1" @submit.prevent="submitRemoteSetup()" :aria-busy="remoteSetup.busy">
-      <div class="modal-head"><h3 id="remote-setup-title">Neues Remote einbinden</h3><button type="button" class="icon-button" @click="closeRemoteSetup()" :disabled="remoteSetup.busy" aria-label="Einrichtung schließen">×</button></div>
+  <div class="modal" x-show="remoteSetup.show" x-cloak>
+    <form class="modal-dialog remote-setup-dialog" x-ref="remoteSetupDialog" role="dialog" aria-modal="true" aria-labelledby="remote-setup-title" tabindex="-1" @submit.prevent="submitRemoteSetup()" :aria-busy="remoteSetup.busy">
+      <div class="modal-head"><div><span class="section-kicker" x-text="remoteSetup.completed ? 'Fertig' : remoteSetup.session ? (remoteSetup.session.ready ? '3 · Verbindung prüfen' : '2 · Zugang einrichten') : '1 · Speicher auswählen'"></span><h3 id="remote-setup-title">Neues Remote einbinden</h3></div><button type="button" class="icon-button" @click="closeRemoteSetup()" :disabled="remoteSetup.busy" aria-label="Einrichtung schließen">×</button></div>
       <div class="modal-content">
-        <p>Verbinde einen neuen Speicher mit diesem Server. Die Anbieterfragen stammen aus rclone und können auf Englisch erscheinen.</p>
-        <template x-if="!remoteSetup.session"><div>
-          <label class="field"><span>Remote-Name</span><input x-model="remoteSetup.name" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{1,63}" maxlength="64" placeholder="mein-speicher" :disabled="remoteSetup.busy" autocomplete="off"><small>2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche.</small></label>
-          <label class="field"><span>Anbieter</span><select x-model="remoteSetup.provider" required :disabled="remoteSetup.busy"><option value="">Bitte auswählen</option><template x-for="provider in remoteSetup.providers" :key="provider.name"><option :value="provider.name" x-text="provider.description"></option></template></select></label>
+        <p class="remote-setup-intro" x-show="!remoteSetup.session && !remoteSetup.completed">Wähle deinen Speicher und gib der Verbindung einen Namen.</p>
+        <template x-if="!remoteSetup.session && !remoteSetup.completed"><div class="remote-setup-fields">
+          <label class="field"><span>Remote-Name</span><input x-model="remoteSetup.name" data-dialog-initial-focus required pattern="[A-Za-z0-9][A-Za-z0-9_-]{1,63}" maxlength="64" placeholder="mein-speicher" :disabled="remoteSetup.busy" autocomplete="off"><small>2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche.</small></label>
+          <fieldset class="remote-provider-picker" :disabled="remoteSetup.busy">
+            <legend>Anbieter</legend>
+            <label class="field remote-provider-search"><span class="sr-only">Anbieter suchen</span><input type="search" x-model="remoteSetup.providerQuery" @keydown.enter.prevent placeholder="Anbieter suchen…" autocomplete="off" aria-controls="remote-provider-options" :disabled="remoteSetup.busy || !remoteSetup.providers.length"></label>
+            <div :id="'remote-provider-options'" class="remote-provider-options">
+              <template x-for="provider in remoteProviderOptions()" :key="provider.name"><label class="remote-provider-choice" :class="remoteSetup.provider === provider.name && 'selected'"><input type="radio" name="remote-provider" x-model="remoteSetup.provider" :value="provider.name" required :disabled="remoteSetup.busy"><span x-text="remoteProviderLabel(provider)"></span></label></template>
+            </div>
+            <p class="remote-provider-empty" role="status" x-show="!remoteSetup.busy && remoteSetup.providers.length && !remoteProviderOptions().length">Kein passender Anbieter. Versuche einen anderen Suchbegriff.</p>
+            <button type="button" class="remote-provider-more" x-show="!remoteSetup.providerQuery.trim() && remoteOtherProviderCount()" @click="remoteSetup.showAllProviders = !remoteSetup.showAllProviders" :aria-expanded="remoteSetup.showAllProviders" aria-controls="remote-provider-options" x-text="remoteSetup.showAllProviders ? 'Häufige Anbieter anzeigen' : 'Weitere Anbieter anzeigen (' + remoteOtherProviderCount() + ')'"></button>
+            <p class="remote-provider-selection" x-show="selectedRemoteProvider() && !remoteProviderOptions().some(provider => provider.name === remoteSetup.provider)" aria-live="polite">Ausgewählt: <strong x-text="selectedRemoteProvider() ? remoteProviderLabel(selectedRemoteProvider()) : ''"></strong></p>
+            <template x-if="selectedRemoteProvider()?.description?.length > 72"><details class="remote-provider-details"><summary>Anbieterhinweise</summary><p class="remote-setup-help" x-text="selectedRemoteProvider().description"></p></details></template>
+          </fieldset>
+          <label class="check-row remote-advanced"><input type="checkbox" x-model="remoteSetup.advanced" :disabled="remoteSetup.busy"><span><strong>Erweiterte Einstellungen anzeigen</strong><small>Für eigene Anwendungszugänge und besondere Anbieteroptionen.</small></span></label>
         </div></template>
-        <template x-if="remoteSetup.session && !remoteSetup.session.ready"><div>
-          <p class="remote-setup-help" x-text="remoteSetup.session.option.help"></p>
-          <label class="field"><span x-text="remoteSetup.session.option.name"></span>
-            <template x-if="remoteSetup.session.option.exclusive && remoteSetup.session.option.examples.length"><select x-model="remoteSetup.answer" x-ref="remoteAnswer" :disabled="remoteSetup.busy"><option value="" x-text="remoteSetup.session.option.default ? 'Standard: ' + remoteSetup.session.option.default : 'Bitte auswählen'"></option><template x-for="example in remoteSetup.session.option.examples" :key="example.value"><option :value="example.value" x-text="example.value + ' · ' + example.help"></option></template></select></template>
-            <template x-if="!remoteSetup.session.option.exclusive || !remoteSetup.session.option.examples.length"><input x-ref="remoteAnswer" x-model="remoteSetup.answer" :type="remoteSetup.session.option.secret ? 'password' : 'text'" :placeholder="remoteSetup.session.option.default || 'Antwort eingeben'" :required="remoteSetup.session.option.required && !remoteSetup.session.option.default" :disabled="remoteSetup.busy" autocomplete="off" spellcheck="false"></template>
-          </label>
-          <p x-show="remoteSetup.session.option.default">Leer lassen, um den angezeigten Standard zu verwenden.</p>
+        <template x-if="remoteSetup.session && !remoteSetup.session.ready"><div class="remote-setup-fields">
+          <p class="remote-setup-context"><strong x-text="remoteSetup.session?.name || ''"></strong><span x-text="selectedRemoteProvider() ? remoteProviderLabel(selectedRemoteProvider()) : ''"></span></p>
+          <p class="remote-setup-help" x-text="remoteStepCopy().description"></p>
+          <template x-if="remoteSetup.session?.option?.name === 'config_token'">
+            <ol class="remote-login-steps">
+              <li>Installiere rclone auf deinem Computer. Den Download findest du unten.</li>
+              <li>Öffne dort ein Terminal, führe den Befehl aus und melde dich im geöffneten Browser bei deinem Speicher an.
+                <div class="remote-authorize-command" x-show="remoteAuthorizationCommand()"><code x-text="remoteAuthorizationCommand()"></code><button type="button" class="button secondary small" @click="copyRemoteAuthorizationCommand($event.currentTarget)">Befehl kopieren</button></div>
+              </li>
+              <li>Kopiere das ausgegebene Anmeldeergebnis in das Feld unten und wähle „Weiter“.</li>
+            </ol>
+          </template>
+          <template x-if="remoteSetup.session?.option?.exclusive && remoteSetup.session?.option?.examples?.length">
+            <fieldset class="remote-answer-choices" x-ref="remoteAnswer" tabindex="-1" :disabled="remoteSetup.busy">
+              <legend x-text="remoteStepCopy().title"></legend>
+              <div class="remote-answer-options"><template x-for="example in (remoteSetup.session?.option?.examples || [])" :key="example.value"><label class="remote-answer-choice" :class="remoteSetup.answer === example.value && 'selected'"><input type="radio" name="remote-answer" x-model="remoteSetup.answer" :value="example.value" :required="remoteSetup.session?.option?.required && !remoteSetup.session?.option?.default" :disabled="remoteSetup.busy"><span><strong x-text="remoteChoiceLabel(example)"></strong></span></label></template></div>
+            </fieldset>
+          </template>
+          <template x-if="!remoteSetup.session?.option?.exclusive || !remoteSetup.session?.option?.examples?.length"><label class="field"><span x-text="remoteStepCopy().title"></span><input x-ref="remoteAnswer" x-model="remoteSetup.answer" :type="remoteSetup.session?.option?.secret ? 'password' : 'text'" :placeholder="remoteSetup.session?.option?.default || remoteStepCopy().placeholder" :required="remoteSetup.session?.option?.required && !remoteSetup.session?.option?.default" :disabled="remoteSetup.busy" autocomplete="off" spellcheck="false"><small x-show="!remoteSetup.session?.option?.required">Optional – ohne eigene Angabe wird die Voreinstellung verwendet.</small></label></template>
+          <p class="remote-setup-default" x-show="remoteSetup.session?.option?.default" x-text="'Voreinstellung: ' + remoteDefaultLabel()"></p>
+          <nav class="remote-step-links" aria-label="Anmeldehilfen" x-show="remoteStepLinks().length"><template x-for="link in remoteStepLinks()" :key="link.href"><a :href="link.href" target="_blank" rel="noopener noreferrer" x-text="link.label"></a></template></nav>
+          <details class="remote-original-help"><summary>Technische Originalhinweise von rclone (Englisch)</summary><p class="remote-setup-help"><template x-for="(part, partIndex) in remoteHelpParts(remoteSetup.session?.option?.help)" :key="partIndex"><span><template x-if="part.href"><a :href="part.href" target="_blank" rel="noopener noreferrer" x-text="part.text"></a></template><template x-if="!part.href"><span x-text="part.text"></span></template></span></template></p></details>
         </div></template>
-        <template x-if="remoteSetup.session?.ready"><p>Die Angaben für <strong x-text="remoteSetup.session.name"></strong> sind vollständig. Mit „Remote speichern“ wird der Speicher in die Serverkonfiguration übernommen. Die Erreichbarkeit kannst du anschließend über die Ordnerauswahl prüfen.</p></template>
+        <template x-if="remoteSetup.session?.ready"><div class="remote-setup-review"><h4>Verbindung speichern?</h4><p><strong x-text="remoteSetup.session?.name || ''"></strong> ist vorbereitet. Erst mit „Remote speichern“ wird die Verbindung auf deinem Server angelegt.</p><p>Danach kannst du sie als Quelle oder Ziel eines Datenwegs auswählen.</p></div></template>
+        <section class="remote-setup-success" x-show="remoteSetup.completed" role="status"><h4>Verbindung gespeichert</h4><p>Dein Remote <strong x-text="remoteSetup.completed"></strong> steht jetzt zur Auswahl. Dieses Fenster bleibt offen, bis du „Fertig“ wählst.</p></section>
         <p class="inline-error" role="alert" x-show="remoteSetup.error" x-text="remoteSetup.error"></p>
         <p x-show="remoteSetup.busy" role="status">Einrichtung wird verarbeitet…</p>
       </div>
-      <div class="modal-footer"><button type="button" class="button secondary" @click="closeRemoteSetup()" :disabled="remoteSetup.busy">Abbrechen</button><button type="submit" class="button primary" :disabled="remoteSetup.busy || (!remoteSetup.session && !remoteSetup.providers.length)" x-text="remoteSetup.session?.ready ? 'Remote speichern' : 'Weiter'"></button></div>
+      <div class="modal-footer"><button type="button" class="button secondary" x-show="!remoteSetup.completed" @click="closeRemoteSetup()" :disabled="remoteSetup.busy">Abbrechen</button><button type="submit" class="button primary" x-show="!remoteSetup.completed" :disabled="remoteSetup.busy || (!remoteSetup.session && (!remoteSetup.provider || !remoteSetup.name.trim()))" x-text="remoteSetup.session?.ready ? 'Remote speichern' : 'Weiter'"></button><button type="button" class="button primary" x-ref="remoteDone" x-show="remoteSetup.completed" @click="closeRemoteSetup()">Fertig</button></div>
     </form>
   </div>
 
@@ -1103,7 +1130,7 @@
       <div class="modal-head"><div><span class="section-kicker" x-text="picker.kind==='remote' ? 'Cloud · rclone Remote' : 'Lokales Dateisystem'"></span><h3 id="picker-dialog-title">Ordner auswählen</h3></div><button class="icon-button" @click="closePicker()" aria-label="Ordnerauswahl schließen">×</button></div>
       <div class="picker-kind-switch" x-show="pickerCanSwitchKind()" role="group" aria-label="Zieltyp auswählen"><button class="button small" :class="picker.kind==='remote' ? 'primary' : 'secondary'" @click="switchPickerKind('remote')" :aria-pressed="picker.kind==='remote'">Cloud</button><button class="button small" :class="picker.kind==='local' ? 'primary' : 'secondary'" @click="switchPickerKind('local')" :aria-pressed="picker.kind==='local'">Lokal</button><span>Cloud-Ziel oder lokalen Zielordner wählen</span></div>
       <div class="picker-toolbar"><button class="icon-button" @click="loadPicker(picker.parent)" :disabled="picker.loading || picker.parent===null || picker.parent===picker.current" title="Eine Ebene höher" aria-label="Eine Ordnerebene höher">↑</button><nav class="picker-breadcrumbs" aria-label="Ordnerpfad"><template x-for="(crumb, crumbIndex) in pickerBreadcrumbs()" :key="crumb.path"><span class="picker-crumb"><button type="button" @click="loadPicker(crumb.path)" :disabled="picker.loading || crumb.path===picker.current" :aria-current="crumb.path===picker.current ? 'location' : null" x-text="crumb.label"></button><span x-show="crumbIndex < pickerBreadcrumbs().length - 1" aria-hidden="true">/</span></span></template></nav><label class="search-field compact-search"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg></span><input x-model="picker.search" placeholder="Ordner filtern" aria-label="Ordnerliste filtern"></label></div>
-      <button type="button" class="button secondary" x-show="picker.kind==='remote' && !picker.current" @click="openRemoteSetup()">Neues Remote einbinden</button>
+      <button type="button" class="button secondary" x-show="picker.kind==='remote' && !picker.current" @click="openRemoteSetup($event.currentTarget)">Neues Remote einbinden</button>
       <div class="picker-list">
         <div class="loading-state" x-show="picker.loading" role="status" aria-live="polite">Verzeichnis wird geladen…</div>
         <div class="inline-error panel-error" x-show="!picker.loading && picker.error" role="alert"><span x-text="picker.error"></span><button class="button secondary small" @click="loadPicker(picker.current)">Erneut versuchen</button></div>

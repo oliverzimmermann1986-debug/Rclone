@@ -25,7 +25,7 @@ function app() {
 
   return {
     page: 'dashboard',
-    remoteSetup: { show: false, busy: false, name: '', provider: '', providers: [], session: null, answer: '', error: '' },
+    remoteSetup: { show: false, busy: false, name: '', provider: '', providers: [], providerQuery: '', showAllProviders: false, advanced: false, completed: '', session: null, answer: '', error: '' },
     pages: ['dashboard', 'pairs', 'definitions', 'runs', 'doctor', 'settings', 'recovery'],
     settingsTabs: ['general', 'scheduler', 'security', 'filters', 'account', 'pbs'],
     navOpen: false,
@@ -2265,37 +2265,180 @@ function app() {
       return size?.measurement_error || size?.error || '';
     },
 
-    async openRemoteSetup() {
-      this.remoteSetup = { show: true, busy: true, name: '', provider: '', providers: [], session: null, answer: '', error: '' };
+    async openRemoteSetup(opener) {
+      opener?.focus();
+      this.remoteSetup = { show: true, busy: true, name: '', provider: '', providers: [], providerQuery: '', showAllProviders: false, advanced: false, completed: '', session: null, answer: '', error: '' };
       this.openDialog('remoteSetupDialog');
       const data = await this.api('GET', '/api/remotes/providers', undefined, { captureError: true });
       this.remoteSetup.busy = false;
       if (!data || data.__error) { this.remoteSetup.error = data?.detail || 'Anbieter konnten nicht geladen werden.'; return; }
+      if (!Array.isArray(data.providers) || !data.providers.length) { this.remoteSetup.error = 'Keine Speicheranbieter verfügbar. Bitte rclone auf dem Server prüfen.'; return; }
       this.remoteSetup.providers = data.providers;
+    },
+
+    remoteProviderLabel(provider) {
+      const names = { pcloud: 'pCloud', drive: 'Google Drive', webdav: 'WebDAV', onedrive: 'Microsoft OneDrive', s3: 'S3-kompatibler Speicher', local: 'Lokaler Ordner', crypt: 'Verschlüsseltes Remote' };
+      const label = names[provider.name] || String(provider.description || provider.name).trim().split(/\r?\n/)[0];
+      return label.length > 72 ? `${label.slice(0, 69).trimEnd()}…` : label;
+    },
+
+    remoteProviderOptions() {
+      const state = this.remoteSetup;
+      const query = state.providerQuery.trim().toLocaleLowerCase();
+      if (query) return state.providers.filter((provider) =>
+        `${this.remoteProviderLabel(provider)} ${provider.name} ${provider.description}`.toLocaleLowerCase().includes(query));
+      const preferred = state.providers.filter((provider) => ['pcloud', 'drive', 'webdav', 'onedrive'].includes(provider.name));
+      return state.showAllProviders || !preferred.length ? state.providers : preferred;
+    },
+
+    remoteOtherProviderCount() {
+      const preferred = this.remoteSetup.providers.filter((provider) => ['pcloud', 'drive', 'webdav', 'onedrive'].includes(provider.name));
+      return preferred.length ? this.remoteSetup.providers.length - preferred.length : 0;
+    },
+
+    selectedRemoteProvider() {
+      return this.remoteSetup.providers.find((provider) => provider.name === this.remoteSetup.provider);
+    },
+
+    remoteChoiceLabel(example) {
+      const value = String(example.value);
+      const common = { true: 'Ja', false: 'Nein', yes: 'Ja', no: 'Nein', other: 'Anderer Anbieter', nextcloud: 'Nextcloud', owncloud: 'ownCloud', onedrive: 'OneDrive (privat oder geschäftlich)', sharepoint: 'SharePoint', driveid: 'Laufwerk über eine Kennung', siteid: 'SharePoint über eine Kennung', search: 'SharePoint-Site suchen' };
+      if (this.remoteSetup.provider === 'pcloud' && this.remoteSetup.session?.option?.name === 'hostname') {
+        if (value === 'eapi.pcloud.com') return 'Europa (EU)';
+        if (value === 'api.pcloud.com') return 'USA / international';
+      }
+      if (this.remoteSetup.session?.option?.name === 'scope') {
+        const scopes = { drive: 'Gesamtes Laufwerk: lesen und schreiben', 'drive.readonly': 'Gesamtes Laufwerk: nur lesen', 'drive.file': 'Nur für diese Anwendung freigegebene Dateien', 'drive.appfolder': 'Nur der Anwendungsordner', 'drive.metadata.readonly': 'Nur Dateiinformationen lesen' };
+        if (scopes[value]) return scopes[value];
+      }
+      if (common[value.toLowerCase()]) return common[value.toLowerCase()];
+      return value.length > 72 ? `${value.slice(0, 69)}…` : value;
+    },
+
+    remoteStepCopy() {
+      const name = this.remoteSetup.session?.option?.name || '';
+      const steps = {
+        url: ['Serveradresse', 'Gib die vollständige Adresse deines WebDAV-Speichers ein. Du findest sie in den Einstellungen deines Speicheranbieters.', 'https://cloud.example.invalid/dav'],
+        endpoint: ['Adresse des Speichers', 'Gib die Adresse ein, die dein Speicheranbieter für diese Verbindung nennt.', 'https://'],
+        vendor: ['Servertyp', 'Wähle deinen WebDAV-Anbieter. Ist er nicht aufgeführt, wähle „Anderer Anbieter“.'],
+        user: ['Benutzername', 'Gib den Benutzernamen für diesen Speicher ein.'],
+        username: ['Benutzername', 'Gib den Benutzernamen für diesen Speicher ein.'],
+        pass: ['Passwort', 'Verwende das Passwort oder App-Passwort für diesen Speicher.'],
+        password: ['Passwort', 'Verwende das Passwort oder App-Passwort für diesen Speicher.'],
+        client_id: ['Eigene Anwendungs-ID', 'Falls du eine eigene Anmeldung beim Anbieter eingerichtet hast, trage deren Client-ID ein.'],
+        client_secret: ['Anwendungsschlüssel', 'Wenn du eine eigene Client-ID verwendest, gib den dazugehörigen geheimen Schlüssel ein.'],
+        config_token: ['Konto anmelden', 'Für diese Anmeldung brauchst du einmalig rclone auf einem Computer mit Browser. Folge den drei Schritten unten.'],
+        token: ['Anmeldeschlüssel', 'Füge den vom Anbieter erhaltenen Anmeldeschlüssel ein.'],
+        bearer_token: ['Zugriffsschlüssel', 'Füge den Zugriffsschlüssel ein, falls dein WebDAV-Anbieter statt Benutzername und Passwort einen solchen Schlüssel verwendet.'],
+        scope: ['Zugriffsrechte', 'Wähle, auf welche Dateien die Verbindung zugreifen darf. Nur mit Schreibzugriff kann Sicherpfad Dateien hochladen.'],
+        hostname: ['Speicherregion', 'Wähle den Standort, an dem dein Speicherkonto liegt.'],
+        region: ['Speicherregion', 'Wähle die Region, die dein Speicheranbieter für dieses Konto nennt.'],
+        config_type: ['Kontotyp', 'Wähle dein OneDrive-Konto oder die passende SharePoint-Verbindung.'],
+        config_driveid: ['Laufwerk auswählen', 'Wähle das Laufwerk, das du mit Sicherpfad verbinden möchtest.'],
+        drive_id: ['Laufwerkskennung', 'Gib die Kennung des gewünschten Laufwerks ein.'],
+        drive_type: ['Laufwerkstyp', 'Wähle den Typ deines Microsoft-Laufwerks.'],
+        config_site_url: ['SharePoint-Adresse', 'Gib die vollständige Adresse deiner SharePoint-Site ein.'],
+        config_site_search: ['SharePoint-Site suchen', 'Gib einen Teil des Namens der gewünschten Site ein.'],
+        root_folder_id: ['Startordner', 'Optional: Beschränke die Verbindung auf einen bestimmten Ordner. Ohne Angabe beginnt sie im Hauptverzeichnis.'],
+        service_account_file: ['Dienstkonto-Datei', 'Nur für die Anmeldung über ein Google-Dienstkonto: Gib den Dateipfad auf dem Server an.'],
+        config_advanced: ['Erweiterte Einstellungen', 'Sonderoptionen sind nur nötig, wenn dein Anbieter oder deine Installation sie verlangt.'],
+      };
+      let step = steps[name] || ['Weitere Anbieterangabe', 'Ergänze die erforderliche Angabe. Die technischen Hinweise des Anbieters kannst du bei Bedarf unten öffnen.'];
+      if (name === 'client_id' && this.remoteSetup.provider === 'drive') step = ['Google-Anwendungs-ID', 'Verwende die Client-ID deiner eigenen Google-OAuth-Anwendung. Der Link unten erklärt die Einrichtung.'];
+      if (name === 'hostname' && this.remoteSetup.provider === 'pcloud') step = ['pCloud-Speicherregion', 'Wähle die Region, in der dein pCloud-Konto angelegt wurde: Europa (EU) oder USA / international.'];
+      return { title: step[0], description: step[1], placeholder: step[2] || 'Hier eingeben' };
+    },
+
+    remoteHelpParts(text) {
+      const source = String(text || '');
+      const parts = [];
+      let cursor = 0;
+      for (const match of source.matchAll(/https?:\/\/[^\s<>"']+/gi)) {
+        const candidate = match[0].replace(/[),.;!?]+$/, '');
+        if (match.index > cursor) parts.push({ text: source.slice(cursor, match.index), href: '' });
+        let href = '';
+        try {
+          const url = new URL(candidate);
+          if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) href = url.href;
+        } catch (_) { /* Invalid URLs remain plain text. */ }
+        parts.push({ text: candidate, href });
+        cursor = match.index + candidate.length;
+      }
+      if (cursor < source.length) parts.push({ text: source.slice(cursor), href: '' });
+      return parts;
+    },
+
+    remoteStepLinks() {
+      const links = this.remoteHelpParts(this.remoteSetup.session?.option?.help).filter((part) => part.href);
+      if (this.remoteSetup.session?.option?.name === 'config_token') links.unshift({ href: 'https://rclone.org/downloads/', text: '' });
+      return Array.from(new Map(links.map((part) => [part.href, part])).values()).slice(0, 8).map((part) => {
+        const url = new URL(part.href);
+        const label = url.hostname === 'rclone.org'
+          ? (url.pathname.startsWith('/downloads') ? 'rclone herunterladen' : url.hash.includes('client-id') ? 'Google-Anmeldung einrichten' : 'Anleitung bei rclone öffnen')
+          : `Link öffnen (${url.hostname})`;
+        return { href: part.href, label };
+      });
+    },
+
+    remoteAuthorizationCommand() {
+      const help = this.remoteSetup.session?.option?.help || '';
+      const match = help.match(/(?:^|\n)\s*(rclone\s+authorize[^\r\n]*)/);
+      return match ? match[1].trim() : '';
+    },
+
+    async copyRemoteAuthorizationCommand(button) {
+      const command = this.remoteAuthorizationCommand();
+      if (!command) return;
+      let copied = false;
+      try {
+        if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(command); copied = true; }
+      } catch (_) { /* Local HTTP installations need the selection fallback. */ }
+      if (!copied) {
+        const previous = button || document.activeElement;
+        const buffer = document.createElement('textarea');
+        buffer.value = command;
+        buffer.readOnly = true;
+        buffer.className = 'remote-copy-buffer';
+        this.$refs.remoteSetupDialog.append(buffer);
+        try { buffer.focus(); buffer.select(); copied = document.execCommand('copy'); }
+        catch (_) { copied = false; }
+        finally { buffer.remove(); previous?.focus(); }
+      }
+      this.showToast(copied ? 'Anmeldebefehl kopiert' : 'Bitte den Befehl markieren und kopieren.', copied ? 'ok' : 'err');
+    },
+
+    remoteDefaultLabel() {
+      const option = this.remoteSetup.session?.option || {};
+      const example = option.examples?.find((item) => item.value === option.default);
+      return example ? this.remoteChoiceLabel(example) : ({ true: 'Ja', false: 'Nein' }[option.default] || option.default || '');
     },
 
     async submitRemoteSetup() {
       const state = this.remoteSetup;
-      if (state.busy) return;
+      if (state.busy || state.completed) return;
       state.busy = true;
       state.error = '';
       const session = state.session;
       const url = !session ? '/api/remotes/setup' : `/api/remotes/setup/${session.id}/${session.ready ? 'save' : 'answer'}`;
-      const body = !session ? { name: state.name.trim(), provider: state.provider }
+      const body = !session ? { name: state.name.trim(), provider: state.provider, ...(state.advanced ? { advanced: true } : {}) }
         : session.ready ? {} : { step: session.step, answer: state.answer || session.option.default || '' };
       const result = await this.api('POST', url, body, { captureError: true, timeoutMs: 70000 });
       state.busy = false;
       if (!result || result.__error) { state.error = result?.detail || 'Einrichtung fehlgeschlagen. Bitte erneut versuchen.'; return; }
       if (session?.ready) {
+        state.completed = result.name || session.name;
         state.session = null;
-        await this.closeRemoteSetup();
-        this.showToast(`Remote ${result.name} ist angelegt.`, 'ok');
+        state.answer = '';
+        this.$nextTick(() => window.requestAnimationFrame(() => this.$refs.remoteDone?.focus()));
         if (this.picker.show && this.picker.kind === 'remote') await this.loadPicker('');
       } else {
         state.session = result;
-        state.answer = '';
+        state.answer = result.option?.exclusive ? result.option.default || '' : '';
         state.error = result.error || '';
-        this.$nextTick(() => this.$refs.remoteAnswer?.focus());
+        this.$nextTick(() => {
+          const answer = this.$refs.remoteAnswer;
+          (answer?.querySelector('input:checked') || answer?.querySelector('input:not(:disabled)') || answer)?.focus();
+        });
       }
     },
 

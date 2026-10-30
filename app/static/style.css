@@ -2356,6 +2356,56 @@ html[data-density="compact"] .job-row { min-height: 54px; }
   font-size: 12px;
 }
 .remote-setup-help {
+  margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.remote-setup-dialog { min-width: 0; }
+.remote-setup-dialog .modal-head, .remote-setup-dialog .modal-footer { flex-shrink: 0; }
+.remote-setup-dialog .modal-content { min-width: 0; min-height: 0; overscroll-behavior: contain; }
+.remote-setup-intro { margin: 0 0 18px; color: var(--text-soft); }
+.remote-setup-fields { display: grid; min-width: 0; gap: 18px; }
+.remote-provider-picker, .remote-answer-choices { min-width: 0; margin: 0; padding: 0; border: 0; }
+.remote-provider-picker > legend, .remote-answer-choices > legend { max-width: 100%; margin-bottom: 10px; padding: 0; font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+.remote-provider-search { margin-bottom: 10px; }
+.remote-provider-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: min(36vh, 280px); gap: 8px; overflow-y: auto; padding: 3px; margin: -3px; overscroll-behavior: contain; }
+.remote-provider-choice, .remote-answer-choice { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); cursor: pointer; overflow-wrap: anywhere; }
+.remote-provider-choice { min-height: 50px; font-size: 13px; font-weight: 550; }
+.remote-provider-choice input, .remote-answer-choice input { flex: 0 0 16px; margin: 0; padding: 0; }
+.remote-provider-choice > span, .remote-answer-choice > span { min-width: 0; }
+.remote-provider-choice:hover, .remote-answer-choice:hover { border-color: var(--text-faint); background: var(--surface-2); }
+.remote-provider-choice.selected, .remote-answer-choice.selected { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 5%, var(--surface)); }
+.remote-provider-choice:focus-within, .remote-answer-choice:focus-within { outline: 2px solid var(--primary); outline-offset: 1px; }
+.remote-provider-picker:disabled label, .remote-answer-choices:disabled label { cursor: wait; opacity: .6; }
+.remote-provider-more { display: block; min-height: 40px; margin-top: 8px; padding: 6px 0; border: 0; background: transparent; color: var(--text-soft); font: inherit; font-size: 12px; text-align: left; text-decoration: underline; text-underline-offset: 3px; }
+.remote-provider-more:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.remote-provider-empty, .remote-provider-selection, .remote-setup-default, .remote-setup-language { color: var(--text-soft); font-size: 12px; overflow-wrap: anywhere; }
+.remote-provider-empty { margin: 12px 0 0; }
+.remote-provider-details { margin-top: 12px; color: var(--text-soft); font-size: 12px; }
+.remote-provider-details summary { cursor: pointer; }
+.remote-provider-details .remote-setup-help { margin-top: 8px; }
+.remote-setup-context { display: flex; min-width: 0; flex-wrap: wrap; gap: 6px 14px; margin: 0; overflow-wrap: anywhere; }
+.remote-setup-context > span { color: var(--text-soft); }
+.remote-answer-options { display: grid; max-height: min(40vh, 320px); gap: 8px; overflow-y: auto; padding: 3px; margin: -3px; overscroll-behavior: contain; }
+.remote-answer-choice { align-items: flex-start; }
+.remote-answer-choice input { margin-top: 3px; }
+.remote-answer-choice strong, .remote-answer-choice small { display: block; }
+.remote-answer-choice strong { font-size: 13px; }
+.remote-answer-choice small { margin-top: 4px; color: var(--text-soft); font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.remote-setup-default { margin: 0; }
+.remote-advanced { margin: 0; color: var(--text-soft); }
+.remote-step-links { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; }
+.remote-step-links a, .remote-original-help a { text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; }
+.remote-original-help { min-width: 0; padding-top: 12px; border-top: 1px solid var(--border); color: var(--text-soft); font-size: 12px; }
+.remote-original-help summary { cursor: pointer; }
+.remote-original-help .remote-setup-help { margin-top: 12px; }
+.remote-login-steps { display: grid; gap: 14px; margin: 0; padding-left: 22px; line-height: 1.6; }
+.remote-authorize-command { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.remote-authorize-command code { min-width: 0; flex: 1 1 220px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+.remote-copy-buffer { position: fixed; width: 1px; height: 1px; min-height: 0; opacity: 0; }
+.remote-setup-review h4, .remote-setup-success h4 { margin: 0 0 10px; font-size: 18px; }
+.remote-setup-review p, .remote-setup-success p { color: var(--text-soft); line-height: 1.6; overflow-wrap: anywhere; }
+.remote-setup-success { border-left: 3px solid var(--ok); padding-left: 16px; }
+@media (max-width: 480px) {
+  .remote-provider-options { grid-template-columns: minmax(0, 1fr); max-height: min(32dvh, 260px); }
 }
