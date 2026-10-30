@@ -2296,6 +2296,10 @@ function app() {
       return preferred.length ? this.remoteSetup.providers.length - preferred.length : 0;
     },
 
+    remoteProviderToggleLabel() {
+      return this.remoteSetup.showAllProviders ? 'Häufige Anbieter anzeigen' : `Weitere Anbieter anzeigen (${this.remoteOtherProviderCount()})`;
+    },
+
     selectedRemoteProvider() {
       return this.remoteSetup.providers.find((provider) => provider.name === this.remoteSetup.provider);
     },
@@ -2429,7 +2433,7 @@ function app() {
         state.completed = result.name || session.name;
         state.session = null;
         state.answer = '';
-        this.$nextTick(() => window.requestAnimationFrame(() => this.$refs.remoteDone?.focus()));
+        this.$nextTick(() => this.$refs.remoteDone?.focus());
         if (this.picker.show && this.picker.kind === 'remote') await this.loadPicker('');
       } else {
         state.session = result;

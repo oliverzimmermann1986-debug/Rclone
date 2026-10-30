@@ -298,7 +298,12 @@ test('rapid repeated confirmation starts one plan write and locks editing until 
   });
   const save = await previewTwiceWeekly(section);
   await save.click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Prüfplan übernehmen', exact: true }).dblclick();
+  // Keep both confirmations on this control. A coordinate double-tap can hit
+  // the mobile navigation after the first click has already closed the dialog.
+  await page.getByRole('dialog').getByRole('button', { name: 'Prüfplan übernehmen', exact: true }).evaluate((button) => {
+    button.click();
+    button.click();
+  });
   await started.promise;
   await expect(section.getByRole('button', { name: 'Speichert…', exact: true })).toBeDisabled();
   await expect(section.getByLabel('Rhythmus')).toBeDisabled();

@@ -1086,7 +1086,7 @@
               <template x-for="provider in remoteProviderOptions()" :key="provider.name"><label class="remote-provider-choice" :class="remoteSetup.provider === provider.name && 'selected'"><input type="radio" name="remote-provider" x-model="remoteSetup.provider" :value="provider.name" required :disabled="remoteSetup.busy"><span x-text="remoteProviderLabel(provider)"></span></label></template>
             </div>
             <p class="remote-provider-empty" role="status" x-show="!remoteSetup.busy && remoteSetup.providers.length && !remoteProviderOptions().length">Kein passender Anbieter. Versuche einen anderen Suchbegriff.</p>
-            <button type="button" class="remote-provider-more" x-show="!remoteSetup.providerQuery.trim() && remoteOtherProviderCount()" @click="remoteSetup.showAllProviders = !remoteSetup.showAllProviders" :aria-expanded="remoteSetup.showAllProviders" aria-controls="remote-provider-options" x-text="remoteSetup.showAllProviders ? 'Häufige Anbieter anzeigen' : 'Weitere Anbieter anzeigen (' + remoteOtherProviderCount() + ')'"></button>
+            <button type="button" class="remote-provider-more" x-show="!remoteSetup.providerQuery.trim() && remoteOtherProviderCount()" @click="remoteSetup.showAllProviders = !remoteSetup.showAllProviders" :aria-expanded="remoteSetup.showAllProviders" aria-controls="remote-provider-options" x-text="remoteProviderToggleLabel()"></button>
             <p class="remote-provider-selection" x-show="selectedRemoteProvider() && !remoteProviderOptions().some(provider => provider.name === remoteSetup.provider)" aria-live="polite">Ausgewählt: <strong x-text="selectedRemoteProvider() ? remoteProviderLabel(selectedRemoteProvider()) : ''"></strong></p>
             <template x-if="selectedRemoteProvider()?.description?.length > 72"><details class="remote-provider-details"><summary>Anbieterhinweise</summary><p class="remote-setup-help" x-text="selectedRemoteProvider().description"></p></details></template>
           </fieldset>
@@ -1120,7 +1120,7 @@
         <p class="inline-error" role="alert" x-show="remoteSetup.error" x-text="remoteSetup.error"></p>
         <p x-show="remoteSetup.busy" role="status">Einrichtung wird verarbeitet…</p>
       </div>
-      <div class="modal-footer"><button type="button" class="button secondary" x-show="!remoteSetup.completed" @click="closeRemoteSetup()" :disabled="remoteSetup.busy">Abbrechen</button><button type="submit" class="button primary" x-show="!remoteSetup.completed" :disabled="remoteSetup.busy || (!remoteSetup.session && (!remoteSetup.provider || !remoteSetup.name.trim()))" x-text="remoteSetup.session?.ready ? 'Remote speichern' : 'Weiter'"></button><button type="button" class="button primary" x-ref="remoteDone" x-show="remoteSetup.completed" @click="closeRemoteSetup()">Fertig</button></div>
+      <div class="modal-footer"><button type="button" class="button secondary" x-show="!remoteSetup.completed" @click="closeRemoteSetup()" :disabled="remoteSetup.busy">Abbrechen</button><button type="submit" class="button primary" x-show="!remoteSetup.completed" :disabled="remoteSetup.busy || (!remoteSetup.session && (!remoteSetup.provider || !remoteSetup.name.trim()))" x-text="remoteSetup.session?.ready ? 'Remote speichern' : 'Weiter'"></button><template x-if="remoteSetup.completed"><button type="button" class="button primary" x-ref="remoteDone" @click="closeRemoteSetup()">Fertig</button></template></div>
     </form>
   </div>
 
