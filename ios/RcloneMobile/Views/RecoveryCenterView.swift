@@ -2,7 +2,6 @@ import SwiftUI
 
 struct RecoveryCenterView: View {
     @EnvironmentObject private var model: AppModel
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var recoveryPass: RecoveryPassResponse?
     @State private var calendar: RecoveryCalendarResponse?
     @State private var policies: [RecoveryPolicyProfile] = []
@@ -23,7 +22,14 @@ struct RecoveryCenterView: View {
                     }
                 }
             }
-            recoveryTasks
+            Section {
+                NavigationLink { RecoveryStagingView() } label: {
+                    Label("Zurückgeholte Dateien & Staging", systemImage: "folder.badge.gearshape")
+                }
+                NavigationLink { RecoveryRescueView() } label: {
+                    Label("Nach Serververlust zurückholen", systemImage: "lifepreserver")
+                }
+            }
             if let recoveryPass {
                 protectionHeader(recoveryPass)
                 if recoveryPass.quarantine.active > 0 {
@@ -53,10 +59,7 @@ struct RecoveryCenterView: View {
         .navigationTitle("Wiederherstellen")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await load() }
-        .task(id: model.serverAddress + "\0" + model.savedUsername) {
-            resetForCurrentAccount()
-            await load()
-        }
+        .task { await load() }
         .onChange(of: model.activeRestoreTestPairs) { previous, current in
             if !previous.isEmpty, current.isEmpty {
                 Task { await load() }
@@ -67,54 +70,10 @@ struct RecoveryCenterView: View {
         }
     }
 
-    private var recoveryTasks: some View {
-        Section("Was möchtest du tun?") {
-            NavigationLink {
-                RecoveryTaskPathPicker(paths: recoveryPass?.dataPaths ?? [], task: .files)
-            } label: {
-                recoveryTaskLabel("Dateien zurückholen", detail: "Ausgewählte Dateien getrennt wiederherstellen", symbol: "folder.badge.plus")
-            }
-            .disabled(recoveryPass == nil)
-            .accessibilityIdentifier("recoverFilesLink")
-            NavigationLink {
-                RecoveryTaskPathPicker(paths: recoveryPass?.dataPaths ?? [], task: .proof)
-            } label: {
-                recoveryTaskLabel("Wiederherstellbarkeit prüfen", detail: "Eine Stichprobe zurückholen und verifizieren", symbol: "arrow.counterclockwise.circle")
-            }
-            .disabled(recoveryPass == nil)
-            .accessibilityIdentifier("verifyRestoreLink")
-            NavigationLink { RecoveryStagingView() } label: {
-                recoveryTaskLabel("Zurückgeholte Dateien & Staging", detail: "Ergebnis, Prüfstatus und Ablageort ansehen", symbol: "folder.badge.gearshape")
-            }
-            .accessibilityIdentifier("recoveryStagingLink")
-            NavigationLink { RecoveryRescueView() } label: {
-                recoveryTaskLabel("Server ausgefallen", detail: "Mit deiner Notfallakte weiterarbeiten", symbol: "lifepreserver")
-            }
-            .accessibilityIdentifier("serverLossLink")
-            NavigationLink { RestorePlanView() } label: {
-                recoveryTaskLabel("Restore-Prüfplan", detail: "Termine und Nachweisablauf gemeinsam planen", symbol: "calendar.badge.clock")
-            }
-            .accessibilityIdentifier("restorePlanLink")
-        }
-    }
-
-    private func recoveryTaskLabel(_ title: String, detail: String, symbol: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: symbol).font(.title3).foregroundStyle(.green).frame(width: 28)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.body.weight(.semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
-    }
-
     private func protectionHeader(_ pass: RecoveryPassResponse) -> some View {
         Section {
             VStack(alignment: .leading, spacing: 16) {
-                AdaptiveMetricGroup(spacing: 14) {
+                HStack(spacing: 14) {
                     ZStack {
                         Circle().fill(scoreColor(pass.protection.score).opacity(0.14))
                         Image(systemName: "lifepreserver.fill")
@@ -127,26 +86,22 @@ struct RecoveryCenterView: View {
                         Text("\(pass.hostname) · \(AppFormat.relative(pass.generatedAt))")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    if !dynamicTypeSize.isAccessibilitySize { Spacer() }
+                    Spacer()
                     Text("\(pass.protection.score)")
                         .font(.title.monospacedDigit().bold())
                 }
                 ProgressView(value: Double(pass.protection.score), total: 100)
                     .tint(scoreColor(pass.protection.score))
-                AdaptiveMetricGroup {
+                HStack(spacing: 0) {
                     ForEach(pass.protection.components) { component in
-                        let layout = dynamicTypeSize.isAccessibilitySize
-                            ? AnyLayout(HStackLayout(alignment: .center, spacing: 10))
-                            : AnyLayout(VStackLayout(alignment: .center, spacing: 2))
-                        layout {
+                        VStack(spacing: 2) {
                             Text("\(component.points)/\(component.maximum)")
                                 .font(.caption.monospacedDigit().weight(.semibold))
                             Text(componentLabel(component.key))
                                 .font(.caption2).foregroundStyle(.secondary)
+                                .lineLimit(1).minimumScaleFactor(0.65)
                         }
-                        .frame(maxWidth: .infinity, alignment: dynamicTypeSize.isAccessibilitySize ? .leading : .center)
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("\(componentLabel(component.key)): \(component.points) von \(component.maximum) Punkten")
+                        .frame(maxWidth: .infinity)
                     }
                 }
             }
@@ -195,7 +150,7 @@ struct RecoveryCenterView: View {
                                 }
                             }
                             .accessibilityElement(children: .ignore)
-                            .accessibilityLabel(day.accessibilitySummary)
+                            .accessibilityLabel("\(day.date), \(day.failed > 0 ? "Fehler" : day.successful > 0 ? "erfolgreich" : "kein Lauf")")
                         }
                     }
                     .padding(.vertical, 4)
@@ -270,15 +225,6 @@ struct RecoveryCenterView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
-    }
-
-    private func resetForCurrentAccount() {
-        loadID = UUID()
-        recoveryPass = nil
-        calendar = nil
-        policies = []
-        exportURL = nil
-        errorMessage = nil
     }
 
     private func load() async {
@@ -421,40 +367,6 @@ struct RecoveryCenterView: View {
     }
 }
 
-private enum RecoveryTask: Equatable {
-    case files, proof
-
-    var title: String { self == .files ? "Dateien zurückholen" : "Wiederherstellbarkeit prüfen" }
-}
-
-private struct RecoveryTaskPathPicker: View {
-    let paths: [RecoveryDataPath]
-    let task: RecoveryTask
-
-    var body: some View {
-        List {
-            if paths.isEmpty {
-                ContentUnavailableView("Keine Datenwege", systemImage: "point.3.connected.trianglepath.dotted",
-                                       description: Text("Lege zuerst einen Datenweg unter Sichern an."))
-            } else {
-                Section("Datenweg auswählen") {
-                    ForEach(paths) { path in
-                        if task == .files {
-                            NavigationLink { SelectiveRecoveryBrowser(dataPath: path) } label: { RecoveryPathRow(path: path) }
-                                .accessibilityIdentifier("recoveryPath-\(path.name)")
-                        } else {
-                            NavigationLink { RecoveryDataPathDetail(dataPath: path) } label: { RecoveryPathRow(path: path) }
-                                .accessibilityIdentifier("recoveryPath-\(path.name)")
-                        }
-                    }
-                }
-            }
-        }
-        .navigationTitle(task.title)
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
 private struct RecoveryPathRow: View {
     @EnvironmentObject private var model: AppModel
     let path: RecoveryDataPath
@@ -500,6 +412,8 @@ private struct RecoveryPathRow: View {
 private struct RecoveryDataPathDetail: View {
     @EnvironmentObject private var model: AppModel
     let dataPath: RecoveryDataPath
+    @State private var confirmDrill = false
+    @State private var isStarting = false
 
     var body: some View {
         List {
@@ -549,14 +463,28 @@ private struct RecoveryDataPathDetail: View {
                     drillStep(3, "Mit Prüfsummen gegen die Quelle bestätigen")
                     drillStep(4, "Temp-Daten automatisch vollständig löschen")
                 }
-                RestoreTestActionButton(pairName: dataPath.name, title: "Stichprobe prüfen")
-                    .disabled(!dataPath.enabled)
+                Button { confirmDrill = true } label: {
+                    if isRestoreTesting {
+                        Label("Notfallübung läuft …", systemImage: "hourglass")
+                    } else {
+                        Label("Notfallübung starten", systemImage: "figure.run.circle")
+                    }
+                }
+                .disabled(isRestoreTesting || model.isDemoMode)
             } header: {
                 Text("Geführte Notfallübung")
             } footer: {
                 Text("Die Übung verändert keine Produktivdaten. Cloud-Anbieter können für das Rückholen Egress berechnen.")
             }
             Section {
+                NavigationLink { TimeTravelBrowserView(identity: dataPath.identity, pairName: dataPath.name) } label: {
+                    Label("Interaktiver Zeitreise-Browser", systemImage: "clock.badge.checkmark")
+                }
+                if dataPath.direction == "bisync" {
+                    NavigationLink { ConflictResolutionView(pairName: dataPath.name) } label: {
+                        Label("Bisync-Konflikte auflösen", systemImage: "arrow.triangle.branch")
+                    }
+                }
                 NavigationLink { RecoveryTimelineView(dataPath: dataPath) } label: {
                     Label("Recovery-Zeitreise", systemImage: "clock.arrow.circlepath")
                 }
@@ -571,6 +499,10 @@ private struct RecoveryDataPathDetail: View {
         }
         .navigationTitle(dataPath.name)
         .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog("Notfallübung für \(dataPath.name) starten?", isPresented: $confirmDrill) {
+            Button("Übung starten") { Task { await startDrill() } }
+            Button("Abbrechen", role: .cancel) {}
+        }
     }
 
     private func drillStep(_ number: Int, _ text: String) -> some View {
@@ -580,8 +512,15 @@ private struct RecoveryDataPathDetail: View {
         }
     }
 
+    private func startDrill() async {
+        isStarting = true
+        defer { isStarting = false }
+        let ok = await model.runRestoreTest(pair: dataPath.name)
+        if ok { model.actionMessage = "Notfallübung läuft. RPO und RTO werden nach Abschluss im Recovery-Pass aktualisiert." }
+    }
+
     private var isRestoreTesting: Bool {
-        model.isRestoreTestRunning(for: dataPath.name)
+        isStarting || model.isRestoreTestRunning(for: dataPath.name)
     }
 }
 
@@ -644,9 +583,13 @@ private struct SelectiveRecoveryBrowser: View {
     let dataPath: RecoveryDataPath
     let pointID: String
     let pointLabel: String
-    @StateObject private var browser = RecoveryBrowserLoadState()
+    @State private var path = ""
+    @State private var items: [RecoveryBrowseItem] = []
+    @State private var selection: Set<String> = []
+    @State private var isLoading = false
     @State private var confirmRestore = false
     @State private var requestLimitMB = 512
+    @State private var errorMessage: String?
 
     init(
         dataPath: RecoveryDataPath,
@@ -665,48 +608,47 @@ private struct SelectiveRecoveryBrowser: View {
                     .font(.subheadline).foregroundStyle(.green)
                 LabeledContent("Stand", value: pointLabel)
                 Stepper("Limit dieser Anfrage: \(requestLimitMB) MB", value: $requestLimitMB, in: 512...51200, step: 512)
-                if !browser.path.isEmpty {
+                if !path.isEmpty {
                     Button { navigateUp() } label: { Label("Übergeordnet", systemImage: "arrow.up") }
                 }
             }
-            Section(browser.path.isEmpty ? "Sicherungsziel" : browser.path) {
-                if browser.isLoading {
+            Section(path.isEmpty ? "Sicherungsziel" : path) {
+                if isLoading {
                     ProgressView()
                 } else {
-                    ForEach(browser.items) { item in
+                    ForEach(items) { item in
                         if item.isDirectory {
-                            Button { Task { await load(path: item.path) } } label: {
+                            Button { path = item.path; Task { await load() } } label: {
                                 Label(item.name, systemImage: "folder.fill")
                             }
                             .foregroundStyle(.primary)
                         } else {
-                            Button { browser.toggle(item.path) } label: {
+                            Button { toggle(item.path) } label: {
                                 HStack {
                                     Label(item.name, systemImage: "doc")
                                     Spacer()
                                     if let size = item.size { Text(AppFormat.bytes(size)).font(.caption).foregroundStyle(.secondary) }
-                                    Image(systemName: browser.selection.contains(item.path) ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(browser.selection.contains(item.path) ? .green : .secondary)
+                                    Image(systemName: selection.contains(item.path) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(selection.contains(item.path) ? .green : .secondary)
                                 }
                             }
                             .foregroundStyle(.primary)
-                            .accessibilityIdentifier("recoveryFile-\(item.path)")
                         }
                     }
                 }
             }
-            if let errorMessage = browser.errorMessage { Text(errorMessage).foregroundStyle(.red) }
+            if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
         }
         .navigationTitle(pointID == "current" ? dataPath.name : "Zeitreise")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Wiederherstellen") { confirmRestore = true }
-                    .disabled(!browser.canStartRestore)
+                    .disabled(selection.isEmpty)
             }
         }
-        .task { await load(path: browser.path) }
-        .confirmationDialog("\(browser.selection.count) Datei(en) ins Recovery-Staging holen?", isPresented: $confirmRestore) {
+        .task { await load() }
+        .confirmationDialog("\(selection.count) Datei(en) ins Recovery-Staging holen?", isPresented: $confirmRestore) {
             Button("Getrennt wiederherstellen") { Task { await restore() } }
             Button("Abbrechen", role: .cancel) {}
         } message: {
@@ -714,53 +656,59 @@ private struct SelectiveRecoveryBrowser: View {
         }
     }
 
-    private func load(path: String) async {
-        confirmRestore = false
-        await browser.load(path: path) { requestedPath in
-            if model.isDemoMode {
-                return [
-                    RecoveryBrowseItem(name: "Dokumente", path: "Dokumente", isDirectory: true, size: nil, modifiedAt: nil),
-                    RecoveryBrowseItem(name: "Beispiel.pdf", path: "Beispiel.pdf", isDirectory: false, size: 245_760, modifiedAt: nil)
-                ]
-            }
+    private func load() async {
+        if model.isDemoMode {
+            items = [
+                RecoveryBrowseItem(name: "Dokumente", path: "Dokumente", isDirectory: true, size: nil, modifiedAt: nil),
+                RecoveryBrowseItem(name: "Beispiel.pdf", path: "Beispiel.pdf", isDirectory: false, size: 245_760, modifiedAt: nil)
+            ]
+            return
+        }
+        isLoading = true
+        defer { isLoading = false }
+        do {
             if pointID == "current" {
-                return try await model.withCurrentClient {
-                    try await $0.browseRecovery(identity: dataPath.name, path: requestedPath)
+                items = try await model.withCurrentClient {
+                    try await $0.browseRecovery(identity: dataPath.name, path: path)
                 }.items
             } else {
-                return try await model.withCurrentClient {
+                items = try await model.withCurrentClient {
                     try await $0.browseRecoveryPoint(
                         identity: dataPath.name,
                         pointID: pointID,
-                        path: requestedPath
+                        path: path
                     )
                 }.items
             }
-        }
+            errorMessage = nil
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    private func toggle(_ value: String) {
+        if selection.contains(value) { selection.remove(value) } else if selection.count < 100 { selection.insert(value) }
     }
 
     private func navigateUp() {
-        let parent = browser.path.split(separator: "/").dropLast().joined(separator: "/")
-        Task { await load(path: parent) }
+        path = path.split(separator: "/").dropLast().joined(separator: "/")
+        Task { await load() }
     }
 
     private func restore() async {
         guard !model.isDemoMode else { return }
-        let response = await browser.restore { capturedPaths in
-            try await model.withCurrentClient {
+        do {
+            let response = try await model.withCurrentClient {
                 try await $0.startSelectiveRestore(
                     SelectiveRestoreRequest(
                         identity: dataPath.name,
-                        paths: capturedPaths,
+                        paths: selection.sorted(),
                         maxTotalMB: requestLimitMB,
                         pointID: pointID
                     )
                 )
             }
-        }
-        if let response {
             model.actionMessage = "Recovery #\(response.jobID) läuft. Das geprüfte Ergebnis erscheint unter Läufe."
-        }
+            selection.removeAll()
+        } catch { errorMessage = error.localizedDescription }
     }
 }
 

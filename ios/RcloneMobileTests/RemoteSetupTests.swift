@@ -4,13 +4,15 @@ import XCTest
 
 final class RemoteSetupTests: XCTestCase {
     func testQuestionDecodesDefaultAndSensitiveInput() throws {
-        let data = Data(#"{"id":"draft","name":"cloud","step":2,"ready":false,"error":"","option":{"name":"config_token","help":"rclone authorize drive","secret":true,"required":true,"default":"","exclusive":false,"examples":[]}}"#.utf8)
+        let data = Data(#"{"id":"draft","name":"cloud","step":2,"ready":false,"error":"","option":{"name":"config_token","label_de":"Google-Anmeldung","help":"rclone authorize drive","hint_de":"Im Browser anmelden","auth_url":"http://127.0.0.1:53682/auth?state=abc","direct_auth_url":"https://accounts.google.com/o/oauth2/auth?state=abc","authorize_command":"rclone authorize \"drive\"","secret":true,"required":true,"default":"","exclusive":false,"examples":[]}}"#.utf8)
         let question = try JSONDecoder().decode(RemoteSetupSession.self, from: data)
         XCTAssertFalse(question.ready)
         XCTAssertEqual(question.step, 2)
         XCTAssertTrue(question.option.secret)
         XCTAssertTrue(question.option.required)
         XCTAssertEqual(question.option.defaultValue, "")
+        XCTAssertEqual(question.option.directAuthUrl, "https://accounts.google.com/o/oauth2/auth?state=abc")
+        XCTAssertEqual(question.option.labelDe, "Google-Anmeldung")
     }
 
     func testAnswerPreservesOAuthTokenAndStepWithoutExtraFields() throws {

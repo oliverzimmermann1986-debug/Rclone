@@ -28,6 +28,13 @@ def test_production_static_mount_has_an_explicit_complete_allowlist():
     assert main.STATIC_ASSET_ALLOWLIST == {
         "alpine.min.js",
         "app.js",
+        "app-core.js",
+        "app-dashboard.js",
+        "app-pairs.js",
+        "app-jobs.js",
+        "app-system.js",
+        "app-recovery.js",
+        "app-settings.js",
         "ui-helpers.js",
         "style.css",
         "workspace.js",
@@ -42,6 +49,34 @@ def test_production_static_mount_has_an_explicit_complete_allowlist():
     assert all((main.STATIC_DIR / name).is_file() for name in mounted.allowed_files)
     assert "index.html" not in mounted.allowed_files
     assert "login.html" not in mounted.allowed_files
+
+
+def test_static_cache_keeps_versioned_assets_and_revalidates_module_imports(
+    tmp_path: Path, monkeypatch
+):
+    import yaml
+
+    from app import config_store
+    from app.config_store import Config
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        yaml.safe_dump({"web": {"allowed_hosts": ["testserver"]}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(config_store, "_config", Config(config))
+    client = TestClient(main.app)
+
+    versioned = client.get("/static/app.js?v=2.4.0-abc")
+    assert versioned.status_code == 200
+    assert versioned.headers["cache-control"] == "public, max-age=86400"
+    # Per import geladene Module tragen kein ?v= und müssen nach Updates revalidiert werden.
+    module = client.get("/static/app-core.js")
+    assert module.status_code == 200
+    assert module.headers["cache-control"] == "no-cache"
+    revalidated = client.get(
+        "/static/app-core.js", headers={"If-None-Match": module.headers["etag"]}
+    )
+    assert revalidated.status_code == 304
 
 
 @pytest.fixture

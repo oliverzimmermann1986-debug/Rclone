@@ -152,7 +152,9 @@ def test_ci_covers_supported_python_dependencies_ui_and_systemd_units():
     assert re.search(r"actions/setup-python@[a-f0-9]{40}\b", workflow)
     assert "-r requirements-dev.txt" in workflow
     assert "python -m pip check" in workflow
-    assert "node --check app/static/app.js" in workflow
+    # ES-Module werden im Modulmodus geprüft (app.js und alle app-*.js).
+    assert "node --input-type=module --check" in workflow
+    assert "app/static/app-*.js" in workflow
     for unit in (
         "rclone-sync-web.service",
         "rclone-sync.service",

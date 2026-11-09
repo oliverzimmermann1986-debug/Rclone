@@ -176,9 +176,6 @@ protocol APIClientProtocol: AnyObject {
     func getRecoveryPass(includePaths: Bool) async throws -> RecoveryPassResponse
     func getRecoveryCalendar(days: Int) async throws -> RecoveryCalendarResponse
     func getRecoveryPolicies() async throws -> RecoveryPoliciesResponse
-    func getRestorePlan() async throws -> RestorePlanResponse
-    func previewRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse
-    func saveRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse
     func getRecoveryQuarantine() async throws -> RecoveryQuarantineResponse
     func browseRecovery(identity: String, path: String) async throws -> RecoveryBrowseResponse
     func startSelectiveRestore(_ request: SelectiveRestoreRequest) async throws -> SelectiveRestoreResponse
@@ -198,6 +195,23 @@ protocol APIClientProtocol: AnyObject {
     func getVaultUpload(uploadID: String) async throws -> VaultUploadStatus
     func getVaultLibrary(identity: String?) async throws -> VaultLibraryResponse
     func downloadVaultItem(id: String, filename: String) async throws -> URL
+    func getLockdownStatus() async throws -> LockdownStatusResponse
+    func activateLockdown(password: String, reason: String) async throws -> LockdownActivationResponse
+    func releaseLockdown(password: String) async throws -> LockdownReleaseResponse
+    func getObjectLockReport(refresh: Bool) async throws -> ObjectLockReportResponse
+    func getBitrotScrubStatus() async throws -> BitrotScrubStatusResponse
+    func startBitrotScrub(pairs: [String]?) async throws -> ActionResponse
+    func getBootDrillStatus() async throws -> BootDrillStatusResponse
+    func startBootDrill() async throws -> BootDrillStartResponse
+    func getPairConflicts(name: String) async throws -> PairConflictsResponse
+    func resolvePairConflict(name: String, basePath: String, choice: String, password: String?) async throws -> ConflictResolveResponse
+    func getStagingDiff(recoveryID: String, path: String) async throws -> TextDiffResponse
+    func getCloudQuota(refresh: Bool) async throws -> CloudQuotaResponse
+    func getRansomwareStatus() async throws -> RansomwareStatusResponse
+    func initPairCanary(pair: String, filename: String?, currentPassword: String?) async throws -> CanaryInitResponse
+    func browseTimeTravel(identity: String, pointID: String, path: String) async throws -> TimeTravelBrowseResponse
+    func getTimeTravelHistory(identity: String, path: String) async throws -> TimeTravelHistoryResponse
+    func getTimeTravelDiff(identity: String, path: String, fromPoint: String, toPoint: String) async throws -> TextDiffResponse
     func logout() async throws -> LogoutResult
     func clearLocalSession()
     func setSessionPersistence(_ enabled: Bool)
@@ -205,6 +219,23 @@ protocol APIClientProtocol: AnyObject {
 }
 
 extension APIClientProtocol {
+    func getLockdownStatus() async throws -> LockdownStatusResponse { LockdownStatusResponse(active: false) }
+    func activateLockdown(password: String, reason: String) async throws -> LockdownActivationResponse { throw APIError.serverFeatureUnavailable(feature: "Notfall-Lockdown") }
+    func releaseLockdown(password: String) async throws -> LockdownReleaseResponse { throw APIError.serverFeatureUnavailable(feature: "Notfall-Lockdown") }
+    func getObjectLockReport(refresh: Bool) async throws -> ObjectLockReportResponse { throw APIError.serverFeatureUnavailable(feature: "S3-Object-Lock-Siegel") }
+    func getBitrotScrubStatus() async throws -> BitrotScrubStatusResponse { throw APIError.serverFeatureUnavailable(feature: "Bitrot-Scrub") }
+    func startBitrotScrub(pairs: [String]?) async throws -> ActionResponse { throw APIError.serverFeatureUnavailable(feature: "Bitrot-Scrub") }
+    func getBootDrillStatus() async throws -> BootDrillStatusResponse { throw APIError.serverFeatureUnavailable(feature: "PBS-Boot-Drill") }
+    func startBootDrill() async throws -> BootDrillStartResponse { throw APIError.serverFeatureUnavailable(feature: "PBS-Boot-Drill") }
+    func getPairConflicts(name: String) async throws -> PairConflictsResponse { throw APIError.serverFeatureUnavailable(feature: "Bisync-Konfliktauflösung") }
+    func resolvePairConflict(name: String, basePath: String, choice: String, password: String?) async throws -> ConflictResolveResponse { throw APIError.serverFeatureUnavailable(feature: "Bisync-Konfliktauflösung") }
+    func getStagingDiff(recoveryID: String, path: String) async throws -> TextDiffResponse { throw APIError.serverFeatureUnavailable(feature: "Restore-Diff") }
+    func getCloudQuota(refresh: Bool) async throws -> CloudQuotaResponse { throw APIError.serverFeatureUnavailable(feature: "Cloud-Kontingent & Egress-Wächter") }
+    func getRansomwareStatus() async throws -> RansomwareStatusResponse { throw APIError.serverFeatureUnavailable(feature: "Ransomware-Früherkennung") }
+    func initPairCanary(pair: String, filename: String?, currentPassword: String?) async throws -> CanaryInitResponse { throw APIError.serverFeatureUnavailable(feature: "Canary-Schutz") }
+    func browseTimeTravel(identity: String, pointID: String, path: String) async throws -> TimeTravelBrowseResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitreise-Browser") }
+    func getTimeTravelHistory(identity: String, path: String) async throws -> TimeTravelHistoryResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitreise-Browser") }
+    func getTimeTravelDiff(identity: String, path: String, fromPoint: String, toPoint: String) async throws -> TextDiffResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitreise-Diff") }
     func getRecoveryStaging() async throws -> RecoveryStagingResponse { throw APIError.serverFeatureUnavailable(feature: "Recovery-Staging") }
     func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
     func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
@@ -213,15 +244,6 @@ extension APIClientProtocol {
     func answerRemoteSetup(id: String, answer: String, step: Int) async throws -> RemoteSetupSession { throw APIError.invalidResponse }
     func saveRemoteSetup(id: String) async throws -> RemoteSetupSaved { throw APIError.invalidResponse }
     func cancelRemoteSetup(id: String) async throws {}
-    func getRestorePlan() async throws -> RestorePlanResponse {
-        throw APIError.serverFeatureUnavailable(feature: "Restore-Prüfplan")
-    }
-    func previewRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse {
-        throw APIError.serverFeatureUnavailable(feature: "Restore-Prüfplan")
-    }
-    func saveRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse {
-        throw APIError.serverFeatureUnavailable(feature: "Restore-Prüfplan")
-    }
     func setSessionPersistence(_ enabled: Bool) {}
     func deferSessionPersistenceUntilAccepted() {}
     func exchangeWebAuthnToken(_ token: String, verifier: String) async throws {
@@ -736,22 +758,6 @@ final class APIClient: APIClientProtocol {
         try await get("/api/recovery/policies")
     }
 
-    func getRestorePlan() async throws -> RestorePlanResponse {
-        do {
-            return try await get("/api/recovery/restore-plan")
-        } catch APIError.server(let status, _) where status == 404 || status == 405 {
-            throw APIError.serverFeatureUnavailable(feature: "Restore-Prüfplan")
-        }
-    }
-
-    func previewRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse {
-        try await post("/api/recovery/restore-plan/preview", body: request)
-    }
-
-    func saveRestorePlan(_ request: RestorePlanUpdate) async throws -> RestorePlanResponse {
-        try await put("/api/recovery/restore-plan", body: request)
-    }
-
     func getRecoveryQuarantine() async throws -> RecoveryQuarantineResponse {
         try await get("/api/recovery/quarantine")
     }
@@ -985,6 +991,85 @@ final class APIClient: APIClientProtocol {
 
     func getMaintenanceLogs(limit: Int = 200) async throws -> MaintenanceLogsResponse {
         try await get("/api/maintenance/logs?limit=\(limit)")
+    }
+
+    func getLockdownStatus() async throws -> LockdownStatusResponse {
+        try await get("/api/lockdown")
+    }
+
+    func activateLockdown(password: String, reason: String) async throws -> LockdownActivationResponse {
+        try await post("/api/lockdown", body: ["password": password, "reason": reason], timeout: 45)
+    }
+
+    func releaseLockdown(password: String) async throws -> LockdownReleaseResponse {
+        try await post("/api/lockdown/release", body: ["password": password], timeout: 30)
+    }
+
+    func getObjectLockReport(refresh: Bool = false) async throws -> ObjectLockReportResponse {
+        try await get("/api/storage/object-lock?refresh=\(refresh ? "true" : "false")")
+    }
+
+    func getBitrotScrubStatus() async throws -> BitrotScrubStatusResponse {
+        try await get("/api/jobs/bitrot-scrub/status")
+    }
+
+    func startBitrotScrub(pairs: [String]? = nil) async throws -> ActionResponse {
+        try await post("/api/jobs/bitrot-scrub", body: BitrotScrubRunRequest(pairs: pairs), timeout: 30)
+    }
+
+    func getBootDrillStatus() async throws -> BootDrillStatusResponse {
+        try await get("/api/pbs/boot-drill/status")
+    }
+
+    func startBootDrill() async throws -> BootDrillStartResponse {
+        try await post("/api/pbs/boot-drill", timeout: 30)
+    }
+
+    func getPairConflicts(name: String) async throws -> PairConflictsResponse {
+        try await get("/api/pairs/\(Self.queryEncode(name))/conflicts")
+    }
+
+    func resolvePairConflict(name: String, basePath: String, choice: String, password: String? = nil) async throws -> ConflictResolveResponse {
+        try await post(
+            "/api/pairs/\(Self.queryEncode(name))/conflicts/resolve",
+            body: ConflictResolveRequest(basePath: basePath, choice: choice, password: password),
+            timeout: 30
+        )
+    }
+
+    func getStagingDiff(recoveryID: String, path: String) async throws -> TextDiffResponse {
+        try await get("/api/recovery/staging/\(Self.queryEncode(recoveryID))/diff?path=\(Self.queryEncode(path))")
+    }
+
+    func getCloudQuota(refresh: Bool = false) async throws -> CloudQuotaResponse {
+        try await get("/api/storage/quota?refresh=\(refresh ? "true" : "false")", timeout: 45)
+    }
+
+    func getRansomwareStatus() async throws -> RansomwareStatusResponse {
+        try await get("/api/security/ransomware-status")
+    }
+
+    func initPairCanary(pair: String, filename: String? = nil, currentPassword: String? = nil) async throws -> CanaryInitResponse {
+        try await post(
+            "/api/security/canary/\(Self.queryEncode(pair))/init",
+            body: CanaryInitRequest(filename: filename, currentPassword: currentPassword),
+            timeout: 30
+        )
+    }
+
+    func browseTimeTravel(identity: String, pointID: String, path: String = "") async throws -> TimeTravelBrowseResponse {
+        let query = "identity=\(Self.queryEncode(identity))&point_id=\(Self.queryEncode(pointID))&path=\(Self.queryEncode(path))"
+        return try await get("/api/recovery/timetravel/browse?\(query)")
+    }
+
+    func getTimeTravelHistory(identity: String, path: String) async throws -> TimeTravelHistoryResponse {
+        let query = "identity=\(Self.queryEncode(identity))&path=\(Self.queryEncode(path))"
+        return try await get("/api/recovery/timetravel/history?\(query)")
+    }
+
+    func getTimeTravelDiff(identity: String, path: String, fromPoint: String, toPoint: String = "current") async throws -> TextDiffResponse {
+        let query = "identity=\(Self.queryEncode(identity))&path=\(Self.queryEncode(path))&from_point=\(Self.queryEncode(fromPoint))&to_point=\(Self.queryEncode(toPoint))"
+        return try await get("/api/recovery/timetravel/diff?\(query)")
     }
 
     func getDatabaseStatus() async throws -> DatabaseStatus {

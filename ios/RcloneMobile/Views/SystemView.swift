@@ -45,6 +45,15 @@ struct SystemView: View {
                     NavigationLink { PushStatusView() } label: {
                         Label("Push-Mitteilungen", systemImage: "bell.badge")
                     }
+                    NavigationLink { LockdownControlView() } label: {
+                        Label("Notfall-Lockdown (Panik-Knopf)", systemImage: "hand.raised.fill")
+                    }
+                    NavigationLink { ObjectLockAndScrubView() } label: {
+                        Label("Schutzsiegel, Canary & Bitrot-Scrub", systemImage: "lock.shield")
+                    }
+                    NavigationLink { CloudQuotaAndBudgetView() } label: {
+                        Label("Cloud-Kontingent & Egress-Wächter", systemImage: "icloud.and.arrow.up")
+                    }
                     NavigationLink { WebAuthnSecurityView() } label: {
                         Label("Passkeys & Sicherheitsschlüssel", systemImage: "person.badge.key")
                     }

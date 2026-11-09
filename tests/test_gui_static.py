@@ -7,6 +7,22 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 STATIC = Path(__file__).resolve().parents[1] / "app" / "static"
+APP_MODULES = (
+    "app-core.js",
+    "app-dashboard.js",
+    "app-pairs.js",
+    "app-jobs.js",
+    "app-system.js",
+    "app-recovery.js",
+    "app-settings.js",
+)
+
+
+def _app_javascript() -> str:
+    """Einstiegsmodul app.js samt Feature-Modulen als ein Text."""
+    names = sorted(path.name for path in STATIC.glob("app*.js"))
+    assert names == sorted((*APP_MODULES, "app.js"))
+    return "\n".join((STATIC / name).read_text(encoding="utf-8") for name in names)
 
 
 def _png_dimensions(path: Path) -> tuple[int, int]:
@@ -52,13 +68,13 @@ def test_main_template_has_unique_ids_and_required_navigation():
 
 def test_template_direct_calls_exist_in_alpine_component():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
     parser = _TemplateParser()
     parser.feed(html)
 
     methods = set(
         re.findall(
-            r"^\s{4}(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^\n]*\)\s*\{",
+            r"^\s{2}(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^\n]*\)\s*\{",
             javascript,
             re.MULTILINE,
         )
@@ -90,6 +106,7 @@ def test_template_direct_calls_exist_in_alpine_component():
 def test_gui_assets_reference_current_cache_version():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     login = (STATIC / "login.html").read_text(encoding="utf-8")
+    main_source = (STATIC.parent / "main.py").read_text(encoding="utf-8")
     assert "/static/style.css?v=__APP_VERSION__" in html
     assert "/static/alpine.min.js?v=__APP_VERSION__" in html
     assert "/static/ui-helpers.js?v=__APP_VERSION__" in html
@@ -98,6 +115,21 @@ def test_gui_assets_reference_current_cache_version():
     assert "/static/workspace.css?v=__APP_VERSION__" in html
     assert html.index("/static/ui-helpers.js") < html.index("/static/app.js")
     assert html.index("/static/app.js") < html.index("/static/workspace.js")
+    # Module laufen deferred: Alpine darf erst nach app.js und workspace.js starten.
+    assert html.index("/static/workspace.js") < html.index("/static/alpine.min.js")
+    assert (
+        '<script type="module" src="/static/app.js?v=__APP_VERSION__"></script>' in html
+    )
+    assert (
+        '<script defer src="/static/workspace.js?v=__APP_VERSION__"></script>' in html
+    )
+    assert (
+        '<script defer src="/static/alpine.min.js?v=__APP_VERSION__"></script>' in html
+    )
+    assert (
+        'html = html.replace("?v=__APP_VERSION__", f"?v={asset_revision}")'
+        in main_source
+    )
     assert "Verifizierte Backup-Leitstelle" in login
     assert "Sicherpfad" in html
     assert "rclone-sync</strong>" not in html
@@ -120,7 +152,7 @@ def test_login_uses_system_theme_and_mobile_full_frame():
 
 def test_target_picker_can_switch_storage_and_create_folders():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert 'aria-label="Zieltyp auswählen"' in html
     assert "switchPickerKind('remote')" in html
@@ -134,7 +166,7 @@ def test_target_picker_can_switch_storage_and_create_folders():
 
 def test_missing_resource_metrics_never_render_as_zero_percent():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     for path in (
         "overview.data?.system?.cpu?.load_percent",
@@ -151,10 +183,10 @@ def test_missing_resource_metrics_never_render_as_zero_percent():
 
 
 def test_system_health_prioritizes_alerts_over_running_state():
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
     method = javascript[
-        javascript.index("    systemLevel() {") : javascript.index(
-            "    systemLabel() {"
+        javascript.index("\n  systemLevel() {") : javascript.index(
+            "\n  systemLabel() {"
         )
     ]
 
@@ -164,7 +196,7 @@ def test_system_health_prioritizes_alerts_over_running_state():
 
 def test_scheduler_settings_route_schedules_to_jobs_and_offer_performance_presets():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
     for text in (
         "Zeitpläne werden pro Job verwaltet",
         "Jobs öffnen",
@@ -183,10 +215,10 @@ def test_scheduler_settings_route_schedules_to_jobs_and_offer_performance_preset
 
 def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert (
-        "status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null }"
+        "status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null, bitrotscrub: null, bootdrill: null }"
         in javascript
     )
     assert "keep: { keep_last: 0, keep_daily: 7, keep_weekly: 4" in javascript
@@ -196,7 +228,10 @@ def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
     assert "this.pending.pbs || this.status?.pbs" in javascript
     assert "if (this.status?.pbs || this.pbs.status?.running)" in javascript
     assert 'value="pbs">PBS-Backup' in html
-    assert "['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs']" in javascript
+    assert (
+        "['', 'backup', 'check', 'quicksync', 'restoretest', 'pbs', 'bitrotscrub', 'bootdrill']"
+        in javascript
+    )
     assert "this.status?.restoretest" in javascript
     assert "if (this.status?.restoretest) return 'Restore-Drill'" in javascript
     assert 'class="table-scroll responsive-table-wrap"' in html
@@ -204,7 +239,7 @@ def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
 
 
 def test_gui_requests_are_latest_response_wins_and_poll_page_aware():
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert "const requestControllers = new Map()" in javascript
     assert "const requestRevisions = new Map()" in javascript
@@ -231,7 +266,7 @@ def test_gui_requests_are_latest_response_wins_and_poll_page_aware():
 
 
 def test_config_save_preserves_edits_made_while_request_is_running():
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert "configEditGeneration: 0" in javascript
     assert "const savedGeneration = this.configEditGeneration" in javascript
@@ -249,7 +284,7 @@ def test_config_save_preserves_edits_made_while_request_is_running():
 
 def test_dialog_focus_accessibility_and_loading_contracts():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
     css = (STATIC / "style.css").read_text(encoding="utf-8")
 
     assert '@keydown.tab.window="trapDialogFocus($event)"' in html
@@ -262,9 +297,15 @@ def test_dialog_focus_accessibility_and_loading_contracts():
         "pickerDialog",
         "jobDialog",
         "remoteSetupDialog",
+        "lockdownDialog",
+        "conflictDialog",
+        "preflightDialog",
+        "diffDialog",
+        "cryptDialog",
     ):
         assert f'x-ref="{ref_name}"' in html
-    assert html.count('aria-modal="true"') == 8
+        assert f"return this.$refs.{ref_name}" in javascript
+    assert html.count('aria-modal="true"') == 13
     assert "focusableElements(dialog)" in javascript
     assert "restoreDialogFocus()" in javascript
     assert "dialogFocusStack.push(document.activeElement)" in javascript
@@ -314,7 +355,7 @@ def test_dialog_focus_accessibility_and_loading_contracts():
 
 def test_confirmation_navigation_and_pair_actions_are_accessible():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert "confirm(" not in html
     assert "confirm(" not in javascript
@@ -378,7 +419,9 @@ def test_pwa_caches_only_versioned_static_allowlist_and_has_install_icon():
     assert '"sizes": "1024x1024"' in manifest
     assert '"purpose": "any"' in manifest
     assert "const CACHE_PREFIX = 'rclone-sync-static-'" in service_worker
-    assert "const CACHE_NAME = `${CACHE_PREFIX}v4`" in service_worker
+    assert "const CACHE_NAME = `${CACHE_PREFIX}v5`" in service_worker
+    for module in APP_MODULES:
+        assert f"'/static/{module}'" in service_worker
     assert "'/static/workspace.js'" in service_worker
     assert "'/static/workspace.css'" in service_worker
     assert "const STATIC_ASSETS = new Set([" in service_worker
@@ -408,7 +451,7 @@ def test_pwa_caches_only_versioned_static_allowlist_and_has_install_icon():
 
 def test_sensitive_config_save_uses_transient_password_and_strips_web_secrets():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert "result.status === 403" in javascript
     assert "requestCurrentPassword(" in javascript
@@ -424,7 +467,7 @@ def test_sensitive_config_save_uses_transient_password_and_strips_web_secrets():
 
 def test_size_recalculation_is_explicit_and_measurement_age_is_visible():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert "loadStorage(true, true)" in javascript
     assert "refresh_sizes=${refreshSizes ? 'true' : 'false'}" in javascript
@@ -435,7 +478,7 @@ def test_size_recalculation_is_explicit_and_measurement_age_is_visible():
 
 def test_storage_dashboard_distinguishes_initial_partial_and_total_failures():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert "storageState: 'loading'" in javascript
     assert "storageState = hadPairs ? 'stale' : 'failed'" in javascript
@@ -460,7 +503,7 @@ def test_storage_dashboard_distinguishes_initial_partial_and_total_failures():
 
 def test_webhook_management_is_not_exposed_in_the_user_interface():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert "settings-tab-notifications" not in html
     assert "settings-panel-notifications" not in html
@@ -473,7 +516,7 @@ def test_webhook_management_is_not_exposed_in_the_user_interface():
 
 def test_push_delivery_status_and_test_are_visible_without_webhooks():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert "Push-Mitteilungen" in html
     assert "push.status?.outbox?.pending" in html
@@ -486,7 +529,7 @@ def test_push_delivery_status_and_test_are_visible_without_webhooks():
 
 def test_failed_job_retry_is_revision_bound_and_visible_in_run_detail():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     assert "canRetryJob(jobModal.job)" in html
     assert "Job erneut starten" in html
@@ -498,7 +541,7 @@ def test_failed_job_retry_is_revision_bound_and_visible_in_run_detail():
 
 def test_canonical_jobs_ui_separates_data_paths_definitions_and_runs():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    javascript = _app_javascript()
 
     for label in ("Lagebild", "Datenwege", "Jobs", "Läufe", "System"):
         assert f"<span>{label}</span>" in html
@@ -514,3 +557,113 @@ def test_canonical_jobs_ui_separates_data_paths_definitions_and_runs():
     assert 'min="1" max="10080" x-model.number="job.retry_minutes"' in html
     for heading in ("Lokaler Ordner", "Cloud-Ordner", "Dateien", "Größe", "Messalter"):
         assert f"<th>{heading}</th>" in html
+
+
+def test_lockdown_dialog_banner_and_start_lock_are_wired():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = _app_javascript()
+
+    assert 'id="lockdown-dialog"' in html
+    assert '@click="openLockdown()"' in html
+    assert 'class="connection-alert error lockdown-banner"' in html
+    assert '@click="releaseLockdown()"' in html
+    for method in (
+        "openLockdown",
+        "triggerLockdown",
+        "releaseLockdown",
+        "loadLockdown",
+        "startBlocked",
+    ):
+        assert f"\n  {method}(" in javascript or f"\n  async {method}(" in javascript
+    assert (
+        "this.loadLockdown()"
+        in javascript.split("async refreshAll", 1)[1].split("startSseProgress", 1)[0]
+    )
+    assert (
+        "window.location = '/login'" in javascript.split("async triggerLockdown", 1)[1]
+    )
+    # Startbuttons sperren über startBlocked(); busy() bleibt reine Laufanzeige.
+    assert ':disabled="busy()' not in html
+    assert ':disabled="startBlocked()"' in html
+
+
+def test_new_job_kinds_object_lock_column_and_system_panels():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = _app_javascript()
+    workspace = (STATIC / "workspace.js").read_text(encoding="utf-8")
+
+    assert "bitrotscrub: 'Bitrot-Scrub'" in javascript
+    assert "bootdrill: 'Boot-Drill'" in javascript
+    assert 'value="bitrotscrub">Bitrot-Scrub' in html
+    assert 'value="bootdrill">Boot-Drill' in html
+    # Object Lock steht als zweites Badge in „Wiederherstellbarkeit“, keine eigene Spalte.
+    assert "<th>Unveränderlichkeit</th>" not in html
+    assert '<span class="sr-only">Unveränderlichkeit: </span>' in html
+    assert "'/api/storage/object-lock'" in javascript
+    assert 'id="vpn-heading"' in html and 'id="bitrot-heading"' in html
+    assert "Bitrot-Scrub/.test(headingText(node))" in workspace
+    assert 'x-model="vpnProbesText"' in html
+    assert "draft.backup.vpn_probes = this.vpnProbesText.split" in javascript
+
+
+def test_tags_conflicts_versions_bandwidth_preflight_diff_and_crypt_are_wired():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    javascript = _app_javascript()
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+
+    # Tags: Eingabe, Filter und Dry-Run je Tag über den pairs-Filter.
+    assert "setPairTags(pair, $event.target.value)" in html
+    assert "runBackup(true, tagPairNames())" in html
+    assert (
+        "if (this.activeTag && !(pair.tags || []).includes(this.activeTag)) return false"
+        in javascript
+    )
+    assert "&pairs=${encodeURIComponent(pairs.join(','))}" in javascript
+    # Bisync-Konflikte: nur bisync, Löschen nur mit Passwort samt 403/429-Wiederholung.
+    assert "x-show=\"pair.direction === 'bisync'\"" in html
+    for choice in ("keep_side1", "keep_side2", "keep_both"):
+        assert f"resolveConflict(group, '{choice}')" in html
+    assert "choice === 'keep_both'" in javascript
+    assert "![403, 429].includes(result.status)" in javascript
+    # Versionsordner: Override optional, Ausdünnen nur nach Vorschau.
+    assert "toggleLifecycleOverride(pair, $event.target.checked)" in html
+    assert "delete pair.versions_lifecycle" in javascript
+    assert (
+        "versionsState[pair.name]?.data?.dry_run && (versionsPurgeCount(pair.name) > 0 || versionsMergeCount(pair.name) > 0)"
+        in html
+    )
+    assert "'/api/jobs/versions/prune'" in javascript
+    # Zusammenführen je Wurzel, Ergebnis nach dem Lauf und Lockdown-Abbruch sind sichtbar.
+    assert "versionsMergeGroups(root)" in html
+    assert "(root.merged || []).filter((item) => item.ok).length" in html
+    assert "versionsState[pair.name]?.data?.aborted === 'lockdown'" in html
+    # Bandbreite: echte Tabelle mit Textalternative je Zelle.
+    assert '<table class="heatmap">' in html
+    assert '<div class="inline-error" role="alert" x-show="bandwidth.error">' in html
+    assert "this.bandwidth.error = !heatmap" in javascript
+    assert '<span class="sr-only" x-text="heatTitle(day, hour)">' in html
+    assert "applyScheduleSuggestion(item)" in html
+    assert "Zeitplan übernommen – noch speichern" in javascript
+    # Änderungsmatrix: Abwahl nur außerhalb von bisync, Start mit exclude_paths.
+    assert "openPreflight(jobModal.job)" in html
+    assert "Bei bisync keine Abwahl möglich" in html
+    assert "{ exclude_paths: this.preflightExcludes() }" in javascript
+    # Restore-Diff: Farbe plus Symbol.
+    assert "openStagingDiff(item)" in html
+    assert "Live-Datei existiert nicht (Datei wäre neu)" in html
+    for kind in ("insert", "delete", "replace"):
+        assert f".diff-{kind} .diff-mark" in css
+    # Crypt: Schlüssel nur im State, Fertig erst nach Bestätigung, nie in Toasts/Storage.
+    assert ':disabled="!crypt.saved || crypt.busy"' in html
+    crypt_code = javascript.split("async openCrypt()", 1)[1].split(
+        "openPicker(mode, idx)", 1
+    )[0]
+    assert "this.crypt = emptyCrypt()" in crypt_code
+    assert "localStorage" not in crypt_code and "sessionStorage" not in crypt_code
+    assert not re.search(r"showToast\([^)]*keys", crypt_code)
+    # Laufstatus und Dialog-Stapelung.
+    assert "if (this.status?.bitrotscrub) return 'Bitrot-Scrub'" in javascript
+    assert "if (this.status?.bootdrill) return 'Boot-Drill'" in javascript
+    assert (
+        ".modal:has(> .confirmation-dialog, > .reauth-dialog) { z-index: 110; }" in css
+    )

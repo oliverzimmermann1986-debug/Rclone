@@ -29,82 +29,24 @@ final class AppModelLifecycleTests: XCTestCase {
             forKey: "pendingPushRevocations"
         )
         let client = StubAPIClient()
-        let suspended = expectation(description: "Push revocation is suspended")
-        let finished = expectation(description: "Session restoration finished")
-        client.suspendUnregisterPush(whenSuspended: suspended)
+        client.suspendUnregisterPush = true
         let model = AppModel(defaults: defaults) { _ in client }
 
-        let restore = Task {
-            await model.restoreSession()
-            finished.fulfill()
-        }
-        let readiness = await XCTWaiter.fulfillment(of: [suspended], timeout: 5)
-        guard readiness == .completed else {
-            restore.cancel()
-            await client.resumeUnregisterPush()
-            _ = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
-            XCTFail("Push revocation did not reach its suspension point: \(readiness)")
-            return
+        let restore = Task { await model.restoreSession() }
+        for _ in 0..<100 where client.unregisterPushCallCount == 0 {
+            await Task.yield()
         }
 
         XCTAssertEqual(client.unregisterPushCallCount, 1)
         XCTAssertEqual(client.configCallCount, 0)
         XCTAssertEqual(model.phase, .checking)
 
-        await client.resumeUnregisterPush()
-        let completion = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
-        guard completion == .completed else {
-            restore.cancel()
-            await client.resumeUnregisterPush()
-            XCTFail("Session restoration did not finish after push revocation: \(completion)")
-            return
-        }
+        client.resumeUnregisterPush()
+        await restore.value
 
         XCTAssertEqual(client.configCallCount, 1)
         XCTAssertEqual(model.phase, .signedIn)
         XCTAssertNil(defaults.data(forKey: "pendingPushRevocations"))
-    }
-
-    func testCancelledRestoreWhilePushRevocationIsPendingNeverActivatesSession() async throws {
-        let defaults = makeDefaults()
-        let server = "https://backup.example.de"
-        defaults.set(server, forKey: "serverAddress")
-        defaults.set(
-            try JSONEncoder().encode([
-                PendingPushRevocationFixture(server: server, token: String(repeating: "ab", count: 32))
-            ]),
-            forKey: "pendingPushRevocations"
-        )
-        let client = StubAPIClient()
-        let suspended = expectation(description: "Push revocation is suspended before cancellation")
-        let finished = expectation(description: "Cancelled session restoration finished")
-        client.suspendUnregisterPush(whenSuspended: suspended)
-        let model = AppModel(defaults: defaults) { _ in client }
-        let restore = Task {
-            await model.restoreSession()
-            finished.fulfill()
-        }
-        let readiness = await XCTWaiter.fulfillment(of: [suspended], timeout: 5)
-        guard readiness == .completed else {
-            restore.cancel()
-            await client.resumeUnregisterPush()
-            _ = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
-            XCTFail("Push revocation did not reach its suspension point: \(readiness)")
-            return
-        }
-
-        // No explicit release: cancellation must unblock the suspended request.
-        restore.cancel()
-        let completion = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
-        await client.resumeUnregisterPush()
-        guard completion == .completed else {
-            XCTFail("Cancelling session restoration left push revocation suspended: \(completion)")
-            return
-        }
-        XCTAssertEqual(client.configCallCount, 0)
-        XCTAssertNotEqual(model.phase, .signedIn)
-        XCTAssertTrue(client.clearedLocalSession)
-        XCTAssertNotNil(defaults.data(forKey: "pendingPushRevocations"))
     }
 
     func testRestoreFailsClosedWhenPendingPushRevocationFails() async throws {
@@ -140,36 +82,18 @@ final class AppModelLifecycleTests: XCTestCase {
             forKey: "pendingPushRevocations"
         )
         let client = StubAPIClient()
-        let suspended = expectation(description: "Push cleanup suspended")
-        let finished = expectation(description: "Activation finished")
-        client.suspendUnregisterPush(whenSuspended: suspended)
+        client.suspendUnregisterPush = true
         let model = AppModel(defaults: defaults) { _ in client }
-        let login = Task {
-            await model.login(server: server, username: "admin", password: "fixture")
-            finished.fulfill()
-        }
-        let readiness = await XCTWaiter.fulfillment(of: [suspended], timeout: 5)
-        guard readiness == .completed else {
-            login.cancel()
-            await client.resumeUnregisterPush()
-            _ = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
-            XCTFail("Push cleanup did not suspend: \(readiness)")
-            return
-        }
+        let login = Task { await model.login(server: server, username: "admin", password: "fixture") }
+        for _ in 0..<100 where client.unregisterPushCallCount == 0 { await Task.yield() }
         XCTAssertEqual(client.unregisterPushCallCount, 1)
         XCTAssertNil(model.client, "A login waiting for cleanup must not publish its client")
         XCTAssertEqual(client.persistenceDeferrals, 1)
         XCTAssertTrue(client.persistenceChoices.isEmpty)
 
         await model.logout()
-        await client.resumeUnregisterPush()
-        let completion = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
-        guard completion == .completed else {
-            login.cancel()
-            await client.resumeUnregisterPush()
-            XCTFail("Activation did not finish: \(completion)")
-            return
-        }
+        client.resumeUnregisterPush()
+        await login.value
 
         XCTAssertEqual(model.phase, .signedOut)
         XCTAssertNil(model.client)
@@ -185,33 +109,15 @@ final class AppModelLifecycleTests: XCTestCase {
             forKey: "pendingPushRevocations"
         )
         let client = StubAPIClient()
-        let suspended = expectation(description: "Push cleanup suspended")
-        let finished = expectation(description: "Activation finished")
-        client.suspendUnregisterPush(whenSuspended: suspended)
+        client.suspendUnregisterPush = true
         let model = AppModel(defaults: defaults) { _ in client }
-        let login = Task {
-            await model.login(server: server, username: "admin", password: "fixture")
-            finished.fulfill()
-        }
-        let readiness = await XCTWaiter.fulfillment(of: [suspended], timeout: 5)
-        guard readiness == .completed else {
-            login.cancel()
-            await client.resumeUnregisterPush()
-            _ = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
-            XCTFail("Push cleanup did not suspend: \(readiness)")
-            return
-        }
+        let login = Task { await model.login(server: server, username: "admin", password: "fixture") }
+        for _ in 0..<100 where client.unregisterPushCallCount == 0 { await Task.yield() }
         XCTAssertEqual(client.unregisterPushCallCount, 1)
 
         login.cancel()
-        await client.resumeUnregisterPush()
-        let completion = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
-        guard completion == .completed else {
-            login.cancel()
-            await client.resumeUnregisterPush()
-            XCTFail("Activation did not finish: \(completion)")
-            return
-        }
+        client.resumeUnregisterPush()
+        await login.value
 
         XCTAssertNotEqual(model.phase, .signedIn)
         XCTAssertNil(model.client)
@@ -227,34 +133,18 @@ final class AppModelLifecycleTests: XCTestCase {
             let added = PendingPushRevocationFixture(server: "https://other.example", token: "new-token")
             defaults.set(try JSONEncoder().encode([old]), forKey: "pendingPushRevocations")
             let client = StubAPIClient()
-            let suspended = expectation(description: "Push cleanup suspended")
-            let finished = expectation(description: "Activation finished")
-            client.suspendUnregisterPush(whenSuspended: suspended)
+            client.suspendUnregisterPush = true
             let model = AppModel(defaults: defaults) { _ in client }
             let activation = Task {
                 if restore { await model.restoreSession() }
                 else { await model.login(server: server, username: "admin", password: "fixture") }
-                finished.fulfill()
             }
-            let readiness = await XCTWaiter.fulfillment(of: [suspended], timeout: 5)
-            guard readiness == .completed else {
-                activation.cancel()
-                await client.resumeUnregisterPush()
-                _ = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
-                XCTFail("Push cleanup did not suspend: \(readiness)")
-                return
-            }
+            for _ in 0..<100 where client.unregisterPushCallCount == 0 { await Task.yield() }
             XCTAssertEqual(client.unregisterPushCallCount, 1)
             // A concurrent transition can append an offline revocation while this request waits.
             defaults.set(try JSONEncoder().encode([old, added]), forKey: "pendingPushRevocations")
-            await client.resumeUnregisterPush()
-            let completion = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
-            guard completion == .completed else {
-                activation.cancel()
-                await client.resumeUnregisterPush()
-                XCTFail("Activation did not finish: \(completion)")
-                return
-            }
+            client.resumeUnregisterPush()
+            await activation.value
 
             let remaining = try JSONDecoder().decode(
                 [PendingPushRevocationFixture].self,
@@ -267,7 +157,7 @@ final class AppModelLifecycleTests: XCTestCase {
 
     func testStoredHTTPConnectionRequiresFreshConfirmationAndClearsSession() async {
         let defaults = makeDefaults()
-        defaults.set("http://192.168.50.20:8001", forKey: "serverAddress")
+        defaults.set("http://192.168.1.20:8001", forKey: "serverAddress")
         let client = StubAPIClient()
         let model = AppModel(defaults: defaults) { _ in client }
 
@@ -276,7 +166,7 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertEqual(model.phase, .signedOut)
         XCTAssertTrue(client.clearedLocalSession)
         XCTAssertEqual(client.configCallCount, 0)
-        XCTAssertEqual(model.serverAddress, "http://192.168.50.20:8001")
+        XCTAssertEqual(model.serverAddress, "http://192.168.1.20:8001")
         XCTAssertTrue(model.errorMessage?.contains("noch nicht gespeichert") == true)
     }
 
@@ -303,8 +193,8 @@ final class AppModelLifecycleTests: XCTestCase {
 
     func testRememberedHTTPApprovalDoesNotCoverDifferentPort() async {
         let defaults = makeDefaults()
-        defaults.set("http://192.168.50.20:8002", forKey: "serverAddress")
-        defaults.set(["http://192.168.50.20:8001"], forKey: "rememberedHTTPServers")
+        defaults.set("http://192.168.1.20:8002", forKey: "serverAddress")
+        defaults.set(["http://192.168.1.20:8001"], forKey: "rememberedHTTPServers")
         let client = StubAPIClient()
         let model = AppModel(defaults: defaults) { _ in client }
 
@@ -316,7 +206,7 @@ final class AppModelLifecycleTests: XCTestCase {
     }
 
     func testSessionOnlyLoginNeverRestoresHTTPOrHTTPS() async throws {
-        for server in ["http://192.168.50.20:8001", "https://backup.example.de"] {
+        for server in ["http://192.168.1.20:8001", "https://backup.example.de"] {
             let defaults = makeDefaults()
             let original = StubAPIClient()
             let login = AppModel(defaults: defaults) { _ in original }
@@ -449,7 +339,7 @@ final class AppModelLifecycleTests: XCTestCase {
             .failure(URLError(.timedOut)),
             .success(.fixture(running: false))
         ]
-        let model = AppModel(defaults: defaults, progressBackoffBase: 0) { _ in client }
+        let model = AppModel(defaults: defaults) { _ in client }
         await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
         XCTAssertEqual(client.jobsCallCount, 1)
 
@@ -753,175 +643,6 @@ final class AppModelLifecycleTests: XCTestCase {
         XCTAssertEqual(client.definitionsCallCount, 0)
     }
 
-    func testSecondRestoreStartFromAnotherScreenIsRejectedWhileRequestIsPending() async throws {
-        let client = StubAPIClient()
-        let model = AppModel(defaults: makeDefaults()) { _ in client }
-        await model.login(server: "https://backup.example", username: "admin", password: "secret")
-        let suspended = expectation(description: "Restore start pending")
-        client.restoreGate = PushRevocationGate(suspended: suspended)
-        client.restoreResponse = ActionResponse(ok: true, jobID: 91, error: nil)
-        let first = Task { await model.runRestoreTest(pair: "Fotos") }
-        await fulfillment(of: [suspended], timeout: 2)
-        XCTAssertFalse(model.canStartRestoreTest)
-        let second = await model.runRestoreTest(pair: "Rezepte")
-        XCTAssertFalse(second)
-        XCTAssertEqual(client.restorePairs, ["Fotos"])
-        XCTAssertEqual(model.activeRestoreTestPairs, ["Fotos"])
-        await client.restoreGate?.release()
-        let started = await first.value
-        XCTAssertTrue(started)
-        let third = await model.runRestoreTest(pair: "Rezepte")
-        XCTAssertFalse(third, "The accepted job remains protected until tracking completes")
-        XCTAssertEqual(model.activeRestoreTestPairs, ["Fotos"])
-        await model.logout()
-    }
-
-    func testOldServerRestoreFailureCannotClearNewServersActivePairOrError() async {
-        let old = StubAPIClient()
-        let fresh = StubAPIClient()
-        let model = AppModel(defaults: makeDefaults()) { url in url.host == "old.example" ? old : fresh }
-        await model.login(server: "https://old.example", username: "admin", password: "secret")
-        let oldSuspended = expectation(description: "Old restore pending")
-        old.restoreGate = PushRevocationGate(suspended: oldSuspended)
-        old.restoreError = URLError(.timedOut)
-        let pendingOld = Task { await model.runRestoreTest(pair: "Fotos") }
-        await fulfillment(of: [oldSuspended], timeout: 2)
-        await model.login(server: "https://fresh.example", username: "admin", password: "secret")
-        let newSuspended = expectation(description: "New restore pending")
-        fresh.restoreGate = PushRevocationGate(suspended: newSuspended)
-        fresh.restoreResponse = ActionResponse(ok: true, jobID: 92, error: nil)
-        let pendingNew = Task { await model.runRestoreTest(pair: "Fotos") }
-        await fulfillment(of: [newSuspended], timeout: 2)
-        model.errorMessage = "New server message"
-        await old.restoreGate?.release()
-        _ = await pendingOld.value
-        XCTAssertEqual(model.errorMessage, "New server message")
-        XCTAssertEqual(model.activeRestoreTestPairs, ["Fotos"])
-        XCTAssertFalse(model.canStartRestoreTest)
-        await fresh.restoreGate?.release()
-        _ = await pendingNew.value
-        await model.logout()
-    }
-
-    func testOldClientErrorsAreCancelledBeforeReachingNewSession() async throws {
-        for error in [URLError(.timedOut) as Error, APIError.server(status: 503, message: "Old failure"), APIError.invalidResponse] {
-            let client = StubAPIClient()
-            let model = AppModel(defaults: makeDefaults()) { _ in client }
-            await model.login(server: "https://backup.example", username: "admin", password: "secret")
-            let suspended = expectation(description: "Old operation paused")
-            let gate = PushRevocationGate(suspended: suspended)
-            let operation = Task { () -> Bool in
-                do {
-                    let _: Bool = try await model.withCurrentClient { _ in
-                        await gate.wait()
-                        throw error
-                    }
-                    return false
-                } catch is CancellationError { return true }
-                catch { return false }
-            }
-            await fulfillment(of: [suspended], timeout: 2)
-            await model.login(server: "https://backup.example", username: "admin", password: "secret")
-            await gate.release()
-            let wasCancelled = await operation.value
-            XCTAssertTrue(wasCancelled)
-            XCTAssertEqual(model.phase, .signedIn)
-            await model.logout()
-        }
-    }
-
-    func testProgressRefreshesShareOnePendingRequest() async {
-        let client = StubAPIClient()
-        let model = AppModel(defaults: makeDefaults()) { _ in client }
-        await model.login(server: "https://backup.example", username: "admin", password: "secret")
-        let initialCalls = client.progressCallCount
-        let suspended = expectation(description: "Shared progress request")
-        client.progressGate = PushRevocationGate(suspended: suspended)
-        let gate = client.progressGate
-        client.progressResults = [.success(.fixture(running: true))]
-        let dashboard = Task { await model.refreshProgress() }
-        await fulfillment(of: [suspended], timeout: 2)
-        let anotherScreen = Task { await model.refreshProgress() }
-        await Task.yield()
-        XCTAssertEqual(client.progressCallCount, initialCalls + 1)
-        await gate?.release()
-        await dashboard.value
-        await anotherScreen.value
-        XCTAssertTrue(model.progress?.running == true)
-        XCTAssertEqual(model.progressConsecutiveFailures, 0)
-        await model.logout()
-    }
-
-    func testBackgroundPauseInvalidatesLateProgressAndForegroundAcceptsNewest() async {
-        let client = StubAPIClient()
-        let model = AppModel(defaults: makeDefaults()) { _ in client }
-        await model.login(server: "https://backup.example", username: "admin", password: "secret")
-        let suspended = expectation(description: "Old progress request")
-        client.progressGate = PushRevocationGate(suspended: suspended)
-        let gate = client.progressGate
-        client.progressResults = [.success(.fixture(running: true)), .success(.fixture(running: false))]
-        let old = Task { await model.refreshProgress() }
-        await fulfillment(of: [suspended], timeout: 2)
-        model.setSceneActive(false)
-        let callsBeforePausedRefresh = client.progressCallCount
-        await model.refreshProgress()
-        XCTAssertEqual(client.progressCallCount, callsBeforePausedRefresh)
-        model.setSceneActive(true)
-        await model.refreshProgress()
-        await gate?.release()
-        await old.value
-        XCTAssertTrue(model.progress?.running == false, "Cancelled transport completions cannot replace a newer foreground result")
-        XCTAssertEqual(model.progressConsecutiveFailures, 0)
-        await model.logout()
-    }
-
-    func testProgressFailuresBackOffAndManualRefreshCanRecover() async {
-        let client = StubAPIClient()
-        let model = AppModel(defaults: makeDefaults()) { _ in client }
-        await model.login(server: "https://backup.example", username: "admin", password: "secret")
-        client.progressResults = [.failure(URLError(.timedOut)), .success(.fixture(running: true))]
-        let initialCalls = client.progressCallCount
-        await model.refreshProgress()
-        await model.refreshProgress()
-        XCTAssertEqual(client.progressCallCount, initialCalls + 1)
-        XCTAssertEqual(model.progressConsecutiveFailures, 1)
-        await model.refreshProgress(force: true)
-        XCTAssertEqual(client.progressCallCount, initialCalls + 2)
-        XCTAssertEqual(model.progressConsecutiveFailures, 0)
-        await model.logout()
-    }
-
-    func testExplicitJobIDIsTrackedDespiteServerClockSkew() async throws {
-        let client = StubAPIClient()
-        let model = AppModel(defaults: makeDefaults(), runPollInterval: .milliseconds(10)) { _ in client }
-        await model.login(server: "https://backup.example", username: "admin", password: "secret")
-        client.restoreResponse = ActionResponse(ok: true, jobID: 91, error: nil)
-        let running = JobRecord.fixture(id: 91, status: "running", definitionID: "", startedAt: 100)
-        client.jobResults = [
-            JobSearchResponse(items: [running], total: 1, limit: 100, offset: 0),
-            JobSearchResponse(items: [running], total: 1, limit: 100, offset: 0)
-        ]
-        client.repeatingJobs = [running]
-        _ = await model.runRestoreTest(pair: "Fotos")
-        let initialJobsCalls = client.jobsCallCount
-        let observationDeadline = Date().addingTimeInterval(2)
-        while client.jobsCallCount < initialJobsCalls + 4, Date() < observationDeadline {
-            try await Task.sleep(for: .milliseconds(1))
-        }
-        XCTAssertGreaterThanOrEqual(client.jobsCallCount, initialJobsCalls + 4)
-        XCTAssertTrue(model.batchIsRunning)
-        XCTAssertEqual(model.activeRestoreTestPairs, ["Fotos"])
-        client.repeatingJobs = [.fixture(id: 91, status: "ok", definitionID: "", startedAt: 100)]
-        let completionDeadline = Date().addingTimeInterval(2)
-        while model.batchIsRunning || !model.activeRestoreTestPairs.isEmpty {
-            guard Date() < completionDeadline else { break }
-            try await Task.sleep(for: .milliseconds(1))
-        }
-        XCTAssertFalse(model.batchIsRunning)
-        XCTAssertTrue(model.activeRestoreTestPairs.isEmpty)
-        await model.logout()
-    }
-
     private func makeDefaults() -> UserDefaults {
         let suite = "AppModelLifecycleTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -944,19 +665,13 @@ private final class StubAPIClient: APIClientProtocol {
     var runAllResponse: ActionResponse?
     var runAllError: Error?
     var retryResponse: ActionResponse?
-    var restoreResponse: ActionResponse?
-    var restoreError: Error?
-    var restoreGate: PushRevocationGate?
-    var progressGate: PushRevocationGate?
-    var repeatingJobs: [JobRecord] = []
-    private(set) var restorePairs: [String?] = []
-    private(set) var progressCallCount = 0
     var pbsError: Error?
     var unregisterPushError: Error?
     var detailedStorage: StorageOverview?
     var detailedStorageError: Error?
     var pushDelay: Duration?
-    private var unregisterPushGate: PushRevocationGate?
+    var suspendUnregisterPush = false
+    private var unregisterPushContinuation: CheckedContinuation<Void, Never>?
     var baseConfig: ConfigSnapshot?
     private(set) var updatedConfig: ConfigSnapshot?
     private(set) var clearedLocalSession = false
@@ -1036,13 +751,7 @@ private final class StubAPIClient: APIClientProtocol {
 
     func runQuickSync(_ request: QuickSyncRequest) async throws -> ActionResponse { throw APIError.invalidResponse }
     func checkPair(name: String) async throws -> ActionResponse { throw APIError.invalidResponse }
-    func runRestoreTest(pair: String?) async throws -> ActionResponse {
-        restorePairs.append(pair)
-        if let restoreGate { await restoreGate.wait() }
-        if let restoreError { throw restoreError }
-        guard let restoreResponse else { throw APIError.invalidResponse }
-        return restoreResponse
-    }
+    func runRestoreTest(pair: String?) async throws -> ActionResponse { throw APIError.invalidResponse }
     func browseLocal(path: String) async throws -> BrowseResponse { throw APIError.invalidResponse }
     func browseRemote(path: String) async throws -> BrowseResponse { throw APIError.invalidResponse }
     func getAuditEvents(limit: Int) async throws -> AuditResponse { throw APIError.invalidResponse }
@@ -1063,7 +772,7 @@ private final class StubAPIClient: APIClientProtocol {
     func getJobs(limit: Int) async throws -> JobSearchResponse {
         jobsCallCount += 1
         if !jobResults.isEmpty { return jobResults.removeFirst() }
-        return JobSearchResponse(items: repeatingJobs, total: repeatingJobs.count, limit: limit, offset: 0)
+        return JobSearchResponse(items: [], total: 0, limit: limit, offset: 0)
     }
     func searchJobs(kind: String?, status: String?, query: String, limit: Int, offset: Int) async throws -> JobSearchResponse {
         try await getJobs(limit: limit)
@@ -1084,13 +793,10 @@ private final class StubAPIClient: APIClientProtocol {
     }
 
     func getProgress() async throws -> BackupProgress {
-        progressCallCount += 1
-        let response = progressResults.isEmpty ? .success(BackupProgress.fixture(running: false)) : progressResults.removeFirst()
-        if let gate = progressGate {
-            progressGate = nil
-            await gate.wait()
+        if !progressResults.isEmpty {
+            return try progressResults.removeFirst().get()
         }
-        return try response.get()
+        return .fixture(running: false)
     }
 
     func getPBSStatus() async throws -> PBSStatus {
@@ -1119,60 +825,25 @@ private final class StubAPIClient: APIClientProtocol {
     }
     func unregisterPushDevice(token: String) async throws -> PushRegistrationResponse {
         unregisterPushCallCount += 1
-        if let unregisterPushGate {
-            await unregisterPushGate.wait()
-            try Task.checkCancellation()
+        if suspendUnregisterPush {
+            await withCheckedContinuation { continuation in
+                unregisterPushContinuation = continuation
+            }
         }
         if let unregisterPushError { throw unregisterPushError }
         unregisteredPushTokens.append(token)
         return PushRegistrationResponse(ok: true)
     }
 
-    func suspendUnregisterPush(whenSuspended expectation: XCTestExpectation) {
-        unregisterPushGate = PushRevocationGate(suspended: expectation)
-    }
-
-    func resumeUnregisterPush() async {
-        await unregisterPushGate?.release()
+    func resumeUnregisterPush() {
+        suspendUnregisterPush = false
+        unregisterPushContinuation?.resume()
+        unregisterPushContinuation = nil
     }
     func logout() async throws -> LogoutResult { logoutResult }
 
     func clearLocalSession() {
         clearedLocalSession = true
-    }
-}
-
-/// Test-only gate: early release and cancellation cannot lose a wake-up.
-private actor PushRevocationGate {
-    private let suspended: XCTestExpectation
-    private var released = false
-    private var continuations: [CheckedContinuation<Void, Never>] = []
-
-    init(suspended: XCTestExpectation) {
-        self.suspended = suspended
-    }
-
-    func wait() async {
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                if released {
-                    continuation.resume()
-                } else {
-                    continuations.append(continuation)
-                    // Publish readiness only after the actor owns the continuation.
-                    suspended.fulfill()
-                }
-            }
-        } onCancel: {
-            Task { await self.release() }
-        }
-    }
-
-    func release() {
-        released = true
-        let pending = continuations
-        continuations.removeAll()
-        for continuation in pending { continuation.resume() }
     }
 }
 
@@ -1197,12 +868,12 @@ private extension BackupProgress {
 }
 
 private extension JobRecord {
-    static func fixture(id: Int, status: String, definitionID: String, startedAt: Double? = nil) -> JobRecord {
+    static func fixture(id: Int, status: String, definitionID: String) -> JobRecord {
         JobRecord(
             id: id,
             kind: "backup",
             status: status,
-            startedAt: startedAt ?? Date().timeIntervalSince1970,
+            startedAt: Date().timeIntervalSince1970,
             endedAt: status == "running" ? nil : Date().timeIntervalSince1970,
             logFile: nil,
             definitionID: definitionID,

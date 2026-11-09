@@ -128,15 +128,6 @@ final class AppModel: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var refreshOwner: UUID?
     private var runTrackingTask: Task<Void, Never>?
-    private var runTrackingGeneration = 0
-    private var restoreStartOwner: UUID?
-    private var progressRequestTask: Task<BackupProgress, Error>?
-    private var progressRequestOwner: UUID?
-    private var progressRequestGeneration = 0
-    private var nextProgressPollAt: Date?
-    private var sceneIsActive = true
-    private let progressBackoffBase: TimeInterval
-    private let now: () -> Date
     private var pushSyncTask: Task<Void, Never>?
     private var pushSyncOwner: UUID?
     private var desiredPushToken: String?
@@ -208,15 +199,11 @@ final class AppModel: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         runPollInterval: Duration = .seconds(2),
-        progressBackoffBase: TimeInterval = 2,
-        now: @escaping () -> Date = Date.init,
         webAuthnBrowserFactory: @escaping @MainActor () -> any WebAuthnBrowserSessionProtocol = { WebAuthnBrowserSession() },
         clientFactory: @escaping (URL) -> any APIClientProtocol = { APIClient(baseURL: $0) }
     ) {
         self.defaults = defaults
         self.runPollInterval = runPollInterval
-        self.progressBackoffBase = progressBackoffBase
-        self.now = now
         self.clientFactory = clientFactory
         self.webAuthnBrowserFactory = webAuthnBrowserFactory
         if let data = defaults.data(forKey: "savedServerProfiles"),
@@ -410,10 +397,7 @@ final class AppModel: ObservableObject {
                 group.addTask { .config(await Self.capture { try await refreshClient.getConfig() }) }
             }
             group.addTask { .jobs(await Self.capture { try await refreshClient.getJobs(limit: 50) }) }
-            group.addTask { .progress(await Self.capture {
-                guard let value = try await self.fetchProgress(force: true) else { throw CancellationError() }
-                return value
-            }) }
+            group.addTask { .progress(await Self.capture { try await refreshClient.getProgress() }) }
             group.addTask { .pbs(await Self.capture { try await refreshClient.getPBSStatus() }) }
 
             for await payload in group {
@@ -471,9 +455,10 @@ final class AppModel: ObservableObject {
                     }
                 case let .progress(result):
                     switch result {
-                    case .success:
-                        break // The shared request accepts its result once.
+                    case let .success(value):
+                        acceptProgress(value)
                     case let .failure(error):
+                        recordProgressFailure()
                         handle(error, firstError: &firstError)
                     }
                 case let .pbs(result):
@@ -499,78 +484,28 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func setSceneActive(_ active: Bool) {
-        guard sceneIsActive != active else { return }
-        sceneIsActive = active
-        if !active { invalidateProgressRequest() }
-        else { nextProgressPollAt = nil }
-    }
-
-    func refreshProgress(force: Bool = false) async {
-        // The tracker owns the polling cadence while a requested run is active.
-        guard force || runTrackingTask == nil else { return }
+    func refreshProgress() async {
+        guard let currentClient = client else { return }
         let session = sessionGeneration
         do {
-            guard let newProgress = try await fetchProgress(force: force) else { return }
+            let newProgress = try await currentClient.getProgress()
             guard isCurrentSession(session) else { return }
-            // Completion data is fetched by the run tracker when it owns the run.
-            if !newProgress.running, runTrackingTask == nil, let currentClient = client,
-               progressCompletionNeedsJobs {
-                progressCompletionNeedsJobs = false
+            let completedRunningJob = progress?.running == true && newProgress.running == false
+            acceptProgress(newProgress)
+            if completedRunningJob {
                 let response = try await currentClient.getJobs(limit: 50)
                 guard isCurrentSession(session) else { return }
                 jobs = response.items
                 jobsState = .loaded
             }
-        } catch is CancellationError {
+        } catch APIError.unauthenticated {
+            guard isCurrentSession(session) else { return }
+            signOutLocally()
         } catch {
-            // Shared requests record failures exactly once and handle session expiry.
+            // Der Poll darf eine anderweitig nutzbare Ansicht nicht mit Meldungen fluten.
+            guard isCurrentSession(session) else { return }
+            recordProgressFailure()
         }
-    }
-
-    private var progressCompletionNeedsJobs = false
-
-    private func fetchProgress(force: Bool = false) async throws -> BackupProgress? {
-        guard sceneIsActive, let currentClient = client else { return nil }
-        if let progressRequestTask { return try await progressRequestTask.value }
-        if !force, let nextProgressPollAt, now() < nextProgressPollAt { return nil }
-        let session = sessionGeneration
-        let generation = progressRequestGeneration
-        let owner = UUID()
-        let task = Task { [weak self] () throws -> BackupProgress in
-            guard let self else { throw CancellationError() }
-            do {
-                let newProgress = try await currentClient.getProgress()
-                guard self.isCurrentSession(session), generation == self.progressRequestGeneration,
-                      self.sceneIsActive, !Task.isCancelled else { throw CancellationError() }
-                let completedRunningJob = self.progress?.running == true && newProgress.running == false
-                if completedRunningJob { self.progressCompletionNeedsJobs = true }
-                self.acceptProgress(newProgress)
-                return newProgress
-            } catch {
-                guard self.isCurrentSession(session), generation == self.progressRequestGeneration,
-                      !Task.isCancelled else { throw CancellationError() }
-                if error as? APIError == .unauthenticated { self.signOutLocally() }
-                else if !(error is CancellationError) { self.recordProgressFailure() }
-                throw error
-            }
-        }
-        progressRequestOwner = owner
-        progressRequestTask = task
-        defer {
-            if progressRequestOwner == owner {
-                progressRequestTask = nil
-                progressRequestOwner = nil
-            }
-        }
-        return try await task.value
-    }
-
-    private func invalidateProgressRequest() {
-        progressRequestGeneration += 1
-        progressRequestTask?.cancel()
-        progressRequestTask = nil
-        progressRequestOwner = nil
     }
 
     func refreshStorageSizes() async {
@@ -667,10 +602,9 @@ final class AppModel: ObservableObject {
     }
 
     func refreshDoctor() async {
-        let session = sessionGeneration
         doctorIsRefreshing = true
         defer {
-            if isCurrentSession(session) { doctorIsRefreshing = false }
+            doctorIsRefreshing = false
         }
         do {
             let newDoctor = try await withCurrentClient { try await $0.getDoctor() }
@@ -808,7 +742,6 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func runJobDefinition(id: String, dryRun: Bool) async -> Bool {
-        guard restoreStartOwner == nil, activeRestoreTestPairs.isEmpty else { return false }
         guard let currentClient = client else { return false }
         let session = sessionGeneration
         do {
@@ -833,7 +766,6 @@ final class AppModel: ObservableObject {
     }
 
     func runAllJobDefinitions(dryRun: Bool = false) async -> Bool {
-        guard restoreStartOwner == nil, activeRestoreTestPairs.isEmpty else { return false }
         do {
             let response = try await withCurrentClient {
                 try await $0.runAllJobDefinitions(dryRun: dryRun)
@@ -869,24 +801,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    var canStartRestoreTest: Bool {
-        phase == .signedIn && !isDemoMode && client != nil
-            && restoreStartOwner == nil && activeRestoreTestPairs.isEmpty
-            && !batchIsRunning && progress?.running != true
-    }
-
     func runRestoreTest(pair: String?) async -> Bool {
-        guard canStartRestoreTest else { return false }
-        let owner = UUID()
-        restoreStartOwner = owner
-        defer { if restoreStartOwner == owner { restoreStartOwner = nil } }
         let targetPairs = pair.map { Set([$0]) }
             ?? Set(storage?.pairs.map(\.name) ?? config?.backup.pairs.map(\.name) ?? [])
         activeRestoreTestPairs = targetPairs
         return await runOperationalAction(
             success: pair == nil ? "Systemweiter Wiederherstellungstest wurde gestartet." : "Wiederherstellungstest wurde gestartet.",
-            trackingRestorePairs: targetPairs,
-            restoreOwner: owner
+            trackingRestorePairs: targetPairs
         ) { client in
             try await client.runRestoreTest(pair: pair)
         }
@@ -918,8 +839,6 @@ final class AppModel: ObservableObject {
             signOutLocally()
             errorMessage = "Passwort geändert. Bitte melde dich mit dem neuen Passwort erneut an."
             return true
-        } catch is CancellationError {
-            return false
         } catch {
             errorMessage = userMessage(for: error)
             return false
@@ -940,21 +859,18 @@ final class AppModel: ObservableObject {
             let value = try await operation(currentClient)
             guard isCurrentSession(session) else { throw CancellationError() }
             return value
-        } catch {
+        } catch APIError.unauthenticated {
             guard isCurrentSession(session) else { throw CancellationError() }
-            if error as? APIError == .unauthenticated { signOutLocally() }
-            throw error
+            signOutLocally()
+            throw APIError.unauthenticated
         }
     }
 
     private func runOperationalAction(
         success: String,
         trackingRestorePairs: Set<String> = [],
-        restoreOwner: UUID? = nil,
         _ operation: (any APIClientProtocol) async throws -> ActionResponse
     ) async -> Bool {
-        if restoreOwner == nil, restoreStartOwner != nil || !activeRestoreTestPairs.isEmpty { return false }
-        let session = sessionGeneration
         do {
             let response = try await withCurrentClient(operation)
             actionMessage = response.ok ? success : (response.error ?? "Aktion konnte nicht gestartet werden.")
@@ -966,11 +882,9 @@ final class AppModel: ObservableObject {
             }
             return response.ok
         } catch is CancellationError {
-            guard isCurrentSession(session) else { return false }
             activeRestoreTestPairs.subtract(trackingRestorePairs)
             return false
         } catch {
-            guard isCurrentSession(session) else { return false }
             activeRestoreTestPairs.subtract(trackingRestorePairs)
             errorMessage = userMessage(for: error)
             return false
@@ -1018,7 +932,6 @@ final class AppModel: ObservableObject {
     }
 
     func runBackup(pair: String? = nil, dryRun: Bool = false) async -> Bool {
-        guard restoreStartOwner == nil, activeRestoreTestPairs.isEmpty else { return false }
         do {
             let response = try await withCurrentClient {
                 try await $0.runBackup(pair: pair, dryRun: dryRun)
@@ -1282,15 +1195,9 @@ final class AppModel: ObservableObject {
         let expectedDefinitionIDs = Set(response.definitions.map(\.definitionID).filter { !$0.isEmpty })
         let expectedJobIDs = Set([response.jobID].compactMap { $0 })
         runTrackingTask?.cancel()
-        invalidateProgressRequest()
-        runTrackingGeneration += 1
-        let trackingGeneration = runTrackingGeneration
         activeRestoreTestPairs = restorePairs
-        progressCompletionNeedsJobs = false
         guard !expectedDefinitionIDs.isEmpty || !expectedJobIDs.isEmpty else {
             activeRestoreTestPairs.removeAll()
-            runTrackingTask = nil
-            batchIsRunning = false
             return
         }
         batchDefinitions = response.definitions
@@ -1304,7 +1211,6 @@ final class AppModel: ObservableObject {
                 expectedJobIDs: expectedJobIDs,
                 startedAt: startedAt,
                 session: session,
-                trackingGeneration: trackingGeneration,
                 restorePairs: restorePairs
             )
         }
@@ -1315,7 +1221,6 @@ final class AppModel: ObservableObject {
         expectedJobIDs: Set<Int>,
         startedAt: Double,
         session: Int,
-        trackingGeneration: Int,
         restorePairs: Set<String>
     ) async {
         var quietPolls = 0
@@ -1323,21 +1228,19 @@ final class AppModel: ObservableObject {
         while !Task.isCancelled, isCurrentSession(session), let currentClient = client {
             do {
                 try await Task.sleep(for: runPollInterval)
-                guard sceneIsActive else { continue }
-                if let nextProgressPollAt, now() < nextProgressPollAt { continue }
-                async let progressRequest = fetchProgress()
+                async let progressRequest = currentClient.getProgress()
                 async let jobsRequest = currentClient.getJobs(limit: 100)
-                let (optionalProgress, response) = try await (progressRequest, jobsRequest)
-                guard isCurrentSession(session), trackingGeneration == runTrackingGeneration,
-                      !Task.isCancelled else { return }
-                guard let newProgress = optionalProgress else { continue }
+                let (newProgress, response) = try await (progressRequest, jobsRequest)
+                guard isCurrentSession(session) else { return }
+                acceptProgress(newProgress)
                 jobs = response.items
                 jobsState = .loaded
 
                 let relevant = response.items.filter {
-                    expectedJobIDs.contains($0.id)
-                        || ($0.startedAt >= startedAt - 5
-                            && $0.definitionID.map(expectedDefinitionIDs.contains) == true)
+                    $0.startedAt >= startedAt - 5 && (
+                        expectedJobIDs.contains($0.id)
+                        || $0.definitionID.map(expectedDefinitionIDs.contains) == true
+                    )
                 }
                 observedDefinitions.formUnion(relevant.compactMap(\.definitionID))
                 if !batchDefinitions.isEmpty {
@@ -1377,10 +1280,7 @@ final class AppModel: ObservableObject {
                     }
                     batchIsRunning = false
                     await refreshVisibleRunData()
-                    guard isCurrentSession(session), trackingGeneration == runTrackingGeneration,
-                          !Task.isCancelled else { return }
                     activeRestoreTestPairs.subtract(restorePairs)
-                    runTrackingTask = nil
                     return
                 }
             } catch APIError.unauthenticated {
@@ -1388,40 +1288,35 @@ final class AppModel: ObservableObject {
                 signOutLocally()
                 return
             } catch is CancellationError {
-                guard isCurrentSession(session), trackingGeneration == runTrackingGeneration,
-                      !Task.isCancelled else { return }
-                // Scene transitions invalidate transport work while retaining the tracked job.
-                continue
+                return
             } catch {
-                guard isCurrentSession(session), trackingGeneration == runTrackingGeneration else { return }
-                // Progress failure/backoff is accounted for by the shared request.
+                guard isCurrentSession(session) else { return }
+                recordProgressFailure()
             }
         }
     }
 
     private func refreshVisibleRunData() async {
-        let session = sessionGeneration
         do {
             async let overviewRequest = withCurrentClient { try await $0.getOverview() }
             async let jobsRequest = withCurrentClient { try await $0.getJobs(limit: 100) }
-            async let progressRequest = fetchProgress(force: true)
+            async let progressRequest = withCurrentClient { try await $0.getProgress() }
             async let storageRequest = withCurrentClient {
                 try await $0.getStorage(includeSizes: false, forceRefresh: false)
             }
             let (newOverview, jobResponse, newProgress, baseStorage) = try await (
                 overviewRequest, jobsRequest, progressRequest, storageRequest
             )
-            guard isCurrentSession(session) else { return }
             overview = newOverview
             overviewState = .loaded
             jobs = jobResponse.items
             jobsState = .loaded
-            _ = newProgress // Accepted by the shared request before publication.
+            acceptProgress(newProgress)
             storage = baseStorage.preservingSizes(from: storage)
             storageState = .loaded
         } catch is CancellationError {
         } catch {
-            if isCurrentSession(session), phase == .signedIn { errorMessage = userMessage(for: error) }
+            if phase == .signedIn { errorMessage = userMessage(for: error) }
         }
     }
 
@@ -1660,16 +1555,6 @@ final class AppModel: ObservableObject {
         refreshTask?.cancel()
         refreshTask = nil
         refreshOwner = nil
-        invalidateProgressRequest()
-        nextProgressPollAt = nil
-        progressCompletionNeedsJobs = false
-        restoreStartOwner = nil
-        activeRestoreTestPairs = []
-        batchIsRunning = false
-        batchDefinitions = []
-        runTrackingTask?.cancel()
-        runTrackingTask = nil
-        runTrackingGeneration += 1
         sessionGeneration += 1
         refreshGeneration += 1
         return sessionGeneration
@@ -1734,9 +1619,8 @@ final class AppModel: ObservableObject {
 
     private func acceptProgress(_ value: BackupProgress) {
         progress = value
-        progressLastSuccessAt = now()
+        progressLastSuccessAt = Date()
         progressConsecutiveFailures = 0
-        nextProgressPollAt = nil
         liveActivityCoordinator.accept(value, hostname: overview?.system.hostname ?? "Sicherpfad")
     }
 
@@ -1781,8 +1665,6 @@ final class AppModel: ObservableObject {
 
     private func recordProgressFailure() {
         progressConsecutiveFailures = min(progressConsecutiveFailures + 1, 999)
-        let delay = min(60, progressBackoffBase * pow(2, Double(min(progressConsecutiveFailures - 1, 5))))
-        nextProgressPollAt = now().addingTimeInterval(delay)
     }
 
     private func signOutLocally() {

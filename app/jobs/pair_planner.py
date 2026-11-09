@@ -42,6 +42,10 @@ def paths_overlap(a: str, b: str) -> bool:
 
 
 def pairs_conflict(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    # Gleiches Airgap-Gerät: der Auswurf des ersten Laufs träfe den zweiten.
+    device = str(first.get("airgap_device") or "")
+    if device and device == str(second.get("airgap_device") or ""):
+        return True
     return any(
         paths_overlap(
             str(first.get(first_key) or ""), str(second.get(second_key) or "")

@@ -1,12 +1,19 @@
 /* Statischer App-Shell-Cache. Authentifizierte und dynamische Antworten
    werden bewusst nie vom Service Worker verarbeitet oder gespeichert. */
 const CACHE_PREFIX = 'rclone-sync-static-';
-const CACHE_NAME = `${CACHE_PREFIX}v4`;
+const CACHE_NAME = `${CACHE_PREFIX}v5`;
 const STATIC_ASSETS = new Set([
   '/static/style.css',
   '/static/alpine.min.js',
   '/static/ui-helpers.js',
   '/static/app.js',
+  '/static/app-core.js',
+  '/static/app-dashboard.js',
+  '/static/app-pairs.js',
+  '/static/app-jobs.js',
+  '/static/app-system.js',
+  '/static/app-recovery.js',
+  '/static/app-settings.js',
   '/static/workspace.js',
   '/static/workspace.css',
   '/static/manifest.json',

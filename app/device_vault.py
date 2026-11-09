@@ -22,16 +22,9 @@ import unicodedata
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Callable, Iterator, Mapping
+from typing import Any, BinaryIO, Mapping
 
 from .db import Database
-from .file_lock import acquire as acquire_file_lock
-from .file_lock import release as release_file_lock
-from .jobs.restore_workspace import (
-    cleanup_orphaned_workspaces,
-    create_workspace,
-    forget_workspace,
-)
 from .notifications import notify
 from .rclone_args import rclone_subprocess_env
 
@@ -50,42 +43,6 @@ class VaultError(ValueError):
     """A safe error that may be shown to an authenticated client."""
 
 
-def endpoint_binding(pair: Mapping[str, Any]) -> dict[str, str]:
-    """Only endpoint semantics bind an upload; scheduling changes do not."""
-    return {
-        "local": str(pair.get("local") or ""),
-        "remote": str(pair.get("remote") or ""),
-        "direction": str(pair.get("direction") or "bisync").lower().strip(),
-    }
-
-
-def _validate_destination(config: Mapping[str, Any], record: Mapping[str, Any]) -> None:
-    from .jobs.restore_test import _endpoints
-
-    pairs = (config.get("backup") or {}).get("pairs") or []
-    configured = next(
-        (
-            pair
-            for pair in pairs
-            if isinstance(pair, Mapping)
-            and str(pair.get("id") or pair.get("name") or "")
-            == str(record.get("identity") or "")
-        ),
-        None,
-    )
-    binding = record.get("endpoint_binding")
-    if (
-        configured is None
-        or str(record.get("target_root") or "")
-        not in {target_root(configured), _endpoints(configured)[1]}
-        or (binding is not None and binding != endpoint_binding(configured))
-    ):
-        raise VaultError(
-            "Datenweg hat sich geändert oder wurde entfernt; lokale Datei bleibt erhalten. "
-            "Konfiguration neu laden und die Datei dem gewünschten Datenweg neu zuordnen."
-        )
-
-
 def vault_root(config: Mapping[str, Any]) -> Path:
     paths = config.get("paths") if isinstance(config.get("paths"), Mapping) else {}
     data_dir = Path(str((paths or {}).get("data_dir") or "/opt/rclone-sync/data"))
@@ -94,7 +51,7 @@ def vault_root(config: Mapping[str, Any]) -> Path:
     if not root.is_absolute():
         raise VaultError("paths.device_vault_dir muss absolut sein")
     root.mkdir(parents=True, exist_ok=True)
-    for name in ("uploads", "records", "blobs", "locks"):
+    for name in ("uploads", "records", "blobs"):
         (root / name).mkdir(mode=0o700, exist_ok=True)
     try:
         root.chmod(0o700)
@@ -144,59 +101,6 @@ def _record_path(root: Path, upload_id: str) -> Path:
 
 def _part_path(root: Path, upload_id: str) -> Path:
     return root / "uploads" / f"{_safe_upload_id(upload_id)}.part"
-
-
-@contextmanager
-def _upload_record_lock(root: Path, upload_id: str) -> Iterator[None]:
-    """Serialize chunk bytes and their receipt across service processes.
-
-    Lock files must remain in place: deleting one could let a new process lock
-    another inode while the original owner still writes this upload.
-    """
-    path = root / "locks" / f"{_safe_upload_id(upload_id)}.lock"
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    with _LOCK:
-        fd = os.open(path, flags, 0o600)
-        acquired = False
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise VaultError("Upload-Lock ist keine reguläre Datei")
-            acquire_file_lock(fd)
-            acquired = True
-            yield
-        finally:
-            if acquired:
-                release_file_lock(fd)
-            os.close(fd)
-
-
-def _reconcile_received(root: Path, record: dict[str, Any]) -> dict[str, Any]:
-    """Keep only acknowledged bytes after a crash before receipt persistence.
-
-    The client can safely resend the discarded suffix. Never infer that
-    unacknowledged bytes are valid or discard a resumable upload wholesale.
-    Caller holds the upload record lock.
-    """
-    if record.get("status") != "receiving":
-        return record
-    expected = int(record.get("size") or 0)
-    received = int(record.get("received") or 0)
-    if not 0 <= received <= expected or expected < 1:
-        raise VaultError("Upload-Status ist beschädigt")
-    part = _part_path(root, str(record["id"]))
-    current = part.stat().st_size if part.exists() else 0
-    if current > received:
-        with part.open("rb+") as handle:
-            handle.truncate(received)
-            handle.flush()
-            os.fsync(handle.fileno())
-        current = received
-    changed = current != received
-    record["received"] = current
-    if current == expected:
-        record["status"] = "uploaded"
-        changed = True
-    return _save_record(root, record) if changed else record
 
 
 def _blob_path(root: Path, sha256: str) -> Path:
@@ -270,7 +174,7 @@ def _is_remote(path: str) -> bool:
 
 def target_root(pair: Mapping[str, Any]) -> str:
     """Vault destination is explicit; bisync's remote side is preferred."""
-    direction = str(pair.get("direction") or "bisync").lower().strip()
+    direction = str(pair.get("direction") or "bisync")
     return str((pair.get("local") if direction == "pull" else pair.get("remote")) or "")
 
 
@@ -407,7 +311,6 @@ def _public_record(record: Mapping[str, Any]) -> dict[str, Any]:
             "target_root",
             "cloud",
             "local_only",
-            "endpoint_binding",
         )
     }
     result["cloud"] = _is_remote(str(record.get("target_root") or ""))
@@ -426,16 +329,7 @@ def create_upload(
     device_name: str,
     target_root: str,
     local_only: bool = False,
-    expected_endpoints: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    binding = endpoint_binding(pair)
-    if (
-        expected_endpoints is not None
-        and endpoint_binding(expected_endpoints) != binding
-    ):
-        raise VaultError(
-            "Datenweg hat sich geändert; Konfiguration neu laden und das Sicherungsziel prüfen."
-        )
     if size < 1 or size > MAX_FILE_BYTES:
         raise VaultError("Dateigröße liegt außerhalb des erlaubten Bereichs")
     digest = str(sha256 or "").lower()
@@ -484,7 +378,6 @@ def create_upload(
         "target_root": str(target_root),
         "cloud": _is_remote(target_root),
         "local_only": not _is_remote(target_root),
-        "endpoint_binding": binding,
         "target_relative": target_relative,
         "created_at": now,
         "updated_at": now,
@@ -506,9 +399,8 @@ def append_chunk(
             f"Ein Upload-Block darf höchstens {MAX_CHUNK_BYTES} Bytes enthalten"
         )
     root = vault_root(config)
-    with _upload_record_lock(root, upload_id):
-        record = _reconcile_received(root, _load_record(root, upload_id))
-        _validate_destination(config, record)
+    with _LOCK:
+        record = _load_record(root, upload_id)
         if record.get("status") != "receiving":
             raise VaultError("Dieser Upload nimmt keine weiteren Daten an")
         part = _part_path(root, upload_id)
@@ -533,10 +425,8 @@ def append_chunk(
 
 def queue_completion(config: Mapping[str, Any], upload_id: str) -> dict[str, Any]:
     root = vault_root(config)
-    with _upload_record_lock(root, upload_id):
-        record = _reconcile_received(root, _load_record(root, upload_id))
-        if record.get("status") != "ready":
-            _validate_destination(config, record)
+    with _LOCK:
+        record = _load_record(root, upload_id)
         if record.get("status") in {"queued", "transferring", "ready"}:
             return _public_record(record)
         if record.get("status") != "uploaded":
@@ -721,11 +611,7 @@ def _copy_and_verify_remote(
 
 
 def complete_upload(
-    database: Database,
-    config: Mapping[str, Any],
-    upload_id: str,
-    *,
-    config_provider: Callable[[], Mapping[str, Any]] | None = None,
+    database: Database, config: Mapping[str, Any], upload_id: str
 ) -> dict[str, Any]:
     root = vault_root(config)
     with _LOCK:
@@ -733,9 +619,7 @@ def complete_upload(
         if not transfer_lock.acquire(blocking=False):
             return _public_record(_load_record(root, upload_id))
     try:
-        return _complete_upload_locked(
-            database, config, upload_id, root, config_provider=config_provider
-        )
+        return _complete_upload_locked(database, config, upload_id, root)
     finally:
         with _LOCK:
             transfer_lock.release()
@@ -748,10 +632,8 @@ def _complete_upload_locked(
     config: Mapping[str, Any],
     upload_id: str,
     root: Path,
-    *,
-    config_provider: Callable[[], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    with _upload_record_lock(root, upload_id):
+    with _LOCK:
         record = _load_record(root, upload_id)
         if record.get("status") == "ready":
             return _public_record(record)
@@ -760,21 +642,13 @@ def _complete_upload_locked(
         record["status"] = "transferring"
         record = _save_record(root, record)
     try:
-        current_config = config_provider() if config_provider else config
-        _validate_destination(current_config, record)
         blob = _prepare_blob(root, record)
-        # Preparing/hashing a large payload can outlive a configuration edit.
-        current_config = config_provider() if config_provider else config
-        _validate_destination(current_config, record)
         target = _join_target(
             str(record["target_root"]), str(record["target_relative"])
         )
         timeout = max(
             300,
-            int(
-                float((current_config.get("backup") or {}).get("timeout_hours", 4))
-                * 3600
-            ),
+            int(float((config.get("backup") or {}).get("timeout_hours", 4)) * 3600),
         )
         # Identical uploads share the timestamp/hash-based destination as well
         # as the local blob. Publish and verify that destination serially.
@@ -787,9 +661,7 @@ def _complete_upload_locked(
                 pair = next(
                     (
                         pair
-                        for pair in (current_config.get("backup") or {}).get(
-                            "pairs", []
-                        )
+                        for pair in (config.get("backup") or {}).get("pairs", [])
                         if str(pair.get("id") or pair.get("name") or "")
                         == str(record.get("identity") or "")
                     ),
@@ -799,11 +671,13 @@ def _complete_upload_locked(
                     raise VaultError(
                         "Datenweg für die lokale Ablage ist nicht mehr verfügbar"
                     )
+                if target_root(pair) != record["target_root"]:
+                    raise VaultError("Das Sicherungsziel hat sich geändert")
                 _guard_local_target(pair, str(record["target_root"]))
                 _copy_and_verify_local(
                     blob, target, str(record["sha256"]), base=str(record["target_root"])
                 )
-        with _upload_record_lock(root, upload_id):
+        with _LOCK:
             record["status"] = "ready"
             record["verified"] = True
             record["received"] = int(record["size"])
@@ -829,7 +703,7 @@ def _complete_upload_locked(
             vault_id=upload_id,
         )
     except Exception as exc:
-        with _upload_record_lock(root, upload_id):
+        with _LOCK:
             record["status"] = "error"
             record["verified"] = False
             record["error"] = str(exc)[:1000]
@@ -854,23 +728,7 @@ def _complete_upload_locked(
 
 
 def upload_status(config: Mapping[str, Any], upload_id: str) -> dict[str, Any]:
-    root = vault_root(config)
-    with _upload_record_lock(root, upload_id):
-        return _public_record(_reconcile_received(root, _load_record(root, upload_id)))
-
-
-def cleanup_vault_scratch(config: Mapping[str, Any]) -> dict[str, int]:
-    paths = config.get("paths") or {}
-    root = Path(
-        str(
-            paths.get("device_vault_dir")
-            or Path(str(paths.get("data_dir") or "/opt/rclone-sync/data"))
-            / "device-vault"
-        )
-    ).expanduser()
-    if not root.is_absolute():
-        raise VaultError("paths.device_vault_dir muss absolut sein")
-    return cleanup_orphaned_workspaces(root / "uploads")
+    return _public_record(_load_record(vault_root(config), upload_id))
 
 
 def library(
@@ -899,10 +757,28 @@ def library(
 def _restore_missing_blob(
     root: Path, config: Mapping[str, Any], record: dict[str, Any]
 ) -> Path:
+    from .jobs.restore_test import _endpoints
     from .handover_rescue import HandoverError, _safe_relative
 
     # A receipt never authorizes an arbitrary path or an old/reconfigured remote.
-    _validate_destination(config, record)
+    pairs = (config.get("backup") or {}).get("pairs") or []
+    configured = next(
+        (
+            pair
+            for pair in pairs
+            if isinstance(pair, Mapping)
+            and str(pair.get("id") or pair.get("name") or "")
+            == str(record.get("identity") or "")
+        ),
+        None,
+    )
+    if not configured or str(record.get("target_root") or "") not in {
+        target_root(configured),
+        _endpoints(configured)[1],
+    }:
+        raise VaultError(
+            "Sicherungsziel hat sich geändert; Notfallakte einem bestehenden Datenweg neu zuordnen"
+        )
     try:
         relative = _safe_relative(str(record.get("target_relative") or ""))
     except HandoverError as exc:
@@ -918,10 +794,7 @@ def _restore_missing_blob(
     if shutil.disk_usage(root).free < size + 64 * 1024 * 1024:
         raise VaultError("Nicht genügend Speicher für die Wiederherstellung")
     target = _join_target(str(record["target_root"]), relative)
-    workspace, workspace_lease = create_workspace(
-        root / "uploads", "restore-vault-rescue-", kind="vault-rescue"
-    )
-    temporary = workspace / "data.part"
+    temporary = root / "uploads" / f"rescue-{uuid.uuid4().hex}.part"
     process = None
     watchdog = None
     timed_out = threading.Event()
@@ -993,18 +866,12 @@ def _restore_missing_blob(
             "Datei konnte nicht aus dem Sicherungsziel zurückgeholt werden"
         ) from exc
     finally:
-        try:
-            if watchdog is not None:
-                watchdog.cancel()
-            if process is not None and process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)
-        finally:
-            try:
-                shutil.rmtree(workspace)
-                forget_workspace(workspace)
-            finally:
-                workspace_lease.release()
+        if watchdog is not None:
+            watchdog.cancel()
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        temporary.unlink(missing_ok=True)
 
 
 def download_blob(config: Mapping[str, Any], upload_id: str) -> tuple[Path, str]:

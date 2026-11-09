@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -24,14 +25,23 @@ _MAX_PAIR_RESULT_BYTES = 32 * 1024
 # restoretest liest vom Ziel und schreibt nur in ein Temp-Verzeichnis, teilt
 # sich aber bewusst den Backup-Scope: Ein Drill während eines laufenden Syncs
 # würde einen inkonsistenten Zwischenstand prüfen und Bandbreite streitig machen.
-_BACKUP_SCOPE_KINDS = ("backup", "check", "quicksync", "restoretest", "recovery")
+_BACKUP_SCOPE_KINDS = (
+    "backup",
+    "check",
+    "quicksync",
+    "restoretest",
+    "recovery",
+    "bitrotscrub",
+)
 _JOB_SCOPE_KINDS = {
     "backup": _BACKUP_SCOPE_KINDS,
     "check": _BACKUP_SCOPE_KINDS,
     "quicksync": _BACKUP_SCOPE_KINDS,
     "restoretest": _BACKUP_SCOPE_KINDS,
     "recovery": _BACKUP_SCOPE_KINDS,
-    "pbs": ("pbs",),
+    "bitrotscrub": _BACKUP_SCOPE_KINDS,
+    "pbs": ("pbs", "bootdrill"),
+    "bootdrill": ("pbs", "bootdrill"),
 }
 
 
@@ -134,7 +144,9 @@ CREATE TABLE IF NOT EXISTS audit_events (
     event_type TEXT NOT NULL,
     actor TEXT NOT NULL DEFAULT 'system',
     created_at REAL NOT NULL,
-    details_json TEXT
+    details_json TEXT,
+    prev_hash TEXT NOT NULL DEFAULT '',
+    entry_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_events_type_created ON audit_events(event_type, created_at DESC);
@@ -268,6 +280,17 @@ CREATE TABLE IF NOT EXISTS native_webauthn_registrations (
 );
 CREATE INDEX IF NOT EXISTS idx_native_webauthn_registrations_expiry
 ON native_webauthn_registrations(expires_at);
+
+CREATE TABLE IF NOT EXISTS file_hash_baseline (
+    pair_key TEXT NOT NULL,
+    path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    modtime TEXT NOT NULL,
+    recorded_at REAL NOT NULL,
+    last_verified_at REAL,
+    PRIMARY KEY(pair_key, path)
+);
 """
 
 
@@ -737,6 +760,14 @@ class Database:
                 )
             connection.execute("PRAGMA user_version=16")
             version = 16
+        audit_cols = {
+            row["name"] for row in connection.execute("PRAGMA table_info(audit_events)")
+        }
+        for col_name in ("prev_hash", "entry_hash"):
+            if col_name not in audit_cols:
+                connection.execute(
+                    f"ALTER TABLE audit_events ADD COLUMN {col_name} TEXT NOT NULL DEFAULT ''"
+                )
 
     @staticmethod
     def _record_job_definition_schedule_state(
@@ -1070,7 +1101,9 @@ class Database:
             )
 
     @contextmanager
-    def conn(self, *, initialize: bool = False) -> Iterator[sqlite3.Connection]:
+    def conn(
+        self, *, initialize: bool = False, readonly: bool = False
+    ) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(
             str(self.path), timeout=30, check_same_thread=False
         )
@@ -1084,13 +1117,17 @@ class Database:
             )
             connection.execute("PRAGMA busy_timeout=30000")
             connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA temp_store=MEMORY")
             # synchronous ist verbindungsgebunden (im Gegensatz zum persistenten
             # journal_mode) und muss daher für jede Verbindung gesetzt werden.
             connection.execute("PRAGMA synchronous=NORMAL")
             if initialize:
                 connection.execute("PRAGMA journal_mode=WAL")
+            if readonly:
+                connection.execute("PRAGMA query_only=ON")
             yield connection
-            connection.commit()
+            if not readonly:
+                connection.commit()
         except Exception:
             connection.rollback()
             raise
@@ -2598,38 +2635,6 @@ class Database:
             }
         return result
 
-    def restore_test_schedule_history(
-        self, history_key: str
-    ) -> Dict[str, Optional[Dict[str, Any]]]:
-        """Read the automatic drill cursor, including pre-separation history.
-
-        Older manual drills shared the global key. Filtering the owning job
-        preserves an earlier scheduled failure even after such a manual success.
-        This does not alter pair evidence or promote partial checks to success.
-        """
-        with self.conn() as connection:
-            base = (
-                "SELECT pr.* FROM pair_runs pr JOIN jobs j ON j.id=pr.job_id "
-                "WHERE pr.history_key=? AND j.kind='restoretest' "
-                "AND j.trigger='scheduler' AND pr.dry_run=0 "
-            )
-            last_row = connection.execute(
-                base
-                + "ORDER BY COALESCE(pr.ended_at, pr.started_at) DESC, pr.id DESC LIMIT 1",
-                (history_key,),
-            ).fetchone()
-            success_row = connection.execute(
-                base
-                + "AND pr.ok=1 ORDER BY COALESCE(pr.ended_at, pr.started_at) DESC, pr.id DESC LIMIT 1",
-                (history_key,),
-            ).fetchone()
-        return {
-            "last_result": self._pair_row_to_result(last_row) if last_row else None,
-            "last_success": self._pair_row_to_result(success_row)
-            if success_row
-            else None,
-        }
-
     def pair_last_results(self) -> Dict[str, Dict[str, Any]]:
         """Letztes Ergebnis je Pair über eine indexierte Abfrage."""
         with self.conn() as connection:
@@ -3680,6 +3685,21 @@ class Database:
         with self.conn() as connection:
             connection.execute("DELETE FROM runtime_settings WHERE key=?", (key,))
 
+    @staticmethod
+    def _compute_audit_hash(
+        prev_hash: str,
+        row_id: int,
+        event_type: str,
+        actor: str,
+        created_at: float,
+        details_json: str,
+    ) -> str:
+        canonical = (
+            f"v1|{prev_hash}|{int(row_id)}|{event_type}|"
+            f"{actor}|{float(created_at):.6f}|{details_json}"
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
     def audit_add(
         self,
         event_type: str,
@@ -3696,12 +3716,87 @@ class Database:
             payload = json.dumps(
                 {"note": "Details wegen Größe verworfen"}, ensure_ascii=False
             )
+        created_at = round(time.time(), 6)
         with self.conn() as connection:
-            cursor = connection.execute(
-                "INSERT INTO audit_events(event_type, actor, created_at, details_json) VALUES (?, ?, ?, ?)",
-                (event, actor_value, time.time(), payload),
+            connection.execute("BEGIN IMMEDIATE")
+            last = connection.execute(
+                "SELECT entry_hash FROM audit_events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            prev_hash = (
+                str(last["entry_hash"] or "GENESIS")
+                if last and str(last["entry_hash"] or "")
+                else "GENESIS"
             )
-            return int(cursor.lastrowid)
+            cursor = connection.execute(
+                "INSERT INTO audit_events(event_type, actor, created_at, details_json, prev_hash, entry_hash) "
+                "VALUES (?, ?, ?, ?, ?, '')",
+                (event, actor_value, created_at, payload, prev_hash),
+            )
+            row_id = int(cursor.lastrowid)
+            entry_hash = self._compute_audit_hash(
+                prev_hash, row_id, event, actor_value, created_at, payload
+            )
+            connection.execute(
+                "UPDATE audit_events SET entry_hash=? WHERE id=?",
+                (entry_hash, row_id),
+            )
+            return row_id
+
+    def audit_verify_chain(self, *, limit: int = 5000) -> Dict[str, Any]:
+        """Prüft die verketteten SHA-256-Prüfsummen des Audit-Protokolls."""
+        max_rows = max(10, min(int(limit or 5000), 50000))
+        with self.conn(readonly=True) as connection:
+            rows = connection.execute(
+                "SELECT id, event_type, actor, created_at, details_json, prev_hash, entry_hash "
+                "FROM ("
+                "  SELECT id, event_type, actor, created_at, details_json, prev_hash, entry_hash "
+                "  FROM audit_events ORDER BY id DESC LIMIT ?"
+                ") ORDER BY id ASC",
+                (max_rows,),
+            ).fetchall()
+        checked = 0
+        hashed = 0
+        legacy_unhashed = 0
+        broken_at_id: Optional[int] = None
+        last_hash = ""
+        prev_was_hashed = False
+
+        for row in rows:
+            checked += 1
+            row_id = int(row["id"])
+            entry_hash = str(row["entry_hash"] or "")
+            prev_hash = str(row["prev_hash"] or "")
+            if not entry_hash:
+                legacy_unhashed += 1
+                prev_was_hashed = False
+                last_hash = ""
+                continue
+            hashed += 1
+            expected = self._compute_audit_hash(
+                prev_hash,
+                row_id,
+                str(row["event_type"] or ""),
+                str(row["actor"] or ""),
+                float(row["created_at"] or 0.0),
+                str(row["details_json"] or ""),
+            )
+            if not secrets.compare_digest(entry_hash, expected):
+                broken_at_id = row_id
+                break
+            if prev_was_hashed and last_hash and prev_hash != last_hash:
+                broken_at_id = row_id
+                break
+            last_hash = entry_hash
+            prev_was_hashed = True
+
+        return {
+            "ok": broken_at_id is None,
+            "checked": checked,
+            "hashed": hashed,
+            "legacy_unhashed": legacy_unhashed,
+            "broken_at_id": broken_at_id,
+            "head_hash": last_hash or None,
+        }
 
     def audit_list(
         self, *, limit: int = 100, event_type: Optional[str] = None
@@ -3713,7 +3808,7 @@ class Database:
             where = " WHERE event_type=?"
             params.append(str(event_type))
         params.append(limit)
-        with self.conn() as connection:
+        with self.conn(readonly=True) as connection:
             rows = connection.execute(
                 f"SELECT * FROM audit_events{where} ORDER BY created_at DESC, id DESC LIMIT ?",
                 tuple(params),
@@ -3736,10 +3831,131 @@ class Database:
         with self.conn() as connection:
             cursor = connection.execute(
                 "DELETE FROM audit_events WHERE created_at < ? AND id NOT IN "
-                "(SELECT id FROM audit_events ORDER BY created_at DESC LIMIT ?)",
+                "(SELECT id FROM audit_events ORDER BY id DESC LIMIT ?)",
                 (cutoff, keep),
             )
             return int(cursor.rowcount or 0)
+
+    def pair_recent_successful_runs(
+        self, history_key: str, *, pair_name: str = "", limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Liefert die letzten erfolgreichen Produktivläufe eines Datenwegs für Trend-Analysen."""
+        max_rows = max(1, min(int(limit or 10), 50))
+        key = str(history_key or "").strip()
+        name = str(pair_name or "").strip()
+        with self.conn(readonly=True) as connection:
+            rows = []
+            if key:
+                rows = connection.execute(
+                    "SELECT job_id, pair_name, history_key, started_at, ended_at, result_json "
+                    "FROM pair_runs WHERE history_key=? AND ok=1 AND dry_run=0 "
+                    "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT ?",
+                    (key, max_rows),
+                ).fetchall()
+            if not rows and name:
+                rows = connection.execute(
+                    "SELECT job_id, pair_name, history_key, started_at, ended_at, result_json "
+                    "FROM pair_runs WHERE pair_name=? AND ok=1 AND dry_run=0 "
+                    "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT ?",
+                    (name, max_rows),
+                ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                parsed = json.loads(row["result_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                parsed = {}
+            if not isinstance(parsed, dict):
+                parsed = {}
+            result.append(
+                {
+                    "job_id": int(row["job_id"]),
+                    "pair_name": str(row["pair_name"]),
+                    "history_key": str(row["history_key"] or ""),
+                    "started_at": float(row["started_at"] or 0.0),
+                    "ended_at": float(row["ended_at"] or row["started_at"] or 0.0),
+                    "pair": parsed,
+                }
+            )
+        return result
+
+    def hash_baseline_get_many(
+        self, pair_key: str, paths: Iterable[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        wanted = list(dict.fromkeys(str(path) for path in paths))
+        result: Dict[str, Dict[str, Any]] = {}
+        with self.conn() as connection:
+            for offset in range(0, len(wanted), 500):
+                chunk = wanted[offset : offset + 500]
+                marks = ",".join("?" for _ in chunk)
+                for row in connection.execute(
+                    "SELECT * FROM file_hash_baseline "
+                    f"WHERE pair_key=? AND path IN ({marks})",
+                    (pair_key, *chunk),
+                ):
+                    result[row["path"]] = dict(row)
+        return result
+
+    def hash_baseline_upsert(
+        self, pair_key: str, rows: Iterable[Mapping[str, Any]]
+    ) -> None:
+        """Neue oder geänderte Datei: Baseline ersetzen, Prüfstand zurücksetzen."""
+        now = time.time()
+        values = [
+            (
+                pair_key,
+                str(row["path"]),
+                str(row["sha256"]),
+                int(row["size"]),
+                str(row["modtime"]),
+                now,
+            )
+            for row in rows
+        ]
+        with self.conn() as connection:
+            connection.executemany(
+                "INSERT INTO file_hash_baseline "
+                "(pair_key, path, sha256, size, modtime, recorded_at, last_verified_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, NULL) "
+                "ON CONFLICT(pair_key, path) DO UPDATE SET "
+                "sha256=excluded.sha256, size=excluded.size, modtime=excluded.modtime, "
+                "recorded_at=excluded.recorded_at, last_verified_at=NULL",
+                values,
+            )
+
+    def hash_baseline_touch(
+        self, pair_key: str, paths: Iterable[str], verified_at: float
+    ) -> None:
+        with self.conn() as connection:
+            connection.executemany(
+                "UPDATE file_hash_baseline SET last_verified_at=? "
+                "WHERE pair_key=? AND path=?",
+                [(float(verified_at), pair_key, str(path)) for path in paths],
+            )
+
+    def hash_baseline_prune(self, pair_key: str, max_rows: int = 50_000) -> int:
+        """Verwirft über ``max_rows`` hinaus die zuletzt verifizierten Zeilen."""
+        # Behalten wird, was am längsten ungeprüft ist: Das ist als Nächstes fällig.
+        # recorded_at ersetzt eine fehlende Verifikation (Baseline = erster Hash).
+        with self.conn() as connection:
+            cursor = connection.execute(
+                "DELETE FROM file_hash_baseline WHERE pair_key=? AND path NOT IN "
+                "(SELECT path FROM file_hash_baseline WHERE pair_key=? "
+                "ORDER BY COALESCE(last_verified_at, recorded_at) ASC LIMIT ?)",
+                (pair_key, pair_key, max(0, int(max_rows))),
+            )
+            return int(cursor.rowcount or 0)
+
+    def hash_baseline_stats(self, pair_key: str) -> Dict[str, Any]:
+        with self.conn() as connection:
+            row = connection.execute(
+                'SELECT COUNT(*) AS "rows", MIN(recorded_at) AS oldest_recorded_at, '
+                "MAX(recorded_at) AS newest_recorded_at, "
+                "MIN(last_verified_at) AS oldest_verified_at "
+                "FROM file_hash_baseline WHERE pair_key=?",
+                (pair_key,),
+            ).fetchone()
+        return dict(row)
 
     def integrity_check(self) -> Dict[str, Any]:
         with self.conn() as connection:
@@ -3752,27 +3968,22 @@ class Database:
         }
 
     def stats(self) -> Dict[str, Any]:
-        with self.conn() as connection:
-            jobs = int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
-            pairs = int(
-                connection.execute("SELECT COUNT(*) FROM pair_runs").fetchone()[0]
-            )
-            auth = int(
-                connection.execute("SELECT COUNT(*) FROM auth_failures").fetchone()[0]
-            )
-            running = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM jobs WHERE status='running'"
-                ).fetchone()[0]
-            )
-            audit = int(
-                connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
-            )
-            runtime = int(
-                connection.execute("SELECT COUNT(*) FROM runtime_settings").fetchone()[
-                    0
-                ]
-            )
+        with self.conn(readonly=True) as connection:
+            row = connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM jobs) AS jobs, "
+                "(SELECT COUNT(*) FROM pair_runs) AS pair_runs, "
+                "(SELECT COUNT(*) FROM auth_failures) AS auth_failures, "
+                "(SELECT COUNT(*) FROM jobs WHERE status='running') AS running, "
+                "(SELECT COUNT(*) FROM audit_events) AS audit_events, "
+                "(SELECT COUNT(*) FROM runtime_settings) AS runtime_settings"
+            ).fetchone()
+            jobs = int(row["jobs"])
+            pairs = int(row["pair_runs"])
+            auth = int(row["auth_failures"])
+            running = int(row["running"])
+            audit = int(row["audit_events"])
+            runtime = int(row["runtime_settings"])
         try:
             size = self.path.stat().st_size
         except OSError:

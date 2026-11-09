@@ -93,7 +93,7 @@ def build() -> int:
     # app.js ersetzen statt ergänzen: sonst überschreibt die echte app()
     # die Attrappe und greift auf nicht erreichbare API-Endpunkte zu.
     html = html.replace(
-        '<script src="/static/app.js"></script>',
+        '<script type="module" src="/static/app.js"></script>',
         '<script src="_stub-methods.js"></script>\n'
         '  <script src="preview-stub.js"></script>',
     )

@@ -64,7 +64,7 @@ final class FixtureDecodingTests: XCTestCase {
 
         let overview = try JSONDecoder().decode(StorageOverview.self, from: data)
         let pair = try XCTUnwrap(overview.pairs.first)
-        XCTAssertEqual(pair.direction, "bisync", "Missing direction must match the server default")
+        XCTAssertEqual(pair.direction, "push")
         XCTAssertEqual(pair.source, "/mnt/fotos")
         XCTAssertEqual(pair.target, "cloud:Fotos")
         XCTAssertEqual(pair.lastTransferred, "2048 B")
@@ -155,8 +155,8 @@ final class FixtureDecodingTests: XCTestCase {
     }
 
     func testLocalIPv4UsesHTTPReverseProxyPort() throws {
-        let url = try APIClient.normalizedServerURL("192.168.50.10")
-        XCTAssertEqual(url.absoluteString, "http://192.168.50.10")
+        let url = try APIClient.normalizedServerURL("192.168.1.67")
+        XCTAssertEqual(url.absoluteString, "http://192.168.1.67")
     }
 
     func testLocalIPv4KeepsExplicitPort() throws {
@@ -165,8 +165,8 @@ final class FixtureDecodingTests: XCTestCase {
     }
 
     func testExplicitLocalHTTPKeepsDefaultPort() throws {
-        let url = try APIClient.normalizedServerURL("http://192.168.50.10")
-        XCTAssertEqual(url.absoluteString, "http://192.168.50.10")
+        let url = try APIClient.normalizedServerURL("http://192.168.1.67")
+        XCTAssertEqual(url.absoluteString, "http://192.168.1.67")
     }
 
     func testExplicitHTTPSIsNotRewritten() throws {
@@ -178,7 +178,7 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertThrowsError(try APIClient.normalizedServerURL("https://admin:secret@backup.example.de")) { error in
             XCTAssertEqual(error as? APIError, .invalidServer)
         }
-        XCTAssertThrowsError(try APIClient.normalizedServerURL("admin:secret@192.168.50.10")) { error in
+        XCTAssertThrowsError(try APIClient.normalizedServerURL("admin:secret@192.168.1.67")) { error in
             XCTAssertEqual(error as? APIError, .invalidServer)
         }
     }

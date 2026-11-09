@@ -11,8 +11,15 @@ from typing import Any, Iterable
 
 from . import runtime_state
 
-BACKUP_KINDS = ("backup", "check", "quicksync", "restoretest", "recovery")
-PBS_KINDS = ("pbs",)
+BACKUP_KINDS = (
+    "backup",
+    "check",
+    "quicksync",
+    "restoretest",
+    "recovery",
+    "bitrotscrub",
+)
+PBS_KINDS = ("pbs", "bootdrill")
 
 
 def reconcile_locked_scope(

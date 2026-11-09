@@ -441,3 +441,240 @@ def test_pair_anomaly_guard_must_be_mapping(tmp_path: Path):
     cfg["backup"]["pairs"] = [_pair(tmp_path, anomaly_guard="unsafe")]
     with pytest.raises(ConfigValidationError, match="anomaly_guard"):
         validate_config(cfg)
+
+
+def _errors(cfg: dict) -> list[str]:
+    with pytest.raises(ConfigValidationError) as excinfo:
+        validate_config(cfg)
+    return excinfo.value.errors
+
+
+def test_new_backup_blocks_have_defaults_and_are_clamped(tmp_path: Path):
+    clean, _ = validate_config(_base(tmp_path))
+    assert clean["backup"]["versions_lifecycle"] == {
+        "enabled": False,
+        "keep_daily": 7,
+        "keep_weekly": 4,
+        "keep_monthly": 12,
+    }
+    assert clean["backup"]["bitrot_scrub"] == {
+        "enabled": False,
+        "schedule": "0 4 * * *",
+        "sample_percent": 2,
+        "max_files": 200,
+        "max_total_mb": 256,
+        "max_scan_files": 20_000,
+        "rotation_days": 30,
+    }
+    assert clean["backup"]["vpn_probes"] == []
+
+    cfg = _base(tmp_path)
+    cfg["backup"]["versions_lifecycle"] = {
+        "enabled": True,
+        "keep_daily": 9999,
+        "keep_weekly": -1,
+        "keep_monthly": "x",
+    }
+    cfg["backup"]["bitrot_scrub"] = {
+        "schedule": "manual",
+        "sample_percent": 0,
+        "max_files": 99_999,
+        "max_total_mb": 0,
+        "max_scan_files": 1,
+        "rotation_days": 999,
+    }
+    clean, _ = validate_config(cfg)
+    assert clean["backup"]["versions_lifecycle"] == {
+        "enabled": True,
+        "keep_daily": 365,
+        "keep_weekly": 0,
+        "keep_monthly": 12,
+    }
+    assert clean["backup"]["bitrot_scrub"] == {
+        "enabled": False,
+        "schedule": "manual",
+        "sample_percent": 1,
+        "max_files": 5000,
+        "max_total_mb": 1,
+        "max_scan_files": 100,
+        "rotation_days": 365,
+    }
+
+
+def test_bitrot_scrub_schedule_must_be_cron_or_manual(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["bitrot_scrub"] = {"schedule": "täglich"}
+    assert any("bitrot_scrub.schedule" in e for e in _errors(cfg))
+
+
+def test_vpn_probes_format_and_limit(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["vpn_probes"] = [
+        "10.8.0.1:443",
+        "gw.example.de:51820",
+        "[fd00::1]:443",
+    ]
+    clean, _ = validate_config(cfg)
+    assert clean["backup"]["vpn_probes"] == cfg["backup"]["vpn_probes"]
+
+    for bad in (
+        "kein-port",
+        "host:0",
+        "host:65536",
+        "fd00::1:443",
+        "[nope]:1",
+        "a b:1",
+    ):
+        cfg["backup"]["vpn_probes"] = ["10.8.0.1:443", bad]
+        assert "backup.vpn_probes[1] ist ungültig (host:port erwartet)" in _errors(
+            cfg
+        ), bad
+
+    cfg["backup"]["vpn_probes"] = [f"h{i}:1" for i in range(11)]
+    assert any("höchstens 10" in e for e in _errors(cfg))
+
+
+def test_pair_new_fields_have_defaults_and_normalize(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [_pair(tmp_path)]
+    pair = validate_config(cfg)[0]["backup"]["pairs"][0]
+    assert pair["airgap_device"] == ""
+    assert pair["zfs_snapshot"] is False
+    assert pair["tags"] == []
+    assert "versions_lifecycle" not in pair
+
+    cfg["backup"]["versions_lifecycle"] = {"keep_weekly": 8}
+    cfg["backup"]["pairs"] = [
+        _pair(
+            tmp_path,
+            airgap_device="/dev/disk/by-uuid/abc-123",
+            zfs_snapshot=True,
+            tags=["NAS", "nas", "privat_1"],
+            versions_lifecycle={"enabled": True, "keep_daily": 5000},
+        )
+    ]
+    pair = validate_config(cfg)[0]["backup"]["pairs"][0]
+    assert pair["airgap_device"] == "/dev/disk/by-uuid/abc-123"
+    assert pair["zfs_snapshot"] is True
+    assert pair["tags"] == ["nas", "privat_1"]
+    assert pair["versions_lifecycle"] == {
+        "enabled": True,
+        "keep_daily": 365,
+        "keep_weekly": 8,
+        "keep_monthly": 12,
+    }
+
+
+def test_pair_zfs_snapshot_requires_push(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [
+        _pair(tmp_path, direction="bisync", mode="bisync", zfs_snapshot=True)
+    ]
+    assert (
+        "backup.pairs[0].zfs_snapshot ist nur bei direction: push möglich"
+        in _errors(cfg)
+    )
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "/tmp/x",
+        "dev/sda",
+        "/dev/../etc/passwd",
+        "/dev/sd a",
+        "/dev/sda\nrm",
+        "/dev/" + "a" * 252,
+    ],
+)
+def test_pair_airgap_device_must_be_safe_dev_path(tmp_path: Path, device):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [_pair(tmp_path, airgap_device=device)]
+    assert "backup.pairs[0].airgap_device ist ungültig" in _errors(cfg)
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [["Bad Tag"], ["-x"], ["a" * 25], [f"t{i}" for i in range(11)], {"a": 1}],
+)
+def test_pair_tags_regex_and_limit(tmp_path: Path, tags):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [_pair(tmp_path, tags=tags)]
+    assert any(e.startswith("backup.pairs[0].tags:") for e in _errors(cfg))
+
+
+def test_pair_versions_lifecycle_must_be_mapping(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["backup"]["pairs"] = [_pair(tmp_path, versions_lifecycle="an")]
+    assert any("versions_lifecycle muss ein Mapping sein" in e for e in _errors(cfg))
+
+
+def test_pbs_new_blocks_have_defaults_and_are_clamped(tmp_path: Path):
+    pbs = validate_config(_base(tmp_path))[0]["pbs"]
+    assert pbs["gc_throttle"] == {"enabled": True, "poll_seconds": 60}
+    assert pbs["boot_drill"] == {
+        "enabled": False,
+        "schedule": "manual",
+        "group": "",
+        "archive": "",
+        "memory_mb": 1024,
+        "timeout_seconds": 60,
+        "scratch_dir": "",
+    }
+
+    cfg = _base(tmp_path)
+    cfg["pbs"] = {
+        "gc_throttle": {"enabled": False, "poll_seconds": 1},
+        "boot_drill": {
+            "enabled": True,
+            "schedule": "0 5 * * 0",
+            "group": "vm/100",
+            "archive": "drive-scsi0.img.fidx",
+            "memory_mb": 10,
+            "timeout_seconds": 99_999,
+            "scratch_dir": "/var/tmp/drill",
+        },
+    }
+    pbs = validate_config(cfg)[0]["pbs"]
+    assert pbs["gc_throttle"] == {"enabled": False, "poll_seconds": 15}
+    assert pbs["boot_drill"]["memory_mb"] == 256
+    assert pbs["boot_drill"]["timeout_seconds"] == 900
+    assert pbs["boot_drill"]["group"] == "vm/100"
+    cfg["pbs"]["gc_throttle"]["poll_seconds"] = 5000
+    cfg["pbs"]["boot_drill"]["memory_mb"] = 10**9
+    pbs = validate_config(cfg)[0]["pbs"]
+    assert pbs["gc_throttle"]["poll_seconds"] == 900
+    assert pbs["boot_drill"]["memory_mb"] == 65_536
+
+
+def test_pbs_boot_drill_validation_errors(tmp_path: Path):
+    cfg = _base(tmp_path)
+    cfg["pbs"] = {"boot_drill": {"enabled": True}}
+    assert any("boot_drill.group ist erforderlich" in e for e in _errors(cfg))
+    for key, value in (
+        ("group", "vmx/100"),
+        ("archive", "a/b"),
+        ("scratch_dir", "relativ/pfad"),
+        ("schedule", "irgendwann"),
+    ):
+        cfg["pbs"] = {"boot_drill": {"group": "ct/101", key: value}}
+        assert any(f"boot_drill.{key}" in e for e in _errors(cfg)), key
+
+
+def test_new_notification_events_are_known_everywhere(tmp_path: Path):
+    from app.notifications import EVENTS
+
+    new = ["bitrot_detected", "boot_drill_ok", "boot_drill_error", "lockdown"]
+    assert set(new) <= set(EVENTS)
+    cfg = _base(tmp_path)
+    cfg["notifications"] = {"apns": {"events": new}}
+    assert validate_config(cfg)[0]["notifications"]["apns"]["events"] == new
+
+
+def test_example_config_documents_new_keys():
+    example = Path(__file__).resolve().parents[1] / "config" / "config.example.yaml"
+    clean, _ = validate_config(yaml.safe_load(example.read_text(encoding="utf-8")))
+    assert clean["pbs"]["boot_drill"]["enabled"] is False
+    assert {"bitrot_detected", "boot_drill_error", "lockdown"} <= set(
+        clean["notifications"]["apns"]["events"]
+    )

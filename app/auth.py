@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 SESSION_COOKIE = "rclone_sync_session"
 LOGIN_CSRF_COOKIE = "rclone_sync_login_csrf"
 DEFAULT_SESSION_MAX_AGE = 7 * 24 * 3600
+WEBAUTHN_REAUTH_PREFIX = "webauthn_reauth:"
+_WEBAUTHN_REAUTH_RUNTIME_KEY = "webauthn_reauth_tokens"
+_webauthn_reauth_memory: dict[str, dict[str, Any]] = {}
 
 
 def account_generation(snapshot: Mapping[str, Any] | None = None) -> str:
@@ -381,8 +384,109 @@ def clear_reauth_failures(request: Request) -> None:
             _login_blocked_until.pop(key, None)
 
 
+def issue_webauthn_reauth_token(
+    request: Request, username: str, *, ttl_seconds: int = 90
+) -> str:
+    """Erzeugt einen einmaligen, sitzungsgebundenen Step-up-Token nach WebAuthn-Prüfung."""
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode("ascii")).hexdigest()
+    session_key, _ip_key = reauth_keys(request)
+    gen = account_generation()
+    now = time.time()
+    entry = {
+        "username": str(username or "admin"),
+        "session_key": session_key,
+        "account_generation": gen,
+        "expires_at": now + max(15, min(int(ttl_seconds), 300)),
+        "created_at": now,
+    }
+    try:
+
+        def _store(current: Any) -> dict[str, Any]:
+            state = current if isinstance(current, dict) else {}
+            tokens = state.get("tokens")
+            if not isinstance(tokens, dict):
+                tokens = {}
+            pruned = {
+                k: v
+                for k, v in tokens.items()
+                if isinstance(v, dict) and float(v.get("expires_at") or 0) >= now
+            }
+            if len(pruned) >= 64:
+                oldest = sorted(
+                    pruned.items(),
+                    key=lambda item: float(item[1].get("created_at") or 0),
+                )[0][0]
+                pruned.pop(oldest, None)
+            pruned[token_hash] = entry
+            return {"tokens": pruned}
+
+        get_db().runtime_update(_WEBAUTHN_REAUTH_RUNTIME_KEY, _store, default={})
+    except Exception:
+        with _login_lock:
+            _webauthn_reauth_memory[token_hash] = entry
+    return f"{WEBAUTHN_REAUTH_PREFIX}{raw_token}"
+
+
+def consume_webauthn_reauth_token(
+    request: Request, username: str, token: str
+) -> str | None:
+    """Verbraucht einen einmaligen WebAuthn-Step-up-Token und liefert die Generation."""
+    text = str(token or "").strip()
+    if not text.startswith(WEBAUTHN_REAUTH_PREFIX):
+        return None
+    raw_token = text[len(WEBAUTHN_REAUTH_PREFIX) :].strip()
+    if not raw_token or len(raw_token) > 256:
+        return None
+    token_hash = hashlib.sha256(raw_token.encode("utf-8", errors="ignore")).hexdigest()
+    session_key, _ip_key = reauth_keys(request)
+    now = time.time()
+    consumed: dict[str, Any] = {}
+    try:
+
+        def _consume(current: Any) -> dict[str, Any]:
+            state = current if isinstance(current, dict) else {}
+            tokens = state.get("tokens")
+            if not isinstance(tokens, dict):
+                tokens = {}
+            found = tokens.pop(token_hash, None)
+            if isinstance(found, dict):
+                consumed.update(found)
+            pruned = {
+                k: v
+                for k, v in tokens.items()
+                if isinstance(v, dict) and float(v.get("expires_at") or 0) >= now
+            }
+            return {"tokens": pruned}
+
+        get_db().runtime_update(_WEBAUTHN_REAUTH_RUNTIME_KEY, _consume, default={})
+    except Exception:
+        pass
+    if not consumed:
+        with _login_lock:
+            mem_entry = _webauthn_reauth_memory.pop(token_hash, None)
+            if isinstance(mem_entry, dict):
+                consumed.update(mem_entry)
+    if not consumed:
+        return None
+    if float(consumed.get("expires_at") or 0) < now:
+        return None
+    if not secrets.compare_digest(str(consumed.get("session_key") or ""), session_key):
+        return None
+    if not _constant_time_text_equal(
+        str(consumed.get("username") or "").casefold(),
+        str(username or "").casefold(),
+    ):
+        return None
+    current_gen = account_generation()
+    expected_gen = str(consumed.get("account_generation") or "")
+    if not expected_gen or not secrets.compare_digest(expected_gen, current_gen):
+        return None
+    return expected_gen
+
+
 def require_reauthentication(request: Request, username: str, password: str) -> str:
-    """Prüft ein aktuelles Passwort mit persistenter Sitzung/IP-Sperre."""
+    """Prüft ein aktuelles Passwort oder einen WebAuthn-Step-up-Token mit Sitzung/IP-Sperre."""
 
     def rate_limited(retry_after: int) -> HTTPException:
         retry = max(1, int(retry_after))
@@ -399,10 +503,30 @@ def require_reauthentication(request: Request, username: str, password: str) -> 
     retry_after = reauth_retry_after(request)
     if retry_after:
         raise rate_limited(retry_after)
-    generation = verify_password_with_generation(username, password)
+    if str(password or "").startswith(WEBAUTHN_REAUTH_PREFIX):
+        generation = consume_webauthn_reauth_token(request, username, password)
+    else:
+        generation = verify_password_with_generation(username, password)
     if generation is None:
         retry_after = record_reauth_failure(request)
         if retry_after:
+            raw_session = str(request.cookies.get(SESSION_COOKIE, "") or "")
+            if raw_session and session_user(raw_session) is not None:
+                try:
+                    new_ver = bump_session_version()
+                    get_db().audit_add(
+                        "reauth_lockout_session_revoked",
+                        actor=str(username or "admin"),
+                        details={
+                            "client": client_host(request),
+                            "session_version": new_ver,
+                            "retry_after_seconds": int(retry_after),
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Sitzungswiderruf nach Reauth-Sperre fehlgeschlagen"
+                    )
             raise rate_limited(retry_after)
         raise HTTPException(
             403,

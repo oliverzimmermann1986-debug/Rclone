@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from hashlib import sha256
+import hashlib
 from os import PathLike
 from pathlib import Path
 
@@ -18,6 +18,13 @@ WEB_CACHE_ASSETS = (
     "alpine.min.js",
     "ui-helpers.js",
     "app.js",
+    "app-core.js",
+    "app-dashboard.js",
+    "app-pairs.js",
+    "app-jobs.js",
+    "app-system.js",
+    "app-recovery.js",
+    "app-settings.js",
     "manifest.json",
     "app-icon-1024.png",
     "workspace.js",
@@ -25,14 +32,15 @@ WEB_CACHE_ASSETS = (
 )
 
 
-def web_asset_cache_revision(directory: Path, version: str) -> str:
-    """Bind the public web bundle's cache key to its current file contents."""
-
-    manifest = sha256()
+def web_asset_cache_revision(directory: PathLike[str] | str, version: str) -> str:
+    """Invalidate the browser cache when a web-only patch changes asset bytes."""
+    root = Path(directory)
+    digest = hashlib.sha256()
     for name in WEB_CACHE_ASSETS:
-        manifest.update(name.encode("utf-8") + b"\0")
-        manifest.update(sha256((directory / name).read_bytes()).digest())
-    return f"{version}-{manifest.hexdigest()[:16]}"
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((root / name).read_bytes())
+    return f"{version}-{digest.hexdigest()[:16]}"
 
 
 class AllowlistedStaticFiles(StaticFiles):

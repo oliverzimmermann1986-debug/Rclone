@@ -297,6 +297,105 @@ def cmd_restore_config_backup(args) -> int:
     return 0
 
 
+def cmd_bootstrap_export(args) -> int:
+    from .bootstrap_export import create_encrypted_bootstrap_bundle
+
+    passphrase = args.passphrase
+    if not passphrase:
+        passphrase = getpass.getpass(
+            "Passphrase für Bootstrap-Export (min. 12 Zeichen): "
+        )
+        confirm = getpass.getpass("Passphrase wiederholen: ")
+        if passphrase != confirm:
+            print("✗ Passphrasen stimmen nicht überein")
+            return 1
+    try:
+        envelope = create_encrypted_bootstrap_bundle(
+            get_config().snapshot(),
+            passphrase=passphrase,
+            include_secrets=bool(getattr(args, "include_secrets", False)),
+            include_rclone_conf=not args.without_rclone_conf,
+        )
+        out_path = Path(args.output).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(envelope, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(out_path, 0o600)
+        except OSError:
+            pass
+    except Exception as exc:
+        print(f"✗ Bootstrap-Export fehlgeschlagen: {exc}")
+        return 1
+    print(f"✓ Verschlüsseltes Bootstrap-Paket geschrieben: {out_path}")
+    return 0
+
+
+def cmd_verify_audit(_args) -> int:
+    db = get_db()
+    status = db.audit_verify_chain()
+    print(json.dumps(status, ensure_ascii=False, indent=2))
+    return 0 if status.get("ok") else 2
+
+
+def cmd_list_hooks(_args) -> int:
+    from .hooks import list_available_hooks
+
+    result = list_available_hooks(get_config().snapshot())
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_bootstrap_restore(args) -> int:
+    from .bootstrap_export import decrypt_bootstrap_bundle
+    from .rclone_args import resolve_rclone_config_path
+
+    bundle_path = Path(args.bundle).expanduser()
+    if not bundle_path.is_file():
+        print(f"✗ Bootstrap-Paket nicht gefunden: {bundle_path}")
+        return 1
+    if not args.yes:
+        print("Abbruch: --yes ist für die Bootstrap-Wiederherstellung erforderlich.")
+        return 1
+    passphrase = args.passphrase or getpass.getpass("Passphrase des Bootstrap-Pakets: ")
+    try:
+        envelope = json.loads(bundle_path.read_text(encoding="utf-8"))
+        bundle = decrypt_bootstrap_bundle(envelope, passphrase=passphrase)
+        restored_cfg = dict(bundle.get("config") or {})
+        web_pre = dict(restored_cfg.get("web") or {})
+        web_pre["secret_key"] = secrets.token_urlsafe(48)
+        restored_cfg["web"] = web_pre
+        normalized, _warnings = validate_config(restored_cfg)
+        _rotate_sessions(normalized)
+        primary = _configured_path()
+        primary.parent.mkdir(parents=True, exist_ok=True)
+        with _config_file_lock(primary):
+            primary.write_text(
+                yaml.safe_dump(normalized, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            try:
+                os.chmod(primary, 0o600)
+            except OSError:
+                pass
+        if args.restore_rclone_conf and bundle.get("rclone_conf"):
+            rclone_target = resolve_rclone_config_path()
+            if rclone_target is not None:
+                rclone_target.parent.mkdir(parents=True, exist_ok=True)
+                rclone_target.write_text(str(bundle["rclone_conf"]), encoding="utf-8")
+                try:
+                    os.chmod(rclone_target, 0o600)
+                except OSError:
+                    pass
+    except Exception as exc:
+        print(f"✗ Bootstrap-Wiederherstellung fehlgeschlagen: {exc}")
+        return 2
+    print(f"✓ Bootstrap-Konfiguration wiederhergestellt nach {_configured_path()}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -351,11 +450,57 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true", help="Wiederherstellung verbindlich bestätigen"
     )
     command.set_defaults(func=cmd_restore_config_backup)
+
+    command = sub.add_parser(
+        "bootstrap-export",
+        help="Verschlüsseltes Disaster-Recovery-Bootstrap-Paket exportieren",
+    )
+    command.add_argument("output", help="Zieldatei (.enc.json)")
+    command.add_argument("--passphrase", help="Passphrase (min. 12 Zeichen)")
+    command.add_argument(
+        "--include-secrets",
+        action="store_true",
+        help="Sensible Schlüssel und Tokens unredigiert einschließen",
+    )
+    command.add_argument(
+        "--without-rclone-conf",
+        action="store_true",
+        help="rclone.conf nicht einschließen",
+    )
+    command.set_defaults(func=cmd_bootstrap_export)
+
+    command = sub.add_parser(
+        "bootstrap-restore",
+        help="Verschlüsseltes Disaster-Recovery-Bootstrap-Paket wiederherstellen",
+    )
+    command.add_argument("bundle", help="Quelldatei (.enc.json)")
+    command.add_argument("--passphrase", help="Passphrase")
+    command.add_argument(
+        "--restore-rclone-conf",
+        action="store_true",
+        help="Mitgesicherte rclone.conf ebenfalls wiederherstellen",
+    )
+    command.add_argument(
+        "--yes", action="store_true", help="Wiederherstellung verbindlich bestätigen"
+    )
+    command.set_defaults(func=cmd_bootstrap_restore)
+
+    command = sub.add_parser(
+        "verify-audit",
+        help="SHA-256-Hash-Kette des Aktivitätsprotokolls verifizieren",
+    )
+    command.set_defaults(func=cmd_verify_audit)
+
+    command = sub.add_parser(
+        "hooks",
+        help="Geprüfte Hook-Skripte in hooks.d auflisten",
+    )
+    command.set_defaults(func=cmd_list_hooks)
     return parser
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     return int(args.func(args))
 
 
