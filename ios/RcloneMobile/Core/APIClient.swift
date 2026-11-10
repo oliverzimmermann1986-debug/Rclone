@@ -1022,7 +1022,7 @@ final class APIClient: APIClientProtocol {
     }
 
     func startBootDrill() async throws -> BootDrillStartResponse {
-        try await post("/api/pbs/boot-drill", timeout: 30)
+        try await post("/api/pbs/boot-drill", body: [String: String](), timeout: 30)
     }
 
     func getPairConflicts(name: String) async throws -> PairConflictsResponse {
