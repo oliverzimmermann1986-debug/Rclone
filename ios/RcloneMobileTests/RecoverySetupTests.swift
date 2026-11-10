@@ -44,14 +44,14 @@ final class RecoverySetupTests: XCTestCase {
 
     func testOfflineKeysSeparateAccountPortSchemeAndBasePath() {
         let store = RecoveryOfflineStore()
-        let original = store.key(server: "http://192.168.1.20:8000", username: "admin")
-        for (server, username) in [("http://192.168.1.20:8001", "admin"),
-                                    ("https://192.168.1.20:8000", "admin"),
-                                    ("http://192.168.1.20:8000/other", "admin"),
-                                    ("http://192.168.1.20:8000", "other")] {
+        let original = store.key(server: "http://192.168.50.20:8000", username: "admin")
+        for (server, username) in [("http://192.168.50.20:8001", "admin"),
+                                    ("https://192.168.50.20:8000", "admin"),
+                                    ("http://192.168.50.20:8000/other", "admin"),
+                                    ("http://192.168.50.20:8000", "other")] {
             XCTAssertNotEqual(original, store.key(server: server, username: username))
         }
-        XCTAssertEqual(original, store.key(server: "http://192.168.1.20:8000/", username: "admin"))
+        XCTAssertEqual(original, store.key(server: "http://192.168.50.20:8000/", username: "admin"))
     }
 
     func testOldUnboundOrExpiredProofIsNotCurrent() throws {
