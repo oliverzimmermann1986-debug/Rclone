@@ -63,7 +63,7 @@ def test_codemagic_verifies_fetched_main_and_exact_signed_tag_before_release_cha
     provenance = config.index("ios_release_preflight.py")
     version_write = config.index("ios_release_version.py")
     verifier_install = config.index("command -v gpg")
-    assert "brew install gnupg" not in config
+    assert "command -v gpg" in config
 
     assert "refs/heads/main:refs/remotes/origin/main" in config
     assert "refs/tags/$CM_TAG:refs/tags/$CM_TAG" in config

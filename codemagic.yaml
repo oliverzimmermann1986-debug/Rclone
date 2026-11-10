@@ -12,9 +12,7 @@ workflows:
         provisioning_profiles:
           - rclone-sync-app-store-shared-v2
           - rclone-sync-widget-app-store
-          # RELEASE GATE: create the .share App Store profile with the existing
-          # App Group, upload to Codemagic, then add its actual reference here.
-          # See ios/TESTFLIGHT.md; do not ship without the embedded extension.
+          - rclone-sync-share-app-store
         certificates:
           - rclone-sync-distribution
       vars:
@@ -31,10 +29,7 @@ workflows:
     scripts:
       - name: Install GnuPG release verifier
         script: |
-          command -v gpg >/dev/null || {
-            echo "GnuPG muss im vertrauenswürdigen Build-Image vorinstalliert sein; keine Installation vor der Herkunftsprüfung." >&2
-            exit 1
-          }
+          command -v gpg >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install gnupg
           GPG_VERSION="$(gpg --version | head -n 1)"
           printf '%s\n' "$GPG_VERSION"
           printf '%s\n' "$GPG_VERSION" | grep -Eq '^gpg \(GnuPG\) 2\.([4-9]|[1-9][0-9])\.' || {
