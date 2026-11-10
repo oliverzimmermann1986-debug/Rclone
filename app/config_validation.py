@@ -58,6 +58,18 @@ _DURATION_RE = re.compile(r"^\d+(?:\.\d+)?(?:ms|s|m|h|d|w)?$")
 _REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,127}:.*$")
 _APNS_IDENTIFIER_RE = re.compile(r"^[A-Z0-9]{10}$")
 _APNS_TOPIC_RE = re.compile(r"^[A-Za-z0-9.-]{3,255}$")
+_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,23}$")
+_MAX_TAGS = 10
+_MAX_VPN_PROBES = 10
+_HOSTNAME_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
+)
+_PROBE_RE = re.compile(
+    r"^(?:\[(?P<v6>[0-9A-Fa-f:.]+)\]|(?P<host>[^:\[\]]+)):(?P<port>[0-9]{1,5})$"
+)
+_PBS_DRILL_GROUP_RE = re.compile(r"^(vm|ct|host)/[A-Za-z0-9_.-]{1,64}$")
+_PBS_DRILL_ARCHIVE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _MAX_PAIRS = 256
 _MAX_JOBS = 256
 _MAX_PBS_TARGETS = 128
@@ -80,6 +92,10 @@ _NOTIFICATION_EVENTS = {
     "anomaly_blocked",
     "recovery_ready",
     "recovery_error",
+    "bitrot_detected",
+    "boot_drill_ok",
+    "boot_drill_error",
+    "lockdown",
 }
 
 
@@ -212,6 +228,45 @@ def _strict_path_ancestor(ancestor: str, child: str) -> bool:
 def _valid_cron(expression: str) -> bool:
     """Only accept the five-field minute-based format used by the systemd timer."""
     return len(expression.split()) == 5 and croniter.is_valid(expression)
+
+
+def _valid_probe(value: str) -> bool:
+    """host:port bzw. [IPv6]:port mit Port 1..65535."""
+    match = _PROBE_RE.fullmatch(value)
+    if not match or not 1 <= int(match["port"]) <= 65535:
+        return False
+    if match["v6"]:
+        try:
+            ipaddress.IPv6Address(match["v6"])
+        except ValueError:
+            return False
+        return True
+    host = match["host"]
+    return len(host) <= 253 and bool(_HOSTNAME_RE.fullmatch(host))
+
+
+def _versions_lifecycle(raw: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
+    """Klemmt einen versions_lifecycle-Block; fehlende Felder erben von ``base``."""
+    out: dict[str, Any] = {
+        "enabled": _boolean(
+            raw.get("enabled", base["enabled"]), default=base["enabled"]
+        )
+    }
+    for key, maximum in (
+        ("keep_daily", 365),
+        ("keep_weekly", 104),
+        ("keep_monthly", 120),
+    ):
+        out[key] = int(
+            _number(
+                raw.get(key, base[key]),
+                default=base[key],
+                minimum=0,
+                maximum=maximum,
+                integer=True,
+            )
+        )
+    return out
 
 
 def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -461,6 +516,14 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             paths[key] = value
         except ValueError as exc:
             errors.append(f"paths.{key} {exc}")
+    if "hooks_dir" in paths and paths.get("hooks_dir") not in (None, ""):
+        try:
+            hooks_dir_val = _clean_path(paths.get("hooks_dir"))
+            if not _is_absolute_local(hooks_dir_val):
+                errors.append("paths.hooks_dir muss absolut sein")
+            paths["hooks_dir"] = hooks_dir_val
+        except ValueError as exc:
+            errors.append(f"paths.hooks_dir {exc}")
 
     backup = cfg.setdefault("backup", {})
     if not isinstance(backup, dict):
@@ -660,6 +723,134 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             )
         ),
     }
+    versions_lifecycle = backup.get("versions_lifecycle")
+    if not isinstance(versions_lifecycle, dict):
+        versions_lifecycle = {}
+    backup["versions_lifecycle"] = _versions_lifecycle(
+        versions_lifecycle,
+        {"enabled": False, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 12},
+    )
+    ransomware_guard = backup.get("ransomware_guard")
+    if ransomware_guard is not None and not isinstance(ransomware_guard, dict):
+        errors.append("backup.ransomware_guard muss ein Mapping sein")
+        ransomware_guard = {}
+    if isinstance(ransomware_guard, dict):
+        try:
+            raw_exts = _normalize_string_list(
+                ransomware_guard.get("suspect_extensions")
+            )
+        except ValueError:
+            errors.append(
+                "backup.ransomware_guard.suspect_extensions muss Text oder Liste sein"
+            )
+            raw_exts = []
+        norm_exts = [
+            (ext.lower() if ext.startswith(".") else f".{ext.lower()}")
+            for ext in raw_exts
+            if ext.strip()
+        ]
+        from .ransomware_guard import DEFAULT_SUSPECT_EXTENSIONS
+
+        backup["ransomware_guard"] = {
+            "enabled": _boolean(ransomware_guard.get("enabled", True), default=True),
+            "suspect_extensions": norm_exts or list(DEFAULT_SUSPECT_EXTENSIONS),
+            "max_suspect_files": int(
+                _number(
+                    ransomware_guard.get("max_suspect_files", 1),
+                    default=1,
+                    minimum=1,
+                    maximum=10_000,
+                    integer=True,
+                )
+            ),
+            "auto_lockdown": _boolean(
+                ransomware_guard.get("auto_lockdown", False), default=False
+            ),
+        }
+    transfer_budget = backup.get("transfer_budget")
+    if transfer_budget is not None and not isinstance(transfer_budget, dict):
+        errors.append("backup.transfer_budget muss ein Mapping sein")
+        transfer_budget = {}
+    if isinstance(transfer_budget, dict):
+        backup["transfer_budget"] = {
+            "enabled": _boolean(transfer_budget.get("enabled", False), default=False),
+            "monthly_egress_gb": int(
+                _number(
+                    transfer_budget.get("monthly_egress_gb", 0),
+                    default=0,
+                    minimum=0,
+                    maximum=1_000_000,
+                    integer=True,
+                )
+            ),
+            "monthly_upload_gb": int(
+                _number(
+                    transfer_budget.get("monthly_upload_gb", 0),
+                    default=0,
+                    minimum=0,
+                    maximum=1_000_000,
+                    integer=True,
+                )
+            ),
+            "warn_percent": int(
+                _number(
+                    transfer_budget.get("warn_percent", 80),
+                    default=80,
+                    minimum=10,
+                    maximum=100,
+                    integer=True,
+                )
+            ),
+            "throttle_optional_jobs": _boolean(
+                transfer_budget.get("throttle_optional_jobs", True), default=True
+            ),
+        }
+    bitrot_scrub = backup.get("bitrot_scrub")
+    if not isinstance(bitrot_scrub, dict):
+        bitrot_scrub = {}
+    bitrot_schedule = str(bitrot_scrub.get("schedule") or "0 4 * * *").strip()
+    if bitrot_schedule.lower() not in _DISABLED_SCHEDULES and not _valid_cron(
+        bitrot_schedule
+    ):
+        errors.append(f"backup.bitrot_scrub.schedule ist ungültig: {bitrot_schedule}")
+    backup["bitrot_scrub"] = {
+        "enabled": _boolean(bitrot_scrub.get("enabled", False)),
+        "schedule": bitrot_schedule,
+        **{
+            key: int(
+                _number(
+                    bitrot_scrub.get(key, default),
+                    default=default,
+                    minimum=low,
+                    maximum=high,
+                    integer=True,
+                )
+            )
+            for key, default, low, high in (
+                ("sample_percent", 2, 1, 100),
+                ("max_files", 200, 1, 5000),
+                ("max_total_mb", 256, 1, 10_240),
+                ("max_scan_files", 20_000, 100, 1_000_000),
+                ("rotation_days", 30, 1, 365),
+            )
+        },
+    }
+    try:
+        vpn_probes = _normalize_string_list(backup.get("vpn_probes"))
+    except ValueError:
+        errors.append("backup.vpn_probes muss Text oder Liste sein")
+        vpn_probes = []
+    if len(vpn_probes) > _MAX_VPN_PROBES:
+        errors.append(
+            f"backup.vpn_probes darf höchstens {_MAX_VPN_PROBES} Einträge enthalten"
+        )
+        vpn_probes = vpn_probes[:_MAX_VPN_PROBES]
+    for index, probe in enumerate(vpn_probes):
+        if not _valid_probe(probe):
+            errors.append(
+                f"backup.vpn_probes[{index}] ist ungültig (host:port erwartet)"
+            )
+    backup["vpn_probes"] = vpn_probes
     timezone = str(backup.get("timezone") or "Europe/Berlin").strip()
     try:
         from zoneinfo import ZoneInfo
@@ -831,6 +1022,97 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             mode = "copy"
         pair["direction"] = direction
         pair["mode"] = mode
+
+        airgap_device = str(pair.get("airgap_device") or "").strip()
+        if airgap_device and (
+            not airgap_device.startswith("/dev/")
+            or len(airgap_device) > 256
+            or ".." in airgap_device.split("/")
+            or any(
+                ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in airgap_device
+            )
+        ):
+            errors.append(f"{label}.airgap_device ist ungültig")
+            airgap_device = ""
+        pair["airgap_device"] = airgap_device
+        pair["zfs_snapshot"] = _boolean(pair.get("zfs_snapshot", False))
+        pair["sqlite_backup"] = _boolean(pair.get("sqlite_backup", False))
+        if pair["sqlite_backup"]:
+            if direction not in {"push", "bisync"}:
+                errors.append(
+                    f"{label}.sqlite_backup ist nur bei direction: push oder bisync möglich"
+                )
+            elif not _is_absolute_local(local):
+                errors.append(
+                    f"{label}.sqlite_backup erfordert einen lokalen Quellpfad in local"
+                )
+        canary_file = str(pair.get("canary_file") or "").strip()
+        if canary_file:
+            from .ransomware_guard import validate_canary_filename
+
+            try:
+                canary_file = validate_canary_filename(canary_file)
+            except ValueError as exc:
+                errors.append(f"{label}.canary_file {exc}")
+                canary_file = ""
+        pair["canary_file"] = canary_file
+        canary_sha256 = str(pair.get("canary_sha256") or "").strip().lower()
+        if canary_sha256 and (
+            len(canary_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in canary_sha256)
+        ):
+            errors.append(
+                f"{label}.canary_sha256 muss ein 64-stelliger SHA-256-Hexwert sein"
+            )
+            canary_sha256 = ""
+        pair["canary_sha256"] = canary_sha256
+        if pair.get("ransomware_guard") is not None:
+            if not isinstance(pair["ransomware_guard"], dict):
+                errors.append(f"{label}.ransomware_guard muss ein Mapping sein")
+                del pair["ransomware_guard"]
+            else:
+                pg = pair["ransomware_guard"]
+                pair["ransomware_guard"] = {
+                    "enabled": _boolean(pg.get("enabled", True), default=True),
+                    "max_suspect_files": int(
+                        _number(
+                            pg.get("max_suspect_files", 1),
+                            default=1,
+                            minimum=1,
+                            maximum=10_000,
+                            integer=True,
+                        )
+                    ),
+                    "auto_lockdown": _boolean(
+                        pg.get("auto_lockdown", False), default=False
+                    ),
+                }
+        if pair["zfs_snapshot"] and direction != "push":
+            errors.append(f"{label}.zfs_snapshot ist nur bei direction: push möglich")
+        try:
+            raw_tags = _normalize_string_list(pair.get("tags"))
+        except ValueError:
+            errors.append(f"{label}.tags: muss Text oder Liste sein")
+            raw_tags = []
+        tags = list(dict.fromkeys(tag.lower() for tag in raw_tags))
+        for tag in tags:
+            if not _TAG_RE.fullmatch(tag):
+                errors.append(
+                    f"{label}.tags: ungültiger Tag {tag!r} (a-z, 0-9, _ und -, "
+                    "1 bis 24 Zeichen, nicht mit _ oder - beginnend)"
+                )
+        if len(tags) > _MAX_TAGS:
+            errors.append(f"{label}.tags: höchstens {_MAX_TAGS} Tags erlaubt")
+            tags = tags[:_MAX_TAGS]
+        pair["tags"] = tags
+        if pair.get("versions_lifecycle") is not None:
+            if isinstance(pair["versions_lifecycle"], dict):
+                pair["versions_lifecycle"] = _versions_lifecycle(
+                    pair["versions_lifecycle"], backup["versions_lifecycle"]
+                )
+            else:
+                errors.append(f"{label}.versions_lifecycle muss ein Mapping sein")
+                del pair["versions_lifecycle"]
 
         # Optionaler physischer/logischer Ausfallbereich für Remote-Ziele.
         # ``location_id`` bleibt als kompatibler Alias erhalten; die
@@ -1208,6 +1490,15 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             if len(value.encode("utf-8")) > 512 * 1024:
                 errors.append(f"{label}.{text_key} ist zu groß")
             pair[text_key] = value
+        for hook_key in ("pre_hook", "post_hook"):
+            if hook_key in pair:
+                from .hooks import validate_hook_name
+
+                try:
+                    pair[hook_key] = validate_hook_name(pair.get(hook_key))
+                except ValueError as exc:
+                    errors.append(f"{label}.{hook_key}: {exc}")
+                    pair[hook_key] = ""
         normalized_pairs.append(pair)
 
     backup["pairs"] = normalized_pairs
@@ -1513,6 +1804,28 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             integer=True,
         )
     )
+    if (
+        "bootstrap_export" in maintenance
+        and maintenance.get("bootstrap_export") is not None
+    ):
+        boot_raw = maintenance.get("bootstrap_export")
+        if not isinstance(boot_raw, dict):
+            errors.append("maintenance.bootstrap_export muss ein Mapping sein")
+            maintenance.pop("bootstrap_export", None)
+        else:
+            target_dir = ""
+            try:
+                target_dir = _clean_path(boot_raw.get("target_dir"))
+                if target_dir and not _is_absolute_local(target_dir):
+                    errors.append(
+                        "maintenance.bootstrap_export.target_dir muss absolut sein"
+                    )
+            except ValueError as exc:
+                errors.append(f"maintenance.bootstrap_export.target_dir {exc}")
+            maintenance["bootstrap_export"] = {
+                "enabled": _boolean(boot_raw.get("enabled", False), default=False),
+                "target_dir": target_dir,
+            }
 
     pbs = cfg.setdefault("pbs", {})
     if not isinstance(pbs, dict):
@@ -1568,6 +1881,74 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         keep[key] = int(
             _number(keep.get(key), default=0, minimum=0, maximum=3650, integer=True)
         )
+    gc_throttle = pbs.get("gc_throttle")
+    if not isinstance(gc_throttle, dict):
+        gc_throttle = {}
+    pbs["gc_throttle"] = {
+        "enabled": _boolean(gc_throttle.get("enabled", True), default=True),
+        "poll_seconds": int(
+            _number(
+                gc_throttle.get("poll_seconds", 60),
+                default=60,
+                minimum=15,
+                maximum=900,
+                integer=True,
+            )
+        ),
+    }
+    boot_drill = pbs.get("boot_drill")
+    if not isinstance(boot_drill, dict):
+        boot_drill = {}
+    drill_enabled = _boolean(boot_drill.get("enabled", False))
+    drill_schedule = str(boot_drill.get("schedule") or "manual").strip()
+    if drill_schedule.lower() not in _DISABLED_SCHEDULES and not _valid_cron(
+        drill_schedule
+    ):
+        errors.append(f"pbs.boot_drill.schedule ist ungültig: {drill_schedule}")
+    drill_group = str(boot_drill.get("group") or "").strip()
+    if drill_group and not _PBS_DRILL_GROUP_RE.fullmatch(drill_group):
+        errors.append(
+            "pbs.boot_drill.group ist ungültig (vm/<id>, ct/<id> oder host/<id> erwartet)"
+        )
+    elif drill_enabled and not drill_group:
+        errors.append(
+            "pbs.boot_drill.group ist erforderlich, wenn pbs.boot_drill.enabled gesetzt ist"
+        )
+    drill_archive = str(boot_drill.get("archive") or "").strip()
+    if drill_archive and not _PBS_DRILL_ARCHIVE_RE.fullmatch(drill_archive):
+        errors.append("pbs.boot_drill.archive ist ungültig")
+    try:
+        drill_scratch = _clean_path(boot_drill.get("scratch_dir"))
+    except ValueError as exc:
+        errors.append(f"pbs.boot_drill.scratch_dir {exc}")
+        drill_scratch = ""
+    if drill_scratch and not _is_absolute_local(drill_scratch):
+        errors.append("pbs.boot_drill.scratch_dir muss ein absoluter Pfad sein")
+    pbs["boot_drill"] = {
+        "enabled": drill_enabled,
+        "schedule": drill_schedule,
+        "group": drill_group,
+        "archive": drill_archive,
+        "memory_mb": int(
+            _number(
+                boot_drill.get("memory_mb", 1024),
+                default=1024,
+                minimum=256,
+                maximum=65_536,
+                integer=True,
+            )
+        ),
+        "timeout_seconds": int(
+            _number(
+                boot_drill.get("timeout_seconds", 60),
+                default=60,
+                minimum=10,
+                maximum=900,
+                integer=True,
+            )
+        ),
+        "scratch_dir": drill_scratch,
+    }
     targets = pbs.setdefault("targets", [])
     if not isinstance(targets, list):
         errors.append("pbs.targets muss eine Liste sein")

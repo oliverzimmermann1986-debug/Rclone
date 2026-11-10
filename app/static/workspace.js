@@ -26,7 +26,9 @@
     const nodes = Array.from(section.children).filter((node) => node !== heading && !always.has(node) && !isNotice(node));
     const groups = definitions.map(([id, label, description]) => ({ id, label, description, nodes: [] }));
     for (const node of nodes) {
-      const group = groups.find((candidate) => candidate.id === classify(node)) || groups[0];
+      const explicitGroup = node.getAttribute('data-workspace-group');
+      const targetId = explicitGroup || classify(node);
+      const group = groups.find((candidate) => candidate.id === targetId) || groups[0];
       group.nodes.push(node);
     }
     const populated = groups.filter((group) => group.nodes.length);
@@ -137,7 +139,7 @@
     ], (node) => {
       if (node.classList.contains('audit-panel')) return 'audit';
       if (node.classList.contains('recovery-panel') || /Logs und Datenbank/.test(headingText(node))) return 'maintenance';
-      if (node.querySelector('.copy-matrix, .copy-table') || /Kopien je Datenbestand/.test(headingText(node))) return 'copies';
+      if (node.querySelector('.copy-matrix, .copy-table') || /Kopien je Datenbestand|Bitrot-Scrub/.test(headingText(node))) return 'copies';
       return 'health';
     });
   }

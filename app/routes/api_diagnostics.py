@@ -27,14 +27,20 @@ from ..job_definitions import (
     scheduled_data_path_ids,
     stable_data_path_id,
 )
-from ..jobs.rclone_sync import _count_files_up_to, _is_remote, build_job_plan
+from ..jobs.rclone_sync import (
+    _count_files_up_to,
+    _is_remote,
+    _SnapshotConfig,
+    build_job_plan,
+)
 from ..jobs.scheduler import next_run_after, rclone_history_key
 from ..overdue import evaluate_pair
-from ..rclone_args import rclone_subprocess_env
+from ..rclone_args import inspect_rclone_config, rclone_subprocess_env
 from ..restore_evidence import is_partial_restore_summary
 from ..scheduler_control import scheduler_state
 from ..security import require_csrf
 from ..system_info import system_snapshot
+from ..vpn_sensor import vpn_snapshot
 
 router = APIRouter(
     prefix="/api/diagnostics",
@@ -210,6 +216,59 @@ def operational_snapshot(
         return result
 
 
+def _integration_checks(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Werkzeuge und Rechte nur für tatsächlich aktivierte Zusatzfunktionen prüfen."""
+    backup = snapshot.get("backup") or {}
+    pairs = [
+        pair
+        for pair in backup.get("pairs") or []
+        if isinstance(pair, dict) and pair.get("enabled", True)
+    ]
+    checks: list[dict[str, Any]] = []
+    if any(pair.get("airgap_device") for pair in pairs):
+        checks.append(
+            _ok("Airgap", "udisksctl und findmnt vorhanden")
+            if shutil.which("udisksctl") and shutil.which("findmnt")
+            else _err(
+                "Airgap", "udisksctl/findmnt nicht installiert (udisks2, util-linux)"
+            )
+        )
+    if any(pair.get("zfs_snapshot") is True for pair in pairs):
+        checks.append(
+            _ok("ZFS", "zfs und /dev/zfs nutzbar")
+            if shutil.which("zfs") and os.access("/dev/zfs", os.R_OK | os.W_OK)
+            else _err(
+                "ZFS",
+                "zfs-Programm oder /dev/zfs nicht nutzbar: systemd-Drop-in mit "
+                "PrivateDevices=false und DeviceAllow=/dev/zfs rw sowie "
+                "'zfs allow' für den Dienstbenutzer einrichten",
+            )
+        )
+    boot_drill = (snapshot.get("pbs") or {}).get("boot_drill") or {}
+    if isinstance(boot_drill, dict) and boot_drill.get("enabled"):
+        checks.append(
+            _ok("Boot-Drill", "qemu-system-x86_64 vorhanden")
+            if shutil.which("qemu-system-x86_64")
+            else _warn("Boot-Drill", "qemu-system-x86_64 nicht installiert")
+        )
+        checks.append(
+            _warn(
+                "Boot-Drill",
+                "Standard-Unit blockiert QEMU (MemoryDenyWriteExecute/PrivateDevices); "
+                "Drop-in nötig",
+            )
+        )
+    if backup.get("vpn_probes"):
+        probes = vpn_snapshot(_SnapshotConfig(snapshot))["probes"]
+        down = [str(probe["target"]) for probe in probes if not probe["reachable"]]
+        checks.append(
+            _warn("VPN", f"Probe(s) nicht erreichbar: {', '.join(down)}")
+            if down
+            else _ok("VPN", f"{len(probes)} Probe(s) erreichbar")
+        )
+    return checks
+
+
 @router.get("/doctor")
 def doctor() -> dict[str, Any]:
     snapshot = get_config().snapshot()
@@ -252,6 +311,131 @@ def doctor() -> dict[str, Any]:
     except Exception as exc:
         checks.append(_err("SQLite", f"DB-Fehler: {exc}"))
 
+    try:
+        db_inst = get_db()
+        verify_chain = getattr(db_inst, "audit_verify_chain", None)
+        if callable(verify_chain):
+            chain_status = verify_chain()
+            checked_count = chain_status.get("checked", chain_status.get("verified", 0))
+            if chain_status.get("ok"):
+                checks.append(
+                    _ok(
+                        "Audit-Hash-Kette",
+                        f"{checked_count} verkettete Ereignisse geprüft",
+                        chain=chain_status,
+                    )
+                )
+            else:
+                checks.append(
+                    _err(
+                        "Audit-Hash-Kette",
+                        f"Manipulation oder Lücke bei Audit-ID #{chain_status.get('broken_at_id')}",
+                        chain=chain_status,
+                    )
+                )
+    except Exception as exc:
+        checks.append(_warn("Audit-Hash-Kette", f"nicht prüfbar: {exc}"))
+
+    try:
+        rclone_conf_info = inspect_rclone_config()
+        dangerous = (
+            rclone_conf_info.get("dangerous_directives")
+            or rclone_conf_info.get("unsafe_directives")
+            or []
+        )
+        if dangerous:
+            bad = ", ".join(
+                f"{item.get('remote') or item.get('section') or 'global'}.{item.get('key')}"
+                for item in dangerous[:5]
+            )
+            checks.append(
+                _err(
+                    "rclone.conf Sicherheit",
+                    f"Blockierte Ausführungsdirektive(n) erkannt: {bad}",
+                    details=rclone_conf_info,
+                )
+            )
+        elif rclone_conf_info.get("permissions_warning") or not rclone_conf_info.get(
+            "permissions_ok", True
+        ):
+            perm_msg = rclone_conf_info.get("permissions_warning") or (
+                f"Dateirechte zu offen ({rclone_conf_info.get('mode_octal') or 'unbekannt'}, empfohlen 0600)"
+            )
+            checks.append(
+                _warn(
+                    "rclone.conf Sicherheit",
+                    str(perm_msg),
+                    details=rclone_conf_info,
+                )
+            )
+        elif rclone_conf_info.get("found") or rclone_conf_info.get("exists"):
+            checks.append(
+                _ok(
+                    "rclone.conf Sicherheit",
+                    f"Geprüft ({rclone_conf_info.get('path')})",
+                )
+            )
+        token_list = (
+            rclone_conf_info.get("expiring_tokens")
+            or rclone_conf_info.get("oauth_tokens")
+            or []
+        )
+        for tok in token_list:
+            sec = tok.get("remote") or tok.get("section") or "?"
+            st = tok.get("status")
+            is_expired = bool(tok.get("expired")) or st == "expired"
+            rem = tok.get("hours_remaining", tok.get("remaining_hours"))
+            has_refresh = bool(tok.get("has_refresh_token"))
+            if is_expired and not has_refresh:
+                checks.append(
+                    _err(
+                        f"OAuth-Token ({sec})",
+                        f"OAuth-Token abgelaufen und kein Refresh-Token vorhanden ({tok.get('expiry')})",
+                    )
+                )
+            elif (not is_expired or st == "expiring_soon") and not has_refresh:
+                checks.append(
+                    _warn(
+                        f"OAuth-Token ({sec})",
+                        f"OAuth-Token läuft in {rem}h ab (kein Refresh-Token)",
+                    )
+                )
+            elif is_expired and has_refresh:
+                checks.append(
+                    _ok(
+                        f"OAuth-Token ({sec})",
+                        "Access-Token abgelaufen, automatischer Refresh-Token vorhanden",
+                    )
+                )
+    except Exception as exc:
+        checks.append(_warn("rclone.conf Sicherheit", f"Prüfung übersprungen: {exc}"))
+
+    web_cfg = snapshot.get("web") or {}
+    trusted_proxies = web_cfg.get("trusted_proxy_ips") or []
+    webauthn_origin = str(web_cfg.get("webauthn_origin") or "").strip().lower()
+    if (
+        webauthn_origin.startswith("https://")
+        and "localhost" not in webauthn_origin
+        and "127.0.0.1" not in webauthn_origin
+        and not trusted_proxies
+    ):
+        checks.append(
+            _warn(
+                "Reverse-Proxy-Trust",
+                "HTTPS-Origin konfiguriert, aber web.trusted_proxy_ips ist leer "
+                "(X-Forwarded-For wird ohne Proxy-Allowlist ignoriert)",
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "Reverse-Proxy-Trust",
+                f"{len(trusted_proxies)} vertrauenswürdige Proxy-IP(s)/Netze"
+                if trusted_proxies
+                else "Direktbetrieb (keine Proxy-Header-Übernahme)",
+            )
+        )
+
     for label, path in {
         "data_dir": paths.get("data_dir", "/opt/rclone-sync/data"),
         "logs_dir": paths.get("logs_dir", "/opt/rclone-sync/logs"),
@@ -260,6 +444,7 @@ def doctor() -> dict[str, Any]:
         result = _writable_dir(str(path))
         result["name"] = label
         checks.append(result)
+    checks.extend(_integration_checks(snapshot))
 
     version_check = _rclone_version_check()
     checks.append(
@@ -820,3 +1005,39 @@ def _build_overview() -> dict[str, Any]:
     with _OVERVIEW_CACHE_LOCK:
         _OVERVIEW_CACHE = (time.monotonic(), copy.deepcopy(result))
     return result
+
+
+@router.get("/system-bundle")
+def system_bundle() -> dict[str, Any]:
+    """Gebündelter System-/Diagnose-Abruf für schnellen Seitenaufbau ohne Request-Sturm."""
+    from . import api_jobs, api_maintenance, api_push, api_ransomware
+
+    cfg = get_config().snapshot()
+    db = get_db()
+    bundle: dict[str, Any] = {
+        "generated_at": time.time(),
+    }
+    for key, fn in (
+        ("overview", overview),
+        ("doctor", doctor),
+        ("copies", copies_matrix),
+        ("logs", lambda: api_maintenance.list_logs(limit=200, query="")),
+        ("database", api_maintenance.database_status),
+        ("snapshots", api_maintenance.list_config_snapshots),
+        ("audit", lambda: api_maintenance.audit_events(limit=100, event_type="")),
+        ("scheduler", api_jobs.get_scheduler_state),
+        ("push", api_push.push_status),
+        ("ransomware", api_ransomware.get_ransomware_status),
+        ("vpn", lambda: vpn_snapshot(_SnapshotConfig(cfg))),
+    ):
+        try:
+            bundle[key] = fn()
+        except Exception as exc:
+            bundle[key] = {"error": str(exc)}
+    try:
+        from ..bitrot_scrub import scrub_status
+
+        bundle["bitrot"] = scrub_status(cfg, db)
+    except Exception as exc:
+        bundle["bitrot"] = {"error": str(exc)}
+    return bundle

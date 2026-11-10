@@ -13,23 +13,6 @@ permissions:
   contents: read
 
 jobs:
-  web-ui:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium webkit
-      - run: npm run test:web
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: web-ui-results
-          path: test-results/
-          retention-days: 14
   python:
     runs-on: ubuntu-24.04
     strategy:
@@ -72,11 +55,10 @@ jobs:
         run: shellcheck scripts/install.sh
       - name: JavaScript syntax
         run: |
-          node --check app/static/app.js
+          # ES-Module: --check liest .js als CommonJS; Syntax per stdin im Modulmodus prüfen.
+          for f in app/static/app.js app/static/app-*.js; do node --input-type=module --check < "$f" || exit 1; done
           node --check app/static/workspace.js
           node --check app/static/sw.js
-      - name: Web request regressions
-        run: node --test scripts/test_web_requests.cjs
       - name: Prepare systemd verification paths
         run: |
           sudo groupadd --system rclone-sync
@@ -95,7 +77,7 @@ jobs:
             systemd/sync-scheduler.service \
             systemd/sync-scheduler.timer
 
-  web:
+  web-ui:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

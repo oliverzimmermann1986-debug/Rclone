@@ -870,3 +870,45 @@ def composition(
         "side": side,
         **result,
     }
+
+
+@router.get("/pair-size")
+def pair_size(
+    pair: str = Query(min_length=1, max_length=200),
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Inkrementelle Größenmessung für genau einen ausgewählten Datenweg."""
+    cfg = get_config()
+    selected = _find_pair(cfg, pair)
+    source, target = _resolve_endpoints(selected)
+    deadline = time.monotonic() + _SIZE_MEASUREMENT_DEADLINE_SECONDS
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pair-size-1") as pool:
+        f_source = pool.submit(
+            _cached_pair_rclone_size,
+            cfg,
+            selected,
+            "source",
+            source,
+            force_refresh=refresh,
+            deadline=deadline,
+        )
+        f_target = pool.submit(
+            _cached_pair_rclone_size,
+            cfg,
+            selected,
+            "target",
+            target,
+            force_refresh=refresh,
+            deadline=deadline,
+        )
+        source_size = f_source.result()
+        target_size = f_target.result()
+    return {
+        "name": str(selected.get("name") or pair),
+        "source": source,
+        "target": target,
+        "source_size": source_size,
+        "target_size": target_size,
+        "source_measurement": _measurement_metadata(source_size, source),
+        "target_measurement": _measurement_metadata(target_size, target),
+    }

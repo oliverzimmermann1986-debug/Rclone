@@ -14,10 +14,7 @@ _MAX_PAUSE_SECONDS = 31 * 24 * 3600
 
 
 def scheduler_state(
-    db: Database | None = None,
-    *,
-    now: float | None = None,
-    cleanup_expired: bool = True,
+    db: Database | None = None, *, now: float | None = None
 ) -> dict[str, Any]:
     database = db or get_db()
     now_value = float(time.time() if now is None else now)
@@ -26,8 +23,7 @@ def scheduler_state(
         raw = {}
     until = float(raw.get("until") or 0)
     if until and until <= now_value:
-        if cleanup_expired:
-            database.runtime_delete(_PAUSE_KEY)
+        database.runtime_delete(_PAUSE_KEY)
         raw = {}
         until = 0
     paused = bool(raw.get("paused") and (until <= 0 or until > now_value))

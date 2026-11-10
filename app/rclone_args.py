@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+from pathlib import Path
 from typing import Any
 
 _MAX_ARGS = 256
@@ -262,3 +263,203 @@ def validate_rclone_args(value: Any, *, allow_unsafe: bool = False) -> list[str]
     return validate_parsed_rclone_args(
         parse_rclone_args(value), allow_unsafe=allow_unsafe
     )
+
+
+DANGEROUS_RCLONE_CONFIG_KEYS = frozenset(
+    {
+        "password_command",
+        "token_command",
+        "metadata_mapper",
+        "sftp_ssh",
+        "ssh",
+        "key_pem_command",
+        "client_cert_command",
+    }
+)
+
+
+class UnsafeRcloneConfigError(ValueError):
+    """Wird geworfen, wenn rclone.conf ausführbare Direktiven enthält."""
+
+
+def resolve_rclone_config_path(explicit: Path | str | None = None) -> Path | None:
+    """Ermittelt die aktive rclone.conf ohne Aufruf externer Prozesse."""
+    from pathlib import Path as _Path
+
+    candidates: list[_Path] = []
+    if explicit:
+        candidates.append(_Path(explicit).expanduser())
+    env_cfg = os.environ.get("RCLONE_CONFIG", "").strip()
+    if env_cfg:
+        candidates.append(_Path(env_cfg).expanduser())
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if xdg:
+        candidates.append(_Path(xdg).expanduser() / "rclone" / "rclone.conf")
+    try:
+        candidates.append(_Path.home() / ".config" / "rclone" / "rclone.conf")
+    except (RuntimeError, OSError):
+        pass
+    candidates.extend(
+        [
+            _Path("/root/.config/rclone/rclone.conf"),
+            _Path("/etc/rclone/rclone.conf"),
+        ]
+    )
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _parse_oauth_expiry(raw_token: str, *, now: float) -> dict[str, Any] | None:
+    """Analysiert das expiry-Feld eines rclone-OAuth-Tokens ohne Secret-Leak."""
+    from datetime import datetime, timezone
+    import json
+
+    text = str(raw_token or "").strip()
+    if not text.startswith("{") or not text.endswith("}"):
+        return None
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    expiry_raw = str(payload.get("expiry") or "").strip()
+    if not expiry_raw or expiry_raw.startswith("0001-01-01"):
+        return None
+    normalized = expiry_raw[:-1] + "+00:00" if expiry_raw.endswith("Z") else expiry_raw
+    normalized = re.sub(r"(\.\d{6})\d+", r"\1", normalized)
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    expiry_ts = dt.timestamp()
+    hours_remaining = (expiry_ts - now) / 3600.0
+    has_refresh = bool(str(payload.get("refresh_token") or "").strip())
+    return {
+        "expiry": dt.astimezone(timezone.utc).isoformat(),
+        "expiry_ts": expiry_ts,
+        "hours_remaining": round(hours_remaining, 1),
+        "expired": hours_remaining <= 0,
+        "has_refresh_token": has_refresh,
+        "needs_attention": (
+            (not has_refresh and hours_remaining <= 72.0) or hours_remaining <= -24.0
+        ),
+    }
+
+
+def inspect_rclone_config(
+    config_path: Any = None, *, now: float | None = None
+) -> dict[str, Any]:
+    """Prüft rclone.conf auf gefährliche Ausführungsdirektiven, Dateirechte und OAuth-Ablauf."""
+    import stat
+    import time
+
+    current_now = float(time.time() if now is None else now)
+    path = resolve_rclone_config_path(config_path)
+    if path is None:
+        return {
+            "found": False,
+            "path": None,
+            "ok": True,
+            "permissions_ok": True,
+            "mode_octal": None,
+            "dangerous_directives": [],
+            "expiring_tokens": [],
+            "remotes": [],
+        }
+
+    permissions_ok = True
+    mode_octal: str | None = None
+    try:
+        st = path.stat()
+        mode = stat.S_IMODE(st.st_mode)
+        mode_octal = f"0{mode:03o}"
+        if os.name != "nt" and (mode & 0o077) != 0:
+            permissions_ok = False
+    except OSError:
+        pass
+
+    dangerous_directives: list[dict[str, str]] = []
+    expiring_tokens: list[dict[str, Any]] = []
+    remotes: list[str] = []
+
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return {
+            "found": True,
+            "path": str(path),
+            "ok": False,
+            "error": str(exc),
+            "permissions_ok": permissions_ok,
+            "mode_octal": mode_octal,
+            "dangerous_directives": [],
+            "expiring_tokens": [],
+            "remotes": [],
+        }
+
+    current_section = ""
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line[1:-1].strip()
+            if current_section and current_section not in remotes:
+                remotes.append(current_section)
+            continue
+        if "=" not in line:
+            continue
+        key, raw_val = line.split("=", 1)
+        key_clean = key.strip().lower()
+        val_clean = raw_val.strip()
+        if not val_clean:
+            continue
+        if key_clean in DANGEROUS_RCLONE_CONFIG_KEYS or key_clean.endswith("_command"):
+            dangerous_directives.append(
+                {
+                    "remote": current_section or "global",
+                    "key": key_clean,
+                }
+            )
+        elif key_clean == "token" and current_section:
+            token_info = _parse_oauth_expiry(val_clean, now=current_now)
+            if token_info and token_info.get("needs_attention"):
+                expiring_tokens.append(
+                    {
+                        "remote": current_section,
+                        **token_info,
+                    }
+                )
+
+    return {
+        "found": True,
+        "path": str(path),
+        "ok": len(dangerous_directives) == 0,
+        "permissions_ok": permissions_ok,
+        "mode_octal": mode_octal,
+        "dangerous_directives": dangerous_directives,
+        "expiring_tokens": expiring_tokens,
+        "remotes": remotes,
+    }
+
+
+def assert_safe_rclone_config(
+    config_path: Any = None,
+) -> dict[str, Any]:
+    """Bricht fail-closed ab, wenn rclone.conf ausführbare Direktiven enthält."""
+    report = inspect_rclone_config(config_path)
+    dangerous = report.get("dangerous_directives") or []
+    if dangerous:
+        items = ", ".join(f"{item['remote']}.{item['key']}" for item in dangerous[:5])
+        raise UnsafeRcloneConfigError(
+            f"rclone.conf enthält gesperrte Ausführungs-Direktiven ({items})"
+        )
+    return report

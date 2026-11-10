@@ -555,14 +555,108 @@ def score_components(
     return {"score": score, "state": state, "components": components}
 
 
+_SIZE_MULTIPLIERS = {
+    "b": 1,
+    "byte": 1,
+    "bytes": 1,
+    "kib": 1024,
+    "kb": 1000,
+    "mib": 1024**2,
+    "mb": 1000**2,
+    "gib": 1024**3,
+    "gb": 1000**3,
+    "tib": 1024**4,
+    "tb": 1000**4,
+    "pib": 1024**5,
+    "pb": 1000**5,
+}
+
+
+def parse_transferred_bytes(value: Any) -> int | None:
+    """Parst rclone-Transferangaben (z. B. '2.5 GiB' oder Integer) in Bytes."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return max(0, int(value))
+    import re as _re
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    match = _re.search(r"(\d+(?:\.\d+)?)\s*([KMGTPE]?i?B|Bytes?)", text, _re.IGNORECASE)
+    if not match:
+        return None
+    amount = float(match.group(1))
+    unit = match.group(2).lower()
+    factor = _SIZE_MULTIPLIERS.get(unit, 1)
+    return max(0, int(amount * factor))
+
+
+def evaluate_transfer_trend(
+    database: Database,
+    *,
+    pair: Mapping[str, Any],
+    current_transferred: Any,
+    spike_factor: float = 5.0,
+    min_spike_bytes: int = 100 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Erkennt ungewöhnliche Transfervolumen-Spitzen im Vergleich zur Pair-Historie."""
+    current_bytes = parse_transferred_bytes(current_transferred)
+    if current_bytes is None:
+        return {"evaluated": False, "spike_detected": False}
+    recent_fn = getattr(database, "pair_recent_successful_runs", None)
+    if not callable(recent_fn):
+        return {"evaluated": False, "spike_detected": False}
+    history_key = rclone_history_key(dict(pair))
+    pair_name = str(pair.get("name") or "")
+    runs = recent_fn(history_key, pair_name=pair_name, limit=10)
+    historical_bytes: list[int] = []
+    for item in runs:
+        pair_res = item.get("pair") if isinstance(item, Mapping) else {}
+        if not isinstance(pair_res, Mapping):
+            continue
+        parsed = parse_transferred_bytes(pair_res.get("transferred"))
+        if parsed is not None and parsed > 0:
+            historical_bytes.append(parsed)
+    if len(historical_bytes) < 3:
+        return {
+            "evaluated": True,
+            "spike_detected": False,
+            "reason": "insufficient_history",
+            "samples": len(historical_bytes),
+            "current_bytes": current_bytes,
+        }
+    avg_bytes = sum(historical_bytes) / len(historical_bytes)
+    threshold = max(float(min_spike_bytes), avg_bytes * max(2.0, float(spike_factor)))
+    spike = float(current_bytes) >= threshold
+    ratio = round(float(current_bytes) / max(1.0, avg_bytes), 2)
+    return {
+        "evaluated": True,
+        "spike_detected": spike,
+        "current_bytes": current_bytes,
+        "baseline_avg_bytes": int(avg_bytes),
+        "ratio": ratio,
+        "samples": len(historical_bytes),
+        "warning": (
+            f"Ungewöhnlich hohes Transfervolumen ({ratio:.1f}x über dem historischen Schnitt)"
+            if spike
+            else None
+        ),
+    }
+
+
 __all__ = [
     "POLICY_PRESETS",
     "acknowledge_quarantine",
     "anomaly_status",
     "evaluate_anomaly",
+    "evaluate_transfer_trend",
     "guard_settings",
     "is_destructive",
     "measure_path",
+    "parse_transferred_bytes",
     "preflight_anomaly_guard",
     "protection_calendar",
     "record_anomaly_baseline",

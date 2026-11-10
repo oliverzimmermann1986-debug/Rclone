@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
+import re
+import tempfile
 import time
-from pathlib import PurePosixPath
+import zipfile
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from cryptography.hazmat.primitives import hashes
@@ -22,23 +26,17 @@ from fastapi import (
     Request,
     Response,
 )
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import __version__, protection
 from ..auth import require_auth, require_reauthentication
 from ..config_store import get_config
 from ..db import JobAlreadyRunningError, get_db
-from ..jobs import rclone_sync
-from ..jobs.job_lifecycle import BACKUP_KINDS, reconcile_locked_scope
-from ..jobs.recovery_lifecycle import (
-    RecoveryBusy,
-    RecoveryCancelled,
-    RecoveryPersistenceError,
-    check_cancelled,
-    finish_job,
-)
 from ..jobs.restore_test import _endpoints
+from ..jobs import runtime_state
 from ..jobs.locks import HeldFileLock, try_file_lock
+from ..lockdown import is_locked_down
 from ..jobs.selective_restore import (
     JOB_KIND,
     list_staging,
@@ -345,80 +343,118 @@ class SnapshotRequest(BaseModel):
     max_total_mb: int = Field(default=5120, ge=1, le=51_200)
 
 
-def _start_recovery_job() -> tuple[Any, int, HeldFileLock]:
-    lease = try_file_lock("backup")
+def _finish_failed_recovery(database, job_id: int, error: BaseException) -> None:
+    try:
+        database.job_finish(job_id, "error", {"ok": False, "error": str(error)[:500]})
+    except Exception:
+        logger.exception("Recovery-Job %s konnte nicht abgeschlossen werden", job_id)
+
+
+def _release_recovery(lease: HeldFileLock, run_id: str, status: str) -> None:
+    try:
+        runtime_state.finish_run(run_id, status)
+    except Exception:
+        logger.exception(
+            "Recovery-Runtime %s konnte nicht abgeschlossen werden", run_id
+        )
+    finally:
+        lease.release()
+
+
+def _run_recovery_locked(lease, run_id, function, database, *args, job_id, **kwargs):
+    status = "error"
+    try:
+        result = function(database, *args, job_id=job_id, **kwargs)
+        job = database.job_get(job_id) or {}
+        status = str(job.get("status") or "error")
+        if status == "running":
+            raise RuntimeError("Recovery-Worker hat den Job nicht abgeschlossen")
+        return result
+    except BaseException as exc:
+        status = "error"
+        _finish_failed_recovery(database, job_id, exc)
+        try:
+            current = database.job_get(job_id) or {}
+            if current.get("status") and current["status"] != "running":
+                status = str(current["status"])
+        except Exception:
+            logger.exception(
+                "Recovery-Jobstatus %s konnte nicht gelesen werden", job_id
+            )
+        raise
+    finally:
+        _release_recovery(lease, run_id, status)
+
+
+def _start_recovery_job(pair) -> tuple[Any, int, HeldFileLock, str]:
+    lease = try_file_lock(runtime_state.DEFAULT_CANCEL_SCOPE)
     if lease is None:
-        raise HTTPException(409, "Eine Sicherung oder Recovery hält den Prozess-Lock")
+        raise HTTPException(
+            409,
+            "Während einer Sicherung oder Recovery läuft bereits ein anderer Prozess",
+        )
+    database = None
+    job_id = None
     try:
         database = get_db()
-        if database.job_terminal_recover_pending().get("failed"):
+        if runtime_state.active_processes(runtime_state.DEFAULT_CANCEL_SCOPE):
             raise HTTPException(
-                503, "Ein vorheriger Jobabschluss ist noch nicht gespeichert"
+                409, "Ein registrierter Sync-Unterprozess ist noch aktiv"
             )
-        if not reconcile_locked_scope(database, scope="backup", kinds=BACKUP_KINDS)[
-            "safe"
-        ]:
-            raise HTTPException(
-                409, "Ein registrierter Recovery-Prozess ist noch aktiv"
-            )
-        rclone_sync.reset_cancel()
         job_id = database.job_start(JOB_KIND, trigger="manual", exclusive_scope=True)
+        run_id = runtime_state.begin_run(
+            [str(pair.get("name") or "")], dry_run=False, kind=JOB_KIND, job_id=job_id
+        )
     except JobAlreadyRunningError as exc:
         lease.release()
         raise HTTPException(
             409, "Während einer Sicherung oder Recovery kann kein weiterer Lauf starten"
         ) from exc
-    except BaseException:
-        lease.release()
-        raise
-    return database, job_id, lease
-
-
-def _run_recovery_job(database, job_id, lease, operation, *args, **kwargs):
-    try:
-        check_cancelled()
-        result = operation(database, *args, job_id=job_id, **kwargs)
-        if (database.job_get(job_id) or {}).get("status") == "running":
-            raise RuntimeError("Recovery-Worker hat den Job nicht abgeschlossen")
-        return result
-    except RecoveryPersistenceError:
-        # A durable intent may still await replay. Do not replace the external
-        # result with a synthetic error or announce success before confirmation.
-        logger.exception("Recovery #%s: terminale Persistenz ausstehend", job_id)
-    except Exception as exc:
-        status = "cancelled" if isinstance(exc, RecoveryCancelled) else "error"
+    except BaseException as exc:
         try:
-            if (database.job_get(job_id) or {}).get("status") == "running":
-                finish_job(database, job_id, status, {"ok": False, "error": str(exc)})
-        except RecoveryPersistenceError:
-            logger.exception("Recovery #%s konnte nicht abgeschlossen werden", job_id)
-    finally:
-        lease.release()
-
-
-def _queue_recovery(background, database, job_id, lease, operation, *args, **kwargs):
-    try:
-        database.audit_add(
-            "selective_recovery_started"
-            if operation is run_selective_restore
-            else "recovery_started",
-            actor="web",
-            details={"job_id": job_id, "operation": operation.__name__},
-        )
-        background.add_task(
-            _run_recovery_job, database, job_id, lease, operation, *args, **kwargs
-        )
-    except BaseException:
-        try:
-            finish_job(
-                database,
-                job_id,
-                "error",
-                {"ok": False, "error": "Recovery konnte nicht gestartet werden"},
-            )
+            if database is not None and job_id is not None:
+                _finish_failed_recovery(database, job_id, exc)
         finally:
             lease.release()
         raise
+    return database, job_id, lease, run_id
+
+
+def _queue_recovery(background, function, config, pair, *args, **kwargs) -> int:
+    if is_locked_down():
+        raise HTTPException(423, "Lockdown aktiv")
+    database, job_id, lease, run_id = _start_recovery_job(pair)
+    try:
+        if function is run_selective_restore:
+            database.audit_add(
+                "selective_recovery_started",
+                actor="web",
+                details={
+                    "job_id": job_id,
+                    "pair": str(pair.get("name") or ""),
+                    "items": len(args[0]),
+                    "recovery_point": kwargs["recovery_point"],
+                },
+            )
+        background.add_task(
+            _run_recovery_locked,
+            lease,
+            run_id,
+            function,
+            database,
+            config,
+            pair,
+            *args,
+            job_id=job_id,
+            **kwargs,
+        )
+    except BaseException as exc:
+        try:
+            _finish_failed_recovery(database, job_id, exc)
+        finally:
+            _release_recovery(lease, run_id, "error")
+        raise
+    return job_id
 
 
 @router.post("/snapshots", status_code=202)
@@ -427,12 +463,8 @@ def start_snapshot(
 ) -> dict[str, Any]:
     config = get_config().snapshot()
     pair = _find_pair(config, body.identity)
-    database, job_id, lease = _start_recovery_job()
-    _queue_recovery(
+    job_id = _queue_recovery(
         background,
-        database,
-        job_id,
-        lease,
         run_snapshot_capture,
         config,
         pair,
@@ -451,12 +483,8 @@ def restore_full_snapshot(
         load_manifest(config, pair, point_id)
     except SnapshotError as exc:
         raise HTTPException(400, str(exc)) from exc
-    database, job_id, lease = _start_recovery_job()
-    _queue_recovery(
+    job_id = _queue_recovery(
         background,
-        database,
-        job_id,
-        lease,
         run_snapshot_restore,
         config,
         pair,
@@ -506,11 +534,6 @@ def browse_backup(
             raise HTTPException(
                 502, "Sicherungsziel konnte nicht sicher gelesen werden"
             ) from exc
-        if not isinstance(entries, list):
-            raise HTTPException(
-                502, "Sicherungsziel hat eine ungültige Antwort geliefert"
-            )
-        truncated = truncated or len(entries) > 500
         items = [
             {
                 "name": str(item.get("Name") or ""),
@@ -603,12 +626,8 @@ def start_selective_restore(
         recovery_source = point_target(config, pair, body.point_id)
     except RecoveryPointError as exc:
         raise HTTPException(404, str(exc)) from exc
-    database, job_id, lease = _start_recovery_job()
-    _queue_recovery(
+    job_id = _queue_recovery(
         background,
-        database,
-        job_id,
-        lease,
         run_selective_restore,
         config,
         pair,
@@ -642,13 +661,196 @@ def delete_staging(
     require_reauthentication(request, user, body.current_password)
     try:
         removed = remove_staging(get_db(), get_config().snapshot(), recovery_id)
-    except RecoveryBusy as exc:
-        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if not removed:
         raise HTTPException(404, "Recovery-Staging nicht gefunden")
     return {"ok": True}
+
+
+@router.get("/staging/{recovery_id}/download")
+def download_staging_archive(
+    recovery_id: str,
+    user: str = Depends(require_auth),
+) -> StreamingResponse:
+    """Lädt ein geprüftes Recovery-Staging als ZIP-Archiv inkl. SHA256SUMS.txt herunter."""
+    from ..recovery_paths import validated_staging_path
+
+    if not re.fullmatch(r"recovery-[0-9]+", str(recovery_id or "")):
+        raise HTTPException(400, "Ungültige Recovery-ID")
+    config = get_config().snapshot()
+    db = get_db()
+    items = list_staging(db, config)
+    record = next((item for item in items if item.get("id") == recovery_id), None)
+    if not record or record.get("status") != "ready" or not record.get("exists"):
+        raise HTTPException(404, "Bereites Recovery-Staging nicht gefunden")
+    root = validated_staging_path(config)
+    work_dir = (root / recovery_id).resolve()
+    if work_dir.parent != root or not work_dir.is_dir():
+        raise HTTPException(404, "Staging-Verzeichnis nicht gefunden")
+    data_dir = work_dir / "data"
+    source_root = data_dir if data_dir.is_dir() else work_dir
+
+    spooled = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b")
+    checksum_lines: list[str] = []
+    try:
+        with zipfile.ZipFile(
+            spooled, mode="w", compression=zipfile.ZIP_DEFLATED
+        ) as archive:
+            for item in sorted(source_root.rglob("*")):
+                if item.is_symlink() or not item.is_file():
+                    continue
+                rel = item.relative_to(source_root).as_posix()
+                if source_root == work_dir and rel == "expected-manifest.json":
+                    continue
+                digest = hashlib.sha256()
+                with item.open("rb") as fh:
+                    while chunk := fh.read(1024 * 1024):
+                        digest.update(chunk)
+                checksum_lines.append(f"{digest.hexdigest()}  {rel}")
+                archive.write(item, arcname=rel)
+            archive.writestr(
+                "SHA256SUMS.txt",
+                ("\n".join(checksum_lines) + "\n").encode("utf-8"),
+            )
+        spooled.seek(0)
+    except Exception as exc:
+        spooled.close()
+        raise HTTPException(
+            500, f"Staging-Archiv konnte nicht erstellt werden: {exc}"
+        ) from exc
+
+    try:
+        db.audit_add(
+            "recovery_staging_downloaded",
+            actor=user,
+            details={"id": recovery_id, "files": len(checksum_lines)},
+        )
+    except Exception:
+        pass
+
+    def stream_archive():
+        try:
+            while chunk := spooled.read(256 * 1024):
+                yield chunk
+        finally:
+            spooled.close()
+
+    return StreamingResponse(
+        stream_archive(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{recovery_id}.zip"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get("/search")
+def search_recovery_files(
+    identity: str = Query(min_length=1, max_length=128),
+    q: str = Query(min_length=1, max_length=128),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Durchsucht verfügbare Wiederherstellungspunkte eines Datenwegs nach Dateinamen."""
+    config = get_config().snapshot()
+    pair = _find_pair(config, identity)
+    needle = q.strip().casefold()
+    if not needle:
+        return {"pair": str(pair.get("name") or ""), "query": q, "results": []}
+    try:
+        points = list_points(config, pair)
+    except RecoveryPointError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    results: list[dict[str, Any]] = []
+    for point in points[:25]:
+        point_id = str(point.get("id") or "")
+        point_label = str(point.get("label") or point_id)
+        if not point_id:
+            continue
+        if point_id.startswith("full-"):
+            try:
+                manifest = load_manifest(config, pair, point_id)
+            except Exception:
+                continue
+            files_map = manifest.get("files") or {}
+            if isinstance(files_map, Mapping):
+                for rel_path, meta in files_map.items():
+                    rel_str = str(rel_path)
+                    if needle in rel_str.casefold():
+                        results.append(
+                            {
+                                "point_id": point_id,
+                                "point_label": point_label,
+                                "path": rel_str,
+                                "name": PurePosixPath(rel_str).name,
+                                "size": (meta or {}).get("bytes")
+                                if isinstance(meta, Mapping)
+                                else None,
+                                "modified_at": point.get("created_at"),
+                            }
+                        )
+                        if len(results) >= limit:
+                            break
+        else:
+            try:
+                target = (
+                    _endpoints(pair)[1]
+                    if point_id == "current"
+                    else point_target(config, pair, point_id)
+                )
+            except Exception:
+                continue
+            if not _is_remote(target):
+                base = Path(target).expanduser()
+                if not base.is_dir():
+                    continue
+                scanned = 0
+                for root_dir, dirs, files in os.walk(base, followlinks=False):
+                    dirs[:] = [
+                        d
+                        for d in dirs
+                        if d
+                        not in {
+                            "Sicherpfad",
+                            ".sicherpfad-snapshots",
+                            ".rclone-versions",
+                        }
+                    ]
+                    for fname in files:
+                        scanned += 1
+                        if scanned > 5000 or len(results) >= limit:
+                            break
+                        rel_str = (Path(root_dir) / fname).relative_to(base).as_posix()
+                        if needle in rel_str.casefold():
+                            try:
+                                st = (Path(root_dir) / fname).lstat()
+                                size = st.st_size
+                                mtime = st.st_mtime
+                            except OSError:
+                                size = None
+                                mtime = None
+                            results.append(
+                                {
+                                    "point_id": point_id,
+                                    "point_label": point_label,
+                                    "path": rel_str,
+                                    "name": fname,
+                                    "size": size,
+                                    "modified_at": mtime,
+                                }
+                            )
+                    if scanned > 5000 or len(results) >= limit:
+                        break
+        if len(results) >= limit:
+            break
+
+    return {
+        "pair": str(pair.get("name") or ""),
+        "query": q,
+        "results": results[:limit],
+    }
 
 
 __all__ = ["build_recovery_pass", "encrypted_handover", "router"]

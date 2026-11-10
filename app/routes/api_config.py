@@ -218,6 +218,38 @@ _SENSITIVE_WEB_SCALARS = {
 }
 
 
+_VERSION_DIRS = ("backup_dir", "backup_dir1", "backup_dir2")
+_VERSION_KEEPS = ("keep_daily", "keep_weekly", "keep_monthly")
+
+
+def _versions_weakened(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    """Andere Versionsablage oder schärfere Ausdünnung kann Vorversionen löschen.
+
+    Erwartet normalisierte backup-Blöcke und löst wie apply_lifecycle/version_roots
+    auf; ein unbekanntes Pair (neu oder mit geänderter id) wird am bisherigen
+    globalen Stand gemessen.
+    """
+
+    def effective(backup: dict[str, Any], pair: dict[str, Any]) -> tuple[dict, list]:
+        lifecycle = pair.get("versions_lifecycle") or backup["versions_lifecycle"]
+        dirs = [str(pair.get(k) or backup.get(k) or "").strip() for k in _VERSION_DIRS]
+        return lifecycle, dirs
+
+    old_pairs = {rclone_history_key(pair): pair for pair in old["pairs"]}
+    checks = [({}, {})]
+    checks += [(old_pairs.get(rclone_history_key(p)), p) for p in new["pairs"]]
+    for before, pair in checks:
+        old_life, old_dirs = effective(old, before or {})
+        new_life, new_dirs = effective(new, pair)
+        if (
+            old_dirs != new_dirs
+            or (new_life["enabled"] and not old_life["enabled"])
+            or any(new_life[key] < old_life[key] for key in _VERSION_KEEPS)
+        ):
+            return True
+    return False
+
+
 def _sensitive_config_changed(
     old_data: dict[str, Any], new_data: dict[str, Any]
 ) -> bool:
@@ -264,9 +296,33 @@ def _sensitive_config_changed(
             "recovery_dir",
             "recovery_snapshots_dir",
             "device_vault_dir",
+            "hooks_dir",
         ):
             if key in new_paths and str(old_paths.get(key) or "") != str(
                 new_paths.get(key) or ""
+            ):
+                return True
+    if "maintenance" in new_data and isinstance(new_data["maintenance"], dict):
+        new_maint = new_data["maintenance"]
+        if "bootstrap_export" in new_maint and isinstance(
+            new_maint["bootstrap_export"], dict
+        ):
+            old_maint = (
+                old_data.get("maintenance")
+                if isinstance(old_data.get("maintenance"), dict)
+                else {}
+            )
+            old_be = (
+                old_maint.get("bootstrap_export")
+                if isinstance(old_maint.get("bootstrap_export"), dict)
+                else {}
+            )
+            new_be = new_maint["bootstrap_export"]
+            if (
+                _semantic_bool(old_be.get("enabled"), default=False)
+                != _semantic_bool(new_be.get("enabled"), default=False)
+                or str(old_be.get("target_dir") or "").strip()
+                != str(new_be.get("target_dir") or "").strip()
             ):
                 return True
     for key, fallback in _SENSITIVE_WEB_SCALARS.items():
@@ -319,28 +375,56 @@ def _sensitive_config_changed(
         ):
             return True
 
-    def effective_guards(data: dict[str, Any]) -> tuple[dict, dict] | None:
+    def normalized_backup(data: dict[str, Any]) -> dict[str, Any] | None:
         # Use the same defaults, coercions and bounds as the eventual write.
         # Otherwise malformed numbers could reset a stricter guard to its
         # default without appearing to change the effective settings here.
         try:
-            normalized, _warnings = validate_config(data)
+            return validate_config(data)[0]["backup"]
         except ConfigValidationError:
             # Invalid structures still receive the ordinary validation error,
             # rather than requiring a password before they can be rejected.
             return None
-        backup = normalized["backup"]
+
+    def effective_guards(backup: dict[str, Any]) -> tuple[dict, dict]:
         global_guard = protection.guard_settings(backup, {})
         overrides = {}
         for pair in backup["pairs"]:
             guard = protection.guard_settings(backup, pair)
             if guard != global_guard:
                 overrides[rclone_history_key(pair)] = guard
-        return global_guard, overrides
+        from ..ransomware_guard import ransomware_settings
 
-    old_guards = effective_guards(old_data)
-    new_guards = effective_guards(new_data)
-    if new_guards is not None and (old_guards is None or old_guards != new_guards):
+        rw_global = ransomware_settings(backup, {})
+        rw_overrides = {
+            rclone_history_key(pair): ransomware_settings(backup, pair)
+            for pair in backup["pairs"]
+            if ransomware_settings(backup, pair) != rw_global
+        }
+        hook_overrides = {
+            rclone_history_key(pair): (
+                str(pair.get("pre_hook") or ""),
+                str(pair.get("post_hook") or ""),
+            )
+            for pair in backup["pairs"]
+            if pair.get("pre_hook") or pair.get("post_hook")
+        }
+        return (
+            global_guard,
+            {
+                **overrides,
+                "__rw__": rw_global,
+                "__rw_pairs__": rw_overrides,
+                "__hooks__": hook_overrides,
+            },
+        )
+
+    old_norm, new_norm = normalized_backup(old_data), normalized_backup(new_data)
+    if new_norm is not None and (
+        old_norm is None
+        or effective_guards(old_norm) != effective_guards(new_norm)
+        or _versions_weakened(old_norm, new_norm)
+    ):
         return True
     if str(old_backup.get("filter_file") or "") != str(
         new_backup.get("filter_file") or ""
@@ -520,6 +604,14 @@ def update_config(
         response_warnings.append(
             "Konfiguration wurde gespeichert, das Audit-Protokoll war jedoch "
             "nicht verfügbar"
+        )
+    try:
+        from ..bootstrap_export import write_automatic_bootstrap_export
+
+        write_automatic_bootstrap_export(normalized, revision=revision)
+    except Exception:
+        logger.exception(
+            "Automatischer Bootstrap-Export nach Config-Save fehlgeschlagen"
         )
     return {
         "ok": True,
@@ -893,3 +985,198 @@ def save_filter_file(body: FilterPayload) -> dict[str, Any]:
         raise
     except OSError as exc:
         raise HTTPException(500, f"Schreibfehler: {exc}") from exc
+
+
+class FilterTestRequest(BaseModel):
+    rules: str = Field(default="", max_length=512 * 1024)
+    paths: list[str] = Field(default_factory=list, max_length=200)
+
+
+def _rclone_glob_to_regex(pattern: str) -> str:
+    """Übersetzt ein rclone-Filter-Pattern in einen regulären Ausdruck."""
+    import re as _re
+
+    anchored = pattern.startswith("/")
+    clean = pattern.lstrip("/")
+    dir_only = clean.endswith("/")
+    if dir_only:
+        clean = clean.rstrip("/")
+    parts: list[str] = []
+    i = 0
+    n = len(clean)
+    while i < n:
+        ch = clean[i]
+        if ch == "*":
+            if i + 1 < n and clean[i + 1] == "*":
+                parts.append(".*")
+                i += 2
+                if i < n and clean[i] == "/":
+                    parts.append("(?:/|$)")
+                    i += 1
+                continue
+            parts.append("[^/]*")
+        elif ch == "?":
+            parts.append("[^/]")
+        else:
+            parts.append(_re.escape(ch))
+        i += 1
+    body = "".join(parts)
+    prefix = "^" if anchored else "(?:^|.*/)"
+    suffix = "(?:/.*)?$" if dir_only else "$"
+    return f"{prefix}{body}{suffix}"
+
+
+def evaluate_rclone_filter_rules(
+    rules_text: str, sample_paths: list[str]
+) -> dict[str, Any]:
+    """Wertet rclone-Filterregeln (+ / -) der Reihe nach gegen Beispielpfade aus."""
+    import re as _re
+
+    compiled_rules: list[tuple[int, str, str, Any]] = []
+    parse_errors: list[str] = []
+    for idx, raw_line in enumerate(str(rules_text or "").splitlines(), start=1):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith(";"):
+            continue
+        if stripped == "!":
+            compiled_rules.append((idx, "!", stripped, None))
+            continue
+        if len(stripped) >= 2 and stripped[0] in {"+", "-"} and stripped[1].isspace():
+            action = stripped[0]
+            pattern = stripped[2:].strip()
+            if not pattern:
+                parse_errors.append(f"Zeile {idx}: Leeres Muster nach '{action}'")
+                continue
+            try:
+                regex = _re.compile(_rclone_glob_to_regex(pattern))
+                compiled_rules.append((idx, action, stripped, regex))
+            except _re.error as exc:
+                parse_errors.append(f"Zeile {idx}: Ungültiges Muster ({exc})")
+        else:
+            parse_errors.append(
+                f"Zeile {idx}: Regel muss mit '+ ' oder '- ' beginnen ({stripped[:40]})"
+            )
+
+    results: list[dict[str, Any]] = []
+    for raw_path in sample_paths[:200]:
+        norm_path = str(raw_path or "").strip().replace("\\", "/").lstrip("/")
+        if not norm_path:
+            continue
+        matched_action = "+"
+        matched_rule = "Standard (+ eingeschlossen)"
+        matched_line: int | None = None
+        for line_no, action, rule_str, regex in compiled_rules:
+            if action == "!":
+                continue
+            if regex is not None and regex.search(norm_path):
+                matched_action = action
+                matched_rule = rule_str
+                matched_line = line_no
+                break
+        results.append(
+            {
+                "path": norm_path,
+                "included": matched_action == "+",
+                "action": matched_action,
+                "matched_rule": matched_rule,
+                "matched_line": matched_line,
+                "rule_line": matched_line,
+            }
+        )
+
+    return {
+        "ok": len(parse_errors) == 0,
+        "rule_count": len(compiled_rules),
+        "parse_errors": parse_errors,
+        "results": results,
+    }
+
+
+@router.post("/filter-test")
+def test_filter_rules(body: FilterTestRequest) -> dict[str, Any]:
+    """Testet rclone-Filterregeln gegen eine Liste von Beispielpfaden."""
+    return evaluate_rclone_filter_rules(body.rules, body.paths)
+
+
+@router.get("/hooks")
+def get_available_hooks() -> dict[str, Any]:
+    """Listet alle allowlist-geprüften Hook-Skripte im Hook-Verzeichnis."""
+    from ..hooks import list_available_hooks
+
+    return list_available_hooks(get_config().snapshot())
+
+
+class BootstrapExportRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=1024)
+    passphrase: str = Field(min_length=12, max_length=512)
+    include_secrets: bool = False
+
+
+@router.post("/bootstrap-export")
+def export_encrypted_bootstrap(
+    request: Request,
+    body: BootstrapExportRequest,
+    user: str = Depends(require_auth),
+) -> dict[str, Any]:
+    """Erstellt ein verschlüsseltes Bootstrap-Paket nach erneuter Authentifizierung."""
+    from ..bootstrap_export import (
+        BootstrapExportError,
+        create_encrypted_bootstrap_bundle,
+    )
+
+    require_reauthentication(request, user, body.current_password)
+    snapshot, revision = get_config().snapshot_with_revision()
+    try:
+        bundle = create_encrypted_bootstrap_bundle(
+            snapshot,
+            passphrase=body.passphrase,
+            revision=revision,
+            include_secrets=body.include_secrets,
+        )
+    except BootstrapExportError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    _audit_best_effort(
+        "bootstrap_bundle_exported",
+        actor=user,
+        details={
+            "revision": revision,
+            "include_secrets": bool(body.include_secrets),
+            "sha256": bundle["sha256"],
+        },
+    )
+    return {"ok": True, "bundle": bundle}
+
+
+class BootstrapVerifyRequest(BaseModel):
+    bundle: dict[str, Any]
+    passphrase: str = Field(min_length=1, max_length=512)
+
+
+@router.post("/bootstrap-verify")
+def verify_encrypted_bootstrap(
+    body: BootstrapVerifyRequest,
+    user: str = Depends(require_auth),
+) -> dict[str, Any]:
+    """Prüft und entschlüsselt ein Bootstrap-Paket probeweise ohne Konfiguration zu überschreiben."""
+    from ..bootstrap_export import BootstrapExportError, decrypt_bootstrap_bundle
+
+    try:
+        decoded = decrypt_bootstrap_bundle(body.bundle, passphrase=body.passphrase)
+    except BootstrapExportError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    cfg = decoded.get("config") if isinstance(decoded.get("config"), dict) else {}
+    backup = cfg.get("backup") if isinstance(cfg.get("backup"), dict) else {}
+    pairs = backup.get("pairs") if isinstance(backup.get("pairs"), list) else []
+    jobs = backup.get("jobs") if isinstance(backup.get("jobs"), list) else []
+    return {
+        "ok": True,
+        "schema": decoded.get("schema"),
+        "app_version": decoded.get("app_version"),
+        "exported_at": decoded.get("exported_at"),
+        "revision": decoded.get("revision"),
+        "include_secrets": bool(decoded.get("include_secrets")),
+        "pairs_count": len(pairs),
+        "jobs_count": len(jobs),
+        "has_filter_file": bool(decoded.get("filter_file_content")),
+        "has_rclone_conf": bool(decoded.get("rclone_conf")),
+    }

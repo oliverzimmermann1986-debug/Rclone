@@ -34,6 +34,9 @@ DEFAULT_ERROR_EVENTS = (
     "restore_test_error",
     "anomaly_blocked",
     "recovery_error",
+    "bitrot_detected",
+    "boot_drill_error",
+    "lockdown",
 )
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: tuple[tuple[str, str, str, int], str, float] | None = None
@@ -331,6 +334,9 @@ def _payload(row: Mapping[str, Any]) -> bytes:
         "restore_test_error",
         "anomaly_blocked",
         "recovery_error",
+        "bitrot_detected",
+        "boot_drill_error",
+        "lockdown",
     }
     payload = {
         **{

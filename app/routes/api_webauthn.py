@@ -18,10 +18,14 @@ from ..auth import (
     SESSION_COOKIE,
     account_generation_guard,
     clear_login_failures,
+    clear_reauth_failures,
     create_session,
+    issue_webauthn_reauth_token,
     login_key,
     login_retry_after,
+    reauth_retry_after,
     record_login_failure,
+    record_reauth_failure,
     require_auth,
     require_reauthentication,
     session_user,
@@ -477,3 +481,87 @@ def delete_credential(
             status_code=401, detail="Die Passwortbestätigung wurde widerrufen."
         ) from exc
     return {"ok": True}
+
+
+class ReauthOptionsRequest(BaseModel):
+    method: Method | None = None
+
+
+@router.post(
+    "/api/webauthn/reauth/options",
+    dependencies=[Depends(require_auth), Depends(require_csrf)],
+)
+def begin_reauth(
+    request: Request,
+    body: ReauthOptionsRequest | None = None,
+    user: str = Depends(require_auth),
+) -> dict[str, Any]:
+    del user
+    retry_after = reauth_retry_after(request)
+    if retry_after:
+        raise HTTPException(
+            429,
+            {
+                "message": "Zu viele falsche Bestätigungen",
+                "reauth_required": True,
+                "retry_after_seconds": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
+    st = status()
+    selected_method: Method = "passkey"
+    if body and body.method:
+        selected_method = body.method
+    elif st.get("passkey_available"):
+        selected_method = "passkey"
+    elif st.get("security_key_available"):
+        selected_method = "security_key"
+    try:
+        return authentication_options(selected_method, native=False)
+    except Exception as exc:
+        raise _ceremony_error(exc) from exc
+
+
+@router.post(
+    "/api/webauthn/reauth/verify",
+    dependencies=[Depends(require_auth), Depends(require_csrf)],
+)
+def complete_reauth(
+    body: CeremonyResponse,
+    request: Request,
+    user: str = Depends(require_auth),
+) -> dict[str, Any]:
+    retry_after = reauth_retry_after(request)
+    if retry_after:
+        raise HTTPException(
+            429,
+            {
+                "message": "Zu viele falsche Bestätigungen",
+                "reauth_required": True,
+                "retry_after_seconds": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
+    try:
+        result = finish_authentication(body.challenge_id, body.credential)
+    except Exception as exc:
+        retry = record_reauth_failure(request)
+        err = _ceremony_error(exc)
+        if retry:
+            err.headers = {"Retry-After": str(retry)}
+        raise err from exc
+    if result.get("native"):
+        raise HTTPException(400, "Native Anmelde-Challenges sind hier nicht erlaubt.")
+    clear_reauth_failures(request)
+    token = issue_webauthn_reauth_token(request, user)
+    get_db().audit_add(
+        "webauthn_stepup_reauth",
+        actor=user,
+        details={"method": result["method"]},
+    )
+    return {
+        "ok": True,
+        "reauth_token": token,
+        "method": result["method"],
+        "expires_in_seconds": 90,
+    }

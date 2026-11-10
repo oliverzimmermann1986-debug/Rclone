@@ -32,6 +32,8 @@ from ..jobs.job_lifecycle import BACKUP_KINDS, reconcile_locked_scope
 from ..jobs.logging_scope import JobScopeFilter
 from ..jobs.locks import HeldFileLock, try_file_lock
 from ..jobs.scheduler import rclone_history_key
+from ..lockdown import is_locked_down
+from ..preflight_matrix import exclude_filter_args
 from ..rclone_args import redact_command_text, rclone_subprocess_env
 from ..restore_evidence import is_partial_restore_summary
 from ..scheduler_control import pause_scheduler, resume_scheduler, scheduler_state
@@ -65,6 +67,7 @@ _ALLOWED_JOB_KINDS = {
     "restoretest",
     "recovery",
     "pbs",
+    "bitrotscrub",
 }
 
 _locks: dict[str, threading.Lock] = {"backup": threading.Lock()}
@@ -309,6 +312,10 @@ def _reserve_backup_job(
                 "Ein registrierter Sync-Unterprozess ist noch aktiv",
             )
         rclone_job.reset_cancel()
+        # Erst nach reset_cancel prüfen: ein später aktivierter Lockdown setzt
+        # sein Cancel-Signal dann nach unserem Reset und bleibt wirksam.
+        if is_locked_down():
+            raise HTTPException(423, "Lockdown aktiv")
         job_id = db.job_start(
             kind,
             log_file=log_file,
@@ -418,6 +425,8 @@ def get_scheduler_state() -> dict[str, Any]:
 def pause_scheduler_endpoint(
     body: SchedulerPausePayload, user: str = Depends(require_auth)
 ) -> dict[str, Any]:
+    if is_locked_down():
+        raise HTTPException(423, "Lockdown aktiv")
     try:
         return pause_scheduler(
             until=body.until,
@@ -432,6 +441,8 @@ def pause_scheduler_endpoint(
 
 @router.post("/scheduler/resume")
 def resume_scheduler_endpoint(user: str = Depends(require_auth)) -> dict[str, Any]:
+    if is_locked_down():
+        raise HTTPException(423, "Lockdown aktiv")
     return resume_scheduler(actor=user, db=get_db())
 
 
@@ -443,7 +454,10 @@ def _queue_backup(
     config_snapshot: dict[str, Any] | None = None,
     config_revision: str | None = None,
     actor: str = "system",
+    exclude_paths: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
+    if is_locked_down():
+        raise HTTPException(423, "Lockdown aktiv")
     if config_snapshot is None:
         config_snapshot, captured_revision = get_config().snapshot_with_revision()
         config_revision = captured_revision
@@ -494,12 +508,20 @@ def _queue_backup(
             "definition_name": definition_name,
             "config_revision": config_revision,
             "config_snapshot": config_snapshot,
+            "exclude_paths": exclude_paths,
             "_request_actor": _audit_actor(actor),
         }
         _audit_best_effort(
             "backup_requested",
             actor=_audit_actor(actor),
-            details={"dry_run": dry_run, "pairs": pairs_filter or []},
+            details={
+                "dry_run": dry_run,
+                "pairs": pairs_filter or [],
+                # Nur Anzahlen: Pfade können personenbezogene Namen enthalten.
+                "excluded_counts": {
+                    name: len(paths) for name, paths in (exclude_paths or {}).items()
+                },
+            },
         )
     except Exception as exc:
         logger.exception(
@@ -616,6 +638,8 @@ def _acquire_definition_batch_scope(*, reset_cancel_state: bool = True) -> HeldF
             )
         if reset_cancel_state:
             rclone_job.reset_cancel()
+        if is_locked_down():
+            raise HTTPException(423, "Lockdown aktiv")
         return scope_lock
     except Exception:
         scope_lock.release()
@@ -763,6 +787,8 @@ def _run_definition_batch_thread(batch_id: str, scope_lock: HeldFileLock) -> Non
 def _queue_enabled_job_definitions(
     *, dry_run: bool, actor: str = "system"
 ) -> dict[str, Any]:
+    if is_locked_down():
+        raise HTTPException(423, "Lockdown aktiv")
     snapshot, revision = get_config().snapshot_with_revision()
     snapshot = copy.deepcopy(snapshot)
     revision = str(revision or "")
@@ -869,6 +895,11 @@ def _queue_enabled_job_definitions(
 def resume_pending_definition_batches() -> int:
     """Startet nach Webdienst-Restart die noch ausstehende dauerhafte Queue."""
     db = get_db()
+    if is_locked_down():
+        logger.warning(
+            "Lockdown aktiv: ausstehende Jobdefinitions-Batches bleiben liegen"
+        )
+        return 0
     resumed = 0
     for pending in db.job_batches_pending():
         batch_id = str(pending["id"])
@@ -900,17 +931,39 @@ def resume_pending_definition_batches() -> int:
     return resumed
 
 
+class BackupRunPayload(BaseModel):
+    exclude_paths: dict[str, list[str]] = Field(default_factory=dict)
+
+
 @router.post("/backup/run")
 def run_backup(
     dry_run: bool = Query(False),
     pairs: Optional[str] = Query(None),
+    payload: Optional[BackupRunPayload] = None,
     user: str = Depends(require_auth),
 ) -> dict[str, Any]:
+    excludes = payload.exclude_paths if payload else {}
     if pairs is not None:
+        pairs_filter = _parse_pair_filter(pairs)
+        unknown = sorted(set(excludes) - set(pairs_filter or []))
+        if unknown:
+            raise HTTPException(
+                400, f"Ausschlüsse für nicht ausgewählte Pairs: {', '.join(unknown)}"
+            )
+        for paths in excludes.values():
+            try:
+                exclude_filter_args(paths)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         return _queue_backup(
             dry_run=dry_run,
-            pairs_filter=_parse_pair_filter(pairs),
+            pairs_filter=pairs_filter,
+            **({"exclude_paths": excludes} if excludes else {}),
             **_request_actor_args(user),
+        )
+    if excludes:
+        raise HTTPException(
+            400, "Ausschlüsse sind nur mit Pair-Auswahl (pairs) möglich"
         )
     return _queue_enabled_job_definitions(dry_run=dry_run, **_request_actor_args(user))
 
@@ -918,6 +971,29 @@ def run_backup(
 @router.get("/definitions")
 def list_job_definitions() -> list[dict[str, Any]]:
     return effective_job_definitions(get_config())
+
+
+@router.get("/definitions/durations")
+def job_definition_durations() -> dict[str, Any]:
+    """Historische Durchschnittslaufzeiten je Jobdefinition für die 24h-Timeline."""
+    db = get_db()
+    recent = db.job_list(kind="backup", status="ok", limit=100)
+    buckets: dict[str, list[float]] = {}
+    for job in recent:
+        def_id = str(job.get("definition_id") or "").strip()
+        started = float(job.get("started_at") or 0)
+        ended = float(job.get("ended_at") or 0)
+        if def_id and started > 0 and ended >= started:
+            buckets.setdefault(def_id, []).append(ended - started)
+    durations: dict[str, dict[str, Any]] = {}
+    for def_id, values in buckets.items():
+        sample = values[:14]
+        durations[def_id] = {
+            "avg_duration_sec": round(sum(sample) / len(sample), 1),
+            "max_duration_sec": round(max(sample), 1),
+            "samples": len(sample),
+        }
+    return {"durations": durations}
 
 
 @router.post("/definitions/run-all")
@@ -1004,6 +1080,15 @@ def cancel_backup(
     response: Response, user: str = Depends(require_auth)
 ) -> dict[str, Any]:
     db = get_db()
+    if (
+        db.job_running("recovery")
+        and not any(db.job_running(kind) for kind in BACKUP_KINDS if kind != "recovery")
+        and not runtime_state.active_processes()
+    ):
+        raise HTTPException(
+            409,
+            "Dieser Wiederherstellungsschritt ist nicht sicher abbrechbar. Der Lauf wird weiter überwacht.",
+        )
     queued_batches = db.job_batch_request_cancel()
     running = any(db.job_running(kind) for kind in BACKUP_KINDS)
     state = rclone_job.get_runtime_state() or {}
@@ -1135,6 +1220,8 @@ def start_restore_test(
     Teilt sich den Backup-Scope, damit kein Drill gegen einen halb
     geschriebenen Zwischenstand prüft.
     """
+    if is_locked_down():
+        raise HTTPException(423, "Lockdown aktiv")
     pairs_filter = _parse_pair_filter(pairs)
     known = _known_pair_names()
     unknown = [name for name in (pairs_filter or []) if name not in known]
@@ -1170,7 +1257,6 @@ def start_restore_test(
                 trigger="manual",
                 reset_cancel_state=False,
                 config_snapshot=config_snapshot,
-                job_id=job_id,
             )
             status = _finish_status(result)
             external_result = (status, result)
@@ -1230,12 +1316,26 @@ def backup_progress() -> dict[str, Any]:
     db = get_db()
     running = db.job_running("backup")
     state = rclone_job.get_runtime_state() or {}
+    current_status = {
+        "backup": running,
+        "check": db.job_running("check"),
+        "quicksync": db.job_running("quicksync"),
+        "restoretest": db.job_running("restoretest"),
+        "pbs": db.job_running("pbs"),
+        "bitrotscrub": db.job_running("bitrotscrub"),
+        "bootdrill": db.job_running("bootdrill"),
+    }
     if not running or state.get("status") != "running":
         last = db.job_list(kind="backup", limit=1)
-        return {
-            "running": False,
-            "last": _redact_result(last[0]) if last else None,
-        }
+        return _redact_result(
+            {
+                "running": False,
+                "last": last[0] if last else None,
+                "current_status": current_status,
+                "pbs_running": bool(current_status["pbs"]),
+                "lockdown_active": is_locked_down(db),
+            }
+        )
 
     started = float(state.get("started_at") or running["started_at"])
     pairs_status: list[dict[str, Any]] = []
@@ -1266,6 +1366,9 @@ def backup_progress() -> dict[str, Any]:
             "pairs": pairs_status,
             "total_pairs": len(pairs_status),
             "done_pairs": sum(1 for pair in pairs_status if pair["status"] in finished),
+            "current_status": current_status,
+            "pbs_running": bool(current_status["pbs"]),
+            "lockdown_active": is_locked_down(db),
         }
     )
 
@@ -1517,6 +1620,8 @@ def _finish_quick_validation(
 def run_quick_sync(
     payload: QuickSyncPayload, user: str = Depends(require_auth)
 ) -> dict[str, Any]:
+    if is_locked_down():
+        raise HTTPException(423, "Lockdown aktiv")
     config_snapshot, config_revision = get_config().snapshot_with_revision()
     remote_path, local_path = _validate_quick_paths(payload, config_snapshot)
     if not _locks["backup"].acquire(blocking=False):
@@ -1846,6 +1951,8 @@ def status_current() -> dict[str, Any]:
             "quicksync": db.job_running("quicksync"),
             "restoretest": db.job_running("restoretest"),
             "pbs": db.job_running("pbs"),
+            "bitrotscrub": db.job_running("bitrotscrub"),
+            "bootdrill": db.job_running("bootdrill"),
         }
     )
 

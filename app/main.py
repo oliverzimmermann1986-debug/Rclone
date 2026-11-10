@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.gzip import GZipMiddleware
 
 from . import __version__
@@ -43,8 +44,7 @@ from .auth_contract import (
 )
 from .config_store import get_config
 from .db import check_database_readonly, database_path, get_db
-from .device_vault import cleanup_vault_scratch
-from .recovery_snapshots import snapshot_root
+from .lockdown import is_locked_down
 from .rclone_args import rclone_subprocess_env
 from .security import (
     CSRF_COOKIE,
@@ -56,18 +56,31 @@ from .static_assets import AllowlistedStaticFiles, web_asset_cache_revision
 from .utils import bounded_number as _bounded_number
 from .routes import (
     api_pbs,
+    api_bandwidth,
+    api_bitrot,
+    api_boot_drill,
     api_browse,
     api_config,
+    api_conflicts,
+    api_crypt,
     api_diagnostics,
     api_jobs,
+    api_lockdown,
     api_maintenance,
+    api_object_lock,
+    api_preflight,
     api_push,
+    api_quota,
+    api_ransomware,
+    api_time_travel,
     api_recovery,
+    api_recovery_diff,
     api_remotes,
-    api_restore_plan,
     api_storage,
     api_test,
     api_vault,
+    api_versions,
+    api_vpn,
     api_webauthn,
 )
 from .maintenance import run_automatic_maintenance
@@ -78,7 +91,6 @@ from .jobs.job_lifecycle import (
     reconcile_locked_scope,
 )
 from .jobs.locks import file_lock_or_none
-from .jobs.restore_workspace import cleanup_orphaned_workspaces
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -236,27 +248,26 @@ def _run_push_dispatcher(stop_event: threading.Event) -> None:
         stop_event.wait(30)
 
 
-def _cleanup_restore_scratch(config: dict) -> None:
-    paths = config.get("paths") or {}
-    operations = (
-        (
-            "Restore",
-            lambda: cleanup_orphaned_workspaces(
-                Path(paths.get("temp_dir") or "/opt/rclone-sync/temp").expanduser()
-            ),
-        ),
-        ("Vault", lambda: cleanup_vault_scratch(config)),
-        ("Snapshot", lambda: cleanup_orphaned_workspaces(snapshot_root(config))),
-    )
-    for label, operation in operations:
+def _watchdog_interval_seconds() -> float | None:
+    raw = os.getenv("WATCHDOG_USEC", "").strip()
+    if not raw:
+        return None
+    try:
+        usec = int(raw)
+    except ValueError:
+        return None
+    if usec <= 0:
+        return None
+    return max(1.0, min(30.0, (usec / 1_000_000.0) / 2.0))
+
+
+def _run_watchdog_loop(stop_event: threading.Event, interval_seconds: float) -> None:
+    while not stop_event.wait(max(1.0, float(interval_seconds))):
         try:
-            cleanup = operation()
-            if cleanup["removed"] or cleanup["failed"]:
-                logger.warning("%s scratch recovery: %s", label, cleanup)
-        except (OSError, ValueError):
-            # Cleanup is best-effort, with durable receipts retained for retry.
-            # An unavailable optional store must not prevent the web app starting.
-            logger.exception("%s scratch path could not be safely cleaned", label)
+            if check_database_readonly(database_path()):
+                _sd_notify("WATCHDOG=1")
+        except Exception:
+            logger.exception("Systemd-Watchdog-Prüfung fehlgeschlagen")
 
 
 @asynccontextmanager
@@ -320,8 +331,6 @@ async def _lifespan(_app):
                     scope,
                     result.get("active_processes", 0),
                 )
-            elif scope == runtime_state.DEFAULT_CANCEL_SCOPE:
-                _cleanup_restore_scratch(get_config().snapshot())
     if recovered:
         logger.warning("%d verwaiste laufende Job(s) als stale markiert", recovered)
     resumed_batches = api_jobs.resume_pending_definition_batches()
@@ -355,12 +364,24 @@ async def _lifespan(_app):
         daemon=True,
     )
     push_thread.start()
+    watchdog_stop = threading.Event()
+    watchdog_interval = _watchdog_interval_seconds()
+    watchdog_thread: threading.Thread | None = None
+    if watchdog_interval is not None:
+        watchdog_thread = threading.Thread(
+            target=_run_watchdog_loop,
+            args=(watchdog_stop, watchdog_interval),
+            name="systemd-watchdog",
+            daemon=True,
+        )
+        watchdog_thread.start()
     try:
         yield
     finally:
         await api_jobs.stop_progress_broadcaster()
         maintenance_stop.set()
         push_stop.set()
+        watchdog_stop.set()
         maintenance_thread.join(timeout=5)
         push_thread.join(timeout=2)
         _sd_notify("STOPPING=1")
@@ -516,7 +537,11 @@ def _apply_security_headers(response, request: Request, request_id: str):
     ):
         response.headers.setdefault("Cache-Control", "no-store")
     elif request.url.path.startswith("/static/"):
-        response.headers.setdefault("Cache-Control", "public, max-age=86400")
+        # Unversionierte Assets (z. B. per import geladene Module) per ETag revalidieren.
+        response.headers.setdefault(
+            "Cache-Control",
+            "public, max-age=86400" if request.query_params.get("v") else "no-cache",
+        )
     if "server" in response.headers:
         del response.headers["server"]
     return response
@@ -531,6 +556,20 @@ def _error_response(request: Request, request_id: str, status_code: int, detail:
 
 class _RequestTooLarge(Exception):
     pass
+
+
+# Bleiben im Lockdown offen, damit er per Passwort-Login aufgehoben werden kann.
+_LOCKDOWN_OPEN_PATHS = frozenset(
+    {"/api/lockdown", "/api/lockdown/release", NATIVE_LOGIN_PATH}
+)
+
+
+def _lockdown_blocks() -> bool:
+    try:
+        return is_locked_down()
+    except Exception:
+        logger.exception("Lockdown-Status nicht lesbar; Anfrage wird nicht gesperrt")
+        return False
 
 
 @app.middleware("http")
@@ -557,6 +596,14 @@ async def security_middleware(request: Request, call_next):
         return _error_response(
             request, request_id, 403, "Origin-Prüfung fehlgeschlagen"
         )
+
+    if (
+        method not in {"GET", "HEAD", "OPTIONS"}
+        and request.url.path.startswith("/api/")
+        and request.url.path not in _LOCKDOWN_OPEN_PATHS
+        and await run_in_threadpool(_lockdown_blocks)
+    ):
+        return _error_response(request, request_id, 423, "Lockdown aktiv")
 
     if state_changing:
         length = request.headers.get("content-length")
@@ -615,14 +662,34 @@ app.include_router(api_pbs.router)
 app.include_router(api_push.router)
 app.include_router(api_webauthn.router)
 app.include_router(api_recovery.router)
-app.include_router(api_restore_plan.router)
 app.include_router(api_vault.router)
+app.include_router(api_lockdown.router)
+app.include_router(api_object_lock.router)
+app.include_router(api_vpn.router)
+app.include_router(api_versions.router)
+app.include_router(api_bitrot.router)
+app.include_router(api_bandwidth.router)
+app.include_router(api_conflicts.router)
+app.include_router(api_preflight.router)
+app.include_router(api_recovery_diff.router)
+app.include_router(api_boot_drill.router)
+app.include_router(api_crypt.router)
+app.include_router(api_ransomware.router)
+app.include_router(api_quota.router)
+app.include_router(api_time_travel.router)
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_ASSET_ALLOWLIST = frozenset(
     {
         "alpine.min.js",
         "app.js",
+        "app-core.js",
+        "app-dashboard.js",
+        "app-pairs.js",
+        "app-jobs.js",
+        "app-system.js",
+        "app-recovery.js",
+        "app-settings.js",
         "ui-helpers.js",
         "style.css",
         "workspace.js",
@@ -645,9 +712,29 @@ app.mount(
 )
 
 
+_html_template_cache: dict[str, tuple[int, int, str]] = {}
+_html_template_lock = threading.Lock()
+
+
+def _read_cached_html(path: Path) -> str:
+    try:
+        st = path.stat()
+        key = str(path)
+        with _html_template_lock:
+            cached = _html_template_cache.get(key)
+            if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+                return cached[2]
+        content = path.read_text(encoding="utf-8")
+        with _html_template_lock:
+            _html_template_cache[key] = (st.st_mtime_ns, st.st_size, content)
+        return content
+    except OSError:
+        return path.read_text(encoding="utf-8")
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_form(request: Request):
-    html = (STATIC_DIR / "login.html").read_text(encoding="utf-8")
+    html = _read_cached_html(STATIC_DIR / "login.html")
     error = (
         '<div class="err">Falsches Login oder vorübergehend gesperrt</div>'
         if request.query_params.get("error")
@@ -805,9 +892,7 @@ def index(request: Request):
     token = request.cookies.get(SESSION_COOKIE, "")
     if not session_user(token):
         return RedirectResponse(url="/login", status_code=303)
-    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    # Frontend patches can ship without changing the application version.
-    # Hash actual asset bytes so equal file timestamps cannot preserve old URLs.
+    html = _read_cached_html(STATIC_DIR / "index.html")
     asset_revision = web_asset_cache_revision(STATIC_DIR, __version__)
     html = html.replace("?v=__APP_VERSION__", f"?v={asset_revision}")
     response = HTMLResponse(html)

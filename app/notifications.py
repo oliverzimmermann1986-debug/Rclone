@@ -21,6 +21,10 @@ EVENTS = (
     "anomaly_blocked",
     "recovery_ready",
     "recovery_error",
+    "bitrot_detected",
+    "boot_drill_ok",
+    "boot_drill_error",
+    "lockdown",
 )
 
 
