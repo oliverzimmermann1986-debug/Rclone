@@ -227,7 +227,7 @@ struct ObjectLockAndScrubView: View {
                 if let last = scrubStatus.lastJob {
                     Text("Letzter Lauf: \(last.status)")
                         .font(.caption)
-                        .foregroundStyle(last.status == "success" ? .secondary : .red)
+                        .foregroundStyle(last.status == "success" ? Color.secondary : Color.red)
                 }
             }
             Button {
@@ -251,7 +251,7 @@ struct ObjectLockAndScrubView: View {
                 if let last = bootDrill.last {
                     Text("Letzter Test: \(last.status)")
                         .font(.caption)
-                        .foregroundStyle(last.status == "success" ? .secondary : .red)
+                        .foregroundStyle(last.status == "success" ? Color.secondary : Color.red)
                 }
             }
             Button {

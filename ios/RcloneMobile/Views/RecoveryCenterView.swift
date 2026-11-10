@@ -477,7 +477,7 @@ private struct RecoveryDataPathDetail: View {
                 Text("Die Übung verändert keine Produktivdaten. Cloud-Anbieter können für das Rückholen Egress berechnen.")
             }
             Section {
-                NavigationLink { TimeTravelBrowserView(identity: dataPath.identity, pairName: dataPath.name) } label: {
+                NavigationLink { TimeTravelBrowserView(identity: dataPath.name, pairName: dataPath.name) } label: {
                     Label("Interaktiver Zeitreise-Browser", systemImage: "clock.badge.checkmark")
                 }
                 if dataPath.direction == "bisync" {
