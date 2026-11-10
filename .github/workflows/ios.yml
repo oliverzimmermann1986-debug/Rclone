@@ -2,6 +2,7 @@ name: iOS
 
 on:
   push:
+    branches: [main]
     paths:
       - "ios/**"
       - "app/**"
