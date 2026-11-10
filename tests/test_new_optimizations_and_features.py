@@ -343,6 +343,8 @@ def test_doctor_and_system_bundle_with_rclone_conf_and_audit_chain(
     db.audit_add("config_saved", actor="admin", details={"rev": "1"})
 
     conf_file = tmp_path / "rclone.conf"
+    conf_file.touch(mode=0o600)
+    conf_file.chmod(0o600)
     conf_file.write_text(
         '[cloud]\ntype = drive\ntoken = {"access_token":"x","expiry":"2020-01-01T00:00:00Z"}\n',
         encoding="utf-8",

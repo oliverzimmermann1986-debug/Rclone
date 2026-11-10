@@ -25,7 +25,7 @@ _DENIED_MARKERS = ("superuser", "only root", "permission denied", "not permitted
 
 
 def lockdown_state(db: Database | None = None) -> dict[str, Any]:
-    raw = (db or get_db()).runtime_get(_KEY, {})
+    raw = getattr(db or get_db(), "runtime_get", lambda _k, _d=None: {})(_KEY, {})
     if isinstance(raw, dict) and raw.get("active") is True:
         return raw
     return {"active": False}

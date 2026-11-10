@@ -1333,7 +1333,7 @@ def backup_progress() -> dict[str, Any]:
                 "last": last[0] if last else None,
                 "current_status": current_status,
                 "pbs_running": bool(current_status["pbs"]),
-                "lockdown_active": is_locked_down(),
+                "lockdown_active": is_locked_down(db),
             }
         )
 
@@ -1368,7 +1368,7 @@ def backup_progress() -> dict[str, Any]:
             "done_pairs": sum(1 for pair in pairs_status if pair["status"] in finished),
             "current_status": current_status,
             "pbs_running": bool(current_status["pbs"]),
-            "lockdown_active": is_locked_down(),
+            "lockdown_active": is_locked_down(db),
         }
     )
 
