@@ -253,7 +253,8 @@ def _start_browser_auth_helper(setup: Setup, authorize_cmd: str) -> None:
                         if qs.get("state"):
                             setup.auth_state = qs["state"][0]
                         redirect_url = _resolve_redirect_location(candidate)
-                        setup.direct_auth_url = redirect_url or candidate
+                        if redirect_url:
+                            setup.direct_auth_url = redirect_url
 
     thread = threading.Thread(target=_reader, daemon=True)
     thread.start()
