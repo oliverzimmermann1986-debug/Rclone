@@ -110,7 +110,7 @@ final class LocalOAuthLoopbackServer: @unchecked Sendable {
             let target = String(parts[1])
             if target.contains("code=") || target.contains("error=") {
                 let html = """
-                <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sicherpfad</title></head><body style="font-family:-apple-system,sans-serif;text-align:center;padding:48px 24px;background:#f5f5f7;color:#1d1d1f;"><div style="max-width:360px;margin:0 auto;background:#fff;padding:28px;border-radius:16px;box-shadow:0 4px 16px rgba(0,0,0,0.08);"><h2 style="margin:0 0 12px;color:#1d7d3f;">? Google Drive verbunden</h2><p style="margin:0;color:#6e6e73;">Die Anmeldung wird in der Sicherpfad-App abgeschlossen?</p></div></body></html>
+                <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sicherpfad</title></head><body style="font-family:-apple-system,sans-serif;text-align:center;padding:48px 24px;background:#f5f5f7;color:#1d1d1f;"><div style="max-width:360px;margin:0 auto;background:#fff;padding:28px;border-radius:16px;box-shadow:0 4px 16px rgba(0,0,0,0.08);"><h2 style="margin:0 0 12px;color:#1d7d3f;">✓ Google Drive verbunden</h2><p style="margin:0;color:#6e6e73;">Die Anmeldung wird in der Sicherpfad-App abgeschlossen…</p></div></body></html>
                 """
                 let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
                 _ = response.withCString { ptr in
@@ -156,25 +156,23 @@ struct RemoteSetupView: View {
                 if let savedName {
                     Section("Remote angelegt") {
                         Label(savedName, systemImage: "checkmark.circle")
-                        Text("Der Speicher ist jetzt in der Ordnerauswahl verf?gbar. Dort kannst du die Erreichbarkeit pr?fen.")
+                        Text("Der Speicher ist jetzt in der Ordnerauswahl verfügbar. Dort kannst du die Erreichbarkeit prüfen.")
                         Button("Fertig") { dismiss() }
                     }
                 } else if let session {
                     if session.ready {
                         Section("Bereit zum Speichern") {
-                            Text("Die Angaben f?r \(session.name) sind vollst?ndig. Erst beim Speichern wird das Remote in die Serverkonfiguration ?bernommen.")
+                            Text("Die Angaben für \(session.name) sind vollständig. Erst beim Speichern wird das Remote in die Serverkonfiguration übernommen.")
                         }
                     } else {
                         Section(session.option.labelDe ?? session.option.name) {
-                            if let authTarget = session.option.directAuthUrl ?? session.option.authUrl,
-                               !authTarget.isEmpty,
-                               URL(string: authTarget) != nil {
-                                Text("Melde dich im ge?ffneten Google-Fenster an und best?tige mit ?Zulassen?. Die R?ckleitung wird automatisch erkannt.")
+                            if Self.httpsAuthURL(for: session) != nil {
+                                Text("Melde dich im geöffneten Google-Fenster an und bestätige mit „Zulassen“. Die Rückleitung wird automatisch erkannt.")
                                     .font(.subheadline)
                                 Button {
                                     startAutomaticBrowserAuthIfNeeded(for: session)
                                 } label: {
-                                    Label("Google-Anmeldung ?ffnen", systemImage: "safari.fill")
+                                    Label("Google-Anmeldung öffnen", systemImage: "safari.fill")
                                         .font(.headline)
                                 }
                             } else {
@@ -183,15 +181,15 @@ struct RemoteSetupView: View {
 
                             if session.option.exclusive && !session.option.examples.isEmpty {
                                 Picker("Antwort", selection: $answer) {
-                                    Text(session.option.defaultValue.isEmpty ? "Bitte ausw?hlen" : "Standard: \(session.option.defaultValue)").tag("")
+                                    Text(session.option.defaultValue.isEmpty ? "Bitte auswählen" : "Standard: \(session.option.defaultValue)").tag("")
                                     ForEach(session.option.examples) { example in
-                                        Text("\(example.value) ? \(example.help)").tag(example.value)
+                                        Text("\(example.value) · \(example.help)").tag(example.value)
                                     }
                                 }
                             } else {
                                 TextField(
                                     !(session.option.authorizeCommand ?? "").isEmpty
-                                        ? "Falls extern angemeldet: 127.0.0.1-Adresse oder Code einf?gen"
+                                        ? "Falls extern angemeldet: 127.0.0.1-Adresse oder Code einfügen"
                                         : (session.option.defaultValue.isEmpty ? "Antwort" : session.option.defaultValue),
                                     text: $answer,
                                     axis: .vertical
@@ -206,12 +204,12 @@ struct RemoteSetupView: View {
                                             answer = clip
                                         }
                                     } label: {
-                                        Label("Aus Zwischenablage einf?gen", systemImage: "doc.on.clipboard")
+                                        Label("Aus Zwischenablage einfügen", systemImage: "doc.on.clipboard")
                                     }
                                 }
                             }
                             if !session.option.defaultValue.isEmpty {
-                                Text("Leer lassen f?r den Standard: \(session.option.defaultValue)").font(.caption).foregroundStyle(.secondary)
+                                Text("Leer lassen für den Standard: \(session.option.defaultValue)").font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -229,13 +227,13 @@ struct RemoteSetupView: View {
                     }
                     Section("Neuer Speicher") {
                         TextField("Remote-Name", text: $name).textInputAutocapitalization(.never).autocorrectionDisabled()
-                        Text("2?64 Buchstaben, Ziffern, Bindestriche oder Unterstriche.").font(.caption).foregroundStyle(.secondary)
+                        Text("2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche.").font(.caption).foregroundStyle(.secondary)
                         Picker("Anbieter", selection: $provider) {
-                            Text("Bitte ausw?hlen").tag("")
+                            Text("Bitte auswählen").tag("")
                             ForEach(providers) { Text($0.description).tag($0.name) }
                         }
                         if provider == "drive" {
-                            Label("Google-Drive-Express: ?ffnet direkt die Google-Anmeldung und ?bernimmt das Konto automatisch.", systemImage: "checkmark.seal.fill")
+                            Label("Google-Drive-Express: Öffnet direkt die Google-Anmeldung und übernimmt das Konto automatisch.", systemImage: "checkmark.seal.fill")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -248,7 +246,7 @@ struct RemoteSetupView: View {
                     Section {
                         Button(primaryButtonTitle) { Task { await submit() } }
                             .disabled(busy || (session == nil && (provider.isEmpty || name.trimmingCharacters(in: .whitespaces).isEmpty)))
-                        if busy { ProgressView("Einrichtung wird verarbeitet?") }
+                        if busy { ProgressView("Einrichtung wird verarbeitet…") }
                         if providers.isEmpty && session == nil && !busy {
                             Button("Anbieter erneut laden") { Task { await load() } }
                         }
@@ -257,7 +255,7 @@ struct RemoteSetupView: View {
             }
             .disabled(busy)
             .navigationTitle("Remote einbinden")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button(savedName == nil ? "Abbrechen" : "Schlie?en") { dismiss() }.disabled(busy) } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button(savedName == nil ? "Abbrechen" : "Schließen") { dismiss() }.disabled(busy) } }
             .interactiveDismissDisabled(busy)
             .sheet(item: $safariAuthItem) { item in
                 SafariAuthSheet(url: item.url)
@@ -291,6 +289,17 @@ struct RemoteSetupView: View {
         .tint(provider == providerName ? .accentColor : .secondary)
     }
 
+    private static func httpsAuthURL(for session: RemoteSetupSession) -> URL? {
+        for candidate in [session.option.directAuthUrl, session.option.authUrl] {
+            if let raw = candidate, !raw.isEmpty,
+               let url = URL(string: raw),
+               url.scheme?.lowercased() == "https" {
+                return url
+            }
+        }
+        return nil
+    }
+
     private static func extractLoopbackPort(from authTarget: String) -> UInt16? {
         if let components = URLComponents(string: authTarget) {
             if let host = components.host, ["127.0.0.1", "localhost"].contains(host), let port = components.port {
@@ -306,13 +315,10 @@ struct RemoteSetupView: View {
     }
 
     private func startAutomaticBrowserAuthIfNeeded(for session: RemoteSetupSession) {
-        guard !session.ready,
-              let authTarget = session.option.directAuthUrl ?? session.option.authUrl,
-              !authTarget.isEmpty,
-              let url = URL(string: authTarget) else {
+        guard !session.ready, let url = Self.httpsAuthURL(for: session) else {
             return
         }
-        let port = Self.extractLoopbackPort(from: authTarget) ?? 53682
+        let port = Self.extractLoopbackPort(from: url.absoluteString) ?? 53682
         loopbackServer.start(port: port) { callbackURL in
             self.safariAuthItem = nil
             self.answer = callbackURL
