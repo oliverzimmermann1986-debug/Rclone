@@ -199,6 +199,8 @@ def _resolve_redirect_location(local_auth_url: str) -> str:
 
 def _start_browser_auth_helper(setup: Setup, authorize_cmd: str) -> None:
     """Startet `rclone authorize --auth-no-open-browser` auf dem Server, um die direkte Google-Login-URL bereitzustellen."""
+    for other in list(_setups.values()):
+        _stop_browser_auth_helper(other)
     _stop_browser_auth_helper(setup)
     setup.auth_output.clear()
     setup.direct_auth_url = ""
@@ -433,6 +435,8 @@ def _view(key: str, setup: Setup) -> dict:
     cmd_match = _AUTH_CMD_RE.search(help_text)
     label_de, hint_de = _OPTION_HINTS_DE.get(opt_name, ("", ""))
     raw_auth_url = url_match.group(0).rstrip(".,)") if url_match else ""
+    if "rclone.org" in raw_auth_url:
+        raw_auth_url = ""
     return {
         "id": key,
         "name": setup.name,
