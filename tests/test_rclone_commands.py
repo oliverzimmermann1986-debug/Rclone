@@ -10,14 +10,16 @@ from app.jobs import rclone_sync
 
 def test_remote_precheck_uses_supported_lsjson_flags(monkeypatch):
     captured = []
+    captured_kwargs = []
 
     class Result:
         returncode = 0
         stdout = "{}"
         stderr = ""
 
-    def fake_run(command, **_kwargs):
+    def fake_run(command, **kwargs):
         captured.append(command)
+        captured_kwargs.append(kwargs)
         return Result()
 
     monkeypatch.setattr(rclone_sync.subprocess, "run", fake_run)
@@ -25,6 +27,23 @@ def test_remote_precheck_uses_supported_lsjson_flags(monkeypatch):
     assert rclone_sync._remote_reachable("pcloud:/folder") == (True, "ok")
     assert captured[0][:3] == ["rclone", "lsjson", "--stat"]
     assert "--no-size" not in captured[0]
+    assert "--contimeout" in captured[0]
+    assert "--low-level-retries" in captured[0]
+    assert captured_kwargs[0]["timeout"] == 90
+    assert captured_kwargs[0]["env"]["RCLONE_LOG_LEVEL"] == "ERROR"
+
+
+def test_remote_precheck_formats_drive_rate_limit_cleanly(monkeypatch):
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = 'ERROR : googleapi: Error 403: Quota exceeded, "reason": "RATE_LIMIT_EXCEEDED"'
+
+    monkeypatch.setattr(rclone_sync.subprocess, "run", lambda *_a, **_kw: Result())
+
+    ok, msg = rclone_sync._remote_reachable("gdrive:/Fotos")
+    assert ok is False
+    assert "Google Drive API-Limit" in msg
 
 
 class FakeConfig:

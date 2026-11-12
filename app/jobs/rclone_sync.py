@@ -975,12 +975,14 @@ def _backup_dir_args(
 
 
 def _remote_reachable(
-    path: str, timeout: int = 15, *, allow_missing: bool = False
+    path: str, timeout: int = 90, *, allow_missing: bool = False
 ) -> tuple[bool, str]:
     if not path:
         return False, "Pfad leer"
     if _is_remote(path):
         try:
+            env = rclone_subprocess_env()
+            env["RCLONE_LOG_LEVEL"] = "ERROR"
             result = subprocess.run(
                 [
                     "rclone",
@@ -988,6 +990,10 @@ def _remote_reachable(
                     "--stat",
                     "--no-mimetype",
                     "--no-modtime",
+                    "--contimeout",
+                    "15s",
+                    "--low-level-retries",
+                    "15",
                     *_rclone_cache_args(),
                     "--",
                     path,
@@ -996,13 +1002,14 @@ def _remote_reachable(
                 text=True,
                 timeout=timeout,
                 stdin=subprocess.DEVNULL,
-                env=rclone_subprocess_env(),
+                env=env,
             )
             if result.returncode == 0:
                 return True, "ok"
             error = (result.stderr or result.stdout or "").strip()[:500]
+            lowered_error = error.lower()
             missing = any(
-                token in error.lower()
+                token in lowered_error
                 for token in (
                     "directory not found",
                     "object not found",
@@ -1011,6 +1018,16 @@ def _remote_reachable(
             )
             if missing and allow_missing:
                 return True, "Ziel wird beim ersten Sync angelegt"
+            if (
+                "ratelimitexceeded" in lowered_error
+                or "rate_limit_exceeded" in lowered_error
+            ):
+                return (
+                    False,
+                    "Google Drive API-Limit erreicht (geteilte rclone client_id "
+                    "überlastet – bitte erneut versuchen oder eigene Google OAuth "
+                    "Client-ID hinterlegen)",
+                )
             return False, f"rclone lsjson --stat exit={result.returncode}: {error}"
         except subprocess.TimeoutExpired:
             return False, f"Timeout nach {timeout}s"
