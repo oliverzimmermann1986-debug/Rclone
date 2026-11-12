@@ -103,7 +103,7 @@ _OPTION_HINTS_DE: dict[str, tuple[str, str]] = {
 class StartRemote(BaseModel):
     name: str
     provider: str
-    express: bool = False
+    express: bool | None = None
     scope: str = "drive"
     client_id: str = ""
     client_secret: SecretStr | None = None
@@ -182,20 +182,25 @@ def _resolve_redirect_location(local_auth_url: str) -> str:
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
         return ""
     opener = urllib.request.build_opener(_NoRedirectHandler())
-    try:
-        resp = opener.open(local_auth_url, timeout=3.0)
-        loc = resp.headers.get("Location") or ""
-    except urllib.error.HTTPError as err:
-        loc = err.headers.get("Location") if err.headers else ""
-    except OSError:
-        return ""
-    if loc and loc.startswith("https://"):
-        return loc
+    for _ in range(15):
+        loc = ""
+        try:
+            resp = opener.open(local_auth_url, timeout=2.0)
+            loc = resp.headers.get("Location") or ""
+        except urllib.error.HTTPError as err:
+            loc = err.headers.get("Location") if err.headers else ""
+        except OSError:
+            loc = ""
+        if loc and loc.startswith("https://"):
+            return loc
+        time.sleep(0.05)
     return ""
 
 
 def _start_browser_auth_helper(setup: Setup, authorize_cmd: str) -> None:
     """Startet `rclone authorize --auth-no-open-browser` auf dem Server, um die direkte Google-Login-URL bereitzustellen."""
+    for other in list(_setups.values()):
+        _stop_browser_auth_helper(other)
     _stop_browser_auth_helper(setup)
     setup.auth_output.clear()
     setup.direct_auth_url = ""
@@ -236,9 +241,13 @@ def _start_browser_auth_helper(setup: Setup, authorize_cmd: str) -> None:
             if not setup.direct_auth_url:
                 match = _AUTH_URL_RE.search(line)
                 if match:
-                    candidate = match.group(0).rstrip(".,)")
+                    candidate = match.group(0).rstrip(".,)\"'")
                     parsed = urllib.parse.urlparse(candidate)
-                    if parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port:
+                    if (
+                        parsed.hostname in {"127.0.0.1", "localhost"}
+                        and parsed.port
+                        and ("/auth" in parsed.path or "state=" in parsed.query)
+                    ):
                         setup.auth_local_base = f"http://127.0.0.1:{parsed.port}"
                         qs = urllib.parse.parse_qs(parsed.query)
                         if qs.get("state"):
@@ -248,7 +257,7 @@ def _start_browser_auth_helper(setup: Setup, authorize_cmd: str) -> None:
 
     thread = threading.Thread(target=_reader, daemon=True)
     thread.start()
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline and not setup.direct_auth_url:
         if proc.poll() is not None:
             break
@@ -426,6 +435,8 @@ def _view(key: str, setup: Setup) -> dict:
     cmd_match = _AUTH_CMD_RE.search(help_text)
     label_de, hint_de = _OPTION_HINTS_DE.get(opt_name, ("", ""))
     raw_auth_url = url_match.group(0).rstrip(".,)") if url_match else ""
+    if "rclone.org" in raw_auth_url:
+        raw_auth_url = ""
     return {
         "id": key,
         "name": setup.name,
@@ -437,12 +448,12 @@ def _view(key: str, setup: Setup) -> dict:
         else "",
         "option": {
             "name": opt_name,
-            "label_de": label_de,
-            "hint_de": hint_de,
+            "label_de": label_de or None,
+            "hint_de": hint_de or None,
             "help": help_text,
-            "auth_url": setup.direct_auth_url or raw_auth_url,
-            "direct_auth_url": setup.direct_auth_url,
-            "authorize_command": cmd_match.group(0).strip() if cmd_match else "",
+            "auth_url": (setup.direct_auth_url or raw_auth_url) or None,
+            "direct_auth_url": setup.direct_auth_url or None,
+            "authorize_command": cmd_match.group(0).strip() if cmd_match else None,
             "secret": bool(option.get("IsPassword")) or "token" in opt_name.lower(),
             "required": bool(option.get("Required")),
             "default": ""
@@ -498,7 +509,7 @@ def _advance(setup: Setup, result: dict) -> None:
     setup.option = result.get("Option") or {}
     setup.step += 1
     setup.error = bool(result.get("Error"))
-    if setup.express and str(setup.option.get("Name") or "") == "config_token":
+    if str(setup.option.get("Name") or "") == "config_token":
         help_text = str(setup.option.get("Help", "") or "")
         cmd_match = _AUTH_CMD_RE.search(help_text)
         if cmd_match:
@@ -549,7 +560,12 @@ def start(payload: StartRemote, request: Request) -> dict:
             )
         auto_answers: dict[str, str] = {}
         initial_params: dict[str, str] = {}
-        if payload.express:
+        use_express = (
+            payload.express
+            if payload.express is not None
+            else (payload.provider == "drive")
+        )
+        if use_express:
             auto_answers["config_fs_advanced"] = "false"
             auto_answers["config_advanced"] = "false"
             if payload.provider == "drive":
@@ -585,7 +601,7 @@ def start(payload: StartRemote, request: Request) -> dict:
             payload.name,
             payload.provider,
             tempfile.TemporaryDirectory(prefix="sicherpfad-remote-"),
-            express=bool(payload.express),
+            express=bool(use_express),
             auto_answers=auto_answers,
         )
         key = secrets.token_urlsafe(32)

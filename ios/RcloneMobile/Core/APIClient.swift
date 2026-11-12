@@ -954,7 +954,7 @@ final class APIClient: APIClientProtocol {
     }
 
     func startRemoteSetup(name: String, provider: String) async throws -> RemoteSetupSession {
-        try await post("/api/remotes/setup", body: RemoteSetupStart(name: name, provider: provider), timeout: 70)
+        try await post("/api/remotes/setup", body: RemoteSetupStart(name: name, provider: provider, express: provider == "drive"), timeout: 70)
     }
 
     func answerRemoteSetup(id: String, answer: String, step: Int) async throws -> RemoteSetupSession {
