@@ -201,3 +201,33 @@ def test_create_remote_directory_cannot_enter_hidden_path(monkeypatch):
         )
 
     assert exc.value.status_code == 403
+
+
+def test_rclone_directories_ignores_stderr_notices(monkeypatch):
+    import io
+
+    class FakeProc:
+        args = ["rclone", "lsf"]
+        returncode = 0
+
+        def __init__(self, cmd, **kwargs):
+            assert kwargs.get("stderr") == subprocess.PIPE
+            assert kwargs.get("env", {}).get("RCLONE_LOG_LEVEL") == "ERROR"
+            self.stdout = io.StringIO("Schoenmackers-main/\nBackups/\n")
+            self.stderr = io.StringIO(
+                "2026/11/12 16:05:28 NOTICE: gdrive: shared Google Drive client_id\n"
+            )
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(api_browse.subprocess, "Popen", FakeProc)
+    names, truncated = api_browse._rclone_directories("gdrive:")
+    assert names == ["Backups", "Schoenmackers-main"]
+    assert truncated is False

@@ -100,6 +100,8 @@ def _rclone_remotes() -> list[str]:
 
 def _rclone_directories(path: str) -> tuple[list[str], bool]:
     """Liest höchstens 1.001 Zeilen und beendet rclone danach kontrolliert."""
+    env = rclone_subprocess_env()
+    env["RCLONE_LOG_LEVEL"] = "ERROR"
     proc = subprocess.Popen(
         [
             "rclone",
@@ -113,12 +115,15 @@ def _rclone_directories(path: str) -> tuple[list[str], bool]:
             path,
         ],
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdin=subprocess.DEVNULL,
-        env=rclone_subprocess_env(),
+        env=env,
     )
     lines: list[str] = []
+    err_chunks: list[str] = []
     read_error: list[str] = []
 
     def reader() -> None:
@@ -137,8 +142,20 @@ def _rclone_directories(path: str) -> tuple[list[str], bool]:
         except (OSError, UnicodeError) as exc:
             read_error.append(str(exc))
 
+    def stderr_reader() -> None:
+        if proc.stderr is None:
+            return
+        try:
+            err_chunks.append(proc.stderr.read(8192))
+        except OSError:
+            pass
+
     thread = threading.Thread(target=reader, name="rclone-browser-reader", daemon=True)
+    err_thread = threading.Thread(
+        target=stderr_reader, name="rclone-browser-stderr", daemon=True
+    )
     thread.start()
+    err_thread.start()
     thread.join(60)
     timed_out = thread.is_alive()
     truncated = len(lines) > _MAX_ENTRIES
@@ -150,12 +167,13 @@ def _rclone_directories(path: str) -> tuple[list[str], bool]:
         proc.kill()
         proc.wait(timeout=5)
     thread.join(1)
+    err_thread.join(1)
     if timed_out:
         raise subprocess.TimeoutExpired(proc.args, 60)
     if read_error:
         raise HTTPException(502, read_error[0])
     if proc.returncode != 0 and not truncated:
-        error = "\n".join(lines[-10:]).strip()[:300]
+        error = "".join(err_chunks).strip()[:300]
         raise HTTPException(502, f"lsf: {error or f'exit {proc.returncode}'}")
 
     names: list[str] = []
