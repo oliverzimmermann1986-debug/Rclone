@@ -1,6 +1,6 @@
 # Vollständig gepinnte Laufzeitabhängigkeiten. Dependabot aktualisiert diese
 # Datei direkt; Installer und CI konsumieren damit denselben geprüften Stand.
-annotated-doc==0.0.4
+annotated-doc==0.0.5
 annotated-types==0.7.0
 anyio==4.14.2
 bcrypt==5.0.0
