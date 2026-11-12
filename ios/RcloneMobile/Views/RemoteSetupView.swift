@@ -56,7 +56,7 @@ struct RemoteSetupView: View {
                                 }
                             } else {
                                 TextField(
-                                    session.option.authorizeCommand != nil
+                                    !(session.option.authorizeCommand ?? "").isEmpty
                                         ? "2. Adresse aus Safari (http://127.0.0.1:53682/?code=…) einfügen"
                                         : (session.option.defaultValue.isEmpty ? "Antwort" : session.option.defaultValue),
                                     text: $answer,
@@ -65,7 +65,7 @@ struct RemoteSetupView: View {
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
 
-                                if session.option.authorizeCommand != nil || session.option.name == "config_token" {
+                                if !(session.option.authorizeCommand ?? "").isEmpty || session.option.name == "config_token" {
                                     Button {
                                         if let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
                                            !clip.isEmpty {

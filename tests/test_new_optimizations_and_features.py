@@ -531,3 +531,7 @@ def test_google_drive_express_token_extraction_and_service_account(
 
     q2 = api_remotes._extract_callback_query("4/0AeanS0barecode", "state99")
     assert q2 is not None and "code=4%2F0AeanS0barecode" in q2 and "state=state99" in q2
+
+    # StartRemote defaults to express=True when provider == "drive"
+    payload_default = api_remotes.StartRemote(name="gdrive", provider="drive")
+    assert payload_default.express is None
