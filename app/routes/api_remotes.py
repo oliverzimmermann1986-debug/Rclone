@@ -717,6 +717,34 @@ def save(key: str, request: Request) -> dict:
                 "opt": {"nonInteractive": True, "noObscure": True},
             },
         )
+        post_answers = {
+            "config_is_local": "false",
+            "config_refresh_token": "false",
+            "config_change_team_drive": "true"
+            if parameters.get("team_drive")
+            else "false",
+            "config_fs_advanced": "false",
+            "config_advanced": "false",
+        }
+        for _ in range(8):
+            if not result.get("State") or result.get("Error"):
+                break
+            opt_name = str((result.get("Option") or {}).get("Name") or "")
+            if opt_name not in post_answers:
+                break
+            result = _rc(
+                "config/update",
+                {
+                    "name": setup.name,
+                    "parameters": {},
+                    "opt": {
+                        "nonInteractive": True,
+                        "continue": True,
+                        "state": result["State"],
+                        "result": post_answers[opt_name],
+                    },
+                },
+            )
         if result.get("State") or result.get("Error"):
             # Only this newly created remote can be removed; existing ones are rejected above.
             _rc("config/delete", {"name": setup.name})
