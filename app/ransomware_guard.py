@@ -41,6 +41,7 @@ DEFAULT_SUSPECT_EXTENSIONS: tuple[str, ...] = (
 
 DEFAULT_CANARY_FILENAME = ".sicherpfad-canary.txt"
 _CANARY_STATE_KEY = "ransomware_canaries:v1"
+_CANARY_PATH_PREFIX = "path:"
 _MAX_CANARY_BYTES = 1024 * 1024
 
 
@@ -160,11 +161,35 @@ def _has_symlink_in_chain(root: Path, rel: str) -> bool:
     return False
 
 
+def _configured_canary_filename(
+    pair: Mapping[str, Any], *, filename: str | None = None
+) -> str:
+    pair_guard = pair.get("ransomware_guard")
+    return (
+        str(filename or "").strip()
+        or str(pair.get("canary_file") or "").strip()
+        or (
+            str(pair_guard.get("canary_file") or "").strip()
+            if isinstance(pair_guard, Mapping)
+            else ""
+        )
+    )
+
+
+def _canary_target_key(local: str, rel: str) -> str:
+    cleaned_local = str(local or "").strip()
+    if not cleaned_local or is_remote(cleaned_local):
+        return ""
+    combined = os.path.join(cleaned_local, *rel.split("/"))
+    return os.path.normcase(os.path.abspath(combined))
+
+
 def init_canary(
     pair: Mapping[str, Any],
     *,
     database: Database | None = None,
     filename: str | None = None,
+    related_pairs: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     local = str(pair.get("local") or "").strip()
     if not local or is_remote(local):
@@ -175,16 +200,8 @@ def init_canary(
     if root.is_symlink() or not root.exists() or not root.is_dir():
         raise ValueError(f"Lokales Quellverzeichnis ist ungültig: {local}")
 
-    pair_guard = pair.get("ransomware_guard")
     configured_name = (
-        filename
-        or str(pair.get("canary_file") or "").strip()
-        or (
-            str(pair_guard.get("canary_file") or "").strip()
-            if isinstance(pair_guard, Mapping)
-            else ""
-        )
-        or DEFAULT_CANARY_FILENAME
+        _configured_canary_filename(pair, filename=filename) or DEFAULT_CANARY_FILENAME
     )
     rel = validate_canary_filename(configured_name)
     target = _ensure_no_symlink_chain(root, rel)
@@ -193,9 +210,7 @@ def init_canary(
         raise ValueError(f"Canary-Datei ist ein symbolischer Link: {rel}")
 
     pair_name = str(pair.get("name") or "")
-    payload = (
-        f"SICHERPFAD CANARY DO NOT MODIFY\npair={pair_name}\nfile={rel}\n"
-    ).encode("utf-8")
+    payload = f"SICHERPFAD CANARY DO NOT MODIFY\nfile={rel}\n".encode("utf-8")
 
     fd, tmp_name = tempfile.mkstemp(
         prefix=".sicherpfad-canary.", suffix=".tmp", dir=str(target.parent)
@@ -217,19 +232,81 @@ def init_canary(
         tmp_path.unlink(missing_ok=True)
 
     digest = hashlib.sha256(payload).hexdigest()
+    target_key = _canary_target_key(local, rel)
 
     if database is not None:
         history_key = rclone_history_key(dict(pair))
+        now = time.time()
         record = {
             "pair": pair_name,
             "canary_file": rel,
+            "canary_path": target_key,
             "canary_sha256": digest,
-            "updated_at": time.time(),
+            "updated_at": now,
         }
+        matching_related: dict[str, tuple[str, str]] = {}
+        if related_pairs:
+            for other in related_pairs:
+                if not isinstance(other, Mapping):
+                    continue
+                other_local = str(other.get("local") or "").strip()
+                if not other_local or is_remote(other_local):
+                    continue
+                other_cfg = (
+                    _configured_canary_filename(other) or DEFAULT_CANARY_FILENAME
+                )
+                try:
+                    other_rel = validate_canary_filename(other_cfg)
+                except ValueError:
+                    continue
+                if _canary_target_key(other_local, other_rel) == target_key:
+                    other_hk = rclone_history_key(dict(other))
+                    matching_related[other_hk] = (
+                        str(other.get("name") or ""),
+                        other_rel,
+                    )
 
         def update(raw: Any) -> dict[str, Any]:
             state = dict(raw) if isinstance(raw, dict) else {}
             state[history_key] = record
+            if target_key:
+                state[_CANARY_PATH_PREFIX + target_key] = {
+                    "canary_file": rel,
+                    "canary_path": target_key,
+                    "canary_sha256": digest,
+                    "updated_at": now,
+                }
+                for key, existing in list(state.items()):
+                    if (
+                        key == history_key
+                        or str(key).startswith(_CANARY_PATH_PREFIX)
+                        or not isinstance(existing, Mapping)
+                    ):
+                        continue
+                    if str(existing.get("canary_path") or "") == target_key:
+                        state[key] = {
+                            **dict(existing),
+                            "canary_file": rel,
+                            "canary_path": target_key,
+                            "canary_sha256": digest,
+                            "updated_at": now,
+                        }
+                for other_hk, (other_name, other_rel) in matching_related.items():
+                    if other_hk == history_key:
+                        continue
+                    prev = (
+                        dict(state[other_hk])
+                        if isinstance(state.get(other_hk), Mapping)
+                        else {}
+                    )
+                    state[other_hk] = {
+                        **prev,
+                        "pair": other_name or str(prev.get("pair") or ""),
+                        "canary_file": other_rel,
+                        "canary_path": target_key,
+                        "canary_sha256": digest,
+                        "updated_at": now,
+                    }
             return state
 
         database.runtime_update(_CANARY_STATE_KEY, update, default={})
@@ -250,8 +327,35 @@ def _stored_canary_entry(
     raw = database.runtime_get(_CANARY_STATE_KEY, {})
     if not isinstance(raw, Mapping):
         return {}
-    entry = raw.get(rclone_history_key(dict(pair)))
-    return dict(entry) if isinstance(entry, Mapping) else {}
+    own = raw.get(rclone_history_key(dict(pair)))
+    own_dict = dict(own) if isinstance(own, Mapping) else {}
+    local = str(pair.get("local") or "").strip()
+    if not local or is_remote(local):
+        return own_dict
+    configured_rel = (
+        _configured_canary_filename(pair)
+        or str(own_dict.get("canary_file") or "").strip()
+        or DEFAULT_CANARY_FILENAME
+    )
+    try:
+        rel = validate_canary_filename(configured_rel)
+    except ValueError:
+        return own_dict
+    target_key = _canary_target_key(local, rel)
+    shared = raw.get(_CANARY_PATH_PREFIX + target_key) if target_key else None
+    if isinstance(shared, Mapping):
+        if not own_dict:
+            return dict(shared)
+        own_updated = float(own_dict.get("updated_at") or 0.0)
+        shared_updated = float(shared.get("updated_at") or 0.0)
+        if shared_updated >= own_updated:
+            merged = dict(own_dict)
+            merged["canary_file"] = str(shared.get("canary_file") or rel)
+            merged["canary_sha256"] = str(shared.get("canary_sha256") or "")
+            merged["canary_path"] = target_key
+            merged["updated_at"] = shared_updated
+            return merged
+    return own_dict
 
 
 def check_canary(

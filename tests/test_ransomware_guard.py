@@ -350,3 +350,70 @@ def test_api_ransomware_routes_and_reauth(tmp_path, monkeypatch):
     assert verify_bad["ok"] is False
     assert verify_bad["extension_scan"]["blocked"] is True
     assert verify_bad["extension_scan"]["suspect_count"] == 1
+
+
+def test_shared_local_path_canary_across_321_pairs(tmp_path):
+    database = Database(tmp_path / "app.db")
+    shared_dir = tmp_path / "Fotos"
+    shared_dir.mkdir()
+    other_dir = tmp_path / "Rezepte"
+    other_dir.mkdir()
+
+    pair_pcloud = _make_pair(shared_dir, name="Fotos pCloud", remote="pcloud:/Fotos")
+    pair_gdrive = _make_pair(shared_dir, name="Fotos gdrive", remote="gdrive:/Fotos")
+    pair_other = _make_pair(other_dir, name="Rezepte pCloud", remote="pcloud:/Rezepte")
+    pair_custom = _make_pair(
+        shared_dir,
+        name="Fotos Custom",
+        remote="b2:/Fotos",
+        canary_file=".custom-canary.txt",
+    )
+
+    # Simulate legacy stale hash on pair_pcloud (e.g. from older per-pair payload)
+    database.runtime_set(
+        ransomware_guard._CANARY_STATE_KEY,
+        {
+            ransomware_guard.rclone_history_key(pair_pcloud): {
+                "pair": "Fotos pCloud",
+                "canary_file": ".sicherpfad-canary.txt",
+                "canary_sha256": "0" * 64,
+                "updated_at": 1.0,
+            }
+        },
+    )
+
+    # Initializing canary on the second 3-2-1 pair (even without passing related_pairs)
+    # repairs/synchronizes the shared-path canary for both Fotos pairs,
+    # without affecting unrelated directories or custom canary filenames.
+    init_gdrive = ransomware_guard.init_canary(pair_gdrive, database=database)
+    assert init_gdrive["ok"] is True
+
+    check_pcloud = ransomware_guard.check_canary(pair_pcloud, database=database)
+    check_gdrive = ransomware_guard.check_canary(pair_gdrive, database=database)
+    check_other = ransomware_guard.check_canary(pair_other, database=database)
+    check_custom = ransomware_guard.check_canary(pair_custom, database=database)
+    assert check_pcloud["configured"] is True and check_pcloud["ok"] is True
+    assert check_gdrive["configured"] is True and check_gdrive["ok"] is True
+    assert check_other["configured"] is False
+    assert check_custom["configured"] is True and check_custom["reason"] == "missing"
+
+    # Re-initializing with related_pairs also keeps both entries aligned
+    init_pcloud = ransomware_guard.init_canary(
+        pair_pcloud,
+        database=database,
+        related_pairs=[pair_pcloud, pair_gdrive, pair_other, pair_custom],
+    )
+    assert init_pcloud["ok"] is True
+    assert ransomware_guard.check_canary(pair_pcloud, database=database)["ok"] is True
+    assert ransomware_guard.check_canary(pair_gdrive, database=database)["ok"] is True
+
+    # Tampering with the shared canary file blocks both 3-2-1 pairs
+    (shared_dir / ransomware_guard.DEFAULT_CANARY_FILENAME).write_text(
+        "ransomware-encrypted", encoding="utf-8"
+    )
+    tampered_pcloud = ransomware_guard.check_canary(pair_pcloud, database=database)
+    tampered_gdrive = ransomware_guard.check_canary(pair_gdrive, database=database)
+    assert tampered_pcloud["ok"] is False
+    assert tampered_pcloud["reason"] == "hash_mismatch"
+    assert tampered_gdrive["ok"] is False
+    assert tampered_gdrive["reason"] == "hash_mismatch"

@@ -58,7 +58,8 @@ def initialize_pair_canary(
 ) -> dict[str, Any]:
     db = get_db()
     snapshot = get_config().snapshot()
-    _backup, pair = _find_pair(snapshot, pair_name)
+    backup, pair = _find_pair(snapshot, pair_name)
+    raw_pairs = backup.get("pairs") if isinstance(backup.get("pairs"), list) else None
 
     existing = check_canary(pair, database=db)
     if existing.get("configured"):
@@ -78,6 +79,7 @@ def initialize_pair_canary(
             pair,
             database=db,
             filename=body.filename if body else None,
+            related_pairs=raw_pairs,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
