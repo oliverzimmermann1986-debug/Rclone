@@ -114,6 +114,7 @@ protocol APIClientProtocol: AnyObject {
     func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse
     func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse
     func getRemoteProviders() async throws -> RemoteProvidersResponse
+    func startRemoteSetup(_ request: RemoteSetupStart) async throws -> RemoteSetupSession
     func startRemoteSetup(name: String, provider: String) async throws -> RemoteSetupSession
     func answerRemoteSetup(id: String, answer: String, step: Int) async throws -> RemoteSetupSession
     func saveRemoteSetup(id: String) async throws -> RemoteSetupSaved
@@ -256,6 +257,9 @@ extension APIClientProtocol {
     func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
     func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
     func getRemoteProviders() async throws -> RemoteProvidersResponse { throw APIError.serverFeatureUnavailable(feature: "Neue Remotes") }
+    func startRemoteSetup(_ request: RemoteSetupStart) async throws -> RemoteSetupSession {
+        try await startRemoteSetup(name: request.name, provider: request.provider)
+    }
     func startRemoteSetup(name: String, provider: String) async throws -> RemoteSetupSession { throw APIError.invalidResponse }
     func answerRemoteSetup(id: String, answer: String, step: Int) async throws -> RemoteSetupSession { throw APIError.invalidResponse }
     func saveRemoteSetup(id: String) async throws -> RemoteSetupSaved { throw APIError.invalidResponse }
@@ -969,8 +973,18 @@ final class APIClient: APIClientProtocol {
         try await get("/api/remotes/providers")
     }
 
+    func startRemoteSetup(_ request: RemoteSetupStart) async throws -> RemoteSetupSession {
+        try await post("/api/remotes/setup", body: request, timeout: 70)
+    }
+
     func startRemoteSetup(name: String, provider: String) async throws -> RemoteSetupSession {
-        try await post("/api/remotes/setup", body: RemoteSetupStart(name: name, provider: provider, express: provider == "drive"), timeout: 70)
+        try await startRemoteSetup(
+            RemoteSetupStart(
+                name: name,
+                provider: provider,
+                express: provider == "drive" || provider == "iclouddrive"
+            )
+        )
     }
 
     func answerRemoteSetup(id: String, answer: String, step: Int) async throws -> RemoteSetupSession {
