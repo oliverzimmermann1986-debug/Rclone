@@ -170,9 +170,9 @@
             </article>
           </div>
 
-          <article class="copy-matrix-summary panel" x-show="copies.data" x-cloak aria-labelledby="copy-matrix-summary-heading">
-            <div><h3 id="copy-matrix-summary-heading">Kopien-Matrix</h3><p>Bestände mit mehreren unabhängigen Sicherungszielen – gemessen an konfigurierten Speicherbereichen.</p></div>
-            <div class="copy-matrix-count"><strong x-text="copyMatrixSummary().protected + ' / ' + copyMatrixSummary().total"></strong><span>ohne offene Hinweise</span></div>
+          <article class="copy-matrix-summary panel" x-show="copies.data || copies.error" x-cloak aria-labelledby="copy-matrix-summary-heading">
+            <div><h3 id="copy-matrix-summary-heading">Kopien-Matrix</h3><p>Bestände mit mehreren unabhängigen Sicherungszielen – gemessen an konfigurierten Speicherbereichen.</p><p class="inline-error" role="status" x-show="copies.error" x-text="copies.error"></p></div>
+            <div class="copy-matrix-count" x-show="copies.data"><strong x-text="copyMatrixSummary().protected + ' / ' + copyMatrixSummary().total"></strong><span>ohne offene Hinweise</span></div>
             <ul x-show="copyMatrixSummary().atRisk.length"><template x-for="row in copyMatrixSummary().atRisk.slice(0,3)" :key="row.id"><li><strong x-text="row.source"></strong><span x-text="row.findings.join(' · ')"></span></li></template></ul>
             <button class="button secondary small" @click="navigate('doctor')">Details in System öffnen</button>
           </article>
@@ -879,6 +879,7 @@
               </div>
             </div>
 
+            <p class="inline-error" role="status" x-show="copies.error" x-text="copies.error"></p>
             <div class="metric-grid small-metrics" x-show="copies.data">
               <article class="metric-card"><div class="metric-head"><span>Datenbestände</span></div><strong class="metric-value" x-text="copies.data?.totals?.sources ?? '—'"></strong></article>
               <article class="metric-card"><div class="metric-head"><span>Nur eine Kopie</span></div><strong class="metric-value" :class="(copies.data?.totals?.single_copy || 0) > 0 && 'error'" x-text="copies.data?.totals?.single_copy ?? '—'"></strong></article>

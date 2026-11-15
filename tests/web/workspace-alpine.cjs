@@ -68,6 +68,8 @@ window.app = () => ({
     this.page = next;
   },
   rcloneBusy() { return false; },
+  startBlocked() { return false; },
+  openJob(id) { this.calls.push(`job:${id}`); },
   storagePairs() { return []; },
   statusLabel(value) { return value; },
   loadDoctor() { this.calls.push('loadDoctor'); },
@@ -120,6 +122,17 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 15));
   await settle();
   assert.equal(model.workspaceViews.doctor, 'copies');
   assert.equal(document.getElementById('workspace-tab-doctor-copies').getAttribute('tabindex'), '0');
+  model.overview.data.pairs.health = [{ name: 'Fotos', last_status: 'error', job_id: 42 }];
+  await settle();
+  const issue = document.querySelector('.workspace-issue button');
+  assert.equal(issue.textContent, 'Lauf ansehen');
+  assert.equal(issue.getAttribute('aria-label'), 'Lauf ansehen: Fotos');
+  issue.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+  await settle();
+  assert.equal(model.calls.at(-1), 'job:42');
+  model.overview.data.pairs.health = [];
+  await settle();
+  assert.equal(document.querySelector('.workspace-issue'), null, 'Resolved issues are removed reactively');
   assert.equal(errors.length, 0, errors.join('\n'));
   console.log('Workspace Alpine VM checks passed: initialization before Alpine, reactive panels/badges, original handlers, and capture navigation.');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

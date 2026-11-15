@@ -148,6 +148,17 @@ body[data-workspace-ready] .workspace-view > .panel { box-shadow: none; }
 .workspace-attention ul { margin: 6px 0 0; padding-inline-start: 18px; }
 .workspace-attention li { line-height: 1.6; overflow-wrap: anywhere; }
 .workspace-attention .button { flex: 0 0 auto; }
+.workspace-issue-list { flex: 1; min-width: 0; }
+.workspace-attention .workspace-issue-list ul { padding: 0; list-style: none; }
+.workspace-attention .workspace-issue {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-block: 8px;
+}
+.workspace-issue + .workspace-issue { border-top: 1px solid var(--border); }
+.workspace-issue > span { min-width: 0; }
 .workspace-live { margin: 0 0 20px; }
 .workspace-live > .live-progress { margin: 0; padding: 0; border: 0; }
 
@@ -229,6 +240,8 @@ body[data-workspace-ready] .settings-layout { gap: 20px; }
   .workspace-tab { min-height: 44px; }
   .workspace-attention { align-items: flex-start; flex-direction: column; padding: 14px; }
   .workspace-attention .button { min-height: 40px; }
+  .workspace-issue-list { width: 100%; }
+  .workspace-attention .workspace-issue { align-items: flex-start; flex-direction: column; gap: 6px; }
   .workspace-disclosure > summary { min-height: 64px; padding-inline: 14px; }
   .workspace-disclosure > :not(summary) { padding: 14px; }
   body[data-workspace-ready] .workspace-view > .metric-grid > .metric-card { padding: 14px; }

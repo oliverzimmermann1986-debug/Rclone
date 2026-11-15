@@ -2,6 +2,7 @@
 // Teil der Alpine-Komponente app(); Methoden laufen mit this = Komponente.
 
 const DIALOG_FOCUS_RETRY_MS = 50;
+const PROGRESS_STREAM_MAX_AGE_MS = 10000;
 export const requestControllers = new Map();
 const requestRevisions = new Map();
 const dialogFocusStack = [];
@@ -64,9 +65,11 @@ export const coreMethods = {
     window.addEventListener('popstate', applyHistoryPage);
     window.addEventListener('online', () => {
       this.setConnectionState('checking', 'Verbindung wird erneut geprüft');
+      this.startSseProgress();
       this.refreshAll(true);
     });
     window.addEventListener('offline', () => {
+      this.stopSseProgress();
       this.setConnectionState('offline', 'Netzwerkverbindung ist offline');
     });
     document.addEventListener('visibilitychange', () => {
@@ -84,7 +87,7 @@ export const coreMethods = {
     });
     await this.loadConfig(true);
     await this.refreshAll(false);
-    if (this.page === 'dashboard') { this.loadObjectLock(); await this.loadStorage(false); await this.loadCopies(); }
+    if (this.page === 'dashboard') { this.loadObjectLock(); await this.loadStorage(false); }
     else this.loadPage(this.page, true);
     this.startPolling();
   },
@@ -98,16 +101,19 @@ export const coreMethods = {
       // Bereiche aktualisieren ausschließlich die dort benötigten Daten.
       if (this.page === 'dashboard') {
         tasks.push(this.loadOverview(true));
-        tasks.push(this.loadRecent(true), this.loadSchedulerState(true), this.loadCopies());
+        tasks.push(this.loadRecent(true), this.loadSchedulerState(true), this.loadCopies(true));
         // Insights nicht abwarten: ein langsamer PBS-Host soll die Aktualisierung nicht blockieren.
         if (this.config.pbs?.enabled) { tasks.push(this.loadPbsStatus(true)); this.loadPbsInsights(); }
       } else if (this.page === 'doctor' || this.page === 'settings') {
         tasks.push(this.loadSchedulerState(true));
       }
       const results = await Promise.all(tasks);
-      if (this.rcloneBusy() || this.progress?.running) await this.loadProgress(true);
+      if ((this.rcloneBusy() || this.progress?.running) && !this.hasFreshProgressStream()) {
+        results.push(await this.loadProgress(true));
+      }
       this.lastUpdated = Date.now();
       const failed = results.filter((result) => result === false).length;
+      this.refreshFailures = failed;
       if (failed) {
         this.setConnectionState('degraded', `${failed} Bereich(e) konnten nicht aktualisiert werden`);
         if (showToast) this.showToast('Ansicht nur teilweise aktualisiert', 'err');
@@ -122,13 +128,21 @@ export const coreMethods = {
   },
 
   startSseProgress() {
-    if (!window.EventSource || this.sse) return;
+    if (!window.EventSource || this.sse || !this.polling.active || document.hidden || navigator.onLine === false) return;
+    if (this.progressStream.retryTimer !== null) window.clearTimeout(this.progressStream.retryTimer);
+    this.progressStream.retryTimer = null;
     try {
-      this.sse = new EventSource('/api/jobs/progress/stream');
-      this.sse.onmessage = (event) => {
+      const stream = new window.EventSource('/api/jobs/progress/stream');
+      this.sse = stream;
+      this.progressStream.startedAt = Date.now();
+      stream.onmessage = (event) => {
+        if (this.sse !== stream || !this.polling.active || document.hidden) return;
         try {
           const data = JSON.parse(event.data);
-          if (data && !data.error) {
+          if (data && typeof data === 'object' && !Array.isArray(data) && typeof data.running === 'boolean' && !data.error) {
+            const wasRunning = this.progress?.running;
+            this.progressStream.lastMessageAt = Date.now();
+            this.progressStream.retryAttempts = 0;
             this.progress = data;
             if (data.current_status && typeof data.current_status === 'object') {
               this.status = { ...this.status, ...data.current_status };
@@ -136,20 +150,45 @@ export const coreMethods = {
             if (typeof data.lockdown_active === 'boolean') {
               this.lockdownState.active = data.lockdown_active;
             }
+            if (wasRunning && !data.running) {
+              this.refreshAll(false);
+              if (this.page === 'runs') this.loadJobs(true);
+            }
           }
         } catch (_) { /* ignore malformed frame */ }
       };
-      this.sse.onerror = () => {
-        // Verbindung abbrechen; Polling bleibt aktiver Fallback.
-        this.stopSseProgress();
+      stream.onerror = () => {
+        if (this.sse === stream) this.scheduleSseReconnect();
       };
     } catch (_) {
-      this.sse = null;
+      this.scheduleSseReconnect();
     }
   },
 
+  hasFreshProgressStream() {
+    return Boolean(this.sse && this.progressStream.lastMessageAt !== null
+      && Date.now() - this.progressStream.lastMessageAt < PROGRESS_STREAM_MAX_AGE_MS);
+  },
+
+  scheduleSseReconnect() {
+    this.stopSseProgress();
+    if (!this.polling.active || document.hidden || navigator.onLine === false || !window.EventSource) return;
+    const delay = Math.min(30000, 1000 * 2 ** Math.min(this.progressStream.retryAttempts, 5));
+    this.progressStream.retryAttempts += 1;
+    this.progressStream.retryTimer = window.setTimeout(() => {
+      this.progressStream.retryTimer = null;
+      this.startSseProgress();
+    }, Math.min(30000, delay + Math.floor(Math.random() * delay * 0.25)));
+  },
+
   stopSseProgress() {
+    if (this.progressStream.retryTimer !== null) window.clearTimeout(this.progressStream.retryTimer);
+    this.progressStream.retryTimer = null;
+    this.progressStream.startedAt = null;
+    this.progressStream.lastMessageAt = null;
     if (this.sse) {
+      this.sse.onmessage = null;
+      this.sse.onerror = null;
       try { this.sse.close(); } catch (_) { /* ignore */ }
       this.sse = null;
     }
@@ -163,6 +202,7 @@ export const coreMethods = {
     this.polling.refreshTimer = null;
     this.polling.activityTimer = null;
     this.stopSseProgress();
+    this.progressStream.retryAttempts = 0;
   },
 
   startPolling() {
@@ -193,7 +233,11 @@ export const coreMethods = {
     const activityLoop = async () => {
       try {
         if (isCurrent() && !document.hidden) {
-          if (this.rcloneBusy() || this.progress?.running) await this.loadProgress(true);
+          const lastFrame = this.progressStream.lastMessageAt ?? this.progressStream.startedAt;
+          if (this.sse && lastFrame !== null && Date.now() - lastFrame >= PROGRESS_STREAM_MAX_AGE_MS) {
+            this.scheduleSseReconnect();
+          }
+          if ((this.rcloneBusy() || this.progress?.running) && !this.hasFreshProgressStream()) await this.loadProgress(true);
           if (this.status?.pbs || this.pbs.status?.running) await this.loadPbsStatus(true);
           if (this.jobModal.show && this.jobModal.autoRefresh && this.jobModal.job?.status === 'running') {
             await this.refreshJobModal();
@@ -344,6 +388,10 @@ export const coreMethods = {
   },
 
   setConnectionState(state, message = '') {
+    if (state === 'online' && this.refreshFailures > 0) {
+      state = 'degraded';
+      message = `${this.refreshFailures} Bereich(e) konnten nicht aktualisiert werden`;
+    }
     this.connectionState = state;
     this.connectionMessage = message || ({
       online: 'Mit dem Server verbunden',

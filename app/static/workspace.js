@@ -98,14 +98,22 @@
     attention.setAttribute('x-show', 'workspaceIssues().length');
     attention.setAttribute('x-cloak', '');
     attention.setAttribute('role', 'status');
-    const copy = element('div');
+    const copy = element('div', 'workspace-issue-list');
     copy.append(element('strong', '', 'Das braucht Aufmerksamkeit'));
     const list = element('ul');
     const template = element('template');
-    template.setAttribute('x-for', '(issue, issueIndex) in workspaceIssues()');
-    template.setAttribute(':key', 'issueIndex');
-    const line = element('li');
-    line.setAttribute('x-text', 'issue');
+    template.setAttribute('x-for', 'issue in workspaceIssues()');
+    template.setAttribute(':key', 'issue.id');
+    const line = element('li', 'workspace-issue');
+    const message = element('span');
+    message.setAttribute('x-text', 'issue.message');
+    const action = element('button', 'button secondary small');
+    action.type = 'button';
+    action.setAttribute('x-text', 'issue.actionLabel');
+    action.setAttribute(':aria-label', "issue.actionLabel + ': ' + issue.pair");
+    action.setAttribute(':disabled', "issue.action === 'restore' && startBlocked()");
+    action.setAttribute('x-on:click', 'workspaceIssueAction(issue)');
+    line.append(message, action);
     template.content.append(line);
     list.append(template);
     copy.append(list);
@@ -304,16 +312,54 @@
       workspaceIssues() {
         const issues = [];
         for (const health of this.overview.data?.pairs?.health || []) {
-          if (health.error || ['error', 'failed', 'timeout', 'stale', 'skipped'].includes(health.last_status)) {
-            issues.push(`${health.name}: ${health.error || this.statusLabel(health.last_status)}`);
+          if (health.error || health.overdue || ['error', 'failed', 'timeout', 'stale', 'skipped'].includes(health.last_status)) {
+            issues.push({
+              id: `run:${health.history_key || health.name}`,
+              pair: health.name,
+              message: `${health.name}: ${health.error || (health.overdue ? 'Sicherung überfällig' : this.statusLabel(health.last_status))}`,
+              action: health.job_id ? 'job' : 'pair',
+              actionLabel: health.job_id ? 'Lauf ansehen' : 'Datenweg öffnen',
+              jobId: health.job_id,
+            });
           }
         }
         for (const pair of this.storagePairs?.() || []) {
-          if (pair.restore_evidence?.state === 'failed' && !issues.some((issue) => issue.startsWith(`${pair.name}:`))) {
-            issues.push(`${pair.name}: Letzter Restore-Test fehlgeschlagen`);
-          }
+          const evidence = pair.restore_evidence;
+          if (!evidence || (evidence.state === 'passed' && evidence.valid !== false
+            && Number(evidence.valid_until) * 1000 > Date.now())) continue;
+          const messages = {
+            failed: 'Letzter Restore-Test fehlgeschlagen',
+            stale: 'Restore-Nachweis veraltet',
+            partial: 'Restore-Stichprobe unvollständig',
+            never: 'Noch kein Restore-Nachweis',
+          };
+          issues.push({
+            id: `restore:${pair.name}`,
+            pair: pair.name,
+            message: `${pair.name}: ${messages[evidence.state] || 'Kein aktueller Restore-Nachweis'}`,
+            action: 'restore',
+            actionLabel: 'Restore-Test starten…',
+          });
         }
         return issues;
+      },
+      async workspaceIssueAction(issue) {
+        if (issue.action === 'restore') return this.runRestoreTest(issue.pair);
+        if (issue.action === 'job') return this.openJob(issue.jobId);
+        await this.navigate('pairs');
+        if (this.page !== 'pairs') return;
+        const index = (this.config.backup?.pairs || []).findIndex((pair) => pair.name === issue.pair);
+        if (index < 0) {
+          this.showToast('Dieser Datenweg ist nicht mehr in der aktuellen Konfiguration vorhanden.', 'warn');
+          return;
+        }
+        this.pairSearch = issue.pair;
+        this.pairFilter = 'all';
+        this.activeTag = '';
+        this.pairOpen[index] = true;
+        this.$nextTick(() => {
+          document.getElementById(`pair-${index}`)?.querySelector('.pair-expand')?.focus();
+        });
       },
     });
   };

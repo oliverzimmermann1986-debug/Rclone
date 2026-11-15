@@ -49,10 +49,16 @@ function runScenario(newerServer = false) {
     page: 'dashboard',
     overview: { data: { pairs: { health: [] } } },
     recovery: { quarantine: [], diff: null },
+    config: { backup: { pairs: [{ name: 'Fotos' }, { name: 'Archiv' }] } },
+    pairOpen: {}, pairSearch: '', pairFilter: 'issues', activeTag: 'private',
+    actions: [],
     $watch(key, callback) { watches.set(key, callback); },
     $nextTick(callback) { callback(); },
     init() { this.originalInitCalled = true; },
-    async navigate(next) { if (next !== 'rejected') this.page = next; },
+    async navigate(next) { if (next !== 'rejected' && !this.blockNavigation) this.page = next; },
+    openJob(id) { this.actions.push(['job', id]); },
+    runRestoreTest(pair) { this.actions.push(['restore', pair]); },
+    showToast(message) { this.actions.push(['toast', message]); },
     statusLabel(status) { return status; },
     storagePairs() { return []; },
   });
@@ -144,14 +150,32 @@ function runScenario(newerServer = false) {
   if (originalActive) Object.defineProperty(normal.document, 'activeElement', originalActive);
   else delete normal.document.activeElement;
   normal.model.overview.data.pairs.health = [
-    { name: 'Fotos', last_status: 'stale' },
+    { name: 'Fotos', last_status: 'stale', job_id: 42 },
     { name: 'Archiv', last_status: 'skipped', error: 'Quarantäne aktiv' },
     { name: 'Dokumente', last_status: 'ok' },
   ];
   normal.model.storagePairs = () => [{ name: 'Cloud', restore_evidence: { state: 'failed' } }];
-  assert.deepEqual(Array.from(normal.model.workspaceIssues()), [
+  const issues = Array.from(normal.model.workspaceIssues());
+  assert.deepEqual(issues.map((issue) => issue.message), [
     'Fotos: stale', 'Archiv: Quarantäne aktiv', 'Cloud: Letzter Restore-Test fehlgeschlagen',
   ]);
+  assert.equal(new Set(issues.map((issue) => issue.id)).size, issues.length);
+  await normal.model.workspaceIssueAction(issues[0]);
+  await normal.model.workspaceIssueAction(issues[2]);
+  assert.deepEqual(normal.model.actions, [['job', 42], ['restore', 'Cloud']]);
+  normal.model.blockNavigation = true;
+  await normal.model.workspaceIssueAction(issues[1]);
+  assert.equal(normal.model.pairSearch, '', 'Rejected navigation preserves filters and editor state');
+  assert.equal(normal.model.pairOpen[1], undefined);
+  normal.model.blockNavigation = false;
+  await normal.model.workspaceIssueAction(issues[1]);
+  assert.equal(normal.model.page, 'pairs');
+  assert.equal(normal.model.pairSearch, 'Archiv');
+  assert.equal(normal.model.pairFilter, 'all');
+  assert.equal(normal.model.activeTag, '');
+  assert.equal(normal.model.pairOpen[1], true);
+  await normal.model.workspaceIssueAction({ action: 'pair', pair: 'Removed' });
+  assert.equal(normal.model.actions.at(-1)[0], 'toast', 'Removed paths do not open another editor');
   normal.model.workspaceSelect('doctor', 'audit');
   await normal.model.navigate('doctor');
   assert.equal(normal.model.workspaceViews.doctor, 'health', 'Entering a page starts in its primary view');

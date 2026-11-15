@@ -12,7 +12,10 @@ export const systemMethods = {
       return;
     }
     if (result.overview) this.overview.data = result.overview;
-    if (result.copies) this.copies.data = result.copies;
+    if (result.copies) {
+      this.copies.data = result.copies;
+      this.copies.error = '';
+    }
     if (result.logs?.logs) this.maintenance.logs = result.logs.logs;
     if (result.database) this.maintenance.database = result.database;
     if (result.snapshots?.snapshots) {

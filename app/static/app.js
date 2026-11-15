@@ -37,6 +37,7 @@ window.app = function app() {
     lastUpdated: null,
     requestTimeoutMs: 30000,
     refreshing: false,
+    refreshFailures: 0,
     polling: { active: false, generation: 0, refreshTimer: null, activityTimer: null },
     configLoading: true,
     configLoaded: false,
@@ -62,6 +63,7 @@ window.app = function app() {
     status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null, bitrotscrub: null, bootdrill: null },
     progress: null,
     sse: null,
+    progressStream: { startedAt: null, lastMessageAt: null, retryTimer: null, retryAttempts: 0 },
     storageLoading: false,
     storageState: 'loading',
     storageError: '',
@@ -125,7 +127,7 @@ window.app = function app() {
 
     plan: { loading: false, data: null, dry_run: true, definitionId: null },
     doctor: { loading: false, data: null },
-    copies: { loading: false, data: null },
+    copies: { loading: false, data: null, error: '' },
     recovery: {
       loading: false, pair: '', points: [], pointId: '', path: '', items: [],
       selectedPaths: [], diff: null, staging: [], quarantine: [], error: '',
