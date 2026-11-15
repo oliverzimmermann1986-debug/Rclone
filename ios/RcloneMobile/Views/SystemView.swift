@@ -14,6 +14,9 @@ struct SystemView: View {
                 Button { showRemoteSetup = true } label: {
                     Label("Neues Remote einbinden", systemImage: "externaldrive.badge.plus")
                 }
+                NavigationLink { CryptRemoteWizardView() } label: {
+                    Label("Verschlüsseltes Remote (Crypt) anlegen", systemImage: "lock.icloud")
+                }
             }
             if let system = model.overview?.system {
                 Section("Server") {
@@ -53,6 +56,12 @@ struct SystemView: View {
                     }
                     NavigationLink { CloudQuotaAndBudgetView() } label: {
                         Label("Cloud-Kontingent & Egress-Wächter", systemImage: "icloud.and.arrow.up")
+                    }
+                    NavigationLink { VersionsLifecycleView() } label: {
+                        Label("Versionsverwaltung (GFS)", systemImage: "clock.arrow.2.circlepath")
+                    }
+                    NavigationLink { BandwidthHeatmapView() } label: {
+                        Label("Bandbreiten-Heatmap & Zeitfenster", systemImage: "chart.bar.xaxis")
                     }
                     NavigationLink { WebAuthnSecurityView() } label: {
                         Label("Passkeys & Sicherheitsschlüssel", systemImage: "person.badge.key")

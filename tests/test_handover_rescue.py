@@ -2,6 +2,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,10 @@ import pytest
 from app import device_vault
 from app import handover_rescue as rescue
 from app.routes.api_recovery import encrypted_handover
+
+pytestmark = pytest.mark.skipif(
+    os.name != "posix", reason="Anchored directory I/O requires POSIX"
+)
 
 
 class AuditDB:

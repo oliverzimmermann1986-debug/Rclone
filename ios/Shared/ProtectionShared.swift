@@ -24,12 +24,25 @@ struct ProtectionWidgetSnapshot: Codable {
         return try? JSONDecoder().decode(Self.self, from: data)
     }
 
+    func hasMeaningfulChanges(comparedTo previous: ProtectionWidgetSnapshot?) -> Bool {
+        guard let previous else { return true }
+        return score != previous.score
+            || state != previous.state
+            || hostname != previous.hostname
+            || activePaths != previous.activePaths
+            || totalPaths != previous.totalPaths
+            || quarantines != previous.quarantines
+    }
+
     func save() {
+        let previous = Self.load()
         guard let data = try? JSONEncoder().encode(self) else { return }
         UserDefaults(suiteName: protectionAppGroup)?.set(data, forKey: "protectionWidgetSnapshot")
-        #if canImport(WidgetKit)
-        WidgetCenter.shared.reloadAllTimelines()
-        #endif
+        if hasMeaningfulChanges(comparedTo: previous) {
+            #if canImport(WidgetKit)
+            WidgetCenter.shared.reloadAllTimelines()
+            #endif
+        }
     }
 
     static func clear() {

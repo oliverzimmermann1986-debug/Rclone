@@ -920,6 +920,9 @@ struct PairConfig: Codable, Identifiable {
     let requireMountpoint: Bool
     let mountpoint: String
     let sentinelFile: String
+    let recoverySnapshots: Bool
+    let maxSuccessAgeHours: Double
+    let exclude: String
     private let extras: [String: JSONValue]
 
     var legacySchedule: String? {
@@ -933,6 +936,7 @@ struct PairConfig: Codable, Identifiable {
         allowDelete: Bool = false, maxDelete: Int? = nil, backupDir: String = "",
         minLocalFiles: Int = 1, minRemoteFiles: Int = 0,
         requireMountpoint: Bool = false, mountpoint: String = "", sentinelFile: String = "",
+        recoverySnapshots: Bool = false, maxSuccessAgeHours: Double = 0, exclude: String = "",
         extras: [String: JSONValue] = [:]
     ) {
         self.stableID = stableID
@@ -950,6 +954,9 @@ struct PairConfig: Codable, Identifiable {
         self.requireMountpoint = requireMountpoint
         self.mountpoint = mountpoint
         self.sentinelFile = sentinelFile
+        self.recoverySnapshots = recoverySnapshots
+        self.maxSuccessAgeHours = maxSuccessAgeHours
+        self.exclude = exclude
         self.extras = extras
     }
 
@@ -971,7 +978,21 @@ struct PairConfig: Codable, Identifiable {
         requireMountpoint = try values.decodeIfPresent(Bool.self, forKey: key("require_mountpoint")) ?? false
         mountpoint = try values.decodeIfPresent(String.self, forKey: key("mountpoint")) ?? ""
         sentinelFile = try values.decodeIfPresent(String.self, forKey: key("sentinel_file")) ?? ""
-        let known = Set(["id", "name", "local", "remote", "direction", "mode", "enabled", "allow_delete", "max_delete", "backup_dir", "min_local_files", "min_remote_files", "require_mountpoint", "mountpoint", "sentinel_file"])
+        recoverySnapshots = try values.decodeIfPresent(Bool.self, forKey: key("recovery_snapshots")) ?? false
+        maxSuccessAgeHours = try values.decodeIfPresent(Double.self, forKey: key("max_success_age_hours")) ?? 0
+        if let textExclude = try? values.decodeIfPresent(String.self, forKey: key("exclude")) {
+            exclude = textExclude
+        } else if let listExclude = try? values.decodeIfPresent([String].self, forKey: key("exclude")) {
+            exclude = listExclude.joined(separator: "\n")
+        } else {
+            exclude = ""
+        }
+        let known = Set([
+            "id", "name", "local", "remote", "direction", "mode", "enabled",
+            "allow_delete", "max_delete", "backup_dir", "min_local_files", "min_remote_files",
+            "require_mountpoint", "mountpoint", "sentinel_file",
+            "recovery_snapshots", "max_success_age_hours", "exclude"
+        ])
         var preserved: [String: JSONValue] = [:]
         for codingKey in values.allKeys where !known.contains(codingKey.stringValue) {
             preserved[codingKey.stringValue] = try values.decode(JSONValue.self, forKey: codingKey)
@@ -998,13 +1019,17 @@ struct PairConfig: Codable, Identifiable {
         try values.encode(requireMountpoint, forKey: key("require_mountpoint"))
         try values.encode(mountpoint, forKey: key("mountpoint"))
         try values.encode(sentinelFile, forKey: key("sentinel_file"))
+        try values.encode(recoverySnapshots, forKey: key("recovery_snapshots"))
+        try values.encode(maxSuccessAgeHours, forKey: key("max_success_age_hours"))
+        try values.encode(exclude, forKey: key("exclude"))
     }
 
     func replacing(
         name: String, local: String, remote: String, direction: String, mode: String,
         enabled: Bool, allowDelete: Bool, maxDelete: Int?, backupDir: String,
         minLocalFiles: Int, minRemoteFiles: Int, requireMountpoint: Bool,
-        mountpoint: String, sentinelFile: String
+        mountpoint: String, sentinelFile: String,
+        recoverySnapshots: Bool? = nil, maxSuccessAgeHours: Double? = nil, exclude: String? = nil
     ) -> PairConfig {
         PairConfig(
             stableID: stableID,
@@ -1022,6 +1047,9 @@ struct PairConfig: Codable, Identifiable {
             requireMountpoint: requireMountpoint,
             mountpoint: mountpoint,
             sentinelFile: sentinelFile,
+            recoverySnapshots: recoverySnapshots ?? self.recoverySnapshots,
+            maxSuccessAgeHours: maxSuccessAgeHours ?? self.maxSuccessAgeHours,
+            exclude: exclude ?? self.exclude,
             extras: extras
         )
     }

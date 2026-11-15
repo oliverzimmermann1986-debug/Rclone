@@ -116,6 +116,7 @@ _SINGLE_VALUE_RCLONE_FLAGS = {
     "--max-lock",
     "--max-transfer",
     "--retries",
+    "--stats-log-level",
     "--timeout",
     "--tpslimit",
     "--tpslimit-burst",
@@ -145,6 +146,16 @@ def _progress_marker(raw_line: str) -> tuple[str, tuple[str, ...] | str] | None:
             tuple(
                 (transferred.group(index) or "").strip().casefold()
                 for index in (1, 2, 3)
+            ),
+        )
+
+    one_line = _STATS_ONE_LINE_RE.search(line)
+    if one_line:
+        return (
+            "one_line_transferred",
+            tuple(
+                (one_line.group(index) or "").strip().casefold()
+                for index in (1, 2, 3, 6, 7)
             ),
         )
 
@@ -1158,6 +1169,9 @@ def _build_pair_command(
         effective_args = _bisync_filter_snapshot(effective_args, cfg)
 
     stats_interval = str((backup.get("tuning") or {}).get("stats_interval") or "10s")
+    has_stats_level = any(
+        str(arg).split("=", 1)[0] == "--stats-log-level" for arg in effective_args
+    )
     cmd = [
         "rclone",
         verb,
@@ -1165,6 +1179,7 @@ def _build_pair_command(
         "--stats",
         stats_interval,
         "--stats-one-line",
+        *([] if has_stats_level else ["--stats-log-level", "NOTICE"]),
     ]
     cmd += effective_args
     if dry_run and "--dry-run" not in cmd:
@@ -2425,6 +2440,9 @@ def run_pair_check(
     ).strip()
     if bwlimit:
         args += ["--bwlimit", bwlimit]
+    has_stats_level = any(
+        str(arg).split("=", 1)[0] == "--stats-log-level" for arg in args
+    )
     cmd = [
         "rclone",
         "check",
@@ -2432,6 +2450,7 @@ def run_pair_check(
         "--stats",
         "10s",
         "--stats-one-line",
+        *([] if has_stats_level else ["--stats-log-level", "NOTICE"]),
         *args,
     ]
     if one_way:

@@ -479,6 +479,7 @@ final class AppModel: ObservableObject {
         }
 
         guard isCurrent(session: session, refresh: refresh) else { return }
+        syncWidgetSnapshot()
         if let firstError {
             errorMessage = userMessage(for: firstError)
         }
@@ -643,6 +644,7 @@ final class AppModel: ObservableObject {
             doctorLastCheckedAt = Date(timeIntervalSince1970: fixture.doctor.generatedAt)
             isDemoMode = true
             phase = .signedIn
+            syncWidgetSnapshot()
         } catch {
             errorMessage = "Die lokale Vorschau konnte nicht geladen werden."
             phase = .signedOut
@@ -1216,6 +1218,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private var lastStreamProgressAt: Date?
+
     private func trackRun(
         expectedDefinitionIDs: Set<String>,
         expectedJobIDs: Set<Int>,
@@ -1223,16 +1227,57 @@ final class AppModel: ObservableObject {
         session: Int,
         restorePairs: Set<String>
     ) async {
+        let streamTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.isCurrentSession(session), let streamClient = self.client else { return }
+                do {
+                    try await streamClient.streamProgress { [weak self] streamed in
+                        await MainActor.run {
+                            guard let self, self.isCurrentSession(session) else { return }
+                            self.lastStreamProgressAt = Date()
+                            self.acceptProgress(streamed)
+                        }
+                    }
+                } catch APIError.unauthenticated {
+                    await MainActor.run {
+                        guard let self, self.isCurrentSession(session) else { return }
+                        self.signOutLocally()
+                    }
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    return
+                }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        defer {
+            streamTask.cancel()
+            lastStreamProgressAt = nil
+        }
+
         var quietPolls = 0
         var observedDefinitions: Set<String> = []
         while !Task.isCancelled, isCurrentSession(session), let currentClient = client {
             do {
                 try await Task.sleep(for: runPollInterval)
-                async let progressRequest = currentClient.getProgress()
-                async let jobsRequest = currentClient.getJobs(limit: 100)
-                let (newProgress, response) = try await (progressRequest, jobsRequest)
-                guard isCurrentSession(session) else { return }
-                acceptProgress(newProgress)
+                let streamFresh = lastStreamProgressAt.map { Date().timeIntervalSince($0) < 3.5 } ?? false
+                let response: JobSearchResponse
+                let newProgress: BackupProgress
+                if streamFresh, let cachedProgress = progress {
+                    response = try await currentClient.getJobs(limit: 100)
+                    guard isCurrentSession(session) else { return }
+                    newProgress = progress ?? cachedProgress
+                } else {
+                    async let progressRequest = currentClient.getProgress()
+                    async let jobsRequest = currentClient.getJobs(limit: 100)
+                    let fetched = try await (progressRequest, jobsRequest)
+                    guard isCurrentSession(session) else { return }
+                    newProgress = fetched.0
+                    response = fetched.1
+                    acceptProgress(newProgress)
+                }
                 jobs = response.items
                 jobsState = .loaded
 
@@ -1314,6 +1359,7 @@ final class AppModel: ObservableObject {
             acceptProgress(newProgress)
             storage = baseStorage.preservingSizes(from: storage)
             storageState = .loaded
+            syncWidgetSnapshot()
         } catch is CancellationError {
         } catch {
             if phase == .signedIn { errorMessage = userMessage(for: error) }
@@ -1615,6 +1661,26 @@ final class AppModel: ObservableObject {
         } else if !(error is CancellationError), firstError == nil {
             firstError = error
         }
+    }
+
+    private func syncWidgetSnapshot() {
+        guard let overview else { return }
+        let assessment = ProtectionAssessment(overview: overview, storage: storage, config: config)
+        let state: String = assessment.score >= 85
+            ? "ready"
+            : (assessment.score >= 60 ? "attention" : "action_needed")
+        let quarantines = overview.pairs.health.filter {
+            ($0.lastStatus ?? "").lowercased() == "quarantined"
+        }.count
+        ProtectionWidgetSnapshot(
+            score: assessment.score,
+            state: state,
+            hostname: overview.system.hostname,
+            generatedAt: overview.generatedAt,
+            activePaths: overview.pairs.enabled,
+            totalPaths: overview.pairs.total,
+            quarantines: quarantines
+        ).save()
     }
 
     private func acceptProgress(_ value: BackupProgress) {

@@ -22,7 +22,7 @@ from pathlib import Path
 
 STATIC = Path(__file__).resolve().parent.parent / "app" / "static"
 SOURCE = STATIC / "index.html"
-STUB = STATIC / "preview-stub.js"
+STUB = STATIC / "_preview-stub.js"
 
 # Bezeichner, die im Template vorkommen, aber echte JS-Globals sind.
 JS_GLOBALS = {
@@ -73,10 +73,61 @@ def template_methods(html: str) -> list[str]:
     return sorted(n for n in names if n not in JS_GLOBALS and not n.startswith("$"))
 
 
+DEFAULT_PREVIEW_STUB = """window.app = function previewApp() {
+  const base = {
+    page: 'dashboard',
+    settingsTab: 'general',
+    configLoading: false,
+    configLoaded: true,
+    configDirty: false,
+    refreshing: false,
+    refreshFailures: 0,
+    lastUpdated: Date.now() / 1000,
+    overview: { data: { pairs: { health: [] } } },
+    copies: { loading: false, data: { totals: { sources: 2, single_copy: 0 } }, error: '' },
+    config: { web: { username: 'admin' }, paths: {}, backup: { enabled: true, timezone: 'Europe/Berlin', pairs: [{ name: 'Fotos', local: '/mnt/data/Fotos', remote: 'pcloud:/Fotos', direction: 'push', mode: 'copy', enabled: true }], jobs: [] }, maintenance: { log_retention_days: 90 } },
+    status: {},
+    progress: null,
+    jobs: [],
+    audit: { loading: false, items: [], chain: { ok: true, checked: 12 }, eventType: '' },
+    push: { loading: false, testing: false, error: '', status: { configured: true, registered_devices: 1, outbox: { pending: 0, failed: 0 } } },
+    bitrot: { loading: false, error: false, data: null, baselines: {} },
+    cloudQuota: { loading: false, error: false, data: null },
+    ransomwareStatus: { loading: false, error: false, data: null },
+    vpn: { loading: false, error: false, data: null },
+    maintenance: { logs: [], loading: false, prune: null, database: null, logQuery: '' },
+    snapshots: { loading: false, items: [], max: 30, restoreName: '', password: '', diff: { loading: false, data: null, error: '' } },
+    bootstrapExport: { passphrase: '', repeat: '', includeSecrets: false, busy: false, verifyResult: null },
+    recovery: { loading: false, pair: 'Fotos', points: [], pointId: '', path: '', items: [], selectedPaths: [], diff: null, staging: [], quarantine: [], vault: { loading: false, items: [], filterPair: '', error: '' }, error: '', maxTotalMb: 512, timeTravel: false, searchQuery: '', searchResults: [], searchLoading: false, handover: { password: '', passphrase: '', repeat: '', includePaths: false, downloaded: false } },
+    schedulerControl: { paused: false, reason: '' },
+    schedulerPause: { minutes: 60, reason: '' },
+    scheduleEditor: { mode: 'daily', time: '02:00' },
+    schedulePreview: { loading: false, valid: true, error: '', nextRuns: [] },
+    configValidation: { ok: null, errors: [], warnings: [], loading: false, revisionMatches: true },
+    pending: {},
+    stagingDiffPaths: {},
+    diffDialog: { show: false, loading: false, data: null, error: '', path: '' },
+  };
+  for (const name of (window.__STUB_METHODS__ || [])) {
+    if (!(name in base)) base[name] = () => '';
+  }
+  base.copyMatrixSummary = () => ({ protected: 2, total: 2, atRisk: [] });
+  base.bitrotPairs = () => [];
+  base.bitrotMismatches = () => [];
+  base.recoveryBreadcrumbs = () => [{ label: 'Wurzel', path: '' }];
+  base.formatBytes = (v) => (v ? `${Math.round(v / 1024)} KiB` : '0 B');
+  base.formatDateTime = () => '—';
+  base.formatTs = () => '—';
+  return base;
+};
+"""
+
+
 def build() -> int:
-    if not SOURCE.exists() or not STUB.exists():
-        print(f"Fehlt: {SOURCE if not SOURCE.exists() else STUB}", file=sys.stderr)
+    if not SOURCE.exists():
+        print(f"Fehlt: {SOURCE}", file=sys.stderr)
         return 1
+    STUB.write_text(DEFAULT_PREVIEW_STUB, encoding="utf-8")
 
     html = SOURCE.read_text(encoding="utf-8")
     methods = template_methods(html)
@@ -95,7 +146,7 @@ def build() -> int:
     html = html.replace(
         '<script type="module" src="/static/app.js"></script>',
         '<script src="_stub-methods.js"></script>\n'
-        '  <script src="preview-stub.js"></script>',
+        '  <script src="_preview-stub.js"></script>',
     )
 
     (STATIC / "_preview.html").write_text(html, encoding="utf-8")

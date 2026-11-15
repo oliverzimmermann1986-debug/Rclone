@@ -490,3 +490,48 @@ def test_dynamic_scheduler_skips_currently_conflicting_pair():
     ]
 
     assert rclone_sync._next_runnable_pair_index(pending, [active]) == 1
+
+
+def test_stats_log_level_notice_default_and_override(monkeypatch):
+    cfg = FakeConfig({"backup": {"tuning": {"stats_interval": "10s"}}})
+    monkeypatch.setattr(rclone_sync, "get_config", lambda: cfg)
+    pair = {
+        "name": "fotos",
+        "remote": "gdrive:/Fotos",
+        "local": "/mnt/data/Fotos",
+        "direction": "push",
+        "mode": "copy",
+    }
+    cmd, *_ = rclone_sync._build_pair_command(pair, [], False)
+    idx = cmd.index("--stats-log-level")
+    assert cmd[idx + 1] == "NOTICE"
+
+    overridden, *_ = rclone_sync._build_pair_command(
+        pair, ["--stats-log-level=INFO"], False
+    )
+    assert "--stats-log-level=INFO" in overridden
+    assert "NOTICE" not in overridden
+
+
+def test_one_line_stats_progress_advances_watchdog_but_eta_jitter_does_not():
+    tracker = rclone_sync._LogProgressTracker()
+    assert (
+        tracker.feed(
+            "2026/11/15 14:00:00 NOTICE: 1.200 GiB / 300 GiB, 0%, 4.1 MiB/s, ETA 20h10m (xfr#3/500)\n"
+        )
+        is True
+    )
+    # Identical bytes and xfr count with jittering speed/ETA must NOT count as progress:
+    assert (
+        tracker.feed(
+            "2026/11/15 14:00:10 NOTICE: 1.200 GiB / 300 GiB, 0%, 0 B/s, ETA 99h59m (xfr#3/500)\n"
+        )
+        is False
+    )
+    # Advancing bytes DOES count as real progress:
+    assert (
+        tracker.feed(
+            "2026/11/15 14:00:20 NOTICE: 1.250 GiB / 300 GiB, 0%, 5.0 MiB/s, ETA 19h50m (xfr#3/500)\n"
+        )
+        is True
+    )

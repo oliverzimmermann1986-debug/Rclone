@@ -121,34 +121,51 @@ def notify_overdue(
     settings = alert_settings(cfg)
     now_value = float(time.time() if now is None else now)
     items = [dict(item) for item in overdue_items]
-    state = _load_state(db)
-
     still_overdue = {
         str(item.get("history_key") or item.get("name") or "") for item in items
     }
-    recovered = [key for key in state if key not in still_overdue]
-    for key in recovered:
-        state.pop(key, None)
-
-    if not settings["enabled"]:
-        if recovered:
-            _store_state(db, state)
-        return []
-
     repeat_sec = settings["repeat_hours"] * 3600
     reported: list[str] = []
-    for item in items:
-        key = str(item.get("history_key") or item.get("name") or "")
-        if not key:
-            continue
-        last_sent = state.get(key, 0.0)
-        if last_sent and now_value - last_sent < repeat_sec:
-            continue
-        state[key] = now_value
-        reported.append(str(item.get("name") or key))
 
-    if reported or recovered:
-        _store_state(db, state)
+    def _mutate_state(raw_state: Any) -> dict[str, float]:
+        reported.clear()
+        state: dict[str, float] = {}
+        if isinstance(raw_state, Mapping):
+            for key, value in raw_state.items():
+                try:
+                    state[str(key)] = float(value)
+                except (TypeError, ValueError):
+                    continue
+        for key in [k for k in state if k not in still_overdue]:
+            state.pop(key, None)
+        if settings["enabled"]:
+            for item in items:
+                key = str(item.get("history_key") or item.get("name") or "")
+                if not key:
+                    continue
+                last_sent = state.get(key, 0.0)
+                if last_sent and now_value - last_sent < repeat_sec:
+                    continue
+                state[key] = now_value
+                reported.append(str(item.get("name") or key))
+        return dict(
+            sorted(state.items(), key=lambda pair: pair[1], reverse=True)[:_MAX_TRACKED]
+        )
+
+    runtime_update = getattr(db, "runtime_update", None)
+    if callable(runtime_update):
+        try:
+            runtime_update(_STATE_KEY, _mutate_state, default={})
+        except ValueError as exc:
+            logger.warning("Ausbleib-Zustand nicht speicherbar: %s", exc)
+    else:
+        prior = _load_state(db)
+        updated = _mutate_state(prior)
+        if updated != prior:
+            _store_state(db, updated)
+
+    if not settings["enabled"]:
+        return []
 
     if reported:
         # Eine Sammelmeldung pro Tick statt einer je Pair — sonst ist der Kanal bei

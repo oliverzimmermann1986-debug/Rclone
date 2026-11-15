@@ -483,6 +483,9 @@ private struct DataPathEditor: View {
     @State private var requireMountpoint: Bool
     @State private var mountpoint: String
     @State private var sentinelFile: String
+    @State private var recoverySnapshots: Bool
+    @State private var maxSuccessAgeHoursText: String
+    @State private var excludeText: String
     @State private var browseTarget: BrowseTarget?
 
     init(pair: PairConfig?, save: @escaping (PairConfig) -> Void) {
@@ -502,6 +505,15 @@ private struct DataPathEditor: View {
         _requireMountpoint = State(initialValue: pair?.requireMountpoint ?? false)
         _mountpoint = State(initialValue: pair?.mountpoint ?? "")
         _sentinelFile = State(initialValue: pair?.sentinelFile ?? "")
+        _recoverySnapshots = State(initialValue: pair?.recoverySnapshots ?? false)
+        let initialAge: String
+        if let hours = pair?.maxSuccessAgeHours, hours > 0 {
+            initialAge = hours.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(hours)) : String(hours)
+        } else {
+            initialAge = ""
+        }
+        _maxSuccessAgeHoursText = State(initialValue: initialAge)
+        _excludeText = State(initialValue: pair?.exclude ?? "")
     }
 
     var body: some View {
@@ -544,7 +556,27 @@ private struct DataPathEditor: View {
                     Toggle("Mountpoint verlangen", isOn: $requireMountpoint)
                     if requireMountpoint { TextField("Mountpoint", text: $mountpoint) }
                     TextField("Sentinel-Datei (relativ)", text: $sentinelFile)
-                    TextField("Versionsablage", text: $backupDir)
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField("Versionsablage", text: $backupDir)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Text("Tipp: Platzhalter {date} (z. B. pcloud:/.rclone-versions/Fotos/{date}) aktiviert datierte GFS-Generationen.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Toggle("Lokale Recovery-Snapshots", isOn: $recoverySnapshots)
+                    TextField("Überfälligkeits-Frist in Std. (leer = Standard)", text: $maxSuccessAgeHoursText)
+                        .keyboardType(.decimalPad)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Ausschlussmuster (eine Zeile je Muster)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextEditor(text: $excludeText)
+                            .font(.system(.footnote, design: .monospaced))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .frame(minHeight: 68)
+                    }
                     if destructive {
                         Toggle("Löschungen ausdrücklich freigeben", isOn: $allowDelete)
                             .tint(.orange)
@@ -552,7 +584,7 @@ private struct DataPathEditor: View {
                             .keyboardType(.numberPad)
                     }
                 }
-                if let validationMessage {
+                if shouldShowValidationBanner, let validationMessage {
                     Section { Label(validationMessage, systemImage: "exclamationmark.triangle") }
                         .foregroundStyle(.red)
                 } else if destructive {
@@ -576,25 +608,56 @@ private struct DataPathEditor: View {
         }
         .sheet(item: $browseTarget) { target in
             PathBrowserSheet(
-                kind: target == .local || remote.hasPrefix("/") ? .local : .remote,
+                kind: target == .local ? .local : .remote,
                 initialPath: target == .local ? local : remote,
                 allowsKindSwitch: target == .remote
-            ) {
-                if target == .local { local = $0 } else { remote = $0 }
+            ) { selected in
+                if target == .local {
+                    local = selected
+                    suggestNameIfEmpty(from: selected)
+                } else {
+                    remote = selected
+                    suggestNameIfEmpty(from: selected)
+                }
             }
         }
     }
 
     private var destructive: Bool { direction == "bisync" || mode == "sync" }
 
+    private var shouldShowValidationBanner: Bool {
+        original != nil
+            || !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !local.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !remote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var parsedMaxSuccessAgeHours: Double? {
+        let trimmed = maxSuccessAgeHoursText.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: ".")
+        if trimmed.isEmpty { return 0 }
+        guard let value = Double(trimmed), value >= 0, value <= 8760 else { return nil }
+        return value
+    }
+
     private var validationMessage: String? {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleanName.isEmpty || cleanName.count > 80 || cleanName.contains("/") || cleanName.contains("\\") {
-            return "Bitte einen gültigen Namen ohne Schrägstriche eingeben."
+        if cleanName.isEmpty {
+            return "Bitte einen Namen für den Datenweg eingeben."
+        }
+        if cleanName.count > 80
+            || cleanName.contains("/")
+            || cleanName.contains("\\")
+            || cleanName.contains(",")
+            || cleanName.lowercased().hasPrefix("pbs:") {
+            return "Bitte einen gültigen Namen ohne Schrägstriche oder Kommas eingeben."
         }
         if !local.hasPrefix("/") { return "Der lokale Pfad muss absolut sein und mit / beginnen." }
         if !(remote.hasPrefix("/") || remote.contains(":")) {
             return "Das Ziel muss ein absoluter Pfad oder ein rclone-Remote wie cloud:Ordner sein."
+        }
+        if parsedMaxSuccessAgeHours == nil {
+            return "Die Überfälligkeits-Frist muss zwischen 0 und 8760 Stunden liegen."
         }
         if destructive && allowDelete && Int(maxDeleteText) == nil {
             return "Für freigegebene Löschungen ist eine begrenzte maximale Anzahl nötig."
@@ -602,8 +665,35 @@ private struct DataPathEditor: View {
         return nil
     }
 
+    private func suggestNameIfEmpty(from rawPath: String) {
+        guard name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let withoutRemote: String
+        if let colon = rawPath.firstIndex(of: ":") {
+            let afterColon = String(rawPath[rawPath.index(after: colon)...])
+            withoutRemote = afterColon.isEmpty ? String(rawPath[..<colon]) : afterColon
+        } else {
+            withoutRemote = rawPath
+        }
+        let candidate = withoutRemote
+            .split(separator: "/")
+            .map(String.init)
+            .last?
+            .replacingOccurrences(of: "\\", with: "-")
+            .replacingOccurrences(of: ",", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !candidate.isEmpty, candidate.count <= 80, !candidate.lowercased().hasPrefix("pbs:") {
+            name = candidate
+        }
+    }
+
     private func commit() {
         let finalMode = direction == "bisync" ? "bisync" : mode
+        let ageHours = parsedMaxSuccessAgeHours ?? 0
+        let normalizedExclude = excludeText
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
         let updated: PairConfig
         if let original {
             updated = original.replacing(
@@ -620,7 +710,10 @@ private struct DataPathEditor: View {
                 minRemoteFiles: minRemoteFiles,
                 requireMountpoint: requireMountpoint,
                 mountpoint: mountpoint,
-                sentinelFile: sentinelFile
+                sentinelFile: sentinelFile,
+                recoverySnapshots: recoverySnapshots,
+                maxSuccessAgeHours: ageHours,
+                exclude: normalizedExclude
             )
         } else {
             updated = PairConfig(
@@ -638,7 +731,10 @@ private struct DataPathEditor: View {
                 minRemoteFiles: minRemoteFiles,
                 requireMountpoint: requireMountpoint,
                 mountpoint: mountpoint,
-                sentinelFile: sentinelFile
+                sentinelFile: sentinelFile,
+                recoverySnapshots: recoverySnapshots,
+                maxSuccessAgeHours: ageHours,
+                exclude: normalizedExclude
             )
         }
         save(updated)

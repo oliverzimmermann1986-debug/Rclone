@@ -68,6 +68,73 @@ final class ConfigurationModelTests: XCTestCase {
         XCTAssertEqual(root["_revision"] as? String, String(repeating: "a", count: 64))
     }
 
+    func testPairConfigDecodesAndEncodesExtendedProtectionFields() throws {
+        let data = Data(#"""
+        {
+          "id":"11111111111111111111111111111111",
+          "name":"Dokumente",
+          "local":"/mnt/data/paperless",
+          "remote":"pcloud:/Backup/paperless",
+          "direction":"push",
+          "mode":"copy",
+          "enabled":true,
+          "backup_dir":"pcloud:/.rclone-versions/paperless/{date}",
+          "recovery_snapshots":true,
+          "max_success_age_hours":36,
+          "exclude":["*.tmp",".DS_Store"]
+        }
+        """#.utf8)
+        let decoded = try JSONDecoder().decode(PairConfig.self, from: data)
+        XCTAssertTrue(decoded.recoverySnapshots)
+        XCTAssertEqual(decoded.maxSuccessAgeHours, 36)
+        XCTAssertEqual(decoded.exclude, "*.tmp\n.DS_Store")
+
+        let encoded = try JSONEncoder().encode(decoded)
+        let raw = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(raw["recovery_snapshots"] as? Bool, true)
+        XCTAssertEqual((raw["max_success_age_hours"] as? NSNumber)?.doubleValue, 36)
+        XCTAssertEqual(raw["exclude"] as? String, "*.tmp\n.DS_Store")
+    }
+
+    func testOperationalExtensionModelsDecodeCryptVersionsAndBandwidthPayloads() throws {
+        let cryptData = Data(#"""
+        {
+          "name":"pcloud-crypt",
+          "remote":"pcloud:sicherpfad-crypt",
+          "filename_encryption":"standard",
+          "directory_name_encryption":true,
+          "keys":{"password":"secret-1","password2":"secret-2"},
+          "warning":"Einmalig sichern"
+        }
+        """#.utf8)
+        let crypt = try JSONDecoder().decode(CryptCreateResponse.self, from: cryptData)
+        XCTAssertEqual(crypt.name, "pcloud-crypt")
+        XCTAssertEqual(crypt.keys.password, "secret-1")
+
+        let versionsData = Data(#"""
+        {
+          "dry_run":true,
+          "roots":[{"root":"pcloud:/.rclone-versions/Fotos","total":4,"keep":["2026-11-15"],"purge":["2026-09-01"]}],
+          "warnings":[]
+        }
+        """#.utf8)
+        let versions = try JSONDecoder().decode(VersionsPreviewResponse.self, from: versionsData)
+        XCTAssertEqual(versions.roots.first?.total, 4)
+        XCTAssertEqual(versions.roots.first?.purge, ["2026-09-01"])
+
+        let heatmapData = Data(#"""
+        {
+          "cells":[[1048576.0,null]],
+          "samples":[[3,0]],
+          "days":90,
+          "timezone":"Europe/Berlin"
+        }
+        """#.utf8)
+        let heatmap = try JSONDecoder().decode(BandwidthHeatmapResponse.self, from: heatmapData)
+        XCTAssertEqual(heatmap.days, 90)
+        XCTAssertEqual(heatmap.samples.first?.first, 3)
+    }
+
     func testJobDefinitionRoundTripsCanonicalOrderingFields() throws {
         let definition = JobDefinition(
             id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

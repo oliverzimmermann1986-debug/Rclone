@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - 1. Notfall-Lockdown (Panik-Knopf)
 
@@ -151,6 +152,8 @@ struct ObjectLockAndScrubView: View {
     @State private var working = false
     @State private var feedback: String?
     @State private var errorMessage: String?
+    @State private var canaryReauthPair: String?
+    @State private var canaryPassword = ""
 
     var body: some View {
         List {
@@ -172,15 +175,48 @@ struct ObjectLockAndScrubView: View {
         .navigationTitle("Schutzsiegel & Prüfungen")
         .task { await reloadAll(refresh: false) }
         .refreshable { await reloadAll(refresh: true) }
+        .alert(
+            "Canary neu initialisieren",
+            isPresented: Binding(
+                get: { canaryReauthPair != nil },
+                set: { if !$0 { canaryReauthPair = nil; canaryPassword = "" } }
+            )
+        ) {
+            SecureField("Aktuelles Serverpasswort", text: $canaryPassword)
+            Button("Abbrechen", role: .cancel) {
+                canaryReauthPair = nil
+                canaryPassword = ""
+            }
+            Button("Überschreiben", role: .destructive) {
+                let targetPair = canaryReauthPair
+                let pwd = canaryPassword
+                canaryReauthPair = nil
+                canaryPassword = ""
+                if let targetPair {
+                    Task { await initCanary(for: targetPair, currentPassword: pwd) }
+                }
+            }
+            .disabled(canaryPassword.isEmpty)
+        } message: {
+            Text("Um eine bestehende Canary-Wächterdatei zu erneuern, bitte das aktuelle Serverpasswort bestätigen.")
+        }
     }
 
     private var ransomwareSection: some View {
         Section("Ransomware-Früherkennung & Canary") {
             if let ransomware {
                 ForEach(ransomware.pairs) { pair in
-                    CanaryPairRow(pair: pair) {
-                        Task { await initCanary(for: pair.name) }
-                    }
+                    CanaryPairRow(
+                        pair: pair,
+                        onInit: {
+                            if pair.canary.configured {
+                                canaryPassword = ""
+                                canaryReauthPair = pair.name
+                            } else {
+                                Task { await initCanary(for: pair.name, currentPassword: nil) }
+                            }
+                        }
+                    )
                 }
             } else {
                 Text("Wird geladen…").foregroundStyle(.secondary)
@@ -275,16 +311,26 @@ struct ObjectLockAndScrubView: View {
         ransomware = await rwTask
     }
 
-    private func initCanary(for pairName: String) async {
+    private func initCanary(for pairName: String, currentPassword: String?) async {
         guard let client = model.client else { errorMessage = APIError.unauthenticated.localizedDescription; return }
         working = true
         feedback = nil
         errorMessage = nil
         defer { working = false }
         do {
-            let res = try await client.initPairCanary(pair: pairName, filename: nil, currentPassword: nil)
+            let res = try await client.initPairCanary(
+                pair: pairName,
+                filename: nil,
+                currentPassword: currentPassword
+            )
             feedback = "Canary für \(res.pair) initialisiert (\(res.canaryFile))."
             ransomware = try? await client.getRansomwareStatus()
+        } catch APIError.configReauthenticationRequired {
+            canaryPassword = ""
+            canaryReauthPair = pairName
+        } catch APIError.reauthenticationRequired {
+            canaryPassword = ""
+            canaryReauthPair = pairName
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -331,9 +377,14 @@ private struct CanaryPairRow: View {
                 Text(pair.name).font(.subheadline.weight(.medium))
                 Spacer()
                 if pair.canary.configured {
-                    Text(pair.canary.ok ? "Canary OK" : "Canary Alarm!")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(pair.canary.ok ? .green : .red)
+                    HStack(spacing: 8) {
+                        Text(pair.canary.ok ? "Canary OK" : "Canary Alarm!")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(pair.canary.ok ? .green : .red)
+                        Button("Neu anlegen", action: onInit)
+                            .font(.caption2)
+                            .buttonStyle(.bordered)
+                    }
                 } else {
                     Button("Canary anlegen", action: onInit)
                         .font(.caption)
@@ -800,6 +851,519 @@ private struct TimeTravelItemRow: View {
         case "displaced_later": return "Später überschrieben"
         case "unchanged": return "Unverändert"
         default: return "Live"
+        }
+    }
+}
+
+// MARK: - 7. Zero-Knowledge Crypt-Assistent
+
+struct CryptRemoteWizardView: View {
+    @EnvironmentObject var model: AppModel
+    @State private var candidates: [CryptCandidateItem] = []
+    @State private var loading = false
+    @State private var working = false
+    @State private var name = ""
+    @State private var baseRemote = ""
+    @State private var basePath = "sicherpfad-crypt"
+    @State private var filenameEncryption = "standard"
+    @State private var directoryNameEncryption = true
+    @State private var useCustomKeys = false
+    @State private var customPassword = ""
+    @State private var customPassword2 = ""
+    @State private var created: CryptCreateResponse?
+    @State private var verifyFeedback: String?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        Form {
+            Section {
+                Text("Legt ein clientseitig verschlüsseltes rclone-Crypt-Remote über einem bestehenden Cloud-Ziel an. Ohne die Wiederherstellungsschlüssel kann selbst der Cloud-Anbieter keine Inhalte lesen.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            if candidates.isEmpty && !loading {
+                Section("Basis-Remote") {
+                    Text("Noch kein geeignetes Cloud-Remote vorhanden. Verbinde zuerst unter „Neues Remote einbinden“ ein Cloud-Ziel.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Section("Crypt-Konfiguration") {
+                    TextField("Name des Crypt-Remotes (z. B. pcloud-crypt)", text: $name)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Picker("Basis-Remote", selection: $baseRemote) {
+                        ForEach(candidates) { item in
+                            Text("\(item.name) (\(item.type))").tag(item.name)
+                        }
+                    }
+                    TextField("Unterordner auf Basis-Remote", text: $basePath)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Picker("Dateinamen-Verschlüsselung", selection: $filenameEncryption) {
+                        Text("Standard (empfohlen)").tag("standard")
+                        Text("Verschleiert (obfuscate)").tag("obfuscate")
+                        Text("Aus (nur Dateiinhalt)").tag("off")
+                    }
+                    Toggle("Ordnernamen verschlüsseln", isOn: $directoryNameEncryption)
+                }
+
+                Section("Schlüsselmaterial") {
+                    Toggle("Eigene Passphrasen vorgeben", isOn: $useCustomKeys)
+                    if useCustomKeys {
+                        SecureField("Hauptschlüssel (mind. 16 Zeichen)", text: $customPassword)
+                        SecureField("Salt / Zweitschlüssel (optional)", text: $customPassword2)
+                    } else {
+                        Text("Der Server erzeugt kryptographisch sichere 256-Bit-Zufallsschlüssel und zeigt sie einmalig zur externen Sicherung an.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button {
+                        Task { await createCrypt() }
+                    } label: {
+                        HStack {
+                            if working { ProgressView() }
+                            Label("Crypt-Remote erstellen", systemImage: "lock.shield")
+                        }
+                    }
+                    .disabled(working || !canSubmit)
+                }
+            }
+
+            if let created {
+                Section("Einmalige Wiederherstellungsschlüssel") {
+                    Label(created.warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    LabeledContent("Crypt-Remote", value: "\(created.name):")
+                    LabeledContent("Zielpfad", value: created.remote)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Passwort (Key 1)").font(.caption.weight(.semibold))
+                        Text(created.keys.password)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                        Text("Salt (Key 2)").font(.caption.weight(.semibold)).padding(.top, 4)
+                        Text(created.keys.password2)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    Button {
+                        UIPasteboard.general.string = [
+                            "Sicherpfad Crypt-Remote: \(created.name):",
+                            "Basis: \(created.remote)",
+                            "password: \(created.keys.password)",
+                            "password2: \(created.keys.password2)"
+                        ].joined(separator: "\n")
+                        verifyFeedback = "Schlüssel in die Zwischenablage kopiert – jetzt im Passwort-Tresor sichern."
+                    } label: {
+                        Label("Schlüssel kopieren", systemImage: "doc.on.doc")
+                    }
+                    Button {
+                        Task { await verifyCreated(name: created.name) }
+                    } label: {
+                        Label("Verschlüsselungs-Roundtrip prüfen", systemImage: "checkmark.seal")
+                    }
+                    .disabled(working)
+                }
+            }
+
+            if let verifyFeedback {
+                Section {
+                    Text(verifyFeedback).font(.footnote).foregroundStyle(.green)
+                }
+            }
+            if let errorMessage {
+                Section {
+                    Text(errorMessage).font(.footnote).foregroundStyle(.red)
+                }
+            }
+        }
+        .navigationTitle("Crypt-Assistent")
+        .task { await loadCandidates() }
+        .refreshable { await loadCandidates() }
+        .onDisappear {
+            customPassword = ""
+            customPassword2 = ""
+        }
+    }
+
+    private var canSubmit: Bool {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanPath = basePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, !baseRemote.isEmpty, !cleanPath.isEmpty else { return false }
+        if useCustomKeys && customPassword.count < 16 { return false }
+        return true
+    }
+
+    private func loadCandidates() async {
+        guard let client = model.client else { return }
+        loading = true
+        defer { loading = false }
+        do {
+            let response = try await client.getCryptCandidates()
+            candidates = response.candidates
+            if baseRemote.isEmpty, let first = response.candidates.first {
+                baseRemote = first.name
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func createCrypt() async {
+        guard let client = model.client else { errorMessage = APIError.unauthenticated.localizedDescription; return }
+        working = true
+        errorMessage = nil
+        verifyFeedback = nil
+        defer { working = false }
+        do {
+            let request = CryptCreateRequest(
+                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                baseRemote: baseRemote,
+                basePath: basePath.trimmingCharacters(in: .whitespacesAndNewlines),
+                filenameEncryption: filenameEncryption,
+                directoryNameEncryption: directoryNameEncryption,
+                password: useCustomKeys ? customPassword : nil,
+                password2: useCustomKeys && !customPassword2.isEmpty ? customPassword2 : nil
+            )
+            let result = try await client.createCryptRemote(request)
+            created = result
+            customPassword = ""
+            customPassword2 = ""
+            verifyFeedback = "Crypt-Remote „\(result.name):“ wurde angelegt."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func verifyCreated(name remoteName: String) async {
+        guard let client = model.client else { return }
+        working = true
+        errorMessage = nil
+        defer { working = false }
+        do {
+            let result = try await client.verifyCryptRemote(name: remoteName)
+            verifyFeedback = result.ok
+                ? "Roundtrip-Prüfung für „\(remoteName):“ erfolgreich bestanden."
+                : "Roundtrip-Prüfung lieferte kein OK."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - 8. GFS-Versionsverwaltung (Aufbewahrung & Ausdünnung)
+
+struct VersionsLifecycleView: View {
+    @EnvironmentObject var model: AppModel
+    @State private var selectedPair = ""
+    @State private var preview: VersionsPreviewResponse?
+    @State private var loading = false
+    @State private var working = false
+    @State private var showPruneAuth = false
+    @State private var currentPassword = ""
+    @State private var feedback: String?
+    @State private var errorMessage: String?
+
+    private var pairs: [PairConfig] {
+        model.config?.backup.pairs ?? []
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Text("Prüft datierte Versionsablagen (backup_dir mit {date}) nach dem Großvater-Vater-Sohn-Prinzip (täglich, wöchentlich, monatlich) und dünnt abgelaufene Stände kontrolliert aus.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            if pairs.isEmpty {
+                Section("Datenweg") {
+                    Text("Noch keine Datenwege konfiguriert.")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Section("Datenweg auswählen") {
+                    Picker("Datenweg", selection: $selectedPair) {
+                        ForEach(pairs) { pair in
+                            Text(pair.name).tag(pair.name)
+                        }
+                    }
+                    .onChange(of: selectedPair) { _, newValue in
+                        guard !newValue.isEmpty else { return }
+                        Task { await loadPreview(for: newValue) }
+                    }
+                    if let activePair = pairs.first(where: { $0.name == selectedPair }),
+                       !activePair.backupDir.contains("{date}") {
+                        Label(
+                            "Dieser Datenweg nutzt aktuell keinen {date}-Platzhalter in der Versionsablage.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    }
+                    Button {
+                        Task { await loadPreview(for: selectedPair) }
+                    } label: {
+                        HStack {
+                            if loading { ProgressView() }
+                            Label("Aufbewahrungs-Vorschau laden", systemImage: "magnifyingglass")
+                        }
+                    }
+                    .disabled(loading || selectedPair.isEmpty)
+                }
+            }
+
+            if let preview {
+                if preview.skipped == true {
+                    Section("Status") {
+                        Text("Versions-Aufbewahrung ist für diesen Datenweg nicht aktiv (\(preview.reason ?? "deaktiviert")).")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    ForEach(preview.roots) { root in
+                        Section(root.root) {
+                            LabeledContent("Gefundene Stände", value: "\(root.total)")
+                            LabeledContent("Behalten", value: "\(root.keep.count)")
+                            LabeledContent("Zusammenführen", value: "\(root.merge.count)")
+                            LabeledContent("Ausdünnen (Löschen)", value: "\(root.purge.count)")
+                            if !root.purged.isEmpty {
+                                LabeledContent("Bereits entfernt", value: "\(root.purged.count)")
+                                    .foregroundStyle(.green)
+                            }
+                            if let err = root.error, !err.isEmpty {
+                                Text(err).font(.caption).foregroundStyle(.red)
+                            }
+                            ForEach(root.failed) { fail in
+                                Text(fail.error).font(.caption2).foregroundStyle(.red)
+                            }
+                        }
+                    }
+
+                    if !preview.warnings.isEmpty {
+                        Section("Hinweise") {
+                            ForEach(preview.warnings, id: \.self) { warning in
+                                Text(warning).font(.caption).foregroundStyle(.orange)
+                            }
+                        }
+                    }
+
+                    let totalPurge = preview.roots.reduce(0) { $0 + $1.purge.count + $1.merge.count }
+                    if totalPurge > 0 {
+                        Section {
+                            Button(role: .destructive) {
+                                currentPassword = ""
+                                showPruneAuth = true
+                            } label: {
+                                HStack {
+                                    if working { ProgressView() }
+                                    Label("Abgelaufene Generationen jetzt bereinigen", systemImage: "trash")
+                                }
+                            }
+                            .disabled(working)
+                        }
+                    }
+                }
+            }
+
+            if let feedback {
+                Section { Text(feedback).font(.footnote).foregroundStyle(.green) }
+            }
+            if let errorMessage {
+                Section { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
+            }
+        }
+        .navigationTitle("Versionsverwaltung")
+        .task {
+            if selectedPair.isEmpty {
+                selectedPair = pairs.first(where: { $0.backupDir.contains("{date}") })?.name
+                    ?? pairs.first?.name
+                    ?? ""
+            }
+            if !selectedPair.isEmpty {
+                await loadPreview(for: selectedPair)
+            }
+        }
+        .alert("Versionsablage bereinigen", isPresented: $showPruneAuth) {
+            SecureField("Aktuelles Serverpasswort", text: $currentPassword)
+            Button("Abbrechen", role: .cancel) { currentPassword = "" }
+            Button("Bereinigen", role: .destructive) {
+                let pwd = currentPassword
+                currentPassword = ""
+                Task { await executePrune(password: pwd) }
+            }
+            .disabled(currentPassword.isEmpty)
+        } message: {
+            Text("Abgelaufene Stände für „\(selectedPair)“ unwiderruflich gemäß GFS-Regeln entfernen?")
+        }
+    }
+
+    private func loadPreview(for pair: String) async {
+        guard !pair.isEmpty, let client = model.client else { return }
+        loading = true
+        errorMessage = nil
+        defer { loading = false }
+        do {
+            preview = try await client.previewPairVersions(pair: pair)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func executePrune(password: String) async {
+        guard !selectedPair.isEmpty, let client = model.client else { return }
+        working = true
+        feedback = nil
+        errorMessage = nil
+        defer { working = false }
+        do {
+            let outcome = try await client.prunePairVersions(pair: selectedPair, password: password)
+            preview = outcome
+            let purgedCount = outcome.roots.reduce(0) { $0 + $1.purged.count }
+            let mergedCount = outcome.roots.reduce(0) { $0 + $1.merged.count }
+            feedback = "Bereinigung abgeschlossen (\(purgedCount) entfernt, \(mergedCount) zusammengeführt)."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - 9. Bandbreiten-Heatmap & Zeitfenster-Vorschläge
+
+struct BandwidthHeatmapView: View {
+    @EnvironmentObject var model: AppModel
+    @State private var selectedDays = 90
+    @State private var heatmap: BandwidthHeatmapResponse?
+    @State private var suggestions: BandwidthSuggestionsResponse?
+    @State private var loading = false
+    @State private var errorMessage: String?
+
+    private let weekdayLabels = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+    var body: some View {
+        List {
+            Section {
+                Picker("Zeitraum", selection: $selectedDays) {
+                    Text("30 Tage").tag(30)
+                    Text("90 Tage").tag(90)
+                    Text("180 Tage").tag(180)
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: selectedDays) { _, _ in
+                    Task { await reload() }
+                }
+            }
+
+            if let suggestions, !suggestions.windows.isEmpty {
+                Section("Schnellste Zeitfenster") {
+                    ForEach(suggestions.windows.prefix(5)) { window in
+                        HStack {
+                            Label(window.label, systemImage: "bolt.horizontal.circle.fill")
+                                .font(.subheadline.weight(.medium))
+                            Spacer()
+                            Text("\(AppFormat.bytes(Int64(window.score)))/s")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.green)
+                        }
+                    }
+                }
+            }
+
+            if let heatmap {
+                Section("Durchsatz nach Wochentag (\(heatmap.timezone))") {
+                    let totalSamples = heatmap.samples.flatMap { $0 }.reduce(0, +)
+                    if totalSamples == 0 {
+                        Text("Noch keine ausreichenden Laufdaten für die Bandbreiten-Auswertung vorhanden.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(weekdayLabels.enumerated()), id: \.offset) { index, day in
+                            let rowCells = index < heatmap.cells.count ? heatmap.cells[index] : []
+                            let rowSamples = index < heatmap.samples.count ? heatmap.samples[index] : []
+                            let validSpeeds = rowCells.compactMap { $0 }
+                            let avgSpeed = validSpeeds.isEmpty ? nil : validSpeeds.reduce(0, +) / Double(validSpeeds.count)
+                            let daySamples = rowSamples.reduce(0, +)
+                            HStack {
+                                Text(day)
+                                    .font(.subheadline.weight(.semibold))
+                                    .frame(width: 34, alignment: .leading)
+                                if let avgSpeed {
+                                    Text("Ø \(AppFormat.bytes(Int64(avgSpeed)))/s")
+                                        .font(.caption.monospacedDigit())
+                                } else {
+                                    Text("Keine Messpunkte")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text("\(daySamples) Läufe")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            } else if loading {
+                Section {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Bandbreitendaten werden ausgewertet …").foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if let suggestions, !suggestions.schedules.isEmpty {
+                Section("Zeitplan-Empfehlungen") {
+                    ForEach(suggestions.schedules) { proposal in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(proposal.name).font(.subheadline.weight(.semibold))
+                            HStack(spacing: 6) {
+                                Text(proposal.currentSchedule)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "arrow.right")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text(proposal.proposedSchedule)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.green)
+                            }
+                            Text(proposal.reason)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+
+            if let errorMessage {
+                Section {
+                    Text(errorMessage).font(.footnote).foregroundStyle(.red)
+                }
+            }
+        }
+        .navigationTitle("Bandbreiten-Heatmap")
+        .task { await reload() }
+        .refreshable { await reload() }
+    }
+
+    private func reload() async {
+        guard let client = model.client else { return }
+        loading = true
+        errorMessage = nil
+        defer { loading = false }
+        do {
+            async let heatmapTask = client.getBandwidthHeatmap(days: selectedDays)
+            async let suggestionsTask = client.getBandwidthSuggestions()
+            let (freshHeatmap, freshSuggestions) = try await (heatmapTask, suggestionsTask)
+            heatmap = freshHeatmap
+            suggestions = freshSuggestions
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 }

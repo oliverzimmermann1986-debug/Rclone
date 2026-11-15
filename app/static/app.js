@@ -133,6 +133,7 @@ window.app = function app() {
       selectedPaths: [], diff: null, staging: [], quarantine: [], error: '',
       maxTotalMb: 512, timeTravel: false,
       searchQuery: '', searchResults: [], searchLoading: false,
+      vault: { loading: false, items: [], filterPair: '', error: '' },
       handover: { password: '', passphrase: '', repeat: '', includePaths: false, downloaded: false },
     },
     storageComposition: { loading: {}, data: {}, errors: {} },

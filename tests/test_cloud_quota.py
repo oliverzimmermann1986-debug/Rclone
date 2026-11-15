@@ -366,3 +366,42 @@ def test_quota_report_cache_and_api_endpoint(tmp_path: Path, monkeypatch):
     assert len(body["remotes"]) == 1
     assert body["remotes"][0]["remote"] == "b2"
     assert body["budget"]["monthly_egress_gb"] == 20
+
+
+def test_quota_report_parallelizes_multiple_remotes_preserving_order(tmp_path: Path):
+    import threading
+
+    cloud_quota.clear_quota_cache()
+    db = Database(tmp_path / "parallel_quota.db")
+    config = {
+        "backup": {
+            "pairs": [
+                {"name": "A", "local": "/srv/a", "remote": "b2:a"},
+                {"name": "B", "local": "/srv/b", "remote": "gdrive:b"},
+                {"name": "C", "local": "/srv/c", "remote": "pcloud:c"},
+            ]
+        }
+    }
+    barrier = threading.Barrier(3, timeout=3.0)
+
+    def concurrent_run(cmd, **_kwargs):
+        barrier.wait()
+        remote = cmd[-1].rstrip(":")
+        sizes = {"b2": 10 * GIB, "gdrive": 20 * GIB, "pcloud": 30 * GIB}
+        free = sizes[remote]
+        return _FakeCompleted(
+            stdout=json.dumps(
+                {"total": 100 * GIB, "used": 100 * GIB - free, "free": free}
+            ),
+            returncode=0,
+        )
+
+    report = cloud_quota.quota_report(
+        config, db, refresh=True, run=concurrent_run, now=NOW
+    )
+    assert [item["remote"] for item in report["remotes"]] == ["b2", "gdrive", "pcloud"]
+    assert [item["free_bytes"] for item in report["remotes"]] == [
+        10 * GIB,
+        20 * GIB,
+        30 * GIB,
+    ]

@@ -185,3 +185,17 @@ def test_support_bundle_is_redacted_and_contains_diagnostics(tmp_path, monkeypat
     assert diagnostics["recent_jobs"][0]["id"] == job_id
     assert diagnostics["log_inventory"]["logs"][0]["path"] == "job.log"
     assert "not bundled" not in response.body.decode("latin-1", errors="ignore")
+
+
+def test_web_recovery_exposes_device_vault_library_controls():
+    index_html = (
+        Path(__file__).resolve().parents[1] / "app" / "static" / "index.html"
+    ).read_text(encoding="utf-8")
+    app_recovery = (
+        Path(__file__).resolve().parents[1] / "app" / "static" / "app-recovery.js"
+    ).read_text(encoding="utf-8")
+    assert 'id="vault-library-heading"' in index_html
+    assert "loadVaultLibrary()" in index_html
+    assert "downloadVaultItem(" in index_html
+    assert "removeVaultLocalCopy(" in index_html
+    assert "/api/vault/library" in app_recovery
