@@ -140,13 +140,19 @@ struct RemoteSetupView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var client: (any APIClientProtocol)?
     @State private var providers: [RemoteProvider] = []
+    @State private var icloudRemotes: [ExistingICloudRemote] = []
     @State private var name = "gdrive"
     @State private var provider = "drive"
+    @State private var icloudService = "drive"
+    @State private var appleId = ""
+    @State private var applePassword = ""
+    @State private var reconnect = false
     @State private var session: RemoteSetupSession?
     @State private var answer = ""
     @State private var busy = false
     @State private var errorMessage: String?
     @State private var savedName: String?
+    @State private var savedReconnected = false
     @State private var safariAuthItem: SafariAuthItem?
     @State private var loopbackServer = LocalOAuthLoopbackServer()
 
@@ -154,9 +160,13 @@ struct RemoteSetupView: View {
         NavigationStack {
             Form {
                 if let savedName {
-                    Section("Remote angelegt") {
+                    Section(savedReconnected ? "iCloud-Anmeldung erneuert" : "Remote angelegt") {
                         Label(savedName, systemImage: "checkmark.circle")
-                        Text("Der Speicher ist jetzt in der Ordnerauswahl verfügbar. Dort kannst du die Erreichbarkeit prüfen.")
+                        Text(
+                            savedReconnected
+                                ? "Das neue Apple-2FA-Sitzungstoken wurde gespeichert. Bestehende Datenwege laufen unverändert weiter."
+                                : "Der Speicher ist jetzt in der Ordnerauswahl verfügbar. Dort kannst du die Erreichbarkeit prüfen."
+                        )
                         Button("Fertig") { dismiss() }
                     }
                 } else if let session {
@@ -186,6 +196,30 @@ struct RemoteSetupView: View {
                                         Text("\(example.value) · \(example.help)").tag(example.value)
                                     }
                                 }
+                            } else if Self.isTwoFACodeOption(session.option) {
+                                TextField("6-stelliger Apple-Code (z. B. 123456)", text: $answer)
+                                    .keyboardType(.numberPad)
+                                    .textContentType(.oneTimeCode)
+                                    .font(.title3.monospacedDigit())
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+
+                                if session.option.name == "config_2fa" {
+                                    Button {
+                                        answer = "sms"
+                                        Task { await submit() }
+                                    } label: {
+                                        Label("Kein Apple-Gerät griffbereit? Code per SMS senden", systemImage: "message")
+                                    }
+                                }
+                            } else if session.option.secret && (session.option.authorizeCommand ?? "").isEmpty && session.option.name != "config_token" {
+                                SecureField(
+                                    session.option.defaultValue.isEmpty ? "Passwort" : session.option.defaultValue,
+                                    text: $answer
+                                )
+                                .textContentType(.password)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
                             } else {
                                 TextField(
                                     !(session.option.authorizeCommand ?? "").isEmpty
@@ -217,6 +251,7 @@ struct RemoteSetupView: View {
                     Section("Schnellwahl") {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
+                                presetButton(title: "Apple iCloud", providerName: "iclouddrive", defaultRemote: "icloud")
                                 presetButton(title: "Google Drive", providerName: "drive", defaultRemote: "gdrive")
                                 presetButton(title: "pCloud", providerName: "pcloud", defaultRemote: "pcloud")
                                 presetButton(title: "OneDrive", providerName: "onedrive", defaultRemote: "onedrive")
@@ -236,6 +271,56 @@ struct RemoteSetupView: View {
                             Label("Google-Drive-Express: Öffnet direkt die Google-Anmeldung und übernimmt das Konto automatisch.", systemImage: "checkmark.seal.fill")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        }
+                    }
+                    if provider == "iclouddrive" {
+                        Section("Apple iCloud Schnellstart") {
+                            Label("Wichtig: Reguläres Apple-Account-Passwort eingeben (kein App-Passwort!). Danach erscheint der 6-stellige Code direkt auf diesem iPhone.", systemImage: "icloud.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            if !icloudRemotes.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        ForEach(icloudRemotes) { item in
+                                            Button("Token erneuern: \(item.name)") {
+                                                reconnect = true
+                                                name = item.name
+                                                icloudService = item.service == "photos" ? "photos" : "drive"
+                                                appleId = item.appleId
+                                                errorMessage = nil
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .tint(reconnect && name == item.name ? .accentColor : .secondary)
+                                        }
+                                    }
+                                    .padding(.vertical, 2)
+                                }
+                            }
+
+                            Picker("iCloud-Dienst", selection: $icloudService) {
+                                Text("iCloud Drive (Backups & Ordner)").tag("drive")
+                                Text("iCloud Fotos (Mediathek)").tag("photos")
+                            }
+                            .onChange(of: icloudService) { _, newValue in
+                                let trimmed = name.trimmingCharacters(in: .whitespaces)
+                                if !reconnect && ["", "icloud", "icloud-fotos"].contains(trimmed) {
+                                    name = newValue == "photos" ? "icloud-fotos" : "icloud"
+                                }
+                            }
+
+                            TextField("Apple-ID (E-Mail)", text: $appleId)
+                                .keyboardType(.emailAddress)
+                                .textContentType(.username)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+
+                            SecureField("Apple-Account-Passwort (regulär)", text: $applePassword)
+                                .textContentType(.password)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+
+                            Toggle("Bestehendes iCloud-Remote erneuern (30-Tage-Token)", isOn: $reconnect)
                         }
                     }
                 }
@@ -266,6 +351,7 @@ struct RemoteSetupView: View {
                 loopbackServer.stop()
                 safariAuthItem = nil
                 answer = ""
+                applePassword = ""
                 if let id = session?.id, let client { Task { try? await client.cancelRemoteSetup(id: id) } }
             }
         }
@@ -274,14 +360,27 @@ struct RemoteSetupView: View {
     private var primaryButtonTitle: String {
         if session?.ready == true { return "Remote speichern" }
         if session == nil && provider == "drive" { return "Weiter zur Google-Anmeldung" }
+        if session == nil && provider == "iclouddrive" {
+            if reconnect { return "iCloud-Token jetzt erneuern" }
+            if !appleId.trimmingCharacters(in: .whitespaces).isEmpty && !applePassword.isEmpty {
+                return "Weiter zum 6-stelligen Apple-Code"
+            }
+            return "Weiter zur iCloud-Anmeldung"
+        }
         if session != nil { return "Fertigstellen & Speichern" }
         return "Weiter"
+    }
+
+    private static func isTwoFACodeOption(_ option: RemoteSetupOption) -> Bool {
+        option.inputMode == "numeric" || option.name == "config_2fa" || option.name == "config_2fa_sms"
     }
 
     private func presetButton(title: String, providerName: String, defaultRemote: String) -> some View {
         Button(title) {
             provider = providerName
-            if name.trimmingCharacters(in: .whitespaces).isEmpty || ["gdrive", "pcloud", "onedrive", "nextcloud"].contains(name) {
+            if providerName != "iclouddrive" { reconnect = false }
+            let trimmed = name.trimmingCharacters(in: .whitespaces)
+            if !reconnect && (trimmed.isEmpty || ["gdrive", "icloud", "icloud-fotos", "pcloud", "onedrive", "nextcloud"].contains(trimmed)) {
                 name = defaultRemote
             }
         }
@@ -333,7 +432,12 @@ struct RemoteSetupView: View {
         guard let client else { errorMessage = APIError.unauthenticated.localizedDescription; return }
         busy = true
         defer { busy = false }
-        do { providers = try await client.getRemoteProviders().providers; errorMessage = nil }
+        do {
+            let response = try await client.getRemoteProviders()
+            providers = response.providers
+            icloudRemotes = response.icloudRemotes
+            errorMessage = nil
+        }
         catch { errorMessage = error.localizedDescription }
     }
 
@@ -345,7 +449,9 @@ struct RemoteSetupView: View {
             if let session {
                 if session.ready {
                     loopbackServer.stop()
-                    savedName = try await client.saveRemoteSetup(id: session.id).name
+                    let saved = try await client.saveRemoteSetup(id: session.id)
+                    savedReconnected = saved.reconnected == true
+                    savedName = saved.name
                     self.session = nil
                 } else {
                     let updated = try await client.answerRemoteSetup(
@@ -355,7 +461,9 @@ struct RemoteSetupView: View {
                     )
                     if updated.ready {
                         loopbackServer.stop()
-                        savedName = try await client.saveRemoteSetup(id: updated.id).name
+                        let saved = try await client.saveRemoteSetup(id: updated.id)
+                        savedReconnected = saved.reconnected == true
+                        savedName = saved.name
                         self.session = nil
                     } else {
                         self.session = updated
@@ -363,7 +471,27 @@ struct RemoteSetupView: View {
                     }
                 }
             } else {
-                let created = try await client.startRemoteSetup(name: name.trimmingCharacters(in: .whitespaces), provider: provider)
+                let trimmedName = name.trimmingCharacters(in: .whitespaces)
+                let request: RemoteSetupStart
+                if provider == "iclouddrive" {
+                    request = RemoteSetupStart(
+                        name: trimmedName,
+                        provider: provider,
+                        express: true,
+                        icloudService: icloudService,
+                        appleId: appleId.trimmingCharacters(in: .whitespaces),
+                        applePassword: applePassword.isEmpty ? nil : applePassword,
+                        reconnect: reconnect
+                    )
+                } else {
+                    request = RemoteSetupStart(
+                        name: trimmedName,
+                        provider: provider,
+                        express: provider == "drive"
+                    )
+                }
+                let created = try await client.startRemoteSetup(request)
+                applePassword = ""
                 session = created
                 startAutomaticBrowserAuthIfNeeded(for: created)
             }

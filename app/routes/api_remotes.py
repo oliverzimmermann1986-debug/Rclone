@@ -27,7 +27,12 @@ from pydantic import BaseModel, Field, SecretStr
 from ..auth import SESSION_COOKIE, require_auth
 from ..config_store import get_config
 from ..db import get_db
-from ..rclone_args import rclone_subprocess_env
+from ..rclone_args import (
+    DANGEROUS_RCLONE_CONFIG_KEYS,
+    assert_safe_rclone_config,
+    rclone_subprocess_env,
+    resolve_rclone_config_path,
+)
 from ..security import require_csrf
 
 router = APIRouter(
@@ -46,6 +51,43 @@ _ALLOWED_DRIVE_SCOPES = {
     "drive.readonly",
     "drive.metadata.readonly",
     "drive.appfolder",
+}
+_ALLOWED_ICLOUD_SERVICES = {"drive", "photos"}
+_TWO_FA_DIGIT_RE = re.compile(r"^\d{6,8}$")
+
+_PROVIDER_DESCRIPTIONS_DE: dict[str, str] = {
+    "iclouddrive": "Apple iCloud (iCloud Drive & Fotos)",
+}
+
+_PROVIDER_OPTION_HINTS_DE: dict[tuple[str, str], tuple[str, str]] = {
+    ("iclouddrive", "service"): (
+        "iCloud-Dienst auswählen",
+        "„drive“ bindet iCloud Drive für Backups & Ordner ein (Lesen/Schreiben). „photos“ bindet deine Apple-iCloud-Fotos-Mediathek ein.",
+    ),
+    ("iclouddrive", "apple_id"): (
+        "Apple-ID (E-Mail-Adresse)",
+        "Deine reguläre Apple-Account-E-Mail-Adresse (z. B. name@icloud.com).",
+    ),
+    ("iclouddrive", "password"): (
+        "Apple-Account-Passwort (reguläres Passwort, kein App-Passwort!)",
+        "Wichtig: Apple verlangt für iCloud Drive & Fotos dein normales Apple-Account-Passwort zusammen mit dem 6-stelligen 2FA-Code – kein anwendungsspezifisches Passwort.",
+    ),
+    ("iclouddrive", "config_2fa"): (
+        "6-stelliger Apple-2FA-Bestätigungscode",
+        "Tippe auf deinem iPhone, iPad oder Mac bei der Apple-Anmeldeabfrage auf „Erlauben“ und gib den 6-stelligen Code ein (Leerzeichen werden automatisch entfernt). Kein Apple-Gerät zur Hand? Klicke auf „Code per SMS anfordern“ oder gib „sms“ ein.",
+    ),
+    ("iclouddrive", "config_2fa_phone"): (
+        "Telefonnummer für SMS-Bestätigungscode wählen",
+        "Wähle die hinterlegte Telefonnummer aus, an die Apple den 6-stelligen SMS-Code senden soll.",
+    ),
+    ("iclouddrive", "config_2fa_sms"): (
+        "6-stelliger SMS-Bestätigungscode",
+        "Gib den 6-stelligen Bestätigungscode ein, den Apple per SMS gesendet hat.",
+    ),
+    ("iclouddrive", "client_id"): (
+        "iCloud API Client-ID (Standard beibehalten)",
+        "Leer lassen, um die integrierte Standard-Kennung von rclone zu verwenden.",
+    ),
 }
 
 _OPTION_HINTS_DE: dict[str, tuple[str, str]] = {
@@ -109,6 +151,10 @@ class StartRemote(BaseModel):
     client_secret: SecretStr | None = None
     root_folder_id: str = ""
     team_drive: bool = False
+    icloud_service: str = "drive"
+    apple_id: str = Field(default="", max_length=320)
+    apple_password: SecretStr | None = None
+    reconnect: bool = False
 
 
 class RemoteAnswer(BaseModel):
@@ -138,6 +184,7 @@ class Setup:
     error: bool = False
     timer: threading.Timer | None = None
     express: bool = False
+    reconnect: bool = False
     auto_answers: dict[str, str] = field(default_factory=dict)
     auth_proc: subprocess.Popen[str] | None = None
     auth_output: list[str] = field(default_factory=list)
@@ -377,6 +424,17 @@ def _run(args: list[str], payload: dict | None = None) -> Any:
             timeout=60,
         )
         if result.returncode:
+            combined_err = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+            if "incorrect username or password" in combined_err:
+                raise HTTPException(
+                    400,
+                    "Apple-Anmeldung fehlgeschlagen: Apple-ID oder Passwort nicht akzeptiert. Wichtig: Für iCloud wird das reguläre Apple-Account-Passwort benötigt (kein anwendungsspezifisches Passwort).",
+                )
+            if "503 service temporarily unavailable" in combined_err:
+                raise HTTPException(
+                    502,
+                    "Apples Anmeldedienst antwortet vorübergehend mit 503. Bitte in wenigen Sekunden erneut versuchen.",
+                )
             raise HTTPException(
                 502,
                 "rclone konnte den Einrichtungsschritt nicht abschließen. Bitte Angaben prüfen.",
@@ -434,7 +492,10 @@ def _view(key: str, setup: Setup) -> dict:
     help_text = str(option.get("Help", "") or "")
     url_match = _AUTH_URL_RE.search(help_text)
     cmd_match = _AUTH_CMD_RE.search(help_text)
-    label_de, hint_de = _OPTION_HINTS_DE.get(opt_name, ("", ""))
+    label_de, hint_de = _PROVIDER_OPTION_HINTS_DE.get(
+        (setup.provider, opt_name), _OPTION_HINTS_DE.get(opt_name, ("", ""))
+    )
+    is_two_fa_code = opt_name in {"config_2fa", "config_2fa_sms"}
     raw_auth_url = url_match.group(0).rstrip(".,)") if url_match else ""
     if "rclone.org" in raw_auth_url:
         raw_auth_url = ""
@@ -455,7 +516,10 @@ def _view(key: str, setup: Setup) -> dict:
             "auth_url": (setup.direct_auth_url or raw_auth_url) or None,
             "direct_auth_url": setup.direct_auth_url or None,
             "authorize_command": cmd_match.group(0).strip() if cmd_match else None,
-            "secret": bool(option.get("IsPassword")) or "token" in opt_name.lower(),
+            "input_mode": "numeric" if is_two_fa_code else None,
+            "secret": False
+            if is_two_fa_code
+            else (bool(option.get("IsPassword")) or "token" in opt_name.lower()),
             "required": bool(option.get("Required")),
             "default": ""
             if option.get("IsPassword") or "token" in opt_name.lower()
@@ -488,6 +552,14 @@ def _advance(setup: Setup, result: dict) -> None:
             auto_val: str | None = "false"
         elif setup.express and opt_name in setup.auto_answers:
             auto_val = setup.auto_answers.pop(opt_name)
+            if (
+                auto_val
+                and option.get("IsPassword")
+                and str(result.get("State") or "").startswith("*all-set,")
+            ):
+                auto_val = _rc("core/obscure", {"clear": auto_val}, setup.config)[
+                    "obscured"
+                ]
         else:
             break
         result = _rc(
@@ -519,23 +591,160 @@ def _advance(setup: Setup, result: dict) -> None:
         _stop_browser_auth_helper(setup)
 
 
+def _provider_items() -> list[dict[str, str]]:
+    data = _rc("config/providers")
+    preferred = ["drive", "iclouddrive", "pcloud", "webdav", "onedrive"]
+    return sorted(
+        [
+            {
+                "name": p["Name"],
+                "description": _PROVIDER_DESCRIPTIONS_DE.get(
+                    p["Name"], p.get("Description", p["Name"])
+                ),
+            }
+            for p in data.get("providers", [])
+        ],
+        key=lambda p: (
+            preferred.index(p["name"]) if p["name"] in preferred else len(preferred),
+            p["description"].casefold(),
+        ),
+    )
+
+
+def _existing_icloud_remotes() -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    try:
+        names = _rc("config/listremotes").get("remotes", [])
+        for raw_name in names:
+            clean = str(raw_name).rstrip(":").strip()
+            if not clean:
+                continue
+            cfg = _rc("config/get", {"name": clean})
+            if isinstance(cfg, dict) and cfg.get("type") == "iclouddrive":
+                items.append(
+                    {
+                        "name": clean,
+                        "service": str(cfg.get("service") or "drive"),
+                        "apple_id": str(cfg.get("apple_id") or ""),
+                    }
+                )
+    except Exception:
+        return []
+    return items
+
+
+def _resolve_live_rclone_conf_path() -> Path:
+    env_cfg = os.environ.get("RCLONE_CONFIG", "").strip()
+    if env_cfg:
+        return Path(env_cfg).expanduser()
+    try:
+        rc_cfg = str(_rc("config/paths").get("config") or "").strip()
+        if rc_cfg:
+            return Path(rc_cfg).expanduser()
+    except Exception:
+        pass
+    resolved = resolve_rclone_config_path()
+    if resolved is not None:
+        return resolved
+    return Path.home() / ".config" / "rclone" / "rclone.conf"
+
+
+def _persist_remote_section_direct(
+    name: str,
+    provider: str,
+    parameters: dict[str, Any],
+    *,
+    allow_replace: bool = False,
+) -> None:
+    """Schreibt ein bereits verifiziertes Remote (z. B. iCloud mit 2FA-Trust-Token) atomar in rclone.conf, ohne erneut eine 2FA-Anmeldung auszulösen."""
+    if not _NAME_RE.fullmatch(name):
+        raise HTTPException(400, "Ungültiger Remote-Name")
+    clean_entries: list[tuple[str, str]] = [("type", provider)]
+    for raw_key, raw_val in parameters.items():
+        k = str(raw_key or "").strip()
+        if not k or k in {"type", "config_refresh_token", "config_is_local"}:
+            continue
+        k_lower = k.lower()
+        if (
+            k_lower in DANGEROUS_RCLONE_CONFIG_KEYS
+            or k_lower.endswith("_command")
+            or any(ch in k for ch in ("\r", "\n", "\x00", "=", "[", "]"))
+        ):
+            raise HTTPException(400, f"Unzulässiger Konfigurationsschlüssel: {k}")
+        if raw_val is None:
+            continue
+        v = str(raw_val)
+        if k == "_auth_session" and not v.strip():
+            continue
+        if any(ch in v for ch in ("\r", "\n", "\x00")):
+            raise HTTPException(400, f"Unzulässiger Konfigurationswert in Feld {k}")
+        clean_entries.append((k, v))
+
+    live_path = _resolve_live_rclone_conf_path()
+    live_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if live_path.exists() and live_path.is_symlink():
+        raise HTTPException(400, "rclone.conf darf kein Symlink sein")
+
+    existing_text = live_path.read_text(encoding="utf-8") if live_path.is_file() else ""
+    existing_lines = existing_text.splitlines()
+    new_section_lines = [f"[{name}]"] + [f"{k} = {v}" for k, v in clean_entries]
+
+    out_lines: list[str] = []
+    in_target = False
+    replaced = False
+    for line in existing_lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            sec_name = stripped[1:-1].strip()
+            if sec_name.casefold() == name.casefold():
+                if not allow_replace:
+                    raise HTTPException(
+                        409, "Ein Remote mit diesem Namen existiert inzwischen bereits"
+                    )
+                if not replaced:
+                    if out_lines and out_lines[-1].strip() != "":
+                        out_lines.append("")
+                    out_lines.extend(new_section_lines)
+                    replaced = True
+                in_target = True
+                continue
+            if in_target:
+                in_target = False
+                if out_lines and out_lines[-1].strip() != "":
+                    out_lines.append("")
+        if not in_target:
+            out_lines.append(line)
+
+    if not replaced:
+        if out_lines and out_lines[-1].strip() != "":
+            out_lines.append("")
+        out_lines.extend(new_section_lines)
+
+    rendered = "\n".join(out_lines).rstrip("\n") + "\n"
+    tmp_path = live_path.parent / f".rclone.conf.tmp.{secrets.token_hex(8)}"
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp_path, flags, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(rendered.encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+        assert_safe_rclone_config(tmp_path)
+        os.replace(tmp_path, live_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 @router.get("/providers")
 def providers() -> dict:
-    data = _rc("config/providers")
-    preferred = ["drive", "pcloud", "webdav", "onedrive"]
     return {
-        "providers": sorted(
-            [
-                {"name": p["Name"], "description": p.get("Description", p["Name"])}
-                for p in data.get("providers", [])
-            ],
-            key=lambda p: (
-                preferred.index(p["name"])
-                if p["name"] in preferred
-                else len(preferred),
-                p["description"].casefold(),
-            ),
-        )
+        "providers": _provider_items(),
+        "icloud_remotes": _existing_icloud_remotes(),
     }
 
 
@@ -545,16 +754,36 @@ def start(payload: StartRemote, request: Request) -> dict:
         raise HTTPException(
             400, "Remote-Name: 2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche"
         )
-    if payload.provider not in {p["name"] for p in providers()["providers"]}:
+    if payload.provider not in {p["name"] for p in _provider_items()}:
         raise HTTPException(400, "Unbekannter Remote-Anbieter")
     drive_scope = payload.scope.strip() or "drive"
     if payload.provider == "drive" and drive_scope not in _ALLOWED_DRIVE_SCOPES:
         raise HTTPException(400, "Ungültiger Google-Drive-Zugriffsumfang (Scope)")
+    icloud_service = payload.icloud_service.strip().lower() or "drive"
+    if (
+        payload.provider == "iclouddrive"
+        and icloud_service not in _ALLOWED_ICLOUD_SERVICES
+    ):
+        raise HTTPException(
+            400, "Ungültiger iCloud-Dienst (erlaubt: „drive“ oder „photos“)"
+        )
     with _lock:
         _expire()
         existing = _rc("config/listremotes").get("remotes", [])
-        if payload.name.casefold() in {n.rstrip(":").casefold() for n in existing}:
-            raise HTTPException(409, "Ein Remote mit diesem Namen existiert bereits")
+        existing_map = {n.rstrip(":").casefold(): n.rstrip(":") for n in existing}
+        matched_existing = existing_map.get(payload.name.casefold())
+        existing_cfg: dict[str, Any] = {}
+        if matched_existing:
+            if not payload.reconnect or payload.provider != "iclouddrive":
+                raise HTTPException(
+                    409, "Ein Remote mit diesem Namen existiert bereits"
+                )
+            existing_cfg = _rc("config/get", {"name": matched_existing})
+            if existing_cfg.get("type") != "iclouddrive":
+                raise HTTPException(
+                    409,
+                    "Ein Remote anderen Typs mit diesem Namen existiert bereits",
+                )
         if len(_setups) >= _MAX_SESSIONS:
             raise HTTPException(
                 429, "Zu viele offene Einrichtungen. Bitte eine Einrichtung schließen."
@@ -564,7 +793,7 @@ def start(payload: StartRemote, request: Request) -> dict:
         use_express = (
             payload.express
             if payload.express is not None
-            else (payload.provider == "drive")
+            else (payload.provider in {"drive", "iclouddrive"})
         )
         if use_express:
             auto_answers["config_fs_advanced"] = "false"
@@ -596,13 +825,37 @@ def start(payload: StartRemote, request: Request) -> dict:
                     initial_params["client_secret"] = client_secret
                 if root_folder_id:
                     initial_params["root_folder_id"] = root_folder_id
+            elif payload.provider == "iclouddrive":
+                resolved_service = (
+                    icloud_service
+                    if payload.icloud_service.strip()
+                    else str(existing_cfg.get("service") or "drive")
+                )
+                if resolved_service not in _ALLOWED_ICLOUD_SERVICES:
+                    resolved_service = "drive"
+                apple_id = (
+                    payload.apple_id.strip()
+                    or str(existing_cfg.get("apple_id") or "").strip()
+                )
+                apple_pw = (
+                    payload.apple_password.get_secret_value()
+                    if payload.apple_password
+                    else ""
+                )
+                auto_answers["service"] = resolved_service
+                auto_answers["client_id"] = ""
+                if apple_id:
+                    auto_answers["apple_id"] = apple_id
+                if apple_pw:
+                    auto_answers["password"] = apple_pw
 
         setup = Setup(
             _owner(request),
-            payload.name,
+            matched_existing or payload.name,
             payload.provider,
             tempfile.TemporaryDirectory(prefix="sicherpfad-remote-"),
             express=bool(use_express),
+            reconnect=bool(payload.reconnect and matched_existing),
             auto_answers=auto_answers,
         )
         key = secrets.token_urlsafe(32)
@@ -652,6 +905,17 @@ def answer(key: str, payload: RemoteAnswer, request: Request) -> dict:
         opt_name = str(setup.option.get("Name") or "")
         if "token" in opt_name.lower():
             value = _complete_browser_auth_if_needed(setup, value)
+        elif setup.provider == "iclouddrive" and opt_name in {
+            "config_2fa",
+            "config_2fa_sms",
+        }:
+            cleaned_code = value.strip()
+            if cleaned_code.lower() == "sms" and opt_name == "config_2fa":
+                value = "sms"
+            else:
+                compact_code = re.sub(r"[\s-]+", "", cleaned_code)
+                if _TWO_FA_DIGIT_RE.fullmatch(compact_code):
+                    value = compact_code
         if not value and setup.option.get("Required"):
             raise HTTPException(
                 400, "Bitte eine Angabe für dieses Pflichtfeld eingeben"
@@ -698,71 +962,86 @@ def save(key: str, request: Request) -> dict:
                 409, "Bitte zuerst alle Einrichtungsschritte abschließen"
             )
         existing = _rc("config/listremotes").get("remotes", [])
-        if setup.name.casefold() in {n.rstrip(":").casefold() for n in existing}:
+        existing_map = {n.rstrip(":").casefold(): n.rstrip(":") for n in existing}
+        if setup.name.casefold() in existing_map and not setup.reconnect:
             raise HTTPException(
                 409, "Ein Remote mit diesem Namen existiert inzwischen bereits"
             )
         parameters = _rc("config/get", {"name": setup.name}, setup.config)
         parameters.pop("type", None)
-        # The staged OAuth flow is already complete. Recreating the section must
-        # not prompt for another login or open a browser on the server.
-        parameters["config_refresh_token"] = "false"
-        parameters["config_is_local"] = "false"
-        result = _rc(
-            "config/create",
-            {
-                "name": setup.name,
-                "type": setup.provider,
-                "parameters": parameters,
-                "opt": {"nonInteractive": True, "noObscure": True},
-            },
-        )
-        post_answers = {
-            "config_is_local": "false",
-            "config_refresh_token": "false",
-            "config_change_team_drive": "true"
-            if parameters.get("team_drive")
-            else "false",
-            "config_fs_advanced": "false",
-            "config_advanced": "false",
-        }
-        for _ in range(8):
-            if not result.get("State") or result.get("Error"):
-                break
-            opt_name = str((result.get("Option") or {}).get("Name") or "")
-            if opt_name not in post_answers:
-                break
+        if setup.provider == "iclouddrive" or setup.reconnect:
+            _persist_remote_section_direct(
+                setup.name,
+                setup.provider,
+                parameters,
+                allow_replace=setup.reconnect,
+            )
+        else:
+            # The staged OAuth flow is already complete. Recreating the section must
+            # not prompt for another login or open a browser on the server.
+            parameters["config_refresh_token"] = "false"
+            parameters["config_is_local"] = "false"
             result = _rc(
-                "config/update",
+                "config/create",
                 {
                     "name": setup.name,
-                    "parameters": {},
-                    "opt": {
-                        "nonInteractive": True,
-                        "continue": True,
-                        "state": result["State"],
-                        "result": post_answers[opt_name],
-                    },
+                    "type": setup.provider,
+                    "parameters": parameters,
+                    "opt": {"nonInteractive": True, "noObscure": True},
                 },
             )
-        if result.get("State") or result.get("Error"):
-            # Only this newly created remote can be removed; existing ones are rejected above.
-            _rc("config/delete", {"name": setup.name})
-            raise HTTPException(
-                502,
-                "Die Anmeldung ist noch nicht vollständig. Bitte Einrichtung wiederholen.",
-            )
+            post_answers = {
+                "config_is_local": "false",
+                "config_refresh_token": "false",
+                "config_change_team_drive": "true"
+                if parameters.get("team_drive")
+                else "false",
+                "config_fs_advanced": "false",
+                "config_advanced": "false",
+            }
+            for _ in range(8):
+                if not result.get("State") or result.get("Error"):
+                    break
+                opt_name = str((result.get("Option") or {}).get("Name") or "")
+                if opt_name not in post_answers:
+                    break
+                result = _rc(
+                    "config/update",
+                    {
+                        "name": setup.name,
+                        "parameters": {},
+                        "opt": {
+                            "nonInteractive": True,
+                            "continue": True,
+                            "state": result["State"],
+                            "result": post_answers[opt_name],
+                        },
+                    },
+                )
+            if result.get("State") or result.get("Error"):
+                # Only this newly created remote can be removed; existing ones are rejected above.
+                _rc("config/delete", {"name": setup.name})
+                raise HTTPException(
+                    502,
+                    "Die Anmeldung ist noch nicht vollständig. Bitte Einrichtung wiederholen.",
+                )
         name = setup.name
+        reconnected = setup.reconnect
         try:
             get_db().audit_add(
-                "remote_created",
+                "remote_reconnected" if reconnected else "remote_created",
                 actor="web",
                 details={"name": name, "provider": setup.provider},
             )
         except Exception:
             pass
         _discard(key)
-        return {"ok": True, "name": name, "path": name + ":"}
+        return {
+            "ok": True,
+            "name": name,
+            "path": name + ":",
+            "reconnected": reconnected,
+        }
 
 
 @router.delete("/setup/{key}")

@@ -370,7 +370,7 @@
         <section x-show="page==='pairs'" x-cloak>
           <div class="page-heading">
             <div><h2>Datenwege verwalten</h2><p>Quelle, Ziel, Übertragungsart und Schutzregeln. Zeitpläne werden getrennt unter Jobs verwaltet.</p></div>
-            <div class="heading-actions"><button class="button secondary" @click="openRemoteSetup('drive')" :disabled="configLoading || !configLoaded">Google Drive / Remote einbinden</button><button class="button secondary" @click="openPairWizard()" :disabled="configLoading || !configLoaded">Assistent</button><button class="button secondary" @click="testRclone()" :disabled="configLoading || !configLoaded">Remotes testen</button><button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading || !configLoaded" x-text="configValidation.loading ? 'Prüfung…' : 'Konfiguration prüfen'"></button><button class="button secondary" @click="saveConfig()" :disabled="!configDirty || pending.save || configLoading" x-text="pending.save ? 'Speichert…' : 'Speichern'"></button><button class="button primary" @click="addPair()" :disabled="configLoading || !configLoaded">Sicheres Pair hinzufügen</button></div>
+            <div class="heading-actions"><button class="button secondary" @click="openRemoteSetup('iclouddrive')" :disabled="configLoading || !configLoaded">iCloud einbinden</button><button class="button secondary" @click="openRemoteSetup('drive')" :disabled="configLoading || !configLoaded">Google Drive / Remote einbinden</button><button class="button secondary" @click="openPairWizard()" :disabled="configLoading || !configLoaded">Assistent</button><button class="button secondary" @click="testRclone()" :disabled="configLoading || !configLoaded">Remotes testen</button><button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading || !configLoaded" x-text="configValidation.loading ? 'Prüfung…' : 'Konfiguration prüfen'"></button><button class="button secondary" @click="saveConfig()" :disabled="!configDirty || pending.save || configLoading" x-text="pending.save ? 'Speichert…' : 'Speichern'"></button><button class="button primary" @click="addPair()" :disabled="configLoading || !configLoaded">Sicheres Pair hinzufügen</button></div>
           </div>
 
           <article class="panel stack" x-show="pairWizard.open" x-cloak aria-labelledby="pair-wizard-heading">
@@ -397,6 +397,7 @@
                 <label class="field"><span>Sync-Richtung</span><select x-model="pairWizard.twoWay"><option :value="false">Einweg (Quelle → Ziel)</option><option :value="true">Bidirektional (Bi-Sync)</option></select></label>
               </div>
               <div class="button-row">
+                <button type="button" class="button secondary small" @click="openRemoteSetup('iclouddrive')">Apple iCloud verbinden</button>
                 <button type="button" class="button secondary small" @click="openRemoteSetup('drive')">Neues Google-Drive-Remote verbinden</button>
                 <button type="button" class="button secondary small" @click="openRemoteSetup()">Anderes Cloud-Remote einbinden</button>
               </div>
@@ -1424,6 +1425,7 @@
         <template x-if="!remoteSetup.session"><div class="stack">
           <div class="filter-presets" role="group" aria-label="Beliebte Cloud-Anbieter">
             <span>Schnellwahl:</span>
+            <button type="button" class="button secondary small" :class="remoteSetup.provider === 'iclouddrive' && 'active'" @click="selectRemotePreset('iclouddrive', 'icloud')">Apple iCloud</button>
             <button type="button" class="button secondary small" :class="remoteSetup.provider === 'drive' && 'active'" @click="selectRemotePreset('drive', 'gdrive')">Google Drive</button>
             <button type="button" class="button secondary small" :class="remoteSetup.provider === 'pcloud' && 'active'" @click="selectRemotePreset('pcloud', 'pcloud')">pCloud</button>
             <button type="button" class="button secondary small" :class="remoteSetup.provider === 'onedrive' && 'active'" @click="selectRemotePreset('onedrive', 'onedrive')">OneDrive</button>
@@ -1469,7 +1471,30 @@
             </div></details>
           </div>
 
-          <label class="check-row" x-show="remoteSetup.provider && remoteSetup.provider !== 'drive'"><input type="checkbox" x-model="remoteSetup.express"><span><strong>Erweiterte Anbieter-Fragen automatisch überspringen</strong><small>Verwendet die empfohlenen Standardwerte für erweiterte rclone-Parameter.</small></span></label>
+          <div class="stack" x-show="remoteSetup.provider === 'iclouddrive'">
+            <div class="alert info"><span class="alert-icon" aria-hidden="true">☁</span><div><strong>Apple-iCloud-Schnelleinrichtung (iCloud Drive &amp; iCloud Fotos)</strong><span>Wichtig: Verwende dein <strong>reguläres Apple-Account-Passwort</strong> (kein anwendungsspezifisches Passwort!). Im nächsten Schritt erscheint sofort der 6-stellige Bestätigungscode auf deinem iPhone, iPad oder Mac.</span></div></div>
+
+            <div class="filter-presets" x-show="remoteSetup.icloudRemotes.length" role="group" aria-label="Vorhandene iCloud-Remotes erneuern">
+              <span>30-Tage-Token erneuern:</span>
+              <template x-for="ic in remoteSetup.icloudRemotes" :key="ic.name">
+                <button type="button" class="button secondary small" :class="remoteSetup.reconnect && remoteSetup.name === ic.name && 'active'" @click="selectIcloudReconnect(ic)" x-text="ic.name + ' (' + (ic.service === 'photos' ? 'Fotos' : 'Drive') + ')'"></button>
+              </template>
+            </div>
+
+            <div class="form-grid two">
+              <label class="field"><span>iCloud-Dienst</span><select :value="remoteSetup.icloudService" @change="selectIcloudService($event.target.value)" :disabled="remoteSetup.busy">
+                <option value="drive">iCloud Drive · Backups &amp; Ordner (Lesen/Schreiben)</option>
+                <option value="photos">iCloud Fotos · Apple-Fotomediathek sichern</option>
+              </select></label>
+              <label class="field"><span>Apple-ID (E-Mail-Adresse)</span><input type="email" x-model="remoteSetup.appleId" placeholder="name@icloud.com" autocomplete="username" spellcheck="false" :disabled="remoteSetup.busy"><small>Optional schon hier eintragen, um direkt zum 6-stelligen 2FA-Code zu springen.</small></label>
+            </div>
+
+            <label class="field"><span>Apple-Account-Passwort · reguläres Passwort (kein App-Passwort)</span><input type="password" x-model="remoteSetup.applePassword" placeholder="Reguläres Apple-Passwort" autocomplete="current-password" :disabled="remoteSetup.busy"><small>Wird verschlüsselt übertragen und nur lokal im temporären Einrichtungsentwurf für die Apple-SRP-Anmeldung genutzt.</small></label>
+
+            <label class="check-row"><input type="checkbox" x-model="remoteSetup.reconnect"><span><strong>Bestehendes iCloud-Remote erneuern (2FA-Trust-Token auffrischen)</strong><small>Aktualisiert ein bereits eingerichtetes iCloud-Remote (Apples Sitzungs-Token läuft nach ca. 30 Tagen ab), ohne bestehende Datenwege zu ändern.</small></span></label>
+          </div>
+
+          <label class="check-row" x-show="remoteSetup.provider && !['drive', 'iclouddrive'].includes(remoteSetup.provider)"><input type="checkbox" x-model="remoteSetup.express"><span><strong>Erweiterte Anbieter-Fragen automatisch überspringen</strong><small>Verwendet die empfohlenen Standardwerte für erweiterte rclone-Parameter.</small></span></label>
         </div></template>
 
         <template x-if="remoteSetup.session && !remoteSetup.session.ready"><div class="stack">
@@ -1490,12 +1515,19 @@
               </div></details>
             </div>
           </div>
+          <div class="alert info" x-show="['config_2fa', 'config_2fa_sms'].includes(remoteSetup.session.option.name)">
+            <span class="alert-icon" aria-hidden="true">🔐</span>
+            <div><strong>Apple 2-Faktor-Bestätigung</strong><span>Tippe auf deinem iPhone, iPad oder Mac bei der Apple-Anmeldeabfrage auf <strong>Erlauben</strong> und gib den 6-stelligen Code unten ein.</span></div>
+          </div>
           <p class="remote-setup-help" x-show="remoteSetup.session.option.hint_de" x-text="remoteSetup.session.option.hint_de"></p>
           <p class="remote-setup-help" x-show="!remoteSetup.session.option.hint_de" x-text="remoteSetup.session.option.help"></p>
           <label class="field"><span x-text="remoteSetup.session.option.label_de || remoteSetup.session.option.name"></span>
             <template x-if="remoteSetup.session.option.exclusive && remoteSetup.session.option.examples.length"><select x-model="remoteSetup.answer" x-ref="remoteAnswer" :disabled="remoteSetup.busy"><option value="" x-text="remoteSetup.session.option.default ? 'Standard: ' + remoteSetup.session.option.default : 'Bitte auswählen'"></option><template x-for="example in remoteSetup.session.option.examples" :key="example.value"><option :value="example.value" x-text="example.value + ' · ' + example.help"></option></template></select></template>
-            <template x-if="!remoteSetup.session.option.exclusive || !remoteSetup.session.option.examples.length"><input x-ref="remoteAnswer" x-model="remoteSetup.answer" :type="remoteSetup.session.option.secret ? 'password' : 'text'" :placeholder="remoteSetup.session.option.authorize_command ? '2. Adresse aus Browser-Adresszeile http://127.0.0.1:53682/?code=… oder Token hier einfügen' : (remoteSetup.session.option.default || 'Antwort eingeben')" :required="remoteSetup.session.option.required && !remoteSetup.session.option.default" :disabled="remoteSetup.busy" autocomplete="off" spellcheck="false"></template>
+            <template x-if="!remoteSetup.session.option.exclusive || !remoteSetup.session.option.examples.length"><input x-ref="remoteAnswer" x-model="remoteSetup.answer" :type="remoteSetup.session.option.secret ? 'password' : 'text'" :inputmode="remoteSetup.session.option.input_mode || (['config_2fa', 'config_2fa_sms'].includes(remoteSetup.session.option.name) ? 'numeric' : null)" :placeholder="remoteSetup.session.option.authorize_command ? '2. Adresse aus Browser-Adresszeile http://127.0.0.1:53682/?code=… oder Token hier einfügen' : (['config_2fa', 'config_2fa_sms'].includes(remoteSetup.session.option.name) ? '6-stelliger Apple-Code · z. B. 123456' : (remoteSetup.session.option.default || 'Antwort eingeben'))" :required="remoteSetup.session.option.required && !remoteSetup.session.option.default" :disabled="remoteSetup.busy" :autocomplete="['config_2fa', 'config_2fa_sms'].includes(remoteSetup.session.option.name) ? 'one-time-code' : 'off'" spellcheck="false"></template>
           </label>
+          <div class="button-row" x-show="remoteSetup.session.option.name === 'config_2fa'">
+            <button type="button" class="button secondary small" @click="requestIcloudSmsCode()" :disabled="remoteSetup.busy">Kein Apple-Gerät griffbereit? Code per SMS anfordern</button>
+          </div>
           <p x-show="remoteSetup.session.option.default">Leer lassen, um den angezeigten Standard zu verwenden.</p>
           <div class="button-row" x-show="remoteSetup.session.option.auth_url && !remoteSetup.session.option.authorize_command"><a class="button secondary small" :href="remoteSetup.session.option.auth_url" target="_blank" rel="noopener noreferrer">Im Browser autorisieren</a></div>
         </div></template>
@@ -1503,7 +1535,7 @@
         <p class="inline-error" role="alert" x-show="remoteSetup.error" x-text="remoteSetup.error"></p>
         <p x-show="remoteSetup.busy" role="status">Einrichtung wird verarbeitet…</p>
       </div>
-      <div class="modal-footer"><button type="button" class="button secondary" @click="closeRemoteSetup()" :disabled="remoteSetup.busy">Abbrechen</button><button type="submit" class="button primary" :disabled="remoteSetup.busy || (!remoteSetup.session && !remoteSetup.providers.length)" x-text="remoteSetup.session?.ready ? 'Remote speichern' : (!remoteSetup.session && remoteSetup.provider === 'drive' && remoteSetup.driveMode === 'service_account' ? 'Google Drive sofort verbinden' : (!remoteSetup.session && remoteSetup.provider === 'drive' ? 'Weiter zur Google-Anmeldung' : (remoteSetup.session && remoteSetup.express ? 'Fertigstellen & Speichern' : 'Weiter')))"></button></div>
+      <div class="modal-footer"><button type="button" class="button secondary" @click="closeRemoteSetup()" :disabled="remoteSetup.busy">Abbrechen</button><button type="submit" class="button primary" :disabled="remoteSetup.busy || (!remoteSetup.session && !remoteSetup.providers.length)" x-text="remoteSetup.session?.ready ? 'Remote speichern' : (!remoteSetup.session && remoteSetup.provider === 'drive' && remoteSetup.driveMode === 'service_account' ? 'Google Drive sofort verbinden' : (!remoteSetup.session && remoteSetup.provider === 'drive' ? 'Weiter zur Google-Anmeldung' : (!remoteSetup.session && remoteSetup.provider === 'iclouddrive' ? (remoteSetup.reconnect ? 'iCloud-Token jetzt erneuern' : (remoteSetup.appleId && remoteSetup.applePassword ? 'Weiter zum 6-stelligen Apple-Code' : 'Weiter zur iCloud-Anmeldung')) : (remoteSetup.session && remoteSetup.express ? 'Fertigstellen & Speichern' : 'Weiter'))))"></button></div>
     </form>
   </div>
 

@@ -403,6 +403,7 @@ export const systemMethods = {
       canary_initialized: 'Canary-Datei angelegt', webauthn_reauth: 'Passkey-Bestätigung',
       webauthn_registered: 'Passkey registriert', webauthn_removed: 'Passkey entfernt',
       lockdown_triggered: 'Lockdown ausgelöst', lockdown_released: 'Lockdown aufgehoben',
+      remote_created: 'Remote eingerichtet', remote_reconnected: 'Remote-Anmeldung erneuert',
     })[type] || type;
   },
 };

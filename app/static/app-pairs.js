@@ -426,7 +426,7 @@ export const pairsMethods = {
   },
 
   async openRemoteSetup(presetProvider = '') {
-    const suggestedNames = { drive: 'gdrive', pcloud: 'pcloud', onedrive: 'onedrive', webdav: 'nextcloud' };
+    const suggestedNames = { drive: 'gdrive', iclouddrive: 'icloud', pcloud: 'pcloud', onedrive: 'onedrive', webdav: 'nextcloud' };
     this.remoteSetup = {
       show: true,
       busy: true,
@@ -442,6 +442,11 @@ export const pairsMethods = {
       teamDrive: false,
       serviceAccountJson: '',
       serviceAccountResult: null,
+      icloudService: 'drive',
+      appleId: '',
+      applePassword: '',
+      reconnect: false,
+      icloudRemotes: [],
       session: null,
       answer: '',
       error: '',
@@ -450,15 +455,45 @@ export const pairsMethods = {
     const data = await this.api('GET', '/api/remotes/providers', undefined, { captureError: true });
     this.remoteSetup.busy = false;
     if (!data || data.__error) { this.remoteSetup.error = data?.detail || 'Anbieter konnten nicht geladen werden.'; return; }
-    this.remoteSetup.providers = data.providers;
+    this.remoteSetup.providers = data.providers || [];
+    this.remoteSetup.icloudRemotes = data.icloud_remotes || [];
   },
 
   selectRemotePreset(provider, suggestedName = '') {
+    const defaultNames = ['', 'gdrive', 'icloud', 'icloud-fotos', 'pcloud', 'onedrive', 'nextcloud'];
     this.remoteSetup.provider = provider;
-    if (!this.remoteSetup.name.trim() && suggestedName) {
+    if (provider !== 'iclouddrive') this.remoteSetup.reconnect = false;
+    if (suggestedName && !this.remoteSetup.reconnect && defaultNames.includes(this.remoteSetup.name.trim())) {
       this.remoteSetup.name = suggestedName;
     }
+    if (provider === 'drive' || provider === 'iclouddrive') {
+      this.remoteSetup.express = true;
+    }
     this.remoteSetup.error = '';
+  },
+
+  selectIcloudService(service) {
+    this.remoteSetup.icloudService = service === 'photos' ? 'photos' : 'drive';
+    if (!this.remoteSetup.reconnect && ['', 'icloud', 'icloud-fotos'].includes(this.remoteSetup.name.trim())) {
+      this.remoteSetup.name = this.remoteSetup.icloudService === 'photos' ? 'icloud-fotos' : 'icloud';
+    }
+  },
+
+  selectIcloudReconnect(item) {
+    if (!item) return;
+    this.remoteSetup.provider = 'iclouddrive';
+    this.remoteSetup.express = true;
+    this.remoteSetup.reconnect = true;
+    this.remoteSetup.name = item.name || 'icloud';
+    this.remoteSetup.icloudService = item.service === 'photos' ? 'photos' : 'drive';
+    this.remoteSetup.appleId = item.apple_id || '';
+    this.remoteSetup.error = '';
+  },
+
+  async requestIcloudSmsCode() {
+    if (this.remoteSetup.busy || this.remoteSetup.session?.option?.name !== 'config_2fa') return;
+    this.remoteSetup.answer = 'sms';
+    await this.submitRemoteSetup();
   },
 
   async loadDriveServiceAccountFile(event) {
@@ -524,6 +559,10 @@ export const pairsMethods = {
         client_secret: (state.clientSecret || '').trim() || null,
         root_folder_id: (state.rootFolderId || '').trim(),
         team_drive: Boolean(state.teamDrive),
+        icloud_service: state.icloudService || 'drive',
+        apple_id: (state.appleId || '').trim(),
+        apple_password: state.applePassword || null,
+        reconnect: Boolean(state.reconnect),
       }
       : session.ready ? {} : { step: session.step, answer: state.answer || session.option.default || '' };
     const result = await this.api('POST', url, body, { captureError: true, timeoutMs: 70000 });
@@ -532,11 +571,12 @@ export const pairsMethods = {
       state.error = result?.detail || 'Einrichtung fehlgeschlagen. Bitte erneut versuchen.';
       return;
     }
+    state.applePassword = '';
     if (session?.ready) {
       state.busy = false;
       state.session = null;
       await this.closeRemoteSetup();
-      this.showToast(`Remote ${result.name} ist angelegt.`, 'ok');
+      this.showToast(result.reconnected ? `iCloud-Anmeldung für ${result.name} erneuert.` : `Remote ${result.name} ist angelegt.`, 'ok');
       if (this.picker.show && this.picker.kind === 'remote') await this.loadPicker('');
     } else if (result.ready && state.express) {
       const saved = await this.api('POST', `/api/remotes/setup/${result.id}/save`, {}, { captureError: true, timeoutMs: 70000 });
@@ -548,7 +588,7 @@ export const pairsMethods = {
       }
       state.session = null;
       await this.closeRemoteSetup();
-      this.showToast(`Remote ${saved.name} ist angelegt.`, 'ok');
+      this.showToast(saved.reconnected ? `iCloud-Anmeldung für ${saved.name} erneuert.` : `Remote ${saved.name} ist angelegt.`, 'ok');
       if (this.picker.show && this.picker.kind === 'remote') await this.loadPicker('');
     } else {
       state.busy = false;
@@ -564,6 +604,7 @@ export const pairsMethods = {
     const id = this.remoteSetup.session?.id;
     this.remoteSetup.show = false;
     this.remoteSetup.answer = '';
+    this.remoteSetup.applePassword = '';
     this.remoteSetup.session = null;
     this.restoreDialogFocus();
     if (id) await this.api('DELETE', `/api/remotes/setup/${id}`, undefined, { silent: true });

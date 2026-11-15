@@ -272,3 +272,325 @@ def test_real_rclone_webdav_roundtrip(client, tmp_path, monkeypatch):
     assert "[existing]" in contents and "[cloud]" in contents
     assert "test-secret" not in contents
     assert remotes._rc("config/get", {"name": "cloud"})["url"] == values["url"]
+
+
+def test_providers_prioritizes_iclouddrive_and_lists_existing_icloud_remotes(
+    client, monkeypatch
+):
+    def rc(method, payload=None, config=None):
+        if method == "config/providers":
+            return {
+                "providers": [
+                    {"Name": "s3", "Description": "Amazon S3"},
+                    {"Name": "pcloud", "Description": "pCloud"},
+                    {"Name": "iclouddrive", "Description": "iCloud Drive and Photos"},
+                    {"Name": "drive", "Description": "Google Drive"},
+                ]
+            }
+        if method == "config/listremotes":
+            return {"remotes": ["gdrive:", "icloud:"]}
+        if method == "config/get":
+            if payload["name"] == "icloud":
+                return {
+                    "type": "iclouddrive",
+                    "service": "photos",
+                    "apple_id": "max@icloud.com",
+                    "password": "obscured-secret",
+                }
+            return {"type": "drive"}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(remotes, "_rc", rc)
+    res = client.get("/api/remotes/providers")
+    assert res.status_code == 200
+    body = res.json()
+    names = [p["name"] for p in body["providers"]]
+    assert names[:3] == ["drive", "iclouddrive", "pcloud"]
+    icloud_desc = next(
+        p["description"] for p in body["providers"] if p["name"] == "iclouddrive"
+    )
+    assert "Apple iCloud" in icloud_desc
+    assert body["icloud_remotes"] == [
+        {"name": "icloud", "service": "photos", "apple_id": "max@icloud.com"}
+    ]
+
+
+def test_icloud_express_direct_credentials_obscures_password_and_saves_without_reauth(
+    client, tmp_path, monkeypatch
+):
+    live_conf = tmp_path / "rclone.conf"
+    live_conf.write_text("[existing]\ntype = local\n", encoding="utf-8")
+    monkeypatch.setenv("RCLONE_CONFIG", str(live_conf))
+    monkeypatch.setattr(
+        remotes,
+        "get_db",
+        lambda: (_ for _ in ()).throw(RuntimeError("audit unavailable")),
+    )
+
+    recorded_steps: list[tuple[str, str]] = []
+    live_create_called = False
+
+    def rc(method, payload=None, config=None):
+        nonlocal live_create_called
+        payload = payload or {}
+        if method == "config/providers":
+            return {
+                "providers": [
+                    {"Name": "iclouddrive", "Description": "iCloud Drive and Photos"}
+                ]
+            }
+        if method == "config/listremotes":
+            return {"remotes": ["existing:"]}
+        if method == "core/obscure":
+            return {
+                "obscured": "obscured-apple-pw"
+                if payload["clear"] == "MyAppleSecret!"
+                else "obscured-other"
+            }
+        if method == "config/create":
+            if config is None:
+                live_create_called = True
+                raise AssertionError("live config/create must not run for iclouddrive")
+            return {
+                "State": "*all-set,0,false",
+                "Option": {"Name": "service", "Required": True, "Default": "drive"},
+            }
+        if method == "config/update":
+            assert config is not None
+            state = payload["opt"]["state"]
+            ans = payload["opt"]["result"]
+            recorded_steps.append((state, ans))
+            if state == "*all-set,0,false":
+                return {
+                    "State": "*all-set,1,false",
+                    "Option": {"Name": "apple_id", "Required": True},
+                }
+            if state == "*all-set,1,false":
+                return {
+                    "State": "*all-set,2,false",
+                    "Option": {
+                        "Name": "password",
+                        "Required": True,
+                        "IsPassword": True,
+                    },
+                }
+            if state == "*all-set,2,false":
+                return {
+                    "State": "*all-advanced",
+                    "Option": {"Name": "config_fs_advanced", "Default": False},
+                }
+            if state == "*all-advanced":
+                return {
+                    "State": "2fa_do",
+                    "Option": {
+                        "Name": "config_2fa",
+                        "Help": "Two-factor authentication: please enter your 2FA code",
+                        "Required": True,
+                    },
+                }
+            if state == "2fa_do":
+                assert ans == "123456"
+                return {"State": ""}
+        if method == "config/get":
+            assert config is not None
+            return {
+                "type": "iclouddrive",
+                "service": "photos",
+                "apple_id": "max@icloud.com",
+                "password": "obscured-apple-pw",
+                "trust_token": "TRUST-TOKEN-XYZ",
+                "cookies": "COOKIES-ABC",
+                "_auth_session": "",
+            }
+        raise AssertionError(method)
+
+    monkeypatch.setattr(remotes, "_rc", rc)
+
+    started = client.post(
+        "/api/remotes/setup",
+        json={
+            "name": "icloud-fotos",
+            "provider": "iclouddrive",
+            "icloud_service": "photos",
+            "apple_id": "max@icloud.com",
+            "apple_password": "MyAppleSecret!",
+        },
+    )
+    assert started.status_code == 200, started.text
+    view = started.json()
+    assert not view["ready"]
+    assert view["option"]["name"] == "config_2fa"
+    assert view["option"]["input_mode"] == "numeric"
+    assert view["option"]["secret"] is False
+    assert "6-stelliger Apple-2FA" in (view["option"]["label_de"] or "")
+    assert ("*all-set,0,false", "photos") in recorded_steps
+    assert ("*all-set,1,false", "max@icloud.com") in recorded_steps
+    assert ("*all-set,2,false", "obscured-apple-pw") in recorded_steps
+    assert ("*all-advanced", "false") in recorded_steps
+
+    # Submit 6-digit code with whitespace/hyphen formatting as shown on Apple devices
+    answered = client.post(
+        f"/api/remotes/setup/{view['id']}/answer",
+        json={"step": view["step"], "answer": " 123 456 "},
+    )
+    assert answered.status_code == 200, answered.text
+    assert answered.json()["ready"] is True
+
+    saved = client.post(f"/api/remotes/setup/{view['id']}/save")
+    assert saved.status_code == 200, saved.text
+    assert saved.json() == {
+        "ok": True,
+        "name": "icloud-fotos",
+        "path": "icloud-fotos:",
+        "reconnected": False,
+    }
+    assert not live_create_called
+    rendered = live_conf.read_text(encoding="utf-8")
+    assert "[existing]" in rendered
+    assert "[icloud-fotos]" in rendered
+    assert "type = iclouddrive" in rendered
+    assert "service = photos" in rendered
+    assert "trust_token = TRUST-TOKEN-XYZ" in rendered
+    assert "_auth_session" not in rendered
+    assert "MyAppleSecret!" not in rendered
+
+
+def test_icloud_reconnect_replaces_existing_section_and_blocks_other_types(
+    client, tmp_path, monkeypatch
+):
+    live_conf = tmp_path / "rclone.conf"
+    live_conf.write_text(
+        "[gdrive]\ntype = drive\n\n[icloud]\ntype = iclouddrive\nservice = drive\napple_id = alt@icloud.com\ntrust_token = EXPIRED\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RCLONE_CONFIG", str(live_conf))
+    monkeypatch.setattr(
+        remotes,
+        "get_db",
+        lambda: (_ for _ in ()).throw(RuntimeError("audit unavailable")),
+    )
+
+    seen_apple_id = []
+
+    def rc(method, payload=None, config=None):
+        payload = payload or {}
+        if method == "config/providers":
+            return {
+                "providers": [
+                    {"Name": "iclouddrive", "Description": "iCloud Drive and Photos"},
+                    {"Name": "drive", "Description": "Google Drive"},
+                ]
+            }
+        if method == "config/listremotes":
+            return {"remotes": ["gdrive:", "icloud:"]}
+        if method == "config/get":
+            if config is None:
+                if payload["name"] == "gdrive":
+                    return {"type": "drive"}
+                return {
+                    "type": "iclouddrive",
+                    "service": "drive",
+                    "apple_id": "alt@icloud.com",
+                }
+            return {
+                "type": "iclouddrive",
+                "service": "drive",
+                "apple_id": "alt@icloud.com",
+                "password": "OBS(pw)",
+                "trust_token": "FRESH-TOKEN-999",
+                "cookies": "FRESH-COOKIES",
+            }
+        if method == "core/obscure":
+            return {"obscured": "OBS(pw)"}
+        if method == "config/create":
+            return {"State": "*all-set,0,false", "Option": {"Name": "service"}}
+        if method == "config/update":
+            st = payload["opt"]["state"]
+            res = payload["opt"]["result"]
+            if st == "*all-set,0,false":
+                return {"State": "*all-set,1,false", "Option": {"Name": "apple_id"}}
+            if st == "*all-set,1,false":
+                seen_apple_id.append(res)
+                return {
+                    "State": "*all-set,2,false",
+                    "Option": {"Name": "password", "IsPassword": True},
+                }
+            if st == "*all-set,2,false":
+                return {
+                    "State": "2fa_do",
+                    "Option": {"Name": "config_2fa", "Required": True},
+                }
+            if st == "2fa_do" and res == "sms":
+                return {
+                    "State": "2fa_sms",
+                    "Option": {"Name": "config_2fa_sms", "Required": True},
+                }
+            if st == "2fa_sms" and res == "654321":
+                return {"State": ""}
+        raise AssertionError((method, payload))
+
+    monkeypatch.setattr(remotes, "_rc", rc)
+
+    # Reconnect must NEVER overwrite a non-iclouddrive remote
+    conflict = client.post(
+        "/api/remotes/setup",
+        json={"name": "gdrive", "provider": "iclouddrive", "reconnect": True},
+    )
+    assert conflict.status_code == 409
+
+    # Reconnect on existing icloud remote pre-fills apple_id and replaces section cleanly
+    started = client.post(
+        "/api/remotes/setup",
+        json={
+            "name": "icloud",
+            "provider": "iclouddrive",
+            "icloud_service": "",
+            "apple_password": "pw",
+            "reconnect": True,
+        },
+    )
+    assert started.status_code == 200, started.text
+    assert seen_apple_id == ["alt@icloud.com"]
+    s1 = started.json()
+    assert s1["option"]["name"] == "config_2fa"
+
+    # Trigger SMS fallback
+    s2 = client.post(
+        f"/api/remotes/setup/{s1['id']}/answer",
+        json={"step": s1["step"], "answer": "sms"},
+    ).json()
+    assert s2["option"]["name"] == "config_2fa_sms"
+    assert s2["option"]["input_mode"] == "numeric"
+
+    s3 = client.post(
+        f"/api/remotes/setup/{s2['id']}/answer",
+        json={"step": s2["step"], "answer": "654-321"},
+    ).json()
+    assert s3["ready"] is True
+
+    saved = client.post(f"/api/remotes/setup/{s3['id']}/save")
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["reconnected"] is True
+    content = live_conf.read_text(encoding="utf-8")
+    assert content.count("[icloud]") == 1
+    assert "[gdrive]" in content
+    assert "FRESH-TOKEN-999" in content
+    assert "EXPIRED" not in content
+
+
+def test_apple_wrong_password_returns_helpful_400_without_credential_leak(monkeypatch):
+    monkeypatch.setattr(
+        remotes.subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(
+            a,
+            1,
+            '{"error":"authSRPComplete: sign in failed: incorrect username or password secret-canary"}',
+            "notice secret-canary",
+        ),
+    )
+    with pytest.raises(HTTPException) as err:
+        remotes._rc("config/create", {"password": "secret-canary"})
+    assert err.value.status_code == 400
+    assert "reguläre Apple-Account-Passwort" in str(err.value.detail)
+    assert "secret-canary" not in str(err.value.detail)

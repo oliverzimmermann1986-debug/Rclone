@@ -6,8 +6,32 @@ struct RemoteProvider: Decodable, Identifiable {
     var id: String { name }
 }
 
+struct ExistingICloudRemote: Decodable, Identifiable, Equatable {
+    let name: String
+    let service: String
+    let appleId: String
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name, service
+        case appleId = "apple_id"
+    }
+}
+
 struct RemoteProvidersResponse: Decodable {
     let providers: [RemoteProvider]
+    let icloudRemotes: [ExistingICloudRemote]
+
+    enum CodingKeys: String, CodingKey {
+        case providers
+        case icloudRemotes = "icloud_remotes"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        providers = try container.decode([RemoteProvider].self, forKey: .providers)
+        icloudRemotes = try container.decodeIfPresent([ExistingICloudRemote].self, forKey: .icloudRemotes) ?? []
+    }
 }
 
 struct RemoteSetupSession: Decodable {
@@ -32,6 +56,7 @@ struct RemoteSetupOption: Decodable {
     let authUrl: String?
     let directAuthUrl: String?
     let authorizeCommand: String?
+    let inputMode: String?
     let secret: Bool
     let required: Bool
     let defaultValue: String
@@ -45,6 +70,7 @@ struct RemoteSetupOption: Decodable {
         case authUrl = "auth_url"
         case directAuthUrl = "direct_auth_url"
         case authorizeCommand = "authorize_command"
+        case inputMode = "input_mode"
         case defaultValue = "default"
     }
 }
@@ -56,11 +82,18 @@ struct RemoteSetupStart: Encodable {
     var scope: String? = nil
     var rootFolderId: String? = nil
     var teamDrive: Bool? = nil
+    var icloudService: String? = nil
+    var appleId: String? = nil
+    var applePassword: String? = nil
+    var reconnect: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
-        case name, provider, express, scope
+        case name, provider, express, scope, reconnect
         case rootFolderId = "root_folder_id"
         case teamDrive = "team_drive"
+        case icloudService = "icloud_service"
+        case appleId = "apple_id"
+        case applePassword = "apple_password"
     }
 }
 
@@ -73,6 +106,7 @@ struct RemoteSetupSaved: Decodable {
     let ok: Bool
     let name: String
     let path: String
+    let reconnected: Bool?
 }
 
 struct GoogleDriveServiceAccountRequest: Encodable {
