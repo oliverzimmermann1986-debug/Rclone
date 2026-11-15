@@ -341,13 +341,14 @@ export const jobsMethods = {
 
   async loadProgress(silent = false) {
     const result = await this.api('GET', '/api/jobs/backup/progress', undefined, { silent, requestKey: 'backup-progress' });
-    if (this.isStale(result)) return null;
+    if (this.isStale(result)) return undefined;
     if (result) {
       this.progress = result;
       if (!result.running) {
         await Promise.all([this.refreshStatus(true), this.loadRecent(true), this.loadOverview(true)]);
       }
     }
+    return Boolean(result);
   },
 
   async ensureConfigSavedForRun() {

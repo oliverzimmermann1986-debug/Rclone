@@ -212,6 +212,14 @@ protocol APIClientProtocol: AnyObject {
     func browseTimeTravel(identity: String, pointID: String, path: String) async throws -> TimeTravelBrowseResponse
     func getTimeTravelHistory(identity: String, path: String) async throws -> TimeTravelHistoryResponse
     func getTimeTravelDiff(identity: String, path: String, fromPoint: String, toPoint: String) async throws -> TextDiffResponse
+    func getCryptCandidates() async throws -> CryptCandidatesResponse
+    func createCryptRemote(_ request: CryptCreateRequest) async throws -> CryptCreateResponse
+    func verifyCryptRemote(name: String) async throws -> CryptVerifyResponse
+    func previewPairVersions(pair: String) async throws -> VersionsPreviewResponse
+    func prunePairVersions(pair: String, password: String) async throws -> VersionsPreviewResponse
+    func getBandwidthHeatmap(days: Int) async throws -> BandwidthHeatmapResponse
+    func getBandwidthSuggestions() async throws -> BandwidthSuggestionsResponse
+    func streamProgress(onUpdate: @escaping (BackupProgress) async -> Void) async throws
     func logout() async throws -> LogoutResult
     func clearLocalSession()
     func setSessionPersistence(_ enabled: Bool)
@@ -236,6 +244,14 @@ extension APIClientProtocol {
     func browseTimeTravel(identity: String, pointID: String, path: String) async throws -> TimeTravelBrowseResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitreise-Browser") }
     func getTimeTravelHistory(identity: String, path: String) async throws -> TimeTravelHistoryResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitreise-Browser") }
     func getTimeTravelDiff(identity: String, path: String, fromPoint: String, toPoint: String) async throws -> TextDiffResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitreise-Diff") }
+    func getCryptCandidates() async throws -> CryptCandidatesResponse { throw APIError.serverFeatureUnavailable(feature: "Zero-Knowledge Crypt-Assistent") }
+    func createCryptRemote(_ request: CryptCreateRequest) async throws -> CryptCreateResponse { throw APIError.serverFeatureUnavailable(feature: "Zero-Knowledge Crypt-Assistent") }
+    func verifyCryptRemote(name: String) async throws -> CryptVerifyResponse { throw APIError.serverFeatureUnavailable(feature: "Zero-Knowledge Crypt-Assistent") }
+    func previewPairVersions(pair: String) async throws -> VersionsPreviewResponse { throw APIError.serverFeatureUnavailable(feature: "Versionsverwaltung (GFS)") }
+    func prunePairVersions(pair: String, password: String) async throws -> VersionsPreviewResponse { throw APIError.serverFeatureUnavailable(feature: "Versionsverwaltung (GFS)") }
+    func getBandwidthHeatmap(days: Int) async throws -> BandwidthHeatmapResponse { throw APIError.serverFeatureUnavailable(feature: "Bandbreiten-Heatmap") }
+    func getBandwidthSuggestions() async throws -> BandwidthSuggestionsResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitfenster-Vorschläge") }
+    func streamProgress(onUpdate: @escaping (BackupProgress) async -> Void) async throws { throw APIError.serverFeatureUnavailable(feature: "Live-Fortschrittsstream") }
     func getRecoveryStaging() async throws -> RecoveryStagingResponse { throw APIError.serverFeatureUnavailable(feature: "Recovery-Staging") }
     func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
     func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
@@ -1072,6 +1088,38 @@ final class APIClient: APIClientProtocol {
         return try await get("/api/recovery/timetravel/diff?\(query)")
     }
 
+    func getCryptCandidates() async throws -> CryptCandidatesResponse {
+        try await get("/api/remotes/crypt/candidates")
+    }
+
+    func createCryptRemote(_ request: CryptCreateRequest) async throws -> CryptCreateResponse {
+        try await post("/api/remotes/crypt", body: request, timeout: 45)
+    }
+
+    func verifyCryptRemote(name: String) async throws -> CryptVerifyResponse {
+        try await post("/api/remotes/crypt/\(Self.pathEncode(name))/verify")
+    }
+
+    func previewPairVersions(pair: String) async throws -> VersionsPreviewResponse {
+        try await get("/api/jobs/versions/preview?pair=\(Self.queryEncode(pair))", timeout: 60)
+    }
+
+    func prunePairVersions(pair: String, password: String) async throws -> VersionsPreviewResponse {
+        try await post(
+            "/api/jobs/versions/prune",
+            body: VersionsPruneRequest(pair: pair, password: password),
+            timeout: 120
+        )
+    }
+
+    func getBandwidthHeatmap(days: Int = 90) async throws -> BandwidthHeatmapResponse {
+        try await get("/api/jobs/bandwidth/heatmap?days=\(days)")
+    }
+
+    func getBandwidthSuggestions() async throws -> BandwidthSuggestionsResponse {
+        try await get("/api/jobs/bandwidth/suggestions")
+    }
+
     func getDatabaseStatus() async throws -> DatabaseStatus {
         try await get("/api/maintenance/database")
     }
@@ -1164,6 +1212,33 @@ final class APIClient: APIClientProtocol {
 
     func getProgress() async throws -> BackupProgress {
         try await get("/api/jobs/backup/progress")
+    }
+
+    func streamProgress(
+        onUpdate: @escaping (BackupProgress) async -> Void
+    ) async throws {
+        var request = URLRequest(url: url(for: "/api/jobs/progress/stream"))
+        request.httpMethod = "GET"
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 90
+        try originPolicy.validateRequest(request)
+        let (bytes, response) = try await session.bytes(for: request, delegate: originPolicy)
+        try originPolicy.validateResponse(response)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if http.statusCode == 401 { clearLocalSession(); throw APIError.unauthenticated }
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.server(status: http.statusCode, message: "HTTP \(http.statusCode)")
+        }
+        persistSession()
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            guard line.hasPrefix("data:") else { continue }
+            let rawPayload = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+            guard !rawPayload.isEmpty, let payloadData = rawPayload.data(using: .utf8) else { continue }
+            if let decoded = try? decoder.decode(BackupProgress.self, from: payloadData) {
+                await onUpdate(decoded)
+            }
+        }
     }
 
     func getPBSStatus() async throws -> PBSStatus {
@@ -1613,7 +1688,7 @@ final class APIClient: APIClientProtocol {
         }
         let message = detail?["message"] as? String ?? plainDetail ?? "Anfrage konnte nicht abgeschlossen werden."
         let currentRevision = detail?["current_revision"] as? String
-        if status == 403, path.hasSuffix("/change-password") || path.hasSuffix("/snapshots/restore") {
+        if status == 403, path.hasSuffix("/change-password") || path.hasSuffix("/snapshots/restore") || path.hasSuffix("/versions/prune") {
             return .reauthenticationRequired(message: message)
         }
         if status == 409, path.hasSuffix("/filter-file") || path.hasSuffix("/snapshots/restore") {

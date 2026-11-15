@@ -348,3 +348,173 @@ struct CanaryInitRequest: Encodable {
         case currentPassword = "current_password"
     }
 }
+
+// MARK: - Zero-Knowledge Crypt Wizard Models
+
+struct CryptCandidatesResponse: Decodable, Equatable {
+    let candidates: [CryptCandidateItem]
+}
+
+struct CryptCandidateItem: Decodable, Identifiable, Equatable {
+    var id: String { name }
+    let name: String
+    let type: String
+}
+
+struct CryptCreateRequest: Encodable {
+    let name: String
+    let baseRemote: String
+    let basePath: String
+    let filenameEncryption: String
+    let directoryNameEncryption: Bool
+    let password: String?
+    let password2: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, password, password2
+        case baseRemote = "base_remote"
+        case basePath = "base_path"
+        case filenameEncryption = "filename_encryption"
+        case directoryNameEncryption = "directory_name_encryption"
+    }
+}
+
+struct CryptKeysPayload: Decodable, Equatable {
+    let password: String
+    let password2: String
+}
+
+struct CryptCreateResponse: Decodable, Equatable {
+    let name: String
+    let remote: String
+    let filenameEncryption: String
+    let directoryNameEncryption: Bool
+    let keys: CryptKeysPayload
+    let warning: String
+
+    enum CodingKeys: String, CodingKey {
+        case name, remote, keys, warning
+        case filenameEncryption = "filename_encryption"
+        case directoryNameEncryption = "directory_name_encryption"
+    }
+}
+
+struct CryptVerifyResponse: Decodable, Equatable {
+    let ok: Bool
+}
+
+// MARK: - GFS Versions Lifecycle Models
+
+struct VersionsPreviewResponse: Decodable, Equatable {
+    var skipped: Bool? = nil
+    var reason: String? = nil
+    var dryRun: Bool? = nil
+    var aborted: String? = nil
+    var roots: [VersionRootPlan] = []
+    var warnings: [String] = []
+
+    enum CodingKeys: String, CodingKey {
+        case skipped, reason, aborted, roots, warnings
+        case dryRun = "dry_run"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        skipped = try container.decodeIfPresent(Bool.self, forKey: .skipped)
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        dryRun = try container.decodeIfPresent(Bool.self, forKey: .dryRun)
+        aborted = try container.decodeIfPresent(String.self, forKey: .aborted)
+        roots = try container.decodeIfPresent([VersionRootPlan].self, forKey: .roots) ?? []
+        warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
+    }
+}
+
+struct VersionRootPlan: Decodable, Identifiable, Equatable {
+    var id: String { root }
+    let root: String
+    var total: Int = 0
+    var keep: [String] = []
+    var merge: [VersionMergeItem] = []
+    var purge: [String] = []
+    var merged: [VersionMergeItem] = []
+    var purged: [String] = []
+    var failed: [VersionFailureItem] = []
+    var error: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case root, total, keep, merge, purge, merged, purged, failed, error
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        root = try container.decode(String.self, forKey: .root)
+        total = try container.decodeIfPresent(Int.self, forKey: .total) ?? 0
+        keep = try container.decodeIfPresent([String].self, forKey: .keep) ?? []
+        merge = try container.decodeIfPresent([VersionMergeItem].self, forKey: .merge) ?? []
+        purge = try container.decodeIfPresent([String].self, forKey: .purge) ?? []
+        merged = try container.decodeIfPresent([VersionMergeItem].self, forKey: .merged) ?? []
+        purged = try container.decodeIfPresent([String].self, forKey: .purged) ?? []
+        failed = try container.decodeIfPresent([VersionFailureItem].self, forKey: .failed) ?? []
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+    }
+}
+
+struct VersionMergeItem: Decodable, Identifiable, Equatable {
+    var id: String { "\(from)->\(into)" }
+    let into: String
+    let from: String
+}
+
+struct VersionFailureItem: Decodable, Identifiable, Equatable {
+    var id: String { "\(name ?? into ?? "err"):\(error)" }
+    var name: String? = nil
+    var into: String? = nil
+    var from: String? = nil
+    let error: String
+}
+
+struct VersionsPruneRequest: Encodable {
+    let pair: String
+    let password: String
+}
+
+// MARK: - Bandwidth Heatmap & Smart Schedule Suggestions Models
+
+struct BandwidthHeatmapResponse: Decodable, Equatable {
+    let cells: [[Double?]]
+    let samples: [[Int]]
+    let days: Int
+    let timezone: String
+}
+
+struct BandwidthSuggestionsResponse: Decodable, Equatable {
+    let timezone: String
+    let windows: [BandwidthWindowSuggestion]
+    let schedules: [BandwidthScheduleProposal]
+}
+
+struct BandwidthWindowSuggestion: Decodable, Identifiable, Equatable {
+    var id: String { "\(weekday)-\(hour)" }
+    let weekday: Int
+    let hour: Int
+    let score: Double
+    let label: String
+}
+
+struct BandwidthScheduleProposal: Decodable, Identifiable, Equatable {
+    var id: String { definitionID }
+    let definitionID: String
+    let name: String
+    let currentSchedule: String
+    let proposedSchedule: String
+    let weekday: Int
+    let hour: Int
+    let reason: String
+
+    enum CodingKeys: String, CodingKey {
+        case name, weekday, hour, reason
+        case definitionID = "definition_id"
+        case currentSchedule = "current_schedule"
+        case proposedSchedule = "proposed_schedule"
+    }
+}

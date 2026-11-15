@@ -485,12 +485,16 @@ export const dashboardMethods = {
     return size?.measurement_error || size?.error || '';
   },
 
-  async loadCopies() {
+  async loadCopies(silent = false) {
     this.copies.loading = true;
-    const result = await this.api('GET', '/api/diagnostics/copies', undefined, { requestKey: 'copies' });
-    if (this.isStale(result)) return;
+    const result = await this.api('GET', '/api/diagnostics/copies', undefined, { silent, requestKey: 'copies' });
+    if (this.isStale(result)) return undefined;
     if (result) this.copies.data = result;
+    this.copies.error = result ? '' : (this.copies.data
+      ? 'Kopienübersicht konnte nicht aktualisiert werden. Angezeigt wird der letzte geladene Stand.'
+      : 'Kopienübersicht konnte nicht geladen werden.');
     this.copies.loading = false;
+    return Boolean(result);
   },
 
   async loadStorageComposition(pair, side = 'source', refresh = false) {

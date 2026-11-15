@@ -51,3 +51,42 @@ def test_maintenance_run_failure_isolated_and_stop_prevents_late_run(
     already_stopped.set()
     main._run_maintenance_loop(already_stopped, interval_seconds=1)
     assert attempts == 1
+
+
+def test_overdue_loop_waits_first_and_isolates_failures(monkeypatch, caplog):
+    from types import SimpleNamespace
+
+    original_once = main._run_overdue_check_once
+    calls: list[str] = []
+    stop = _ControlledStop(waits_before_stop=3)
+    monkeypatch.setattr(main, "_run_overdue_check_once", lambda: calls.append("tick"))
+
+    main._run_overdue_loop(stop, interval_seconds=900)
+
+    assert calls == ["tick", "tick"]
+    assert stop.waits == [900, 900, 900]
+
+    monkeypatch.setattr(main, "_run_overdue_check_once", original_once)
+    monkeypatch.setattr(
+        main,
+        "get_config",
+        lambda: SimpleNamespace(snapshot=lambda: {"backup": {"enabled": False}}),
+    )
+    monkeypatch.setattr(
+        "app.overdue.check_and_notify",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("must skip disabled")),
+    )
+    main._run_overdue_check_once()
+
+    monkeypatch.setattr(
+        main,
+        "get_config",
+        lambda: SimpleNamespace(snapshot=lambda: {"backup": {"enabled": True}}),
+    )
+    monkeypatch.setattr(main, "get_db", lambda: object())
+    monkeypatch.setattr(
+        "app.overdue.check_and_notify",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("db busy")),
+    )
+    main._run_overdue_check_once()
+    assert "Hintergrundprüfung überfälliger Datenwege fehlgeschlagen" in caplog.text

@@ -26,6 +26,11 @@ def test_ios_operational_extension_models_exist() -> None:
         "struct CanaryInitResponse",
         "struct TimeTravelBrowseResponse",
         "struct TimeTravelHistoryResponse",
+        "struct CryptCandidatesResponse",
+        "struct CryptCreateResponse",
+        "struct VersionsPreviewResponse",
+        "struct BandwidthHeatmapResponse",
+        "struct BandwidthSuggestionsResponse",
     ):
         assert model_name in text, f"Missing iOS model: {model_name}"
 
@@ -49,6 +54,13 @@ def test_ios_api_client_exposes_all_operational_endpoints() -> None:
         '"/api/recovery/timetravel/browse',
         '"/api/recovery/timetravel/history',
         '"/api/recovery/timetravel/diff',
+        '"/api/remotes/crypt/candidates"',
+        '"/api/remotes/crypt"',
+        '"/api/jobs/versions/preview',
+        '"/api/jobs/versions/prune"',
+        '"/api/jobs/bandwidth/heatmap',
+        '"/api/jobs/bandwidth/suggestions"',
+        '"/api/jobs/progress/stream"',
     ):
         assert endpoint in text, f"Missing iOS APIClient endpoint: {endpoint}"
 
@@ -64,6 +76,9 @@ def test_ios_operational_extension_views_and_navigation() -> None:
         "struct ConflictResolutionView",
         "struct LineDiffViewerView",
         "struct TimeTravelBrowserView",
+        "struct CryptRemoteWizardView",
+        "struct VersionsLifecycleView",
+        "struct BandwidthHeatmapView",
     ):
         assert view_name in ext_views, f"Missing iOS view: {view_name}"
 
@@ -71,6 +86,9 @@ def test_ios_operational_extension_views_and_navigation() -> None:
     assert "LockdownControlView()" in system_view
     assert "ObjectLockAndScrubView()" in system_view
     assert "CloudQuotaAndBudgetView()" in system_view
+    assert "CryptRemoteWizardView()" in system_view
+    assert "VersionsLifecycleView()" in system_view
+    assert "BandwidthHeatmapView()" in system_view
 
     recovery_view = (IOS_VIEWS / "RecoveryCenterView.swift").read_text(encoding="utf-8")
     assert "TimeTravelBrowserView(" in recovery_view

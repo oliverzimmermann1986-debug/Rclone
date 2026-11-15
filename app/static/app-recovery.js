@@ -8,12 +8,22 @@ export const recoveryMethods = {
     this.recovery.error = '';
     const configured = (this.config.backup?.pairs || []).filter((pair) => pair.enabled !== false && pair.name);
     if (!this.recovery.pair || !configured.some((pair) => pair.name === this.recovery.pair)) this.recovery.pair = configured[0]?.name || '';
+    const vaultFilter = String(this.recovery.vault?.filterPair || '').trim();
+    const vaultParams = new URLSearchParams({ limit: '200' });
+    if (vaultFilter) vaultParams.set('identity', vaultFilter);
     const tasks = [
       this.api('GET', '/api/recovery/staging', undefined, { silent: true, captureError: true, requestKey: 'recovery-staging' }),
       this.api('GET', '/api/recovery/quarantine', undefined, { silent: true, captureError: true, requestKey: 'recovery-quarantine' }),
+      this.api('GET', `/api/vault/library?${vaultParams}`, undefined, { silent: true, captureError: true, requestKey: 'recovery-vault-library' }),
     ];
     if (this.recovery.pair) tasks.push(this.api('GET', `/api/recovery/points?identity=${encodeURIComponent(this.recovery.pair)}`, undefined, { silent: true, captureError: true, requestKey: 'recovery-points' }));
-    const [staging, quarantine, points] = await Promise.all(tasks);
+    const [staging, quarantine, vaultLibrary, points] = await Promise.all(tasks);
+    if (vaultLibrary?.items) {
+      this.recovery.vault.items = vaultLibrary.items;
+      this.recovery.vault.error = '';
+    } else if (vaultLibrary?.__error) {
+      this.recovery.vault.error = typeof vaultLibrary.detail === 'string' ? vaultLibrary.detail : (vaultLibrary.detail?.message || 'Geräte-Vault konnte nicht geladen werden.');
+    }
     if (staging?.items) this.recovery.staging = staging.items;
     if (quarantine?.items) this.recovery.quarantine = quarantine.items;
     if (points?.points) {
@@ -117,6 +127,56 @@ export const recoveryMethods = {
   downloadRecoveryStaging(item) {
     if (!item?.id) return;
     window.location.assign(`/api/recovery/staging/${encodeURIComponent(item.id)}/download`);
+  },
+
+  async loadVaultLibrary() {
+    this.recovery.vault.loading = true;
+    this.recovery.vault.error = '';
+    const params = new URLSearchParams({ limit: '200' });
+    const filter = String(this.recovery.vault.filterPair || '').trim();
+    if (filter) params.set('identity', filter);
+    const result = await this.api('GET', `/api/vault/library?${params}`, undefined, {
+      silent: true,
+      captureError: true,
+      requestKey: 'recovery-vault-library',
+    });
+    this.recovery.vault.loading = false;
+    if (this.isStale(result)) return;
+    if (result?.__error) {
+      this.recovery.vault.error = typeof result.detail === 'string' ? result.detail : (result.detail?.message || 'Geräte-Vault konnte nicht geladen werden.');
+      return;
+    }
+    this.recovery.vault.items = result?.items || [];
+  },
+
+  vaultStatusLabel(item) {
+    if (!item) return '—';
+    if (item.status === 'ready' && item.verified) return 'SHA-256 verifiziert';
+    if (item.status === 'remote') return 'In Cloud hinterlegt';
+    if (item.status === 'queued' || item.status === 'transferring') return 'Wird übertragen';
+    if (item.status === 'uploaded' || item.status === 'receiving') return 'Empfangen';
+    if (item.status === 'error') return item.error ? `Fehler: ${item.error}` : 'Fehler';
+    return item.status || 'In Bearbeitung';
+  },
+
+  downloadVaultItem(item) {
+    if (!item?.id) return;
+    window.location.assign(`/api/vault/library/${encodeURIComponent(item.id)}/download`);
+  },
+
+  async removeVaultLocalCopy(item) {
+    if (!item?.id) return;
+    if (!(await this.requestConfirmation(
+      `Lokalen Server-Cache und Beleg für „${item.filename || item.id}“ entfernen? Die Kopie im konfigurierten Sicherungsziel bleibt unangetastet.`,
+      { title: 'Lokale Vault-Kopie entfernen?', confirmLabel: 'Lokale Kopie entfernen' }
+    ))) return;
+    const password = await this.requestCurrentPassword('Aktuelles Passwort zum Entfernen der lokalen Vault-Kopie eingeben.');
+    if (!password) return;
+    const result = await this.api('DELETE', `/api/vault/library/${encodeURIComponent(item.id)}`, { current_password: password });
+    if (result?.ok) {
+      this.showToast('Lokale Vault-Kopie entfernt (Sicherungsziel bleibt erhalten)');
+      await this.loadVaultLibrary();
+    }
   },
 
   async searchRecoveryFiles() {

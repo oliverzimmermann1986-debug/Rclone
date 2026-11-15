@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 import pytest
@@ -98,6 +99,7 @@ def test_parent_segments_after_remote_separator_are_rejected(monkeypatch, path):
     assert not called
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Anchored directory I/O requires POSIX")
 def test_create_local_directory_stays_inside_configured_root(tmp_path, monkeypatch):
     monkeypatch.setattr(api_browse, "_browse_roots", lambda: [tmp_path.resolve()])
 

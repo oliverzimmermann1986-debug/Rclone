@@ -54,6 +54,7 @@ def _create(tmp_path: Path, payload: bytes) -> tuple[dict, dict]:
     return config, record
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Anchored directory I/O requires POSIX")
 def test_resumable_upload_is_verified_and_restorable(tmp_path: Path, monkeypatch):
     payload = b"verified-device-photo" * 80_000
     config, record = _create(tmp_path, payload)
@@ -98,6 +99,7 @@ def test_content_hash_deduplicates_second_upload(tmp_path: Path, monkeypatch):
     assert second["status"] == "uploaded"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Anchored directory I/O requires POSIX")
 def test_restore_rejects_a_corrupted_local_blob(tmp_path: Path, monkeypatch):
     payload = b"verified-content"
     config, record = _create(tmp_path, payload)
@@ -274,6 +276,7 @@ def test_regular_reader_rejects_fifo_without_blocking(tmp_path):
         device_vault._open_regular(fifo)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Anchored directory I/O requires POSIX")
 def test_local_copy_removal_keeps_target_and_shared_blob(tmp_path, monkeypatch):
     payload = b"retained-target"
     config, first = _create(tmp_path, payload)
@@ -332,6 +335,7 @@ def test_remote_copy_failure_does_not_start_download(tmp_path: Path, monkeypatch
         )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Anchored directory I/O requires POSIX")
 def test_identical_concurrent_uploads_both_finish(tmp_path: Path, monkeypatch):
     payload = b"same-photo-two-devices"
     config, first = _create(tmp_path, payload)

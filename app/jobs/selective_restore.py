@@ -415,6 +415,8 @@ def run_selective_restore(
             "--stats",
             "10s",
             "--stats-one-line",
+            "--stats-log-level",
+            "NOTICE",
             "--",
             backup_target,
             str(data),

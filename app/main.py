@@ -210,6 +210,33 @@ def _production_security_warnings() -> list[str]:
 
 
 _MAINTENANCE_INTERVAL_SECONDS = 6 * 60 * 60
+_OVERDUE_CHECK_INTERVAL_SECONDS = 15 * 60
+
+
+def _run_overdue_check_once() -> None:
+    from .overdue import check_and_notify as check_overdue
+
+    try:
+        snapshot = get_config().snapshot()
+        backup = snapshot.get("backup") if isinstance(snapshot, dict) else {}
+        if not bool((backup or {}).get("enabled", True)):
+            return
+        reported = check_overdue(snapshot, get_db())
+        if reported:
+            logger.warning(
+                "Ausbleib-Alarm (Web-Hintergrundprüfung): %s", ", ".join(reported)
+            )
+    except Exception:
+        logger.exception("Hintergrundprüfung überfälliger Datenwege fehlgeschlagen")
+
+
+def _run_overdue_loop(
+    stop_event: threading.Event,
+    *,
+    interval_seconds: float = _OVERDUE_CHECK_INTERVAL_SECONDS,
+) -> None:
+    while not stop_event.wait(max(1.0, float(interval_seconds))):
+        _run_overdue_check_once()
 
 
 def _run_automatic_maintenance_once() -> None:
@@ -364,6 +391,14 @@ async def _lifespan(_app):
         daemon=True,
     )
     push_thread.start()
+    overdue_stop = threading.Event()
+    overdue_thread = threading.Thread(
+        target=_run_overdue_loop,
+        args=(overdue_stop,),
+        name="overdue-alerts",
+        daemon=True,
+    )
+    overdue_thread.start()
     watchdog_stop = threading.Event()
     watchdog_interval = _watchdog_interval_seconds()
     watchdog_thread: threading.Thread | None = None
@@ -381,9 +416,11 @@ async def _lifespan(_app):
         await api_jobs.stop_progress_broadcaster()
         maintenance_stop.set()
         push_stop.set()
+        overdue_stop.set()
         watchdog_stop.set()
         maintenance_thread.join(timeout=5)
         push_thread.join(timeout=2)
+        overdue_thread.join(timeout=2)
         _sd_notify("STOPPING=1")
 
 

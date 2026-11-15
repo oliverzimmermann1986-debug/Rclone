@@ -57,6 +57,18 @@ Die Oberfläche ist als Betriebszentrale statt als reine Konfigurationsmaske auf
 
 Produktive Aktionen bleiben bewusst visuell von Dry-Runs getrennt. Löschende Läufe zeigen weiterhin die vorhandenen Schutzbedingungen und werden serverseitig validiert; die GUI ist keine Umgehung der Sicherheitslogik.
 
+Das Lagebild bietet zu jedem Befund eine passende Aktion: den betroffenen Lauf
+ansehen, den Datenweg mit geöffneten Details aufrufen oder einen Restore-Test
+nach Bestätigung starten. Fehlende, veraltete und unvollständige
+Restore-Nachweise erscheinen ebenfalls in dieser Liste. Schlägt die
+Aktualisierung der Kopienübersicht fehl, bleibt der letzte geladene Stand mit
+einem ausdrücklichen Hinweis sichtbar; die Gesamtaktualisierung meldet einen
+Teilfehler. Ein frischer Fortschritts-Ereignisstrom ersetzt zusätzliche
+Fortschrittsabfragen. Bei Ausfall oder ausbleibenden Meldungen greifen diese
+Abfragen wieder; die Verbindung wird mit wachsender Wartezeit erneut aufgebaut.
+In ausgeblendeten Browser-Tabs werden Verbindung und Wiederverbindungsversuche
+angehalten.
+
 Tastaturkürzel: `Strg/Cmd + S` speichert offene Konfigurations- bzw. Filteränderungen. `/` fokussiert auf der Pair- oder Jobseite direkt die Suche.
 
 ### Betriebserweiterungen
@@ -734,8 +746,10 @@ git diff --check
 
 Die Web-Prüfungen laufen mit dem mitgelieferten Alpine und einem isolierten DOM
 ohne Browser oder Backend. Sie prüfen die Unteransichten, erhaltene Aktionen,
-Warnhinweise und Tastaturbedienung. Eine Sichtprüfung auf Desktop und Mobilgerät
-bleibt zusätzlich erforderlich.
+Warnhinweise und Tastaturbedienung. Verhaltenstests mit kontrollierter Uhr und
+simulierten Verbindungsfehlern prüfen außerdem Teilausfälle, Fortschrittsabfragen,
+Wiederverbindung und die Bestätigung vor Restore-Tests. Eine Sichtprüfung auf
+Desktop und Mobilgerät bleibt zusätzlich erforderlich.
 
 
 ### Recovery-Aufbewahrung und lokale Pfade

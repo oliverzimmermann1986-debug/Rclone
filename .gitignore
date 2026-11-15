@@ -23,6 +23,7 @@ playwright-report/
 graphify-out/
 app/static/_preview*.html
 app/static/_stub-methods.js
+app/static/_preview-stub.js
 # Local security-review material and operator secrets.
 .planning/
 deploy-backend*.sh

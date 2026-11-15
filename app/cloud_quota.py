@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -501,18 +502,37 @@ def quota_report(
     cfg = _as_mapping(config)
     now_ts = time.time() if now is None else float(now)
     remotes_list: list[dict[str, Any]] = []
-
-    for remote_name in configured_remotes(cfg):
-        about: dict[str, Any] | None = None
-        if not refresh:
-            with _cache_lock:
+    remotes = configured_remotes(cfg)
+    abouts: dict[str, dict[str, Any]] = {}
+    if not refresh and remotes:
+        with _cache_lock:
+            for remote_name in remotes:
                 cached = _about_cache.get(remote_name)
                 if cached is not None and (now_ts - cached[0]) <= CACHE_TTL_SECONDS:
-                    about = dict(cached[1])
-        if about is None:
-            about = remote_about(remote_name, run=run)
-            with _cache_lock:
-                _about_cache[remote_name] = (now_ts, dict(about))
+                    abouts[remote_name] = dict(cached[1])
+
+    missing = [name for name in remotes if name not in abouts]
+    if len(missing) == 1:
+        fetched = {missing[0]: remote_about(missing[0], run=run)}
+    elif len(missing) > 1:
+        fetched = {}
+        with ThreadPoolExecutor(max_workers=min(4, len(missing))) as pool:
+            futures = {
+                name: pool.submit(remote_about, name, run=run) for name in missing
+            }
+            for name, future in futures.items():
+                fetched[name] = future.result()
+    else:
+        fetched = {}
+
+    if fetched:
+        with _cache_lock:
+            for name, about_data in fetched.items():
+                _about_cache[name] = (now_ts, dict(about_data))
+        abouts.update(fetched)
+
+    for remote_name in remotes:
+        about = abouts[remote_name]
         growth = estimate_growth_and_days_left(
             db,
             remote_name,
