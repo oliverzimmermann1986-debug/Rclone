@@ -1239,10 +1239,8 @@ final class AppModel: ObservableObject {
                         }
                     }
                 } catch APIError.unauthenticated {
-                    await MainActor.run {
-                        guard let self, self.isCurrentSession(session) else { return }
-                        self.signOutLocally()
-                    }
+                    guard self.isCurrentSession(session) else { return }
+                    self.signOutLocally()
                     return
                 } catch is CancellationError {
                     return
