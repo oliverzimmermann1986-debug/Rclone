@@ -2,6 +2,7 @@ import SwiftUI
 
 /// UI only: draft bindings, no API client, tokens, network calls or Google password field.
 struct GoogleDriveLoginForm: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let driveRemotes: [ExistingGoogleDriveRemote]
     let driveReconnectSupported: Bool
     @Binding var name: String
@@ -9,6 +10,18 @@ struct GoogleDriveLoginForm: View {
     @Binding var clientId: String
     @Binding var clientSecret: String
     @Binding var useStoredClient: Bool
+
+    init(driveRemotes: [ExistingGoogleDriveRemote], driveReconnectSupported: Bool,
+         name: Binding<String>, reconnect: Binding<Bool>, clientId: Binding<String>,
+         clientSecret: Binding<String>, useStoredClient: Binding<Bool>) {
+        self.driveRemotes = driveRemotes
+        self.driveReconnectSupported = driveReconnectSupported
+        _name = name
+        _reconnect = reconnect
+        _clientId = clientId
+        _clientSecret = clientSecret
+        _useStoredClient = useStoredClient
+    }
 
     private var existing: ExistingGoogleDriveRemote? {
         reconnect ? driveRemotes.first(where: { $0.name == name }) : nil
@@ -27,13 +40,21 @@ struct GoogleDriveLoginForm: View {
     var body: some View {
         Section("Google Drive auswählen") {
             if driveReconnectSupported, !driveRemotes.isEmpty {
-                Picker("Verbindung", selection: connectionChoice) {
-                    Text("Neue Verbindung").tag("")
+                if dynamicTypeSize.isAccessibilitySize {
+                    connectionOption("Neue Verbindung", value: "")
                     ForEach(driveRemotes) { remote in
-                        Text("Erneuern: \(remote.name)").tag(remote.name)
+                        connectionOption("Erneuern: \(remote.name)", value: remote.name)
                     }
+                } else {
+                    Picker("Verbindung", selection: connectionChoice) {
+                        Text("Neue Verbindung").tag("")
+                        ForEach(driveRemotes) { remote in
+                            Text("Erneuern: \(remote.name)").tag(remote.name)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(minHeight: 44)
                 }
-                .frame(minHeight: 44)
             }
             if reconnect {
                 Text("Verwende dasselbe Google-Konto. Datenwege, Tresore und vorhandene Ordnerzuordnungen bleiben erhalten.")
@@ -101,6 +122,29 @@ struct GoogleDriveLoginForm: View {
                 Label("Google-Freigabestatus verstehen", systemImage: "info.circle")
                     .frame(minHeight: 44, alignment: .leading)
             }
+            .accessibilityIdentifier("googleDriveOAuthExpirationLink")
         }
+    }
+
+    private func connectionOption(_ title: String, value: String) -> some View {
+        let selected = connectionChoice.wrappedValue == value
+        return Button { connectionChoice.wrappedValue = value } label: {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    .fixedSize()
+                    .accessibilityHidden(true)
+                Text(title)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.body)
+            .frame(minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(selected ? "Ausgewählt" : "Nicht ausgewählt")
     }
 }

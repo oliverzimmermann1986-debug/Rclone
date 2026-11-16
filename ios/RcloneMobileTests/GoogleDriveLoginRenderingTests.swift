@@ -54,14 +54,69 @@ final class GoogleDriveLoginRenderingTests: XCTestCase {
         host.view.layoutIfNeeded()
         window.layoutIfNeeded()
         attach(view: host.view, name: name + "-top")
-        if let scroll = findScrollView(in: host.view), scroll.contentSize.height > scroll.bounds.height {
-            let bottom = scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom
+        try await revealFinalLink(in: host.view)
+        attach(view: host.view, name: name + "-bottom")
+    }
+
+    private func revealFinalLink(in view: UIView) async throws {
+        if let collection = findCollectionView(in: view) {
+            // Form uses self-sizing collection cells; contentSize initially contains estimates.
+            XCTAssertGreaterThan(collection.numberOfSections, 0)
+            var fullyVisiblePasses = 0
+            for _ in 0..<8 {
+                collection.layoutIfNeeded()
+                let last = try XCTUnwrap(lastItem(in: collection))
+                collection.scrollToItem(at: last, at: .bottom, animated: false)
+                await Task.yield()
+                try await Task.sleep(for: .milliseconds(100))
+                view.layoutIfNeeded()
+                collection.layoutIfNeeded()
+                if let cell = collection.cellForItem(at: last),
+                   collection.indexPathsForVisibleItems.contains(last),
+                   visibleContent(in: collection).contains(cell.frame) {
+                    fullyVisiblePasses += 1
+                    if fullyVisiblePasses >= 2 { break }
+                } else {
+                    fullyVisiblePasses = 0
+                }
+            }
+            let last = try XCTUnwrap(lastItem(in: collection))
+            XCTAssertGreaterThan(collection.numberOfItems(inSection: last.section), 0)
+            let cell = try XCTUnwrap(collection.cellForItem(at: last), "The final Google-Freigabestatus link row must be materialized.")
+            XCTAssertTrue(collection.indexPathsForVisibleItems.contains(last), "The final link row must be visible.")
+            XCTAssertTrue(visibleContent(in: collection).contains(cell.frame), "The complete final link row must fit inside the captured viewport.")
+            return
+        }
+        let scroll = try XCTUnwrap(findScrollView(in: view), "The Google form must expose a scrollable viewport.")
+        for _ in 0..<4 {
+            let bottom = max(-scroll.adjustedContentInset.top,
+                scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
             scroll.setContentOffset(CGPoint(x: 0, y: bottom), animated: false)
             await Task.yield()
             try await Task.sleep(for: .milliseconds(100))
-            host.view.layoutIfNeeded()
-            attach(view: host.view, name: name + "-bottom")
+            view.layoutIfNeeded()
+            scroll.layoutIfNeeded()
         }
+        let finalOffset = max(-scroll.adjustedContentInset.top,
+            scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+        XCTAssertEqual(scroll.contentOffset.y, finalOffset, accuracy: 1, "The final link must be reachable at the actual form bottom.")
+    }
+
+    private func lastItem(in collection: UICollectionView) -> IndexPath? {
+        for section in (0..<collection.numberOfSections).reversed() {
+            let items = collection.numberOfItems(inSection: section)
+            if items > 0 { return IndexPath(item: items - 1, section: section) }
+        }
+        return nil
+    }
+
+    private func visibleContent(in scroll: UIScrollView) -> CGRect {
+        scroll.bounds.inset(by: scroll.adjustedContentInset).insetBy(dx: -1, dy: -1)
+    }
+
+    private func findCollectionView(in view: UIView) -> UICollectionView? {
+        if let collection = view as? UICollectionView { return collection }
+        return view.subviews.lazy.compactMap { self.findCollectionView(in: $0) }.first
     }
 
     private func attach(view: UIView, name: String) {
