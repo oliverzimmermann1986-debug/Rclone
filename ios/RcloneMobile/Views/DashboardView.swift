@@ -713,6 +713,7 @@ private struct CopyListRow: View {
 
 struct StorageEndpointMeasurementRow: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .subheadline) private var symbolWidth: CGFloat = 24
     @State private var showingDetails = false
     let symbol: String
     let title: String
@@ -749,7 +750,7 @@ struct StorageEndpointMeasurementRow: View {
                 }
             }
             if let message = presentation.message {
-                HStack(alignment: .top, spacing: 8) {
+                noteLayout {
                     Label(message, systemImage: "exclamationmark.triangle")
                         .font(.footnote)
                         .foregroundStyle(.primary)
@@ -759,12 +760,14 @@ struct StorageEndpointMeasurementRow: View {
                         Button { showingDetails = true } label: {
                             Text("Details")
                                 .font(.footnote.weight(.medium))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: true)
                                 .frame(minWidth: 44, minHeight: 44)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.borderless)
                         .accessibilityLabel("Messdetails für \(title) öffnen")
-                        .accessibilityHint("Zeigt Messzeitpunkt und vollständige technische Meldung.")
+                        .accessibilityHint("Zeigt Messzeitpunkt und die technische Meldung des Servers.")
                     }
                 }
             }
@@ -776,11 +779,19 @@ struct StorageEndpointMeasurementRow: View {
         }
     }
 
+    private var noteLayout: AnyLayout {
+        dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 8))
+    }
+
     private var identity: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: symbol)
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
-                .frame(width: 20)
+                .fixedSize()
+                .frame(width: symbolWidth, alignment: .leading)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.caption.weight(.medium)).foregroundStyle(.secondary)

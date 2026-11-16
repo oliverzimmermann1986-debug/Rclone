@@ -210,7 +210,10 @@ def test_stored_http_session_restore_is_fail_closed_and_manual_login_reconfirms(
     assert restore.index(
         "requiresExplicitInsecureTransportConfirmation"
     ) < restore.index("try await newClient.getConfig()")
-    assert "if APIClient.requiresExplicitInsecureTransportConfirmation(url)" in login
+    assert (
+        "if APIClient.requiresExplicitInsecureTransportConfirmation(target.url)"
+        in login
+    )
     assert "showHTTPWarning = true" in login
 
 

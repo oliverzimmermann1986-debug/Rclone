@@ -49,11 +49,21 @@ Die Exporttests prüfen im Simulator echte Dateiinhalte, getrennte temporäre Or
 
 ## Verbindung
 
+Die Anmeldung führt zuerst durch die Serverauswahl und anschließend zu Benutzername,
+Passwort oder Passkey. Eine aus dem Browser kopierte Adresse mit abschließendem
+`/login` wird als Login-Seite erkannt; ein davorliegender Reverse-Proxy-Basispfad und
+ein expliziter Port bleiben erhalten. Gespeicherte Serverprofile gelten bereits als
+Basispfade und werden nicht erneut als Browseradresse interpretiert. Die ausgewählte
+Adresse steht vor dem Absenden der Zugangsdaten sichtbar in der Anmeldemaske.
+Die Adressauswahl stellt noch keine Verbindung her und prüft kein Zertifikat. Bei
+Tailscale-Adressen weist sie auf die benötigte VPN-Verbindung hin; die tatsächliche
+TLS-Prüfung erfolgt weiterhin durch iOS beim Verbindungsaufbau.
+
 Die Serveradresse muss auf den von außen erreichbaren Reverse Proxy des Sicherpfad-Servers zeigen, zum Beispiel `https://backup.example.de`. Eine lokale IP-Adresse ohne Schema, etwa `192.168.1.67`, wird automatisch als `http://192.168.1.67` über den HTTP-Standardport 80 verwendet. Abweichende Ports können explizit angegeben werden. Der interne Uvicorn-Port 8001 ist bei der Standardinstallation nur an `127.0.0.1` gebunden und vom iPhone nicht direkt erreichbar. HTTPS ist für produktive Installationen vorgesehen. Lokale Netzwerkverbindungen sind erlaubt; unsichere beliebige HTTP-Verbindungen werden durch App Transport Security nicht global freigegeben.
 
 Öffentliche DNS-Namen verwenden ohne explizites Schema HTTPS; Namensanfänge wie `features` oder `fd` gelten nicht als lokale IPv6-Adresse. Die App lehnt eingebettete URL-Zugangsdaten ab. HTTP-Umleitungen bleiben auf Schema, Host und Port des ausgewählten Servers beschränkt, damit Anmelde- oder Bestätigungsdaten nicht an ein anderes Ziel weitergeleitet werden. Pfadwechsel innerhalb desselben Servers bleiben möglich.
 
-Das Passwort wird für die Anmeldung und bewusste Passwortbestätigungen übertragen und nicht gespeichert. Auch die Anlage eines neuen Passkeys benötigt das aktuelle Serverpasswort. Bei WebAuthn verbleibt der private Schlüssel im iCloud-Schlüsselbund, System-Authenticator oder physischen FIDO2-Schlüssel; die App erhält nur einen einmal verwendbaren Sitzungscode. Serveradresse und Benutzername liegen in `UserDefaults`. Mit „Angemeldet bleiben“ werden Sitzungen und CSRF-Cookie im nicht synchronisierenden Geräteschlüsselbund gespeichert, getrennt nach Schema, Host, Port und Basispfad. Das umfasst ausdrücklich bestätigte lokale HTTP-Verbindungen. HTTP ist unverschlüsselt; HTTPS wird empfohlen. Ohne diese Option, nach Abmeldung, Widerruf oder Ablauf ist eine neue Anmeldung nötig. Passkeys benötigen weiterhin eine geeignete HTTPS-Origin. Der Privacy-Manifest deklariert den app-internen `UserDefaults`-Zugriff mit Apples Gründen `CA92.1` (app-eigene Defaults) und `1C8F.1` (App-Group-Defaults mit Widget); Tracking und Datensammlung sind deaktiviert.
+Das Passwort wird für die Anmeldung und bewusste Passwortbestätigungen übertragen und nicht gespeichert. Auch die Anlage eines neuen Passkeys benötigt das aktuelle Serverpasswort. Bei WebAuthn verbleibt der private Schlüssel im iCloud-Schlüsselbund, System-Authenticator oder physischen FIDO2-Schlüssel; die App erhält nur einen einmal verwendbaren Sitzungscode. Serveradresse und Benutzername liegen in `UserDefaults`. Mit „Angemeldet bleiben“ werden HTTPS-Sitzungen und CSRF-Cookie im nicht synchronisierenden Geräteschlüsselbund gespeichert, getrennt nach Schema, Host, Port und Basispfad. HTTP ist unverschlüsselt und erfordert eine ausdrückliche Bestätigung; HTTP-Sitzungen werden nicht für spätere App-Starts gespeichert. Ohne die Speicheroption, nach Abmeldung, Widerruf oder Ablauf ist eine neue Anmeldung nötig. Passkeys benötigen eine geeignete HTTPS-Origin mit Domainnamen; eine reine IP-Adresse reicht nicht. Der Privacy-Manifest deklariert den app-internen `UserDefaults`-Zugriff mit Apples Gründen `CA92.1` (app-eigene Defaults) und `1C8F.1` (App-Group-Defaults mit Widget); Tracking und Datensammlung sind deaktiviert.
 
 Beim erneuten Anmelden am selben Server wartet die App dessen laufende Abmeldung ab. Andere Serverprofile bleiben währenddessen nutzbar. Ein verspätetes Ergebnis eines früheren Logins, Logouts oder Passkey-Dialogs ersetzt keine neuere Sitzung und entfernt keine neueren gespeicherten Cookies. Eine neue Sitzung wird erst nach Prüfung des aktuellen Anmeldevorgangs gespeichert.
 
