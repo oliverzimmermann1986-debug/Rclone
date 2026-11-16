@@ -48,7 +48,9 @@ def test_storage_measurements_support_cache_age_and_explicit_recalculation():
     assert 'case measuredAt = "measured_at"' in models
     assert 'case measurementStatus = "measurement_status"' in models
     assert "await model.refreshStorageSizes()" in dashboard
-    assert 'case "stale"' in dashboard
+    # Freshness behavior is covered by the native presentation tests; this
+    # lightweight gate verifies that the dashboard uses their shared presenter.
+    assert "StorageMeasurementPresentation(size: size" in dashboard
 
 
 def test_storage_cards_drill_into_native_privacy_preserving_charts():
