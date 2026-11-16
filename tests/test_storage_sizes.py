@@ -161,6 +161,47 @@ def test_composition_keeps_partial_aggregates_but_does_not_cache_them(monkeypatc
     assert not api_storage._composition_cache
 
 
+def test_size_failure_is_not_hidden_by_shared_client_notice(monkeypatch):
+    notice = (
+        "NOTICE: This remote uses rclone's shared Google Drive client_id, "
+        "which is being retired. " + "Setup instructions. " * 30
+    )
+    monkeypatch.setattr(
+        api_storage.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=3,
+            stdout="",
+            stderr=notice
+            + "\n2026/11/16 19:56:22 ERROR : error listing: directory not found\n",
+        ),
+    )
+    result = api_storage._rclone_size("gdrive-vault:/Documents")
+    assert result["error"] == "error listing: directory not found"
+    assert "count" not in result
+    assert "bytes" not in result
+
+
+def test_size_failure_preserves_quota_reason_after_a_long_path():
+    error = "ERROR : " + "long-path/" * 60 + ": rateLimitExceeded: Queries per minute"
+    message = api_storage._rclone_size_error(error, "")
+    assert len(message) == 300
+    assert message.endswith("rateLimitExceeded: Queries per minute")
+
+
+def test_size_failure_reads_json_diagnostics_and_stdout_fallback():
+    assert (
+        api_storage._rclone_size_error(
+            'NOTICE: update the shared client\n{"level":"error","msg":"invalid_grant"}',
+            '{"count":0,"bytes":0}',
+        )
+        == "invalid_grant"
+    )
+    assert (
+        api_storage._rclone_size_error("", "permission denied") == "permission denied"
+    )
+
+
 def test_rclone_size_preserves_parseable_values_after_traversal_error(monkeypatch):
     def run(*_args, **_kwargs):
         return SimpleNamespace(

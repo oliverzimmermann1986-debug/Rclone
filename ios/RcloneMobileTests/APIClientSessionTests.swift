@@ -3,6 +3,26 @@ import XCTest
 @testable import RcloneMobile
 
 final class APIClientSessionTests: XCTestCase {
+    func testPastedBrowserLoginUsesCanonicalNativeEndpoints() async throws {
+        for prefix in ["", "/sicherpfad"] {
+            let target = try ServerLoginTarget(address: "https://login.example\(prefix)/login?next=/security")
+            let jar = URLSessionConfiguration.ephemeral.httpCookieStorage!
+            RecordingLoginURLProtocol.reset(cookieStorage: jar)
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [RecordingLoginURLProtocol.self]
+            configuration.httpCookieStorage = jar
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            let client = APIClient(baseURL: target.url, session: session, cookieStorage: jar,
+                sessionPersistence: LoginPersistenceSpy())
+
+            try await client.login(username: "fixture", password: "fixture-password")
+
+            XCTAssertEqual(RecordingLoginURLProtocol.requests,
+                ["GET \(prefix)/api/auth/login", "POST \(prefix)/api/auth/login"])
+        }
+    }
+
     func testLoginCanDeferPersistenceUntilTheOwningAppSessionAcceptsIt() async throws {
         for flow in ["native", "legacy", "webauthn"] {
             let baseURL = try XCTUnwrap(URL(string: "https://login.example"))

@@ -48,7 +48,9 @@ def test_storage_measurements_support_cache_age_and_explicit_recalculation():
     assert 'case measuredAt = "measured_at"' in models
     assert 'case measurementStatus = "measurement_status"' in models
     assert "await model.refreshStorageSizes()" in dashboard
-    assert 'case "stale"' in dashboard
+    # Freshness behavior is covered by the native presentation tests; this
+    # lightweight gate verifies that the dashboard uses their shared presenter.
+    assert "StorageMeasurementPresentation(size: size" in dashboard
 
 
 def test_storage_cards_drill_into_native_privacy_preserving_charts():
@@ -208,7 +210,10 @@ def test_stored_http_session_restore_is_fail_closed_and_manual_login_reconfirms(
     assert restore.index(
         "requiresExplicitInsecureTransportConfirmation"
     ) < restore.index("try await newClient.getConfig()")
-    assert "if APIClient.requiresExplicitInsecureTransportConfirmation(url)" in login
+    assert (
+        "if APIClient.requiresExplicitInsecureTransportConfirmation(target.url)"
+        in login
+    )
     assert "showHTTPWarning = true" in login
 
 

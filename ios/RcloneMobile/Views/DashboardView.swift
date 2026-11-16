@@ -73,15 +73,13 @@ struct DashboardView: View {
                 Section {
                     if let pairs = model.storage?.pairs, !pairs.isEmpty {
                         ForEach(pairs) { pair in
-                            Button { selectedProtectionPath = pair } label: {
-                                CopyListRow(
-                                    pair: pair,
-                                    isMeasuring: model.storageSizesAreLoading,
-                                    isRestoreTesting: model.isRestoreTestRunning(for: pair.name)
-                                )
+                            CopyListRow(
+                                pair: pair,
+                                isMeasuring: model.storageSizesAreLoading,
+                                isRestoreTesting: model.isRestoreTestRunning(for: pair.name)
+                            ) {
+                                selectedProtectionPath = pair
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityHint("Öffnet Statistiken, Schutzpfad und Restore-Nachweis.")
                         }
                     } else if let configured = model.config?.backup.pairs, !configured.isEmpty {
                         ForEach(configured) { pair in
@@ -624,53 +622,65 @@ private struct ConfiguredCopyListRow: View {
                     .font(.caption)
                     .foregroundStyle(pair.enabled ? .green : .secondary)
             }
-            endpoint(symbol: "folder.fill", title: "Lokal", path: pair.local)
-            endpoint(symbol: "icloud.fill", title: "Cloud", path: pair.remote)
+            endpoint(path: pair.local, isSource: pair.direction != "pull")
+            endpoint(path: pair.remote, isSource: pair.direction == "pull")
         }
         .padding(.vertical, 5)
     }
 
-    private func endpoint(symbol: String, title: String, path: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol).foregroundStyle(.green).frame(width: 20)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                Text(path).font(.subheadline).lineLimit(1).truncationMode(.middle)
-            }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(isMeasuring ? "Dateien werden gezählt" : "– Dateien")
-                    .font(.subheadline.weight(.semibold))
-                Text(isMeasuring ? "Größe wird berechnet" : "– Größe")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityElement(children: .combine)
+    private func endpoint(path: String, isSource: Bool) -> some View {
+        StorageEndpointMeasurementRow(
+            symbol: path.hasPrefix("/") ? "folder.fill" : "icloud.fill",
+            title: path.hasPrefix("/") ? "Lokal" : "Cloud",
+            path: path, size: nil,
+            context: .init(isLocal: path.hasPrefix("/"), isSource: isSource, isBidirectional: pair.direction == "bisync"),
+            isMeasuring: isMeasuring
+        )
     }
 }
 
 private struct CopyListRow: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let pair: StoragePair
     let isMeasuring: Bool
     let isRestoreTesting: Bool
+    let onOpen: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
-            HStack {
-                Text(pair.name)
-                    .font(.headline)
-                Spacer()
-                VStack(alignment: .trailing, spacing: 3) {
-                    Text(AppFormat.relative(pair.lastSync))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    RestoreEvidenceBadge(evidence: pair.restoreEvidence, isRunning: isRestoreTesting)
+            Button(action: onOpen) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .top) {
+                        Text(pair.name)
+                            .font(.headline)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                            .accessibilityHidden(true)
+                    }
+                    if dynamicTypeSize.isAccessibilitySize {
+                        VStack(alignment: .leading, spacing: 5) {
+                            lastSyncLabel
+                            RestoreEvidenceBadge(evidence: pair.restoreEvidence, isRunning: isRestoreTesting)
+                        }
+                    } else {
+                        HStack(alignment: .top) {
+                            lastSyncLabel
+                            Spacer(minLength: 8)
+                            RestoreEvidenceBadge(evidence: pair.restoreEvidence, isRunning: isRestoreTesting)
+                        }
+                    }
                 }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityHint("Öffnet Statistiken, Schutzpfad und Restore-Nachweis.")
 
-            endpoint(symbol: "folder.fill", title: "Lokal", path: pair.local, size: localSize)
-            endpoint(symbol: "icloud.fill", title: "Cloud", path: pair.remote ?? "–", size: remoteSize)
+            endpoint(path: pair.local, size: localSize)
+            endpoint(path: pair.remote ?? "–", size: remoteSize)
         }
         .padding(.vertical, 5)
     }
@@ -683,60 +693,181 @@ private struct CopyListRow: View {
         pair.source == pair.remote ? pair.sourceSize : pair.targetSize
     }
 
-    private func endpoint(symbol: String, title: String, path: String, size: PathSize?) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol)
-                .foregroundStyle(.green)
-                .frame(width: 20)
+    private var lastSyncLabel: some View {
+        Text(pair.lastSync.map { AppFormat.relative($0) } ?? "Kein Erfolgsnachweis")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel(StorageMeasurementPresentation.missingSuccessNote(lastSync: pair.lastSync)
+                ?? "Letzte erfolgreiche Sicherung: \(AppFormat.relative(pair.lastSync))")
+    }
 
+    private func endpoint(path: String, size: PathSize?) -> some View {
+        StorageEndpointMeasurementRow(
+            symbol: path.hasPrefix("/") ? "folder.fill" : "icloud.fill",
+            title: path.hasPrefix("/") ? "Lokal" : "Cloud",
+            path: path, size: size, context: .init(path: path, pair: pair), isMeasuring: isMeasuring
+        )
+    }
+}
+
+struct StorageEndpointMeasurementRow: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .subheadline) private var symbolWidth: CGFloat = 24
+    @State private var showingDetails = false
+    let symbol: String
+    let title: String
+    let path: String
+    let size: PathSize?
+    let context: StorageMeasurementPresentation.Context
+    let isMeasuring: Bool
+
+    init(symbol: String, title: String, path: String, size: PathSize?, context: StorageMeasurementPresentation.Context, isMeasuring: Bool = false) {
+        self.symbol = symbol
+        self.title = title
+        self.path = path
+        self.size = size
+        self.context = context
+        self.isMeasuring = isMeasuring
+    }
+
+    private var presentation: StorageMeasurementPresentation {
+        StorageMeasurementPresentation(size: size, context: context, isMeasuring: isMeasuring)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 8) {
+                    identity
+                    measurements
+                }
+            } else {
+                HStack(alignment: .top, spacing: 10) {
+                    identity.layoutPriority(1)
+                    Spacer(minLength: 8)
+                    measurements
+                }
+            }
+            if let message = presentation.message {
+                noteLayout {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .layoutPriority(1)
+                    if presentation.hasDetails {
+                        Button { showingDetails = true } label: {
+                            Text("Details")
+                                .font(.footnote.weight(.medium))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: true)
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Messdetails für \(title) öffnen")
+                        .accessibilityHint("Zeigt Messzeitpunkt und die technische Meldung des Servers.")
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showingDetails) {
+            StorageMeasurementDetailsView(title: title, path: path, presentation: presentation)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        }
+    }
+
+    private var noteLayout: AnyLayout {
+        dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 8))
+    }
+
+    private var identity: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize()
+                .frame(width: symbolWidth, alignment: .leading)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
+                Text(title).font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 Text(path)
                     .font(.subheadline)
-                    .lineLimit(1)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                     .truncationMode(.middle)
-            }
-
-            Spacer(minLength: 8)
-
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(AppFormat.count(size?.count))
-                    .font(.subheadline.weight(.semibold))
-                Text(AppFormat.bytes(size?.bytes))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(measurementLabel(size))
-                    .font(.caption2)
-                    .foregroundStyle(measurementColor(size))
             }
         }
         .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title), \(path)")
     }
 
-    private func measurementLabel(_ size: PathSize?) -> String {
-        guard let size else { return isMeasuring ? "Wird gemessen …" : "Noch nicht gemessen" }
-        switch size.measurementStatus {
-        case "fresh":
-            return "Gerade gemessen"
-        case "cached":
-            return "Gemessen \(AppFormat.relative(size.measuredAt))"
-        case "stale":
-            if let issue = size.measurementError ?? size.error, !issue.isEmpty {
-                return "Veraltet · \(issue)"
-            }
-            return "Veraltet · \(AppFormat.relative(size.measuredAt))"
-        case "failed":
-            return size.measurementError ?? size.error ?? "Messung fehlgeschlagen"
-        default:
-            return size.measuredAt.map { "Gemessen \(AppFormat.relative($0))" } ?? "Noch nicht gemessen"
+    private var measurements: some View {
+        VStack(alignment: dynamicTypeSize.isAccessibilitySize ? .leading : .trailing, spacing: 2) {
+            Text("\(AppFormat.count(presentation.count)) Dateien")
+                .font(.subheadline.weight(.semibold))
+            Text(AppFormat.bytes(presentation.bytes))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(presentation.freshnessLabel)
+                .font(.caption)
+                .foregroundStyle(presentation.isWarning ? .orange : .secondary)
         }
+        .fixedSize(horizontal: !dynamicTypeSize.isAccessibilitySize, vertical: true)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(presentation.measuredAt.map { "Messzeitpunkt: \(AppFormat.date($0))" } ?? "Messzeitpunkt unbekannt")
     }
+}
 
-    private func measurementColor(_ size: PathSize?) -> Color {
-        guard let status = size?.measurementStatus else { return .secondary }
-        return ["stale", "failed"].contains(status) ? .orange : .secondary
+private struct StorageMeasurementDetailsView: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let path: String
+    let presentation: StorageMeasurementPresentation
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(title).font(.headline)
+                        Text(path).font(.body).textSelection(.enabled)
+                    }
+                    if let message = presentation.message {
+                        Label(message, systemImage: "exclamationmark.triangle")
+                            .font(.body)
+                    }
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(presentation.freshnessLabel).font(.headline)
+                        Text("\(AppFormat.count(presentation.count)) Dateien · \(AppFormat.bytes(presentation.bytes))")
+                        Text(presentation.measuredAt.map { "Messzeitpunkt: \(AppFormat.date($0))" } ?? "Messzeitpunkt unbekannt")
+                            .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Technische Meldung").font(.headline)
+                        Text(presentation.technicalDetails ?? "Der Server hat keine weitere technische Meldung geliefert.")
+                            .font(.body.monospaced())
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+            }
+            .navigationTitle("Messdetails")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button { dismiss() } label: {
+                        Text("Fertig").frame(minWidth: 44, minHeight: 44)
+                    }
+                    .accessibilityLabel("Messdetails schließen")
+                }
+            }
+        }
     }
 }
 
