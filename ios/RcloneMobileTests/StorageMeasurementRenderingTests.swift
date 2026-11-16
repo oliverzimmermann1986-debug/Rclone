@@ -93,7 +93,7 @@ final class StorageMeasurementRenderingTests: XCTestCase {
 
     private func findScrollView(in view: UIView) -> UIScrollView? {
         if let scroll = view as? UIScrollView { return scroll }
-        return view.subviews.lazy.compactMap { findScrollView(in: $0) }.first
+        return view.subviews.lazy.compactMap { self.findScrollView(in: $0) }.first
     }
 }
 
