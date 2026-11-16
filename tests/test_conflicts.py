@@ -1,5 +1,7 @@
 import json
+import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -47,6 +49,48 @@ class FakeRclone:
 
 def ls_dir(path):
     return ("rclone", "lsjson", "--files-only", "--no-mimetype", "--", path)
+
+
+@pytest.mark.skipif(
+    shutil.which("rclone") is None, reason="Requires the installed rclone binary"
+)
+@pytest.mark.parametrize("collision", [False, True])
+def test_real_keep_both_preserves_a_destination_created_after_listing(
+    tmp_path: Path, monkeypatch, collision
+):
+    monkeypatch.setattr("app.lockdown.is_locked_down", lambda: False)
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    source = first / "proof.conflict1.txt"
+    source.write_bytes(b"original conflict contents")
+    destinations = []
+
+    def run(command, **kwargs):
+        if command[1] == "moveto":
+            target = Path(command[-1])
+            if collision:
+                target.write_bytes(b"independent newer file")
+            destinations.append(target)
+        return subprocess.run(command, **kwargs)
+
+    result = conflicts.resolve_conflict(
+        {
+            "name": "Dummy",
+            "direction": "bisync",
+            "remote": str(first),
+            "local": str(second),
+        },
+        "proof.txt",
+        "keep_both",
+        run=run,
+    )
+    assert result["completed"] is not collision
+    assert source.exists() is collision
+    assert len(destinations) == 1
+    assert destinations[0].read_bytes() == (
+        b"independent newer file" if collision else b"original conflict contents"
+    )
 
 
 def test_list_groups_by_regex_with_live_files_and_skips_invalid_paths():
@@ -229,7 +273,8 @@ def test_keep_both_renames_on_both_sides_without_overwriting():
         [
             "rclone",
             "moveto",
-            "--immutable",
+            "--ignore-existing",
+            "--error-on-no-transfer",
             "--",
             f"{gd}.conflict1.txt",
             f"{gd} (Konflikt Seite1 2026-10-01 2).txt",
@@ -237,7 +282,8 @@ def test_keep_both_renames_on_both_sides_without_overwriting():
         [
             "rclone",
             "moveto",
-            "--immutable",
+            "--ignore-existing",
+            "--error-on-no-transfer",
             "--",
             f"{gd}.conflict2.txt",
             f"{gd} (Konflikt Seite1 2026-10-01 3).txt",
@@ -245,7 +291,8 @@ def test_keep_both_renames_on_both_sides_without_overwriting():
         [
             "rclone",
             "moveto",
-            "--immutable",
+            "--ignore-existing",
+            "--error-on-no-transfer",
             "--",
             f"{data}.conflict1.txt",
             f"{data} (Konflikt Seite2 2026-10-01).txt",
@@ -253,7 +300,8 @@ def test_keep_both_renames_on_both_sides_without_overwriting():
         [
             "rclone",
             "moveto",
-            "--immutable",
+            "--ignore-existing",
+            "--error-on-no-transfer",
             "--",
             f"{data}.conflict2.txt",
             f"{data} (Konflikt Seite2 2026-10-01 2).txt",

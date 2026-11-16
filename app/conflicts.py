@@ -296,7 +296,8 @@ def resolve_conflict(
                 plan.append(
                     [
                         "moveto",
-                        "--immutable",
+                        "--ignore-existing",
+                        "--error-on-no-transfer",
                         "--",
                         _join(roots[side], rel(copy["name"])),
                         _join(roots[side], rel(target)),
