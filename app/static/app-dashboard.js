@@ -82,7 +82,7 @@ export const dashboardMethods = {
     this.overview.loading = !silent;
     const result = await this.api('GET', '/api/diagnostics/overview', undefined, { silent, requestKey: 'overview' });
     if (this.isStale(result)) return undefined;
-    if (result) this.overview.data = result;
+    if (result) this.overview.data = { ...result, storage_pairs: result.storage_pairs || this.overview.data?.storage_pairs || [] };
     this.overview.loading = false;
     return !!result;
   },
@@ -104,6 +104,7 @@ export const dashboardMethods = {
   async loadPbsStatus(silent = false) {
     this.pbs.loading = true;
     const wasRunning = Boolean(this.pbs.status?.running || this.status?.pbs);
+    const runningId = this.pbs.status?.running_job?.id || this.status?.pbs?.id;
     const result = await this.api('GET', '/api/pbs/status', undefined, { silent, requestKey: 'pbs-status' });
     if (this.isStale(result)) return undefined;
     this.pbs.loading = false;
@@ -116,7 +117,11 @@ export const dashboardMethods = {
         this.loadRecent(true);
         this.loadOverview(true);
         if (this.page === 'runs') this.loadJobs(false);
-        this.showToast('PBS-Backup abgeschlossen');
+        const last = result.last || result.last_job || (runningId ? await this.api('GET', `/api/jobs/${runningId}`, undefined, { silent: true }) : null);
+        const succeeded = last?.status === 'ok';
+        const message = last?.status === 'cancelled' ? 'PBS-Backup abgebrochen'
+          : (last && ['error', 'stale'].includes(last.status) ? 'PBS-Backup fehlgeschlagen' : (succeeded ? 'PBS-Backup abgeschlossen' : 'PBS-Lauf beendet · Ergebnis noch nicht verfügbar'));
+        this.showToast(message, succeeded ? 'ok' : 'warn');
       }
     }
     return Boolean(result);
@@ -136,9 +141,9 @@ export const dashboardMethods = {
     }
   },
   async cancelPbs() {
-    if (this.pending.pbsCancel || !this.pbs.status?.running) return;
+    if (this.pending.pbsCancel || !(this.pbs.status?.running || this.status?.pbs || this.status?.bootdrill)) return;
     if (!(await this.requestConfirmation(
-      'Laufendes PBS-Backup kontrolliert abbrechen?',
+      this.status?.bootdrill ? 'Laufenden Boot-Drill kontrolliert abbrechen?' : 'Laufendes PBS-Backup kontrolliert abbrechen?',
       { title: 'PBS-Backup abbrechen', confirmLabel: 'Backup abbrechen' },
     ))) return;
     this.pending.pbsCancel = true;
@@ -363,7 +368,7 @@ export const dashboardMethods = {
   copyDelta(entry) {
     const source = entry?.source_size;
     const target = entry?.target_size;
-    if (!source || !target || !Number.isFinite(Number(source.bytes)) || !Number.isFinite(Number(target.bytes))) return null;
+    if (!source || !target || source.bytes === null || source.bytes === undefined || target.bytes === null || target.bytes === undefined || !Number.isFinite(Number(source.bytes)) || !Number.isFinite(Number(target.bytes))) return null;
     const sourceBytes = Number(source.bytes);
     const targetBytes = Number(target.bytes);
     const max = Math.max(sourceBytes, targetBytes, 1);

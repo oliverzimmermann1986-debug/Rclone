@@ -397,6 +397,17 @@ erfolgreichen Login oder beim Ändern des Passworts automatisch entfernt.
 
 ## Upgrade
 
+Ab Version 2.4.1 sind Erfolgsstände zusätzlich an Quelle, Ziel, Richtung und
+Übertragungsmodus gebunden. Beim ersten Upgrade können ältere Einträge deshalb
+als fehlender Nachweis erscheinen. Ein Erfolg eines früheren Endpunkts wird
+nicht auf einen geänderten Datenweg übertragen; bestehende Laufprotokolle bleiben
+innerhalb ihrer Aufbewahrungsfrist erhalten.
+
+Der ZIP-Export eines Recovery-Stagings prüft den ursprünglichen Dateinachweis
+erneut. Veränderte Dateien oder ein fehlender Nachweis erfordern eine erneute
+Wiederherstellung. Ein erreichbares leeres Crypt-Ziel gilt nur als erreichbar;
+„Lesbar“ wird erst nach erfolgreichem Lesen einer vorhandenen Datei angezeigt.
+
 Voraussetzung ist ein vertrauenswürdiger Quellbaum im Eigentum von root,
 einschließlich `.git`, der für den Dienstbenutzer nicht beschreibbar ist.
 Altinstallationen mit einem durch den Dienstbenutzer beschreibbaren Checkout

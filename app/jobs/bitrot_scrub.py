@@ -387,7 +387,11 @@ def _scrub_pair(
         sample = _select_sample(files, baseline, settings, now=time.time())
         result["sampled"] = len(sample)
         if not sample:
-            result["ok"] = True
+            result.update(
+                ok=False,
+                skipped=True,
+                error="Keine Datei innerhalb der Stichproben- und Transfergrenzen geprüft",
+            )
             return result
         hashes, rc = _hashsum(
             remote,

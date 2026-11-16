@@ -50,7 +50,7 @@ def _join(root: str, relative: str) -> str:
 
 
 def _safe_relative(value: str) -> str:
-    raw = str(value or "").replace("\\", "/").strip()
+    raw = str(value or "")
     candidate = PurePosixPath(raw)
     if (
         candidate.is_absolute()

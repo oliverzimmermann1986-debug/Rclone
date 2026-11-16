@@ -19,7 +19,7 @@ from .rclone_args import rclone_subprocess_env
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 CACHE_TTL_SECONDS = 3600
 _LABELS = {
-    "immutable": "Ransomware-immun",
+    "immutable": "Object Lock im Bucket aktiv",
     "lock_no_default": "Object Lock ohne Standardregel",
     "versioned": "versioniert",
     "unprotected": "ohne Schutz",

@@ -623,8 +623,8 @@
                   </div></template>
                   </div>
 
-                  <div class="test-result" x-show="testResults[idx]" :class="testResults[idx]?.ok ? 'ok' : 'error'">
-                    <strong x-text="testResults[idx]?.message || testResults[idx]?.error || 'Test läuft…'"></strong><small x-show="testResults[idx]?.tested_unsaved">Aktueller GUI-Entwurf wurde geprüft.</small>
+                  <div class="test-result" x-show="pairTestResult(pair)" :class="pairTestResult(pair)?.ok ? 'ok' : 'error'">
+                    <strong x-text="pairTestResult(pair)?.message || pairTestResult(pair)?.error || 'Test läuft…'"></strong><small x-show="pairTestResult(pair)?.tested_unsaved">Aktueller GUI-Entwurf wurde geprüft.</small>
                   </div>
 
                   <div class="pair-footer-actions">
@@ -696,9 +696,9 @@
           </div>
           <article class="panel schedule-timeline" aria-labelledby="schedule-timeline-heading">
             <div class="panel-head"><div><h3 id="schedule-timeline-heading">Nächste 24 Stunden</h3><p>Termine der aktivierten Jobs in der konfigurierten Zeitzone.</p></div><button class="button secondary small" @click="loadJobScheduleTimeline()" :disabled="jobTimeline.loading" x-text="jobTimeline.loading ? 'Berechnet…' : 'Aktualisieren'"></button></div>
-            <div class="inline-error" x-show="jobTimeline.conflicts.length" role="status"><template x-for="conflict in jobTimeline.conflicts" :key="conflict.at"><p><strong>Achtung:</strong> <span x-text="conflict.names.join(' und ') + ' starten gleichzeitig um ' + new Date(conflict.at).toLocaleTimeString('de-DE', {hour:'2-digit', minute:'2-digit'})"></span></p></template></div>
-            <div class="timeline-axis"><template x-for="hour in [0, 6, 12, 18, 24]" :key="hour"><span :style="`left:${timelineHourPosition(hour)}%`" x-text="String(hour).padStart(2,'0') + ':00'"></span></template></div>
-            <template x-for="row in jobTimeline.rows" :key="row.id"><div class="timeline-row"><strong x-text="row.name"></strong><div class="timeline-track"><template x-for="(run, runIndex) in row.runs" :key="runIndex"><i :style="`left:${run.position}%;width:${run.widthPercent || 1.2}%`" :title="formatDateTime(run.timestamp) + (run.avgDurationSec ? ' · Ø Dauer ' + formatDur(run.avgDurationSec) : '')" :aria-label="'Geplant ' + formatDateTime(run.timestamp)"></i></template></div><small x-show="row.error" x-text="row.error"></small></div></template>
+            <div class="inline-error" x-show="jobTimeline.conflicts.length" role="status"><template x-for="conflict in jobTimeline.conflicts" :key="conflict.at"><p><strong>Achtung:</strong> <span x-text="conflict.names.join(' und ') + ' starten gleichzeitig um ' + timelineTime(Date.parse(conflict.at) / 1000)"></span></p></template></div>
+            <div class="timeline-axis"><template x-for="hour in [0, 6, 12, 18, 24]" :key="hour"><span :style="`left:${timelineHourPosition(hour)}%`" x-text="timelineHourLabel(hour)"></span></template></div>
+            <template x-for="row in jobTimeline.rows" :key="row.id"><div class="timeline-row"><strong x-text="row.name"></strong><div class="timeline-track"><template x-for="(run, runIndex) in row.runs" :key="runIndex"><i :style="`left:${run.position}%;width:${run.widthPercent || 1.2}%`" :title="timelineTime(run.timestamp) + (run.avgDurationSec ? ' · Ø Dauer ' + formatDur(run.avgDurationSec) : '')" :aria-label="'Geplant ' + timelineTime(run.timestamp)"></i></template></div><small x-show="row.error" x-text="row.error"></small></div></template>
             <p class="muted" x-show="!jobTimeline.loading && !jobTimeline.rows.length">Keine aktivierten, geplanten Jobs.</p>
           </article>
           <article class="panel stack" aria-labelledby="bandwidth-heading">
@@ -780,6 +780,7 @@
 
         <!-- DOCTOR -->
         <section x-show="page==='doctor'" x-cloak>
+          <div class="alert warn" x-show="systemBundleErrors.length" role="alert"><span class="alert-icon" aria-hidden="true">△</span><div><strong>Systemdaten nur teilweise aktualisiert</strong><template x-for="message in systemBundleErrors" :key="message"><p x-text="message"></p></template></div></div>
           <div class="page-heading">
             <div><h2>System</h2><p>Dienste, Ressourcen, Datenbank und Schutzregeln prüfen.</p><div class="button-row"><button type="button" class="button secondary" @click="openRemoteSetup()">Neues Remote einbinden</button><button type="button" class="button secondary" @click="openCrypt()">Verschlüsseltes Remote anlegen</button></div></div>
             <div class="heading-actions"><button class="button secondary" @click="navigate('recovery')">Wiederherstellung</button><button class="button secondary" @click="navigate('settings')">Einstellungen</button><button class="button secondary" @click="downloadSupportBundle()">Support-Bundle</button><button class="button primary" @click="loadDoctor()" :disabled="doctor.loading"><span x-text="doctor.loading ? 'Prüfung läuft…' : 'Vollständige Prüfung'"></span></button></div>
@@ -1090,7 +1091,7 @@
           </div>
 
           <div class="settings-layout">
-            <nav class="settings-nav" aria-label="Einstellungsbereiche" role="tablist" @keydown.right.prevent="moveSettingsTab(1)" @keydown.left.prevent="moveSettingsTab(-1)" @keydown.home.prevent="selectSettingsTab(settingsTabs[0], true)" @keydown.end.prevent="selectSettingsTab(settingsTabs[settingsTabs.length-1], true)">
+            <nav class="settings-nav" aria-label="Einstellungsbereiche" role="tablist" :aria-orientation="settingsTabsHorizontal ? 'horizontal' : 'vertical'" @keydown="settingsTabKey($event)">
               <button id="settings-tab-general" role="tab" :aria-selected="settingsTab==='general'" aria-controls="settings-panel-general" :tabindex="settingsTab==='general' ? 0 : -1" :class="settingsTab==='general' && 'active'" @click="selectSettingsTab('general')"><span class="settings-nav-mark">01</span><span><strong>Allgemein</strong><small>Pfade, Hosts und Zeitzone</small></span></button>
               <button id="settings-tab-scheduler" role="tab" :aria-selected="settingsTab==='scheduler'" aria-controls="settings-panel-scheduler" :tabindex="settingsTab==='scheduler' ? 0 : -1" :class="settingsTab==='scheduler' && 'active'" @click="selectSettingsTab('scheduler')"><span class="settings-nav-mark">02</span><span><strong>Scheduler & Leistung</strong><small>Zeitplan, Last und Aufbewahrung</small></span></button>
               <button id="settings-tab-security" role="tab" :aria-selected="settingsTab==='security'" aria-controls="settings-panel-security" :tabindex="settingsTab==='security' ? 0 : -1" :class="settingsTab==='security' && 'active'" @click="selectSettingsTab('security')"><span class="settings-nav-mark">03</span><span><strong>Sicherheit</strong><small>Löschschutz und Webzugriff</small></span></button>
@@ -1156,7 +1157,7 @@
                         <code x-text="config.backup.default_schedule || 'manual'"></code>
                       </div>
                       <div class="inline-error" x-show="schedulePreview.valid === false" x-text="schedulePreview.error"></div>
-                      <div class="inherit-note"><strong>Wichtig:</strong> Dieser Standard gilt nur für Pairs ohne eigenen Zeitplan. Ein Pair mit „manuell“ bleibt manuell.</div>
+                      <div class="inherit-note"><strong>Wichtig:</strong> Zeitpläne werden ausschließlich in den Jobdefinitionen unter Jobs festgelegt.</div>
                     </section>
 
                     <section class="settings-section">
@@ -1257,7 +1258,7 @@
                       <ol x-show="schedulePreview.nextRuns.length"><template x-for="(run, idx) in schedulePreview.nextRuns" :key="run.iso"><li><span x-text="scheduleNextLabel(run, idx)"></span><small x-text="config.backup.timezone || 'Europe/Berlin'"></small></li></template></ol>
                     </div>
                     <div class="summary-warning" x-show="schedulerRiskLevel() !== 'low'" :class="schedulerRiskLevel()"><strong x-text="schedulerRiskLevel() === 'high' ? 'Ressourcen prüfen' : 'Last beobachten'"></strong><span x-text="schedulerRiskText()"></span></div>
-                    <div class="summary-help"><strong>Wie greifen Zeitpläne?</strong><p>Jedes Pair kann einen eigenen Zeitplan haben. Nur ein leeres Zeitplanfeld übernimmt diesen Standard. „Manuell“ schaltet die Automatik für das Pair bewusst aus.</p></div>
+                    <div class="summary-help"><strong>Wie greifen Zeitpläne?</strong><p>Jede Jobdefinition hat einen Zeitplan und zugeordnete Datenwege. „Manuell“ schaltet automatische Starts dieses Jobs aus. Zeitpläne werden unter Jobs bearbeitet.</p></div>
                   </aside>
                 </div>
               </article>
@@ -1286,10 +1287,10 @@
                   <h4 class="subheading">Live-Filter-Tester</h4>
                   <label class="field"><span>Beispielpfade (einer pro Zeile)</span><textarea class="mono" rows="4" x-model="filterTester.pathsText" placeholder="fotos/urlaub/.DS_Store&#10;dokumente/vertrag.pdf&#10;projekt/node_modules/pkg/index.js"></textarea></label>
                   <div class="button-row"><button type="button" class="button secondary small" @click="runFilterTest()" :disabled="filterTester.loading" x-text="filterTester.loading ? 'Prüft…' : 'Gegen aktuelle Regeln testen'"></button></div>
-                  <div class="inline-error" x-show="(filterTester.parseErrors || []).length" x-cloak role="alert">
+                  <div class="inline-error" x-show="filterTestIsCurrent() && (filterTester.parseErrors || []).length" x-cloak role="alert">
                     <template x-for="err in filterTester.parseErrors" :key="err"><div x-text="err"></div></template>
                   </div>
-                  <div class="snapshot-diff-list" x-show="filterTester.results.length" x-cloak><template x-for="item in filterTester.results" :key="item.path"><div><code x-text="item.path"></code><span class="badge compact" :class="item.included ? 'ok' : 'warn'" x-text="item.included ? 'Eingeschlossen' : 'Ausgeschlossen'"></span><small class="mono" x-text="(item.matched_line ?? item.rule_line) ? ('Regel #' + (item.matched_line ?? item.rule_line) + ': ' + item.matched_rule) : (item.matched_rule || 'Standard · eingeschlossen')"></small></div></template></div>
+                  <p class="muted" x-show="(filterTester.results.length || filterTester.parseErrors.length) && !filterTestIsCurrent()" role="status">Regeln oder Beispielpfade wurden geändert. Bitte erneut prüfen.</p><div class="snapshot-diff-list" x-show="filterTestIsCurrent() && filterTester.results.length" x-cloak><template x-for="item in filterTester.results" :key="item.path"><div><code x-text="item.path"></code><span class="badge compact" :class="item.included ? 'ok' : 'warn'" x-text="item.included ? 'Eingeschlossen' : 'Ausgeschlossen'"></span><small class="mono" x-text="(item.matched_line ?? item.rule_line) ? ('Regel #' + (item.matched_line ?? item.rule_line) + ': ' + item.matched_rule) : (item.matched_rule || 'Standard · eingeschlossen')"></small></div></template></div>
                 </div>
               </article>
 
@@ -1406,7 +1407,7 @@
       <div class="modal-content">
         <div class="alert info"><span class="alert-icon">i</span><span>Quick-Sync ist für einmalige Aufgaben. Dauerhafte Synchronisationen gehören als Pair in die Konfiguration.</span></div>
         <label class="field"><span>Remote-Pfad · rclone-Remote oder lokaler Pfad</span><div class="input-action"><input class="mono" x-model="quick.remote" placeholder="pcloud:/Backup oder /mnt/usb1" aria-label="Remote-Pfad"><button @click="openQuickPicker('remote')" aria-label="rclone-Remote durchsuchen">Remote</button><button @click="openQuickPicker('remote-local')" aria-label="Lokalen Pfad als Remote-Seite wählen">Lokal</button></div></label>
-        <div class="quick-swap-row"><button type="button" class="button secondary small" @click="swapQuickPaths()" aria-label="Quelle und Ziel tauschen">⇄ Pfade tauschen</button></div>
+        <div class="quick-swap-row"><button type="button" class="button secondary small" @click="swapQuickPaths()" aria-label="Quelle und Ziel tauschen">⇄ Richtung umkehren</button></div>
         <label class="field"><span>Lokaler Pfad</span><div class="input-action"><input class="mono" x-model="quick.local" placeholder="/mnt/backup" aria-label="Lokaler Quick-Sync-Pfad"><button @click="openQuickPicker('local')" aria-label="Lokalen Ordner wählen">Ordner</button></div></label>
         <label class="check-row"><input type="checkbox" x-model="quick.new_target"><span><strong>Neues leeres Ziel</strong><small>Legt den lokalen Pfad an und deaktiviert dafür den Mount-Schutz (min_local_files=0). Nur setzen, wenn das Ziel bewusst neu ist.</small></span></label>
         <div class="form-grid two"><label class="field"><span>Richtung</span><select x-model="quick.direction" @change="if(quick.direction==='bisync')quick.mode='bisync';else if(quick.mode==='bisync')quick.mode='copy'"><option value="pull">Remote-Pfad → Lokaler Pfad</option><option value="push">Lokaler Pfad → Remote-Pfad</option><option value="bisync">Bidirektional – beide Seiten angleichen</option></select></label><label class="field"><span>Modus</span><select x-model="quick.mode" :disabled="quick.direction==='bisync'"><option value="copy">Copy – ohne Löschen</option><option value="sync">Sync – Mirror</option><option value="bisync" x-show="quick.direction==='bisync'">Bi-Sync</option></select></label></div>
@@ -1646,10 +1647,10 @@
         </template>
       </div>
       <div class="modal-footer">
-        <small class="muted" x-show="preflight.kind === 'quicksync'">Für den produktiven Lauf Quick-Sync ohne Dry-Run erneut starten.</small>
+        <small class="muted" x-show="preflight.kind === 'backup' && !preflight.data?.config_revision">Dieser alte Lauf hat keinen gebundenen Konfigurationsstand. Bitte einen neuen Dry-Run erstellen.</small><small class="muted" x-show="preflight.kind === 'quicksync'">Für den produktiven Lauf Quick-Sync ohne Dry-Run erneut starten.</small>
         <small class="muted" x-show="preflightExcludedCount()" x-text="preflightExcludedCount() + ' Pfade abgewählt'"></small>
         <button class="button secondary" @click="closePreflight()">Schließen</button>
-        <button class="button danger" x-show="preflight.kind === 'backup' && (preflight.data?.pairs || []).length" @click="startPreflightRun()" :disabled="startBlocked()"><span x-show="!pending.backup">Produktiv starten</span><span x-show="pending.backup">Startet…</span></button>
+        <button class="button danger" x-show="canStartPreflightRun()" @click="startPreflightRun()" :disabled="startBlocked()"><span x-show="!pending.backup">Produktiv starten</span><span x-show="pending.backup">Startet…</span></button>
       </div>
     </div>
   </div>
@@ -1712,7 +1713,7 @@
           <div class="field"><span id="crypt-password-label">Schlüssel (password)</span><pre id="crypt-password" class="code-block crypt-key" role="group" aria-labelledby="crypt-password-label" x-text="crypt.result?.keys?.password"></pre><button type="button" class="button secondary small" @click="copyCryptKey('password')" aria-describedby="crypt-password-label">Schlüssel kopieren</button></div>
           <div class="field"><span id="crypt-password2-label">Salt (password2)</span><pre id="crypt-password2" class="code-block crypt-key" role="group" aria-labelledby="crypt-password2-label" x-text="crypt.result?.keys?.password2"></pre><button type="button" class="button secondary small" @click="copyCryptKey('password2')" aria-describedby="crypt-password2-label">Salt kopieren</button></div>
           <label class="check-row"><input type="checkbox" x-model="crypt.saved"><span><strong>Ich habe beide Schlüssel im Passwortmanager gesichert</strong><small>Ohne sie lassen sich die Daten nach einem Verlust dieses Servers nicht entschlüsseln.</small></span></label>
-          <div class="button-row"><button type="button" class="button secondary small" @click="verifyCrypt()" :disabled="crypt.busy" x-text="crypt.busy ? 'Prüft…' : 'Remote prüfen'"></button><span class="badge compact" role="status" x-show="crypt.verify" :class="crypt.verify?.ok ? 'ok' : 'error'" x-text="crypt.verify?.ok ? 'Lesbar' : 'Nicht lesbar'"></span><small class="error-text" x-show="crypt.verify && !crypt.verify.ok && crypt.verify.text !== 'Nicht lesbar'" x-text="crypt.verify?.text"></small></div>
+          <div class="button-row"><button type="button" class="button secondary small" @click="verifyCrypt()" :disabled="crypt.busy" x-text="crypt.busy ? 'Prüft…' : 'Remote prüfen'"></button><span class="badge compact" role="status" x-show="crypt.verify" :class="crypt.verify?.verified ? 'ok' : (crypt.verify?.ok ? 'warn' : 'error')" x-text="crypt.verify?.verified ? 'Lesbar' : (crypt.verify?.ok ? 'Entschlüsselung ungeprüft' : 'Nicht lesbar')"></span><small :class="crypt.verify?.ok ? 'hint' : 'error-text'" x-show="crypt.verify?.text" x-text="crypt.verify?.text"></small></div>
           <p>Datenwege nutzen jetzt <code x-text="(crypt.result?.name || '') + ':'"></code> als Cloud-Ordner. Basis: <code x-text="crypt.result?.remote"></code></p>
         </div>
         <p class="inline-error" role="alert" x-show="crypt.error" x-text="crypt.error"></p>
@@ -1746,8 +1747,8 @@
   <div class="command-palette-backdrop" x-show="commandPalette.show" x-transition.opacity @click.self="closeCommandPalette()" @keydown.escape.stop="closeCommandPalette()" x-cloak>
     <section class="command-palette" x-ref="commandPaletteDialog" role="dialog" aria-modal="true" aria-labelledby="command-palette-title">
       <h2 id="command-palette-title" class="sr-only">Befehlssuche</h2>
-      <label class="command-palette-search"><span aria-hidden="true">⌕</span><input id="command-palette-input" x-model="commandPalette.query" @input="commandPalette.selectedIndex=0" @keydown.down.prevent="moveCommandSelection(1)" @keydown.up.prevent="moveCommandSelection(-1)" @keydown.escape.stop="closeCommandPalette()" @keydown.enter.prevent="runSelectedCommand()" placeholder="Ansicht, Datenweg oder Aktion suchen…" autocomplete="off"><kbd>Esc</kbd></label>
-      <div class="command-palette-results" role="listbox" aria-label="Aktionen"><template x-for="(item, itemIdx) in commandItems()" :key="item.label"><button type="button" role="option" :aria-selected="itemIdx === commandPalette.selectedIndex" :class="itemIdx === commandPalette.selectedIndex && 'active'" @click="runCommand(item)" x-text="item.label"></button></template><p x-show="commandItems().length===0">Keine passenden Aktionen.</p></div>
+      <label class="command-palette-search"><span aria-hidden="true">⌕</span><input id="command-palette-input" aria-label="Befehle und Ansichten suchen" role="combobox" aria-autocomplete="list" aria-controls="command-palette-list" :aria-expanded="commandPalette.show" :aria-activedescendant="commandItems().length ? ('command-option-' + commandPalette.selectedIndex) : null" x-model="commandPalette.query" @input="resetCommandSelection()" @keydown.down.prevent="moveCommandSelection(1)" @keydown.up.prevent="moveCommandSelection(-1)" @keydown.escape.stop="closeCommandPalette()" @keydown.enter.prevent="runSelectedCommand()" placeholder="Ansicht, Datenweg oder Aktion suchen…" autocomplete="off"><kbd>Esc</kbd></label>
+      <div id="command-palette-list" class="command-palette-results" role="listbox" aria-label="Aktionen"><template x-for="(item, itemIdx) in commandItems()" :key="item.label"><button type="button" role="option" tabindex="-1" :id="'command-option-' + itemIdx" :aria-selected="itemIdx === commandPalette.selectedIndex" :class="itemIdx === commandPalette.selectedIndex && 'active'" @click="runCommand(item)" x-text="item.label"></button></template><p x-show="commandItems().length===0">Keine passenden Aktionen.</p></div>
       <small>Mit <kbd>Strg K</kbd> oder <kbd>⌘ K</kbd> öffnen · <kbd>↑</kbd><kbd>↓</kbd> wählen · <kbd>Enter</kbd> ausführen</small>
     </section>
   </div>

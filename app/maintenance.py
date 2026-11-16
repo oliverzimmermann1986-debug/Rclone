@@ -24,9 +24,13 @@ def iter_logs(root: Path | None = None) -> Iterator[Path]:
         return
     for path in base.rglob("*.log"):
         try:
+            if path.is_symlink() or any(
+                parent.is_symlink() for parent in path.parents if parent != base
+            ):
+                continue
             resolved = path.resolve()
             if resolved.is_file() and is_relative_to(resolved, base):
-                yield resolved
+                yield path
         except (OSError, RuntimeError):
             continue
 

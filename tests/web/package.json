@@ -2,7 +2,7 @@
   "name": "sicherpfad-web-checks",
   "private": true,
   "scripts": {
-    "test": "node runtime-behavior.cjs && node workspace-dom.cjs && node workspace-alpine.cjs"
+    "test": "node runtime-behavior.cjs && node review-regressions.cjs && node workspace-dom.cjs && node workspace-alpine.cjs"
   },
   "devDependencies": {
     "linkedom": "0.18.12"

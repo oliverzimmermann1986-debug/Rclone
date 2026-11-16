@@ -9,34 +9,53 @@ export const systemMethods = {
       this.loadOverview(true); this.loadLogs(); this.loadDatabaseStatus(); this.loadSnapshots();
       this.loadAudit(); this.loadCopies(); this.loadSchedulerState(true); this.loadPushStatus(true);
       this.loadBitrot(); this.loadRansomwareStatus();
+      this.loadDoctor(); this.loadVpn();
       return;
     }
-    if (result.overview) this.overview.data = result.overview;
-    if (result.copies) {
+    const failures = [];
+    const labels = { overview: 'Übersicht', doctor: 'Systemprüfung', copies: 'Kopienübersicht', logs: 'Logs', database: 'Datenbank', snapshots: 'Snapshots', audit: 'Audit', scheduler: 'Scheduler', push: 'Push', bitrot: 'Bitrot', ransomware: 'Ransomware-Schutz', vpn: 'VPN' };
+    const usable = (key) => {
+      const part = result[key];
+      if (part?.error) {
+        failures.push(`${labels[key]}: ${part.error}`);
+        return false;
+      }
+      return Boolean(part);
+    };
+    if (usable('overview')) this.overview.data = { ...result.overview, storage_pairs: result.overview.storage_pairs || this.overview.data?.storage_pairs || [] };
+    if (usable('doctor')) this.doctor.data = result.doctor;
+    this.doctor.loading = false;
+    if (usable('copies')) {
       this.copies.data = result.copies;
       this.copies.error = '';
-    }
-    if (result.logs?.logs) this.maintenance.logs = result.logs.logs;
-    if (result.database) this.maintenance.database = result.database;
-    if (result.snapshots?.snapshots) {
+    } else if (result.copies?.error) this.copies.error = String(result.copies.error);
+    if (usable('logs') && result.logs.logs) this.maintenance.logs = result.logs.logs;
+    if (usable('database')) this.maintenance.database = result.database;
+    if (usable('snapshots') && result.snapshots.snapshots) {
       this.snapshots.items = result.snapshots.snapshots;
       this.snapshots.max = result.snapshots.max_snapshots || 30;
     }
-    if (result.audit?.events) this.audit.items = result.audit.events;
-    if (result.audit?.chain) this.audit.chain = result.audit.chain;
-    if (result.scheduler) this.schedulerControl = { ...this.schedulerControl, ...result.scheduler, loading: false };
-    if (result.push) {
+    if (usable('audit')) {
+      if (result.audit.events) this.audit.items = result.audit.events;
+      if (result.audit.chain) this.audit.chain = result.audit.chain;
+    }
+    if (usable('scheduler')) this.schedulerControl = { ...this.schedulerControl, ...result.scheduler, loading: false };
+    if (usable('push')) {
       this.push.status = result.push;
       this.push.error = '';
-    }
-    if (result.bitrot) {
+    } else if (result.push?.error) this.push.error = String(result.push.error);
+    if (usable('bitrot')) {
       this.bitrot.data = result.bitrot;
       this.bitrot.error = false;
-    }
-    if (result.ransomware) {
+    } else if (result.bitrot?.error) this.bitrot.error = true;
+    if (usable('ransomware')) {
       this.ransomwareStatus.data = result.ransomware;
       this.ransomwareStatus.error = false;
-    }
+    } else if (result.ransomware?.error) this.ransomwareStatus.error = true;
+    if (usable('vpn')) { this.vpn.data = result.vpn; this.vpn.error = false; }
+    else if (result.vpn?.error) this.vpn.error = true;
+    this.vpn.loading = false;
+    this.systemBundleErrors = failures;
   },
 
   async loadDoctor() {
@@ -206,6 +225,7 @@ export const systemMethods = {
     const result = await this.api('POST', `/api/maintenance/logs/prune?days=${days}&dry_run=${dryRun}`);
     if (result) {
       this.maintenance.prune = result;
+      if (result.ok === false) { this.showToast(result.error || 'Logbereinigung fehlgeschlagen.', 'err'); return; }
       this.showToast(dryRun ? `${result.matched} alte Logs gefunden` : `${result.deleted} alte Logs gelöscht`);
       this.loadLogs();
     }
@@ -245,11 +265,14 @@ export const systemMethods = {
   },
 
   async loadSnapshotDiff() {
+    const generation = (this.snapshots.diffGeneration || 0) + 1;
+    this.snapshots.diffGeneration = generation;
     const name = this.snapshots.restoreName;
     if (!name) { this.snapshots.diff = { loading: false, data: null, error: '' }; return; }
     this.snapshots.diff = { loading: true, data: null, error: '' };
     const result = await this.api('GET', `/api/maintenance/config/snapshots/${encodeURIComponent(name)}/diff`, undefined, { silent: true, captureError: true, requestKey: 'snapshot-diff' });
     if (this.isStale(result)) return;
+    if (generation !== this.snapshots.diffGeneration || name !== this.snapshots.restoreName) return;
     if (result?.__error) {
       const detail = result.detail;
       this.snapshots.diff = { loading: false, data: null, error: typeof detail === 'string' ? detail : (detail?.message || 'Snapshot-Unterschiede konnten nicht geladen werden.') };

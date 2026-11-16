@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from app.copies import build_matrix, target_scope
 from app.db import Database
+from app.jobs.scheduler import rclone_history_key
 
 
 class _Cfg:
@@ -270,13 +271,16 @@ def test_versioned_offsite_pair_is_clean(tmp_path):
             "ok": True,
             "pairs": [{"name": "a", "ok": True}, {"name": "b", "ok": True}],
             "history_keys": {
-                "a": f"rclone:id:{pairs[0]['id']}",
-                "b": f"rclone:id:{pairs[1]['id']}",
+                "a": rclone_history_key(pairs[0]),
+                "b": rclone_history_key(pairs[1]),
             },
         },
     )
     with db.conn() as connection:
         connection.execute("UPDATE pair_runs SET ended_at=?", (now - 3600,))
+        connection.execute(
+            "UPDATE pair_history_state SET last_success_at=?", (now - 3600,)
+        )
 
     matrix = build_matrix(_cfg(pairs), db, now=now)
     row = matrix["sources"][0]

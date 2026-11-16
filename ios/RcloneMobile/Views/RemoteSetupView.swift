@@ -459,6 +459,7 @@ struct RemoteSetupView: View {
                         answer: answer.isEmpty ? session.option.defaultValue : answer,
                         step: session.step
                     )
+                    self.session = updated
                     if updated.ready {
                         loopbackServer.stop()
                         let saved = try await client.saveRemoteSetup(id: updated.id)
@@ -466,7 +467,6 @@ struct RemoteSetupView: View {
                         savedName = saved.name
                         self.session = nil
                     } else {
-                        self.session = updated
                         startAutomaticBrowserAuthIfNeeded(for: updated)
                     }
                 }

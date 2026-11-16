@@ -69,7 +69,7 @@ window.app = () => ({
   },
   rcloneBusy() { return false; },
   startBlocked() { return false; },
-  openJob(id) { this.calls.push(`job:${id}`); },
+  showJob(job) { this.calls.push(`job:${job.id}`); },
   storagePairs() { return []; },
   statusLabel(value) { return value; },
   loadDoctor() { this.calls.push('loadDoctor'); },

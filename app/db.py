@@ -2343,6 +2343,8 @@ class Database:
                     (history_key,),
                 ).fetchone()
                 if not row:
+                    if ":fp:" in history_key:
+                        return None
                     legacy_key = self._default_history_key("", pair_name)
                     row = connection.execute(
                         "SELECT * FROM pair_runs "
@@ -2375,6 +2377,8 @@ class Database:
                     (history_key,),
                 ).fetchone()
                 if not row:
+                    if ":fp:" in history_key:
+                        return None
                     terminal_stable_attempt_exists = connection.execute(
                         "SELECT 1 FROM pair_runs WHERE history_key=? "
                         "AND (status<>'running' OR ended_at IS NOT NULL) LIMIT 1",
@@ -2466,7 +2470,7 @@ class Database:
             # der bereits vor dem Lookup reservierte laufende Versuch die alte
             # Erfolgsevidenz nicht verdecken. Die Evidenz wird auf den stabilen
             # Key übernommen und überlebt danach auch Job-Pruning und Umbenennen.
-            if key != legacy_key:
+            if key != legacy_key and ":fp:" not in key:
                 legacy = connection.execute(
                     "SELECT * FROM pair_history_state "
                     "WHERE history_key=? AND pair_name=?",
@@ -2517,7 +2521,7 @@ class Database:
                     ).fetchone()
                     is not None
                 )
-            if not terminal_seen and key != legacy_key:
+            if not terminal_seen and key != legacy_key and ":fp:" not in key:
                 legacy = connection.execute(
                     "SELECT terminal_seen FROM pair_history_state "
                     "WHERE history_key=? AND pair_name=?",
@@ -2533,7 +2537,8 @@ class Database:
 
         ``identities`` bildet den stabilen, getypten History-Key auf den aktuellen
         Anzeigenamen ab. Alte name-basierte Zeilen werden nur verwendet, solange
-        noch keine Zeile für den stabilen Key existiert.
+        noch keine Zeile oder dauerhafte Erfolgsevidenz für den stabilen Key
+        existiert. Endpointgebundene Fingerprints übernehmen niemals Namensdaten.
         """
         requested = {
             str(history_key).strip(): str(pair_name).strip()
@@ -2545,6 +2550,7 @@ class Database:
 
         selected_ids: Dict[str, tuple[Optional[int], Optional[int]]] = {}
         rows_by_id: Dict[int, sqlite3.Row] = {}
+        retained_successes: Dict[str, float] = {}
         items = list(requested.items())
         with self.conn() as connection:
             # Four correlated Top-1 probes per identity keep work proportional
@@ -2572,14 +2578,19 @@ class Database:
                     "(SELECT id FROM pair_runs WHERE history_key=requested.history_key "
                     "AND ok=1 AND dry_run=0 "
                     "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1) "
-                    "AS stable_success_id FROM requested) "
-                    "SELECT history_key, stable_last_id, stable_success_id, "
-                    "CASE WHEN stable_last_id IS NULL THEN "
+                    "AS stable_success_id, "
+                    "(SELECT last_success_at FROM pair_history_state "
+                    "WHERE history_key=requested.history_key AND ever_succeeded=1) "
+                    "AS retained_success_at FROM requested) "
+                    "SELECT history_key, stable_last_id, stable_success_id, retained_success_at, "
+                    "CASE WHEN stable_last_id IS NULL AND retained_success_at IS NULL "
+                    "AND instr(history_key, ':fp:')=0 THEN "
                     "(SELECT id FROM pair_runs WHERE pair_name=stable.pair_name "
                     "AND history_key IN ('', stable.legacy_key) "
                     "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1) "
                     "END AS legacy_last_id, "
-                    "CASE WHEN stable_last_id IS NULL THEN "
+                    "CASE WHEN stable_last_id IS NULL AND retained_success_at IS NULL "
+                    "AND instr(history_key, ':fp:')=0 THEN "
                     "(SELECT id FROM pair_runs WHERE pair_name=stable.pair_name "
                     "AND history_key IN ('', stable.legacy_key) "
                     "AND ok=1 AND dry_run=0 "
@@ -2589,6 +2600,10 @@ class Database:
                 ).fetchall()
                 row_ids: set[int] = set()
                 for row in id_rows:
+                    if row["retained_success_at"] is not None:
+                        retained_successes[str(row["history_key"])] = float(
+                            row["retained_success_at"]
+                        )
                     stable_last = row["stable_last_id"]
                     if stable_last is not None:
                         last_id = int(stable_last)
@@ -2629,6 +2644,30 @@ class Database:
             last_success = (
                 self._pair_row_to_result(success_row) if success_row else None
             )
+            retained_at = retained_successes.get(history_key)
+            if retained_at is not None and (
+                not last_success
+                or retained_at > float(last_success.get("ended_at") or 0)
+            ):
+                # Job pruning removes the detailed attempt, not its durable
+                # success evidence. Only the exact identity's recorded success
+                # timestamp is known; do not invent a start time or job ID.
+                last_success = {
+                    "ok": True,
+                    "dry_run": False,
+                    "status": "ok",
+                    "started_at": None,
+                    "ended_at": retained_at,
+                    "pair": {
+                        "name": requested[history_key],
+                        "history_key": history_key,
+                        "ok": True,
+                    },
+                    "job_id": None,
+                    "history_key": history_key,
+                    "scheduled_slot": None,
+                    "history_pruned": True,
+                }
             result[history_key] = {
                 "last_result": self._pair_row_to_result(last_row) if last_row else None,
                 "last_success": last_success,
@@ -2762,9 +2801,32 @@ class Database:
             )
 
     def push_device_delete(
-        self, token: str, *, claim_owner: Optional[str] = None
+        self,
+        token: str,
+        *,
+        claim_owner: Optional[str] = None,
+        expected_environment: Optional[str] = None,
+        expected_updated_at: Optional[float] = None,
     ) -> bool:
         with self.conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            registration = connection.execute(
+                "SELECT environment, updated_at FROM push_devices WHERE token=?",
+                (token,),
+            ).fetchone()
+            if registration is not None and (
+                (
+                    expected_environment is not None
+                    and str(registration["environment"]) != expected_environment
+                )
+                or (
+                    expected_updated_at is not None
+                    and float(registration["updated_at"]) != float(expected_updated_at)
+                )
+            ):
+                # A rejected delivery only describes the registration it used.
+                # Do not remove a newer registration or its pending messages.
+                return False
             if claim_owner is None:
                 connection.execute("DELETE FROM push_outbox WHERE token=?", (token,))
             else:
@@ -2778,12 +2840,19 @@ class Database:
             )
             return bool(cursor.rowcount)
 
-    def push_device_exists(self, token: str, *, now: Optional[float] = None) -> bool:
+    def push_device_exists(
+        self,
+        token: str,
+        *,
+        now: Optional[float] = None,
+        environment: Optional[str] = None,
+    ) -> bool:
         now_value = float(time.time() if now is None else now)
         with self.conn() as connection:
             row = connection.execute(
-                "SELECT 1 FROM push_devices WHERE token=? AND expires_at>?",
-                (token, now_value),
+                "SELECT 1 FROM push_devices WHERE token=? AND expires_at>? "
+                "AND (? IS NULL OR environment=?)",
+                (token, now_value, environment, environment),
             ).fetchone()
         return row is not None
 
@@ -2888,6 +2957,7 @@ class Database:
         limit: int = 32,
         lease_seconds: int = 60,
         now: Optional[float] = None,
+        dedupe_key: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         now_value = float(time.time() if now is None else now)
         owner = str(claim_owner or "").strip()
@@ -2921,8 +2991,15 @@ class Database:
             rows = connection.execute(
                 "SELECT id FROM push_outbox WHERE status='pending' "
                 "AND next_attempt_at<=? AND expires_at>? "
+                "AND (? IS NULL OR dedupe_key=?) "
                 "ORDER BY next_attempt_at, id LIMIT ?",
-                (now_value, now_value, max(1, min(int(limit), 128))),
+                (
+                    now_value,
+                    now_value,
+                    dedupe_key,
+                    str(dedupe_key)[:256] if dedupe_key is not None else None,
+                    max(1, min(int(limit), 128)),
+                ),
             ).fetchall()
             ids = [int(row["id"]) for row in rows]
             if not ids:
@@ -2936,7 +3013,10 @@ class Database:
                 (lease_until, owner, now_value, *ids),
             )
             claimed = connection.execute(
-                f"SELECT * FROM push_outbox WHERE id IN ({placeholders}) "
+                "SELECT push_outbox.*, "
+                "(SELECT updated_at FROM push_devices "
+                "WHERE push_devices.token=push_outbox.token) AS registration_updated_at "
+                f"FROM push_outbox WHERE id IN ({placeholders}) "
                 "AND status='sending' AND claim_owner=? "
                 "ORDER BY next_attempt_at, id",
                 (*ids, owner),
@@ -3051,6 +3131,16 @@ class Database:
                 ),
             )
             return status
+
+    def push_outbox_sent_count(self, dedupe_key: str) -> int:
+        """Count only the message requested by a synchronous send/test."""
+        with self.conn() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM push_outbox WHERE dedupe_key=? AND status='sent'",
+                    (str(dedupe_key)[:256],),
+                ).fetchone()[0]
+            )
 
     def push_outbox_status(self) -> Dict[str, Any]:
         with self.conn() as connection:

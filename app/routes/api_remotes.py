@@ -247,7 +247,15 @@ def _resolve_redirect_location(local_auth_url: str) -> str:
 def _start_browser_auth_helper(setup: Setup, authorize_cmd: str) -> None:
     """Startet `rclone authorize --auth-no-open-browser` auf dem Server, um die direkte Google-Login-URL bereitzustellen."""
     for other in list(_setups.values()):
-        _stop_browser_auth_helper(other)
+        if (
+            other is not setup
+            and other.auth_proc is not None
+            and other.auth_proc.poll() is None
+        ):
+            raise HTTPException(
+                409,
+                "Eine Browser-Anmeldung läuft bereits. Bitte zuerst abschließen oder abbrechen.",
+            )
     _stop_browser_auth_helper(setup)
     setup.auth_output.clear()
     setup.direct_auth_url = ""
@@ -1114,8 +1122,14 @@ def create_google_drive_service_account(
         sa_file = sa_dir / f"{name}.json"
         if sa_file.is_symlink():
             raise HTTPException(400, "Service-Account-Zieldatei darf kein Symlink sein")
-        flags = os.O_CREAT | os.O_TRUNC | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(sa_file, flags, stat.S_IRUSR | stat.S_IWUSR)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(sa_file, flags, stat.S_IRUSR | stat.S_IWUSR)
+        except FileExistsError as exc:
+            raise HTTPException(
+                409,
+                "Eine Service-Account-Datei mit diesem Namen existiert bereits; sie wurde nicht verändert.",
+            ) from exc
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(

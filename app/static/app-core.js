@@ -63,6 +63,7 @@ export const coreMethods = {
     };
     window.addEventListener('hashchange', applyHistoryPage);
     window.addEventListener('popstate', applyHistoryPage);
+    window.addEventListener('resize', () => { this.settingsTabsHorizontal = window.matchMedia?.('(max-width: 900px)').matches || false; });
     window.addEventListener('online', () => {
       this.setConnectionState('checking', 'Verbindung wird erneut geprüft');
       this.startSseProgress();
@@ -253,12 +254,19 @@ export const coreMethods = {
 
   async navigate(next, updateHash = true) {
     if (!this.pages.includes(next)) return;
+    if (next === this.page) {
+      this.closeNavigation(false);
+      return;
+    }
     if ((this.configDirty || this.filterFile.dirty) && ['pairs', 'definitions', 'settings'].includes(this.page) && next !== this.page) {
       const confirmed = await this.requestConfirmation(
         'Es gibt ungespeicherte Änderungen. Seite trotzdem wechseln?',
         { title: 'Ungespeicherte Änderungen', confirmLabel: 'Seite wechseln' },
       );
-      if (!confirmed) return;
+      if (!confirmed) {
+        if (!updateHash && window.location.hash !== `#${this.page}`) history.replaceState(null, '', `#${this.page}`);
+        return;
+      }
     }
     this.page = next;
     this.closeNavigation(false);
@@ -287,7 +295,7 @@ export const coreMethods = {
     } else if (page === 'doctor') {
       if (!configAlreadyLoaded) this.loadConfig();
       this.loadSystemBundle();
-      this.loadDoctor(); this.loadVpn(); this.loadCloudQuota();
+      this.loadCloudQuota();
     } else if (page === 'recovery') {
       if (!configAlreadyLoaded) await this.loadConfig();
       this.loadRecovery();
@@ -323,6 +331,16 @@ export const coreMethods = {
     }
     const current = Number(this.commandPalette.selectedIndex) || 0;
     this.commandPalette.selectedIndex = (current + delta + items.length) % items.length;
+    this.scrollCommandSelection();
+  },
+
+  resetCommandSelection() {
+    this.commandPalette.selectedIndex = 0;
+    this.scrollCommandSelection();
+  },
+
+  scrollCommandSelection() {
+    this.$nextTick(() => document.getElementById(`command-option-${this.commandPalette.selectedIndex}`)?.scrollIntoView({ block: 'nearest' }));
   },
 
   runSelectedCommand() {
@@ -426,6 +444,7 @@ export const coreMethods = {
     const controller = new AbortController();
     if (requestKey) requestControllers.set(requestKey, controller);
     let timedOut = false;
+    let timeout;
     try {
       const upper = String(method || 'GET').toUpperCase();
       const opts = { method: upper, credentials: 'include', headers: {} };
@@ -437,16 +456,18 @@ export const coreMethods = {
         opts.body = JSON.stringify(body);
       }
       opts.signal = controller.signal;
-      const timeout = setTimeout(() => {
+      timeout = setTimeout(() => {
         timedOut = true;
         controller.abort();
       }, options.timeoutMs || this.requestTimeoutMs);
-      let response;
-      try { response = await fetch(url, opts); } finally { clearTimeout(timeout); }
+      const response = await fetch(url, opts);
       if (requestKey && requestRevisions.get(requestKey) !== revision) return staleResponse;
       if (!response.ok) {
         if (response.status === 401) { window.location = '/login'; return null; }
-        const err = await response.json().catch(() => ({}));
+        const err = await response.json().catch((error) => {
+          if (error.name === 'AbortError') throw error;
+          return {};
+        });
         if (requestKey && requestRevisions.get(requestKey) !== revision) return staleResponse;
         const rawDetail = err.detail || response.statusText;
         let detail = rawDetail;
@@ -491,6 +512,7 @@ export const coreMethods = {
       }
       return null;
     } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
       if (requestKey && requestControllers.get(requestKey) === controller) {
         requestControllers.delete(requestKey);
       }
@@ -540,20 +562,20 @@ export const coreMethods = {
     return Boolean(
       this.pending.backup || this.pending.quick || this.pending.pbs ||
       this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.pbs ||
-      this.status?.bitrotscrub || this.status?.bootdrill,
+      this.status?.bitrotscrub || this.status?.bootdrill || this.status?.recovery,
     );
   },
 
   rcloneBusy() {
     return Boolean(
       this.pending.backup || this.pending.quick ||
-      this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest,
+      this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.bitrotscrub || this.status?.recovery,
     );
   },
 
   runningJob() {
     return this.status?.backup || this.status?.check || this.status?.quicksync || this.status?.restoretest || this.status?.pbs ||
-      this.status?.bitrotscrub || this.status?.bootdrill || null;
+      this.status?.bitrotscrub || this.status?.bootdrill || this.status?.recovery || null;
   },
 
   runningKind() {
@@ -564,6 +586,7 @@ export const coreMethods = {
     if (this.status?.restoretest) return 'Restore-Drill';
     if (this.status?.bitrotscrub) return 'Bitrot-Scrub';
     if (this.status?.bootdrill) return 'Boot-Drill';
+    if (this.status?.recovery) return 'Wiederherstellung';
     if (this.pending.backup) return 'Backup';
     if (this.pending.quick) return 'Quick-Sync';
     return '';
@@ -596,7 +619,7 @@ export const coreMethods = {
     return [...dialog.querySelectorAll(
       'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
       'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    )].filter((element) => !element.hidden && element.offsetParent !== null);
+    )].filter((element) => !element.hidden && element.offsetParent !== null && element.getAttribute?.('tabindex') !== '-1');
   },
 
   openDialog(refName) {
@@ -662,8 +685,8 @@ export const coreMethods = {
   },
 
   activeDialog() {
-    if (this.remoteSetup.show) return this.$refs.remoteSetupDialog;
     if (this.commandPalette.show) return this.$refs.commandPaletteDialog;
+    if (this.remoteSetup.show) return this.$refs.remoteSetupDialog;
     if (this.confirmationDialog.show) return this.$refs.confirmationDialog;
     if (this.currentPasswordDialog.show) return this.$refs.currentPasswordDialog;
     if (this.lockdownDialog.show) return this.$refs.lockdownDialog;

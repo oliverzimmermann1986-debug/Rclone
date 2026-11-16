@@ -28,10 +28,10 @@
   /* Zustandsfarben – die einzigen Farben im Interface.
      Blau ist zugleich Interaktionsfarbe (Fokus, Auswahl, Links), damit
      keine fünfte Nuance hinzukommt. */
-  --ok:            #12855b;
-  --running:       #2f6feb;
-  --warning:       #b06f00;
-  --danger:        #d1293d;
+  --ok:            #096d45;
+  --running:       #245bd0;
+  --warning:       #805000;
+  --danger:        #b51f32;
   --ok-soft:       #e9f7f1;
   --running-soft:  #eaf1fe;
   --warning-soft:  #fdf3e3;
@@ -42,7 +42,7 @@
   --primary:       #2f6feb;
   --primary-hover: #1f5ed4;
   --primary-soft:  #eaf1fe;
-  --success:       #12855b;
+  --success:       #096d45;
   --success-soft:  #e9f7f1;
   --info:          #2f6feb;
   --info-soft:     #eaf1fe;
@@ -1930,8 +1930,8 @@ input[type="checkbox"], input[type="radio"] {
 .toast.ok .toast-symbol { background: var(--ok-soft); color: var(--ok); }
 .toast.warn { border-color: color-mix(in srgb, var(--warning) 32%, var(--border)); }
 .toast.warn .toast-symbol { background: var(--warning-soft); color: var(--warning); }
-.toast.error { border-color: color-mix(in srgb, var(--danger) 32%, var(--border)); }
-.toast.error .toast-symbol { background: var(--danger-soft); color: var(--danger); }
+.toast.error, .toast.err { border-color: color-mix(in srgb, var(--danger) 32%, var(--border)); }
+.toast.error .toast-symbol, .toast.err .toast-symbol { background: var(--danger-soft); color: var(--danger); }
 .toast button {
   width: 26px; height: 26px;
   border: 0; border-radius: var(--radius-sm);
@@ -2322,6 +2322,7 @@ html[data-density="compact"] .job-row { min-height: 54px; }
 .command-palette-results { max-height: min(55vh, 460px); overflow: auto; padding: 6px; }
 .command-palette-results button { display: block; width: 100%; padding: 10px 12px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); text-align: left; }
 .command-palette-results button:hover, .command-palette-results button:focus-visible { outline: 0; background: var(--surface-2); }
+.command-palette-results button.active { background: var(--running-soft); color: var(--running); outline: 2px solid var(--running); outline-offset: -2px; }
 .command-palette-results p, .command-palette > small { display: block; margin: 8px 12px 12px; color: var(--text-soft); font-size: 11px; }
 .command-palette > small { margin: 0; padding: 8px 14px; border-top: 1px solid var(--border); }
 @media (max-width: 900px) {

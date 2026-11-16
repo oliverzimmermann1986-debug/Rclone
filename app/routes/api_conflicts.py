@@ -87,7 +87,9 @@ def resolve_pair_conflict(
     if lease is None:
         raise HTTPException(409, _BUSY)
     try:
-        if get_db().job_running("backup"):
+        if get_db().job_running("backup") or runtime_state.active_processes(
+            runtime_state.DEFAULT_CANCEL_SCOPE
+        ):
             raise HTTPException(409, _BUSY)
         result = conflicts.resolve_conflict(pair, body.base_path, body.choice)
     except conflicts.OriginUnclear as exc:

@@ -229,6 +229,7 @@ def test_keep_both_renames_on_both_sides_without_overwriting():
         [
             "rclone",
             "moveto",
+            "--immutable",
             "--",
             f"{gd}.conflict1.txt",
             f"{gd} (Konflikt Seite1 2026-10-01 2).txt",
@@ -236,6 +237,7 @@ def test_keep_both_renames_on_both_sides_without_overwriting():
         [
             "rclone",
             "moveto",
+            "--immutable",
             "--",
             f"{gd}.conflict2.txt",
             f"{gd} (Konflikt Seite1 2026-10-01 3).txt",
@@ -243,6 +245,7 @@ def test_keep_both_renames_on_both_sides_without_overwriting():
         [
             "rclone",
             "moveto",
+            "--immutable",
             "--",
             f"{data}.conflict1.txt",
             f"{data} (Konflikt Seite2 2026-10-01).txt",
@@ -250,6 +253,7 @@ def test_keep_both_renames_on_both_sides_without_overwriting():
         [
             "rclone",
             "moveto",
+            "--immutable",
             "--",
             f"{data}.conflict2.txt",
             f"{data} (Konflikt Seite2 2026-10-01 2).txt",

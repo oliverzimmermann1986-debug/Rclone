@@ -677,6 +677,18 @@ def _run_definition_batch_thread(batch_id: str, scope_lock: HeldFileLock) -> Non
             definition_name = str(definition.get("name") or "") or None
             current_batch = db.job_batch_get(batch_id) or {}
             if current_batch.get("cancel_requested") or rclone_job.is_cancelled():
+                if item.get("job_id") is not None:
+                    reserved = db.job_get(int(item["job_id"]))
+                    if reserved and reserved.get("status") == "running":
+                        db.job_finish(
+                            int(item["job_id"]),
+                            "cancelled",
+                            {
+                                "ok": False,
+                                "cancelled": True,
+                                "error": "Batch vor dem Start abgebrochen",
+                            },
+                        )
                 db.job_batch_item_finish(batch_id, index, "cancelled")
                 _audit_best_effort(
                     "job_definition_batch_item_failed",
@@ -933,6 +945,7 @@ def resume_pending_definition_batches() -> int:
 
 class BackupRunPayload(BaseModel):
     exclude_paths: dict[str, list[str]] = Field(default_factory=dict)
+    expected_revision: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 @router.post("/backup/run")
@@ -943,6 +956,19 @@ def run_backup(
     user: str = Depends(require_auth),
 ) -> dict[str, Any]:
     excludes = payload.exclude_paths if payload else {}
+    captured = {}
+    if payload and payload.expected_revision is not None:
+        snapshot, revision = get_config().snapshot_with_revision()
+        if revision != payload.expected_revision:
+            raise HTTPException(
+                409,
+                "Die Konfiguration wurde seit dem Probelauf geändert. Bitte neu prüfen.",
+            )
+        if pairs is None:
+            raise HTTPException(
+                400, "Eine revisionsgebundene Vorschau benötigt eine Pair-Auswahl"
+            )
+        captured = {"config_snapshot": snapshot, "config_revision": revision}
     if pairs is not None:
         pairs_filter = _parse_pair_filter(pairs)
         unknown = sorted(set(excludes) - set(pairs_filter or []))
@@ -958,6 +984,7 @@ def run_backup(
         return _queue_backup(
             dry_run=dry_run,
             pairs_filter=pairs_filter,
+            **captured,
             **({"exclude_paths": excludes} if excludes else {}),
             **_request_actor_args(user),
         )
@@ -1813,7 +1840,18 @@ def export_jobs_csv(
         def emit(row: list[Any]) -> str:
             buffer.seek(0)
             buffer.truncate(0)
-            writer.writerow(row)
+            writer.writerow(
+                [
+                    "'" + cell
+                    if isinstance(cell, str)
+                    and (
+                        cell.lstrip(" \t\r\n").startswith(("=", "+", "-", "@"))
+                        or cell.startswith(("\t", "\r", "\n"))
+                    )
+                    else cell
+                    for cell in row
+                ]
+            )
             return buffer.getvalue()
 
         yield "\ufeff" + emit(
@@ -1920,6 +1958,11 @@ def retry_job(
             "Die Konfiguration wurde seit diesem Lauf geändert. Bitte Job neu planen und bewusst starten.",
         )
     definition, pair_names = _resolved_definition(snapshot, definition_id)
+    dry_run = bool(
+        dry_run
+        or previous.get("dry_run")
+        or (previous.get("summary") or {}).get("dry_run")
+    )
     result = _queue_backup(
         dry_run=dry_run,
         pairs_filter=pair_names,

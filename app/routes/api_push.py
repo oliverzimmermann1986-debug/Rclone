@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..auth import require_auth
+from ..auth import SESSION_COOKIE, account_generation_guard, require_auth, session_user
 from ..config_store import get_config
 from ..db import get_db
 from ..push_notifications import delivery_guard, push_server_id, send_push_notifications
@@ -20,8 +21,9 @@ router = APIRouter(
     tags=["push"],
     dependencies=[Depends(require_auth), Depends(require_csrf)],
 )
+logger = logging.getLogger(__name__)
 
-_DEVICE_TOKEN_RE = re.compile(r"^[a-f0-9]{64,512}$")
+_DEVICE_TOKEN_RE = re.compile(r"^(?:[a-f0-9]{2}){32,256}$")
 
 
 class PushDeviceRegistration(BaseModel):
@@ -69,33 +71,43 @@ def push_status() -> dict[str, object]:
 @router.post("/devices")
 def register_push_device(
     body: PushDeviceRegistration,
+    request: Request,
     user: str = Depends(require_auth),
 ) -> dict[str, object]:
     token = _token(body.token)
     database = get_db()
-    database.push_device_upsert(
-        token,
-        body.environment,
-        app_version=body.app_version.strip(),
-        lease_seconds=int(
-            (
-                get_config().get(
-                    "notifications", "apns", "device_lease_days", default=7
+    # Match the rotation lock order (configuration, then delivery). Checking
+    # only the request dependency could re-register a revoked in-flight session.
+    with account_generation_guard(), delivery_guard(database):
+        if session_user(request.cookies.get(SESSION_COOKIE, "")) != user:
+            raise HTTPException(401, "Die Sitzung wurde widerrufen.")
+        database.push_device_upsert(
+            token,
+            body.environment,
+            app_version=body.app_version.strip(),
+            lease_seconds=int(
+                (
+                    get_config().get(
+                        "notifications", "apns", "device_lease_days", default=7
+                    )
+                    or 7
                 )
-                or 7
-            )
-            * 86400
-        ),
-    )
-    database.audit_add(
-        "push_device_registered",
-        actor=user,
-        details={
-            "environment": body.environment,
-            "app_version": body.app_version.strip(),
-        },
-    )
-    return {"ok": True, "registered": True, "server_id": push_server_id()}
+                * 86400
+            ),
+        )
+        server_id = push_server_id()
+    try:
+        database.audit_add(
+            "push_device_registered",
+            actor=user,
+            details={
+                "environment": body.environment,
+                "app_version": body.app_version.strip(),
+            },
+        )
+    except Exception:
+        logger.exception("Audit der gespeicherten Push-Registrierung fehlgeschlagen")
+    return {"ok": True, "registered": True, "server_id": server_id}
 
 
 @router.delete("/devices")

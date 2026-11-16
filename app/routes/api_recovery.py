@@ -500,10 +500,10 @@ def restore_full_snapshot(
 
 
 def _relative_path(value: str) -> str:
-    original = str(value or "").replace("\\", "/").strip()
+    original = str(value or "")
     if original.startswith("/"):
         raise HTTPException(400, "Ungültiger relativer Pfad")
-    raw = original.strip("/")
+    raw = original
     path = PurePosixPath(raw)
     if (
         path.is_absolute()
@@ -619,7 +619,10 @@ class SelectiveRestoreRequest(BaseModel):
 def start_selective_restore(
     body: SelectiveRestoreRequest, background: BackgroundTasks
 ) -> dict[str, Any]:
-    selection = normalize_selection(body.paths)
+    try:
+        selection = normalize_selection(body.paths)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     config = get_config().snapshot()
     pair = _find_pair(config, body.identity)
     try:
@@ -691,6 +694,41 @@ def download_staging_archive(
     data_dir = work_dir / "data"
     source_root = data_dir if data_dir.is_dir() else work_dir
 
+    try:
+        manifest_path = work_dir / "expected-manifest.json"
+        if (
+            not manifest_path.exists()
+            and record.get("verification_scope") == "full-snapshot"
+        ):
+            from ..recovery_snapshots import POINT_RE, snapshot_root
+
+            point_id = str(record.get("recovery_point") or "")
+            if POINT_RE.fullmatch(point_id):
+                manifest_path = snapshot_root(config) / point_id / "manifest.json"
+        raw_manifest = manifest_path.read_bytes()
+        if hashlib.sha256(raw_manifest).hexdigest() != record.get("manifest_sha256"):
+            raise ValueError(
+                "Der ursprüngliche Prüfnachweis fehlt oder wurde verändert"
+            )
+        expected = json.loads(raw_manifest)
+        if expected.get("schema") == "sicherpfad-full-snapshot-v1":
+            expected = {
+                entry["path"]: {
+                    "bytes": entry["size"],
+                    "algorithm": "sha256",
+                    "checksum": entry["sha256"],
+                }
+                for entry in expected["entries"]
+            }
+        from ..jobs.selective_restore import _verify_manifest
+
+        _verify_manifest(source_root, expected)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+        raise HTTPException(
+            409,
+            "Staging stimmt nicht mit dem ursprünglichen Prüfnachweis überein. Bitte neu wiederherstellen.",
+        ) from exc
+
     spooled = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b")
     checksum_lines: list[str] = []
     try:
@@ -698,19 +736,39 @@ def download_staging_archive(
             spooled, mode="w", compression=zipfile.ZIP_DEFLATED
         ) as archive:
             for item in sorted(source_root.rglob("*")):
-                if item.is_symlink() or not item.is_file():
+                if item.is_symlink():
                     continue
                 rel = item.relative_to(source_root).as_posix()
+                if item.is_dir():
+                    archive.writestr(rel + "/", b"")
+                    continue
+                if not item.is_file():
+                    continue
                 if source_root == work_dir and rel == "expected-manifest.json":
                     continue
                 digest = hashlib.sha256()
-                with item.open("rb") as fh:
+                proof = expected[rel]
+                original_digest = hashlib.new(proof["algorithm"])
+                written = 0
+                with item.open("rb") as fh, archive.open(rel, "w") as zipped:
                     while chunk := fh.read(1024 * 1024):
                         digest.update(chunk)
+                        original_digest.update(chunk)
+                        written += len(chunk)
+                        zipped.write(chunk)
+                if (
+                    written != proof["bytes"]
+                    or original_digest.hexdigest() != proof["checksum"]
+                ):
+                    raise RuntimeError("Datei wurde während des Exports verändert")
                 checksum_lines.append(f"{digest.hexdigest()}  {rel}")
-                archive.write(item, arcname=rel)
+            checksum_name = "SHA256SUMS.txt"
+            suffix = 1
+            while checksum_name in archive.namelist():
+                checksum_name = f"SHA256SUMS.sicherpfad-{suffix}.txt"
+                suffix += 1
             archive.writestr(
-                "SHA256SUMS.txt",
+                checksum_name,
                 ("\n".join(checksum_lines) + "\n").encode("utf-8"),
             )
         spooled.seek(0)
@@ -774,9 +832,10 @@ def search_recovery_files(
                 manifest = load_manifest(config, pair, point_id)
             except Exception:
                 continue
-            files_map = manifest.get("files") or {}
-            if isinstance(files_map, Mapping):
-                for rel_path, meta in files_map.items():
+            entries = manifest.get("entries") or []
+            if isinstance(entries, list):
+                for meta in entries:
+                    rel_path = str(meta.get("path") or "")
                     rel_str = str(rel_path)
                     if needle in rel_str.casefold():
                         results.append(
@@ -785,7 +844,7 @@ def search_recovery_files(
                                 "point_label": point_label,
                                 "path": rel_str,
                                 "name": PurePosixPath(rel_str).name,
-                                "size": (meta or {}).get("bytes")
+                                "size": (meta or {}).get("size")
                                 if isinstance(meta, Mapping)
                                 else None,
                                 "modified_at": point.get("created_at"),

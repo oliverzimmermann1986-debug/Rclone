@@ -3,8 +3,12 @@ import json
 import time
 
 import pytest
+import yaml
+from fastapi import Request
 
-from app import push_notifications
+from app import config_store, push_notifications
+from app.auth import SESSION_COOKIE, create_session
+from app.config_store import Config
 from app.config_validation import ConfigValidationError, validate_config
 from app.db import Database
 from app.routes import api_push
@@ -135,13 +139,36 @@ def test_apns_config_is_fail_closed_and_restricted_to_data_dir(tmp_path: Path):
 def test_push_route_validates_and_registers_device(monkeypatch, tmp_path: Path):
     database = Database(tmp_path / "route.db")
     monkeypatch.setattr(api_push, "get_db", lambda: database)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "web": {
+                    "username": "admin",
+                    "secret_key": "push-route-secret-0123456789-ABCDEFGHIJKLMN",
+                    "session_version": 1,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_store, "_config", Config(config_path))
 
     result = api_push.register_push_device(
         api_push.PushDeviceRegistration(
             token=TOKEN,
             environment="production",
             app_version="1.0.10",
-        )
+        ),
+        Request(
+            {
+                "type": "http",
+                "headers": [
+                    (b"cookie", f"{SESSION_COOKIE}={create_session('admin')}".encode())
+                ],
+            }
+        ),
+        user="admin",
     )
 
     assert result == {

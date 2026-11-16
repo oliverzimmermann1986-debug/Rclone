@@ -174,17 +174,17 @@ def normalize_selection(paths: Sequence[str]) -> list[str]:
         raise ValueError(f"Es müssen 1 bis {_MAX_ITEMS} Einträge ausgewählt werden")
     clean: list[str] = []
     for raw in paths:
-        original = str(raw or "").replace("\\", "/").strip()
+        original = str(raw or "")
         if original.startswith("/"):
             raise ValueError("Auswahl enthält einen absoluten Pfad")
-        value = original.strip("/")
+        value = original
         candidate = PurePosixPath(value)
         if (
             not value
             or len(value) > 1024
             or candidate.is_absolute()
             or ".." in candidate.parts
-            or any(part in {"", "."} for part in candidate.parts)
+            or any(part in {"", "."} for part in value.split("/"))
             or any(char in value for char in ("\x00", "\r", "\n"))
         ):
             raise ValueError("Auswahl enthält einen unsicheren relativen Pfad")
@@ -229,16 +229,22 @@ def _load_state(database: Database) -> list[dict[str, Any]]:
 
 
 def _save_record(database: Database, record: Mapping[str, Any]) -> None:
-    records = [
-        item for item in _load_state(database) if item.get("id") != record.get("id")
-    ]
-    records.insert(0, dict(record))
-    # Never hide retained data merely because the display history grows.
-    retained = [item for item in records if item.get("status") in {"running", "ready"}]
-    history = [
-        item for item in records if item.get("status") not in {"running", "ready"}
-    ]
-    database.runtime_set(_STATE_KEY, retained + history[:_MAX_STATE_ITEMS])
+    def update(raw: Any) -> list[dict[str, Any]]:
+        records = [
+            dict(item)
+            for item in (raw if isinstance(raw, list) else [])
+            if isinstance(item, Mapping) and item.get("id") != record.get("id")
+        ]
+        records.insert(0, dict(record))
+        retained = [
+            item for item in records if item.get("status") in {"running", "ready"}
+        ]
+        history = [
+            item for item in records if item.get("status") not in {"running", "ready"}
+        ]
+        return retained + history[:_MAX_STATE_ITEMS]
+
+    database.runtime_update(_STATE_KEY, update, default=[])
 
 
 def check_staging_budget(
@@ -309,13 +315,28 @@ def remove_staging(
     if target.parent != root:
         raise ValueError("Recovery-Ziel liegt außerhalb des Staging-Bereichs")
     existed = target.is_dir()
+    stored_path = str(known.get("staging_path") or "")
+    if stored_path and Path(stored_path).parent != target:
+        raise ValueError(
+            "Der Staging-Ablageort wurde geändert. Für diese Wiederherstellung zuerst den ursprünglichen Ablageort wieder einstellen."
+        )
     if existed:
         shutil.rmtree(target)
-    records = [item for item in _load_state(database) if item.get("id") != recovery_id]
-    database.runtime_set(_STATE_KEY, records)
-    database.audit_add(
-        "recovery_staging_removed", actor="web", details={"id": recovery_id}
+    database.runtime_update(
+        _STATE_KEY,
+        lambda raw: [
+            item
+            for item in (raw if isinstance(raw, list) else [])
+            if isinstance(item, Mapping) and item.get("id") != recovery_id
+        ],
+        default=[],
     )
+    try:
+        database.audit_add(
+            "recovery_staging_removed", actor="web", details={"id": recovery_id}
+        )
+    except Exception:
+        logger.exception("Staging entfernt; Audit-Nachtrag fehlgeschlagen")
     return existed
 
 
@@ -351,6 +372,7 @@ def run_selective_restore(
         record.update(requested_items=len(selection), limit_bytes=limit_bytes)
         work = staging_root(config, pair=pair) / recovery_id
         data = work / "data"
+        record["staging_path"] = str(data)
         _save_record(database, record)
         work.mkdir(mode=0o700)
         created = True

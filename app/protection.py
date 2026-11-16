@@ -425,7 +425,22 @@ def acknowledge_quarantine(database: Database, pair: Mapping[str, Any]) -> bool:
                 and isinstance(quarantine.get("endpoints"), dict)
                 and pairs_conflict(current, quarantine["endpoints"])
             ):
-                removed.append(state["quarantines"].pop(key))
+                acknowledged = state["quarantines"].pop(key)
+                removed.append(acknowledged)
+                if isinstance(acknowledged, dict) and all(
+                    isinstance(acknowledged.get(field), (int, float))
+                    for field in ("current_count", "current_bytes")
+                ):
+                    state["baselines"][key] = {
+                        "pair": str(pair.get("name") or ""),
+                        "history_key": str(
+                            acknowledged.get("history_key")
+                            or rclone_history_key(dict(pair))
+                        ),
+                        "count": int(acknowledged["current_count"]),
+                        "bytes": int(acknowledged["current_bytes"]),
+                        "measured_at": time.time(),
+                    }
         return _bounded_state(state)
 
     database.runtime_update(_ANOMALY_STATE_KEY, update, default={})

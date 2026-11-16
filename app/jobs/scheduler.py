@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
+from ..cron_utils import valid_minute_schedule
+
 from ..job_definitions import (
     data_paths_by_id,
     definition_history_key,
@@ -32,7 +34,7 @@ def _is_disabled(schedule: Optional[str]) -> bool:
 
 def _is_valid_schedule(schedule: str) -> bool:
     """Der Dienst unterstützt bewusst nur minutenbasierte 5-Feld-Cron-Ausdrücke."""
-    return len(str(schedule or "").split()) == 5 and croniter.is_valid(schedule)
+    return valid_minute_schedule(schedule)
 
 
 def _timezone(name: Optional[str]) -> ZoneInfo:
@@ -54,10 +56,20 @@ def _digest_identity(kind: str, payload: Mapping[str, Any]) -> str:
 
 def rclone_history_key(pair: Mapping[str, Any]) -> str:
     stable_id = str(pair.get("id") or "").strip()
-    if stable_id:
-        return f"rclone:id:{stable_id}"
     remote = str(pair.get("remote") or "").strip().rstrip("/")
     local = str(pair.get("local") or "").strip().rstrip("/")
+    if stable_id and (remote or local):
+        return _digest_identity(
+            f"rclone:id:{stable_id}",
+            {
+                "remote": remote,
+                "local": local,
+                "direction": str(pair.get("direction") or "bisync").strip().lower(),
+                "mode": str(pair.get("mode") or "bisync").strip().lower(),
+            },
+        )
+    if stable_id:
+        return f"rclone:id:{stable_id}"
     if remote or local:
         return _digest_identity(
             "rclone",

@@ -19,7 +19,11 @@ import httpx
 import jwt
 
 from .config_store import get_config
-from .config_validation import SESSION_SECRET_PLACEHOLDER, session_secret_strength_error
+from .config_validation import (
+    DEFAULT_APNS_ERROR_EVENTS,
+    SESSION_SECRET_PLACEHOLDER,
+    session_secret_strength_error,
+)
 from .db import Database, get_db
 from .file_lock import acquire as lock_file, release as unlock_file
 from .rclone_args import redact_command_text
@@ -27,17 +31,7 @@ from .rclone_args import redact_command_text
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-DEFAULT_ERROR_EVENTS = (
-    "sync_error",
-    "mount_check_failed",
-    "pair_overdue",
-    "restore_test_error",
-    "anomaly_blocked",
-    "recovery_error",
-    "bitrot_detected",
-    "boot_drill_error",
-    "lockdown",
-)
+DEFAULT_ERROR_EVENTS = DEFAULT_APNS_ERROR_EVENTS
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: tuple[tuple[str, str, str, int], str, float] | None = None
 _BACKGROUND_DISPATCH_LOCK = threading.Lock()
@@ -130,23 +124,29 @@ def _post_with_claim_heartbeat(
         0.01,
         min(float(_CLAIM_HEARTBEAT_INTERVAL_SECONDS), float(lease_seconds) / 3.0),
     )
-    while not done.wait(interval):
-        renewed = database.push_outbox_renew_claims(
-            [row_id],
-            claim_owner=claim_owner,
-            lease_seconds=lease_seconds,
-        )
-        if row_id not in renewed:
-            logger.error(
-                "APNs-Outbox-Lease %s von Dispatcher %s ging während POST verloren",
-                row_id,
-                claim_owner,
+    try:
+        while not done.wait(interval):
+            renewed = database.push_outbox_renew_claims(
+                [row_id],
+                claim_owner=claim_owner,
+                lease_seconds=lease_seconds,
             )
-            lease_lost = True
-            # Stop network I/O rather than continuing delivery without a lease.
-            client.close()
-            break
-    worker.join()
+            if row_id not in renewed:
+                logger.error(
+                    "APNs-Outbox-Lease %s von Dispatcher %s ging während POST verloren",
+                    row_id,
+                    claim_owner,
+                )
+                lease_lost = True
+                break
+    finally:
+        # Keep the revocation fence until the blocking request has actually
+        # stopped, including when a database renewal raises before returning.
+        try:
+            if not done.is_set():
+                client.close()
+        finally:
+            worker.join()
     if lease_lost:
         raise httpx.TransportError(
             "APNs-Zustellung nach Verlust der Outbox-Lease abgebrochen"
@@ -407,6 +407,7 @@ def dispatch_pending_pushes(
     limit: int = 32,
     claim_owner: str | None = None,
     lease_seconds: int | None = None,
+    dedupe_key: str | None = None,
 ) -> dict[str, int]:
     """Claimt fällige Outbox-Zeilen atomar und stellt sie best-effort zu."""
 
@@ -420,6 +421,7 @@ def dispatch_pending_pushes(
         claim_owner=owner,
         limit=limit,
         lease_seconds=requested_lease,
+        dedupe_key=dedupe_key,
     )
     result = {"sent": 0, "failed": 0, "removed": 0, "retrying": 0}
     if not rows:
@@ -503,7 +505,9 @@ def dispatch_pending_pushes(
                         [row_id], claim_owner=owner, lease_seconds=active_lease_seconds
                     ):
                         continue
-                    if not database.push_device_exists(token):
+                    if not database.push_device_exists(
+                        token, environment=str(row["environment"])
+                    ):
                         logger.info(
                             "APNs-Gerät %s wurde vor Zustellung widerrufen", token[-8:]
                         )
@@ -511,7 +515,7 @@ def dispatch_pending_pushes(
                             row_id,
                             claim_owner=owner,
                             sent=False,
-                            error="APNs-Gerät wurde widerrufen",
+                            error="APNs-Gerät wurde widerrufen oder neu registriert",
                         )
                         continue
                     response = _post_with_claim_heartbeat(
@@ -543,7 +547,12 @@ def dispatch_pending_pushes(
                         error=f"HTTP {response.status_code} {reason}".strip(),
                     )
                     if status == "failed":
-                        if database.push_device_delete(token, claim_owner=owner):
+                        if database.push_device_delete(
+                            token,
+                            claim_owner=owner,
+                            expected_environment=str(row["environment"]),
+                            expected_updated_at=row.get("registration_updated_at"),
+                        ):
                             result["removed"] += 1
                         result["failed"] += 1
                     continue
@@ -623,7 +632,14 @@ def send_push_notifications(
         dedupe_key=key,
         retention_seconds=int(settings.get("retention_seconds") or 86400),
     )
-    result.update(dispatch_pending_pushes(db=database, client_factory=client_factory))
+    result.update(
+        dispatch_pending_pushes(
+            db=database, client_factory=client_factory, dedupe_key=key
+        )
+    )
+    # Another dispatcher may already have completed this exact message. Never
+    # mistake unrelated outbox deliveries for success of the requested test.
+    result["sent"] = max(result["sent"], database.push_outbox_sent_count(key))
     return result
 
 

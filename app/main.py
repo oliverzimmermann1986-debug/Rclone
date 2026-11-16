@@ -49,6 +49,7 @@ from .rclone_args import rclone_subprocess_env
 from .security import (
     CSRF_COOKIE,
     cookie_secure_for_request,
+    csrf_tokens_match,
     new_csrf_token,
     require_csrf,
 )
@@ -808,7 +809,7 @@ def login_submit(
     target = "/security" if next == "/security" else "/"
     retry_url = "/login?next=/security&" if target == "/security" else "/login?"
     cookie_nonce = request.cookies.get(LOGIN_CSRF_COOKIE, "")
-    if not cookie_nonce or not secrets.compare_digest(cookie_nonce, login_csrf):
+    if not csrf_tokens_match(cookie_nonce, login_csrf):
         return RedirectResponse(url=retry_url + "error=csrf", status_code=303)
     status, retry_after = _authenticate_login(request, username, password)
     if status == "rate_limited":
@@ -843,9 +844,7 @@ def native_login_challenge(request: Request):
 @app.post(NATIVE_LOGIN_PATH, response_model=NativeLoginResponse)
 def native_login_submit(request: Request, credentials: NativeLoginRequest):
     cookie_nonce = request.cookies.get(LOGIN_CSRF_COOKIE, "")
-    if not cookie_nonce or not secrets.compare_digest(
-        cookie_nonce, credentials.login_csrf
-    ):
+    if not csrf_tokens_match(cookie_nonce, credentials.login_csrf):
         return JSONResponse(status_code=403, content={"status": "csrf_failed"})
 
     status, retry_after = _authenticate_login(

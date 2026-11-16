@@ -375,7 +375,10 @@ def diff_config_snapshot(name: str) -> dict[str, Any]:
 
             def safe_display(value: Any) -> str:
                 rendered = json.dumps(
-                    value, ensure_ascii=False, sort_keys=True, default=str
+                    redact_secrets(value),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
                 )
                 return rendered if len(rendered) <= 240 else rendered[:237] + "…"
 
@@ -491,8 +494,13 @@ def restore_config_snapshot(
         session_version = 1
     restored_web["session_version"] = max(1, session_version) + 1
     try:
-        revoke_all_push_devices()
-        new_revision = store.replace(normalized, expected_revision=revision)
+
+        def restore_current(_current: dict[str, Any]) -> dict[str, Any]:
+            revoke_all_push_devices()
+            return normalized
+
+        store.update(restore_current, expected_revision=revision)
+        new_revision = store.revision
     except ConfigConflictError as exc:
         raise HTTPException(409, "Konfiguration wurde parallel geändert") from exc
     response_warnings = list(warnings)
