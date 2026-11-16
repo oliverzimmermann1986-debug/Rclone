@@ -53,6 +53,25 @@ jobs:
       - name: Verify real Google OAuth configuration states without account access
         if: matrix.python-version == '3.12'
         run: python -m pytest -q tests/test_remote_setup.py -k real_own_drive
+      - name: Install verified rclone 1.74.4 for production-version OAuth tests
+        if: matrix.python-version == '3.12'
+        run: |
+          TASK_RCLONE_DIR="$(mktemp -d "$RUNNER_TEMP/rclone-oauth.XXXXXX")"
+          TASK_RCLONE_ARCHIVE="$TASK_RCLONE_DIR/rclone.zip"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 2 \
+            --output "$TASK_RCLONE_ARCHIVE" \
+            https://github.com/rclone/rclone/releases/download/v1.74.4/rclone-v1.74.4-linux-amd64.zip
+          printf '%s  %s\n' \
+            fe435e0c36228e7c2f116a8701f01127bb1f694005fc11d1f27186c8bca4115d \
+            "$TASK_RCLONE_ARCHIVE" | sha256sum --check -
+          unzip -p "$TASK_RCLONE_ARCHIVE" rclone-v1.74.4-linux-amd64/rclone > "$TASK_RCLONE_DIR/rclone"
+          chmod 755 "$TASK_RCLONE_DIR/rclone"
+          echo "$TASK_RCLONE_DIR" >> "$GITHUB_PATH"
+      - name: Verify production-version Google OAuth states without account access
+        if: matrix.python-version == '3.12'
+        run: |
+          rclone version
+          python -m pytest -q tests/test_remote_setup.py -k real_own_drive
 
   installer:
     runs-on: ubuntu-24.04
