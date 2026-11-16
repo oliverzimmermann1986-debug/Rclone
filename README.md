@@ -397,6 +397,10 @@ erfolgreichen Login oder beim Ändern des Passworts automatisch entfernt.
 
 ## Upgrade
 
+Ab Version 2.4.2 bleibt bei fehlgeschlagenen Größenmessungen die eigentliche
+Fehlerursache sichtbar, auch wenn rclone zuvor lange Anbieterhinweise ausgibt.
+Messfehler sind kein Nachweis einer leeren oder erfolgreich gesicherten Kopie.
+
 Ab Version 2.4.1 sind Erfolgsstände zusätzlich an Quelle, Ziel, Richtung und
 Übertragungsmodus gebunden. Beim ersten Upgrade können ältere Einträge deshalb
 als fehlender Nachweis erscheinen. Ein Erfolg eines früheren Endpunkts wird

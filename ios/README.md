@@ -59,6 +59,12 @@ Beim erneuten Anmelden am selben Server wartet die App dessen laufende Abmeldung
 
 ## Backend-Vertrag
 
+Die Cloud-Zeilen im Lagebild zeigen kurze Hinweise zu Messfehlern; die technische
+Originalmeldung öffnet sich über „Details“. Fehlende Quellen, fehlende Ziele,
+API-Limits, voller Speicher, Anmeldefehler und Zeitüberschreitungen werden
+getrennt erklärt. Ältere oder unvollständige Messwerte bleiben entsprechend
+markiert. Ein fehlender Sicherungsnachweis gilt nicht als erfolgreicher Erstlauf.
+
 Die App verwendet die kanonische Trennung **Datenwege → Jobs → Läufe**. Schreibvorgänge sind an die gelesene Konfigurationsrevision gebunden; HTTP 409 erzwingt ein bewusstes Neuladen statt stillen Überschreibens. Die gemeinsam versionierte Fixture [`../contracts/native_read_contract_v1.json`](../contracts/native_read_contract_v1.json) wird sowohl vom Backend als auch von den Swift-Decodierungstests geprüft.
 
 

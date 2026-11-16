@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -161,6 +162,36 @@ def _disk_usage(path: str) -> dict[str, Any]:
         return {"path": path, "exists": True, "error": str(exc)}
 
 
+def _rclone_size_error(stderr: str, stdout: str) -> str:
+    """Keep the actual failure when provider notices precede it."""
+    lines = (stderr + "\n" + stdout).splitlines()
+    message = ""
+    for line in lines:
+        if line.lstrip().startswith("{"):
+            try:
+                item = json.loads(line)
+            except ValueError:
+                item = None
+            if isinstance(item, dict) and str(item.get("level", "")).lower() in {
+                "error",
+                "critical",
+                "fatal",
+            }:
+                message = str(item.get("msg") or line).strip()
+                break
+        match = re.search(r"\b(?:ERROR|CRITICAL|FATAL)\s*:\s*(.+)", line, re.I)
+        if match:
+            message = match.group(1).strip()
+            break
+    if not message:
+        message = next(
+            (line.strip() for line in reversed(lines) if "failed to" in line.lower()),
+            (stderr or stdout).strip(),
+        )
+    # Long paths must not consume the whole allowance before the failure reason.
+    return message if len(message) <= 300 else "…" + message[-299:]
+
+
 def _rclone_size(
     remote: str, timeout: float = 45, filter_args: Sequence[str] = ()
 ) -> dict[str, Any]:
@@ -201,7 +232,7 @@ def _rclone_size(
                 "count": data.get("count"),
                 "bytes": data.get("bytes"),
             }
-        error = (result.stderr or result.stdout).strip()[:300]
+        error = _rclone_size_error(result.stderr or "", result.stdout or "")
         partial = {
             "path": remote,
             "error": error,
