@@ -27,6 +27,9 @@ from pydantic import BaseModel, Field, SecretStr
 from ..auth import SESSION_COOKIE, require_auth
 from ..config_store import get_config
 from ..db import get_db
+from ..jobs import runtime_state
+from ..jobs.job_lifecycle import BACKUP_KINDS
+from ..jobs.locks import try_file_lock
 from ..rclone_args import (
     DANGEROUS_RCLONE_CONFIG_KEYS,
     assert_safe_rclone_config,
@@ -155,6 +158,7 @@ class StartRemote(BaseModel):
     apple_id: str = Field(default="", max_length=320)
     apple_password: SecretStr | None = None
     reconnect: bool = False
+    require_own_client: bool = False
 
 
 class RemoteAnswer(BaseModel):
@@ -191,6 +195,11 @@ class Setup:
     auth_local_base: str = "http://127.0.0.1:53682"
     auth_state: str = ""
     direct_auth_url: str = ""
+    require_own_client: bool = False
+    original_config: dict[str, Any] = field(default_factory=dict)
+    original_fingerprint: str = ""
+    live_config_path: str = ""
+    oauth_client: dict[str, str] = field(default_factory=dict)
 
     @property
     def config(self) -> str:
@@ -507,6 +516,17 @@ def _view(key: str, setup: Setup) -> dict:
     raw_auth_url = url_match.group(0).rstrip(".,)") if url_match else ""
     if "rclone.org" in raw_auth_url:
         raw_auth_url = ""
+    private_drive = setup.provider == "drive" and (
+        setup.require_own_client or setup.reconnect
+    )
+    if private_drive:
+        # rclone's authorize command can embed the OAuth client secret in its
+        # config blob. Keep that command on the server-side helper only.
+        help_text = (
+            "Bei Google im Browser anmelden und anschließend die Rückrufadresse "
+            "oder das neue Anmeldeergebnis hier einfügen. Die Einrichtung bleibt "
+            "30 Minuten gültig; erst Speichern ändert das Remote."
+        )
     return {
         "id": key,
         "name": setup.name,
@@ -521,16 +541,27 @@ def _view(key: str, setup: Setup) -> dict:
             "label_de": label_de or None,
             "hint_de": hint_de or None,
             "help": help_text,
-            "auth_url": (setup.direct_auth_url or raw_auth_url) or None,
+            "auth_url": (
+                setup.direct_auth_url or ("" if private_drive else raw_auth_url)
+            )
+            or None,
             "direct_auth_url": setup.direct_auth_url or None,
-            "authorize_command": cmd_match.group(0).strip() if cmd_match else None,
+            "authorize_command": cmd_match.group(0).strip()
+            if cmd_match and not private_drive
+            else None,
             "input_mode": "numeric" if is_two_fa_code else None,
             "secret": False
             if is_two_fa_code
-            else (bool(option.get("IsPassword")) or "token" in opt_name.lower()),
+            else (
+                bool(option.get("IsPassword"))
+                or "token" in opt_name.lower()
+                or (private_drive and opt_name == "client_secret")
+            ),
             "required": bool(option.get("Required")),
             "default": ""
-            if option.get("IsPassword") or "token" in opt_name.lower()
+            if option.get("IsPassword")
+            or "token" in opt_name.lower()
+            or (private_drive and opt_name in {"client_id", "client_secret"})
             else (
                 ""
                 if default is None
@@ -540,7 +571,11 @@ def _view(key: str, setup: Setup) -> dict:
             ),
             "examples": [
                 {"value": str(e["Value"]), "help": e.get("Help", "")}
-                for e in option.get("Examples") or []
+                for e in (option.get("Examples") or [])
+                if not (
+                    private_drive
+                    and opt_name in {"client_id", "client_secret", "config_token"}
+                )
             ],
             "exclusive": bool(option.get("Exclusive")),
         },
@@ -641,6 +676,62 @@ def _existing_icloud_remotes() -> list[dict[str, str]]:
     return items
 
 
+def _existing_drive_remotes() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    try:
+        for name in _rc("config/listremotes").get("remotes", []):
+            clean = str(name).rstrip(":").strip()
+            if not clean:
+                continue
+            cfg = _rc("config/get", {"name": clean})
+            if isinstance(cfg, dict) and cfg.get("type") == "drive":
+                items.append(
+                    {
+                        "name": clean,
+                        "has_own_client": bool(
+                            str(cfg.get("client_id") or "").strip()
+                            and str(cfg.get("client_secret") or "").strip()
+                        ),
+                    }
+                )
+    except Exception:
+        return []
+    return items
+
+
+def _config_fingerprint(config: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _drive_token_fingerprint(parameters: dict[str, Any]) -> str:
+    try:
+        token = json.loads(str(parameters.get("token") or ""))
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(token, dict) or not all(
+        isinstance(token.get(key), str) and token[key].strip()
+        for key in ("access_token", "refresh_token")
+    ):
+        return ""
+    return _config_fingerprint(token)
+
+
+def _drive_live_config_path() -> Path:
+    path = _resolve_live_rclone_conf_path()
+    if path.is_symlink():
+        raise HTTPException(400, "rclone.conf darf kein Symlink sein")
+    if path.is_file():
+        with path.open("rb") as stream:
+            if stream.read(128).lstrip().startswith(b"RCLONE_ENCRYPT_V"):
+                raise HTTPException(
+                    409,
+                    "Diese rclone.conf ist verschlüsselt. Sie wird von der geführten Google-Anmeldung nicht verändert.",
+                )
+    return path.resolve()
+
+
 def _resolve_live_rclone_conf_path() -> Path:
     env_cfg = os.environ.get("RCLONE_CONFIG", "").strip()
     if env_cfg:
@@ -663,6 +754,7 @@ def _persist_remote_section_direct(
     parameters: dict[str, Any],
     *,
     allow_replace: bool = False,
+    config_path: Path | None = None,
 ) -> None:
     """Schreibt ein bereits verifiziertes Remote (z. B. iCloud mit 2FA-Trust-Token) atomar in rclone.conf, ohne erneut eine 2FA-Anmeldung auszulösen."""
     if not _NAME_RE.fullmatch(name):
@@ -688,7 +780,9 @@ def _persist_remote_section_direct(
             raise HTTPException(400, f"Unzulässiger Konfigurationswert in Feld {k}")
         clean_entries.append((k, v))
 
-    live_path = _resolve_live_rclone_conf_path()
+    live_path = (
+        config_path if config_path is not None else _resolve_live_rclone_conf_path()
+    )
     live_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if live_path.exists() and live_path.is_symlink():
         raise HTTPException(400, "rclone.conf darf kein Symlink sein")
@@ -753,6 +847,8 @@ def providers() -> dict:
     return {
         "providers": _provider_items(),
         "icloud_remotes": _existing_icloud_remotes(),
+        "drive_remotes": _existing_drive_remotes(),
+        "drive_reconnect_supported": True,
     }
 
 
@@ -782,16 +878,38 @@ def start(payload: StartRemote, request: Request) -> dict:
         matched_existing = existing_map.get(payload.name.casefold())
         existing_cfg: dict[str, Any] = {}
         if matched_existing:
-            if not payload.reconnect or payload.provider != "iclouddrive":
+            if not payload.reconnect or payload.provider not in {
+                "iclouddrive",
+                "drive",
+            }:
                 raise HTTPException(
                     409, "Ein Remote mit diesem Namen existiert bereits"
                 )
             existing_cfg = _rc("config/get", {"name": matched_existing})
-            if existing_cfg.get("type") != "iclouddrive":
+            if existing_cfg.get("type") != payload.provider:
                 raise HTTPException(
                     409,
                     "Ein Remote anderen Typs mit diesem Namen existiert bereits",
                 )
+        elif payload.reconnect and payload.provider == "drive":
+            raise HTTPException(404, "Das Google-Drive-Remote ist nicht mehr vorhanden")
+        drive_reconnect = bool(
+            matched_existing and payload.reconnect and payload.provider == "drive"
+        )
+        if drive_reconnect and (
+            any(
+                existing_cfg.get(key)
+                for key in ("service_account_file", "service_account_credentials")
+            )
+            or str(existing_cfg.get("env_auth") or "").lower()
+            not in {"", "false", "0", "no"}
+            or str(existing_cfg.get("client_credentials") or "").lower()
+            not in {"", "false", "0", "no"}
+        ):
+            raise HTTPException(
+                409,
+                "Dieses Drive-Remote verwendet einen Service-Account oder Umgebungszugang. Die Browser-Anmeldung ändert diesen Zugangstyp nicht.",
+            )
         if len(_setups) >= _MAX_SESSIONS:
             raise HTTPException(
                 429, "Zu viele offene Einrichtungen. Bitte eine Einrichtung schließen."
@@ -803,6 +921,14 @@ def start(payload: StartRemote, request: Request) -> dict:
             if payload.express is not None
             else (payload.provider in {"drive", "iclouddrive"})
         )
+        if drive_reconnect or (
+            payload.provider == "drive" and payload.require_own_client
+        ):
+            use_express = True
+        own_drive_client = payload.provider == "drive" and (
+            payload.require_own_client or drive_reconnect
+        )
+        keep_drive_client = False
         if use_express:
             auto_answers["config_fs_advanced"] = "false"
             auto_answers["config_advanced"] = "false"
@@ -813,6 +939,22 @@ def start(payload: StartRemote, request: Request) -> dict:
                     if payload.client_secret
                     else ""
                 )
+                if bool(client_id) != bool(client_secret):
+                    raise HTTPException(
+                        400,
+                        "Client-ID und Client-Secret müssen gemeinsam eingegeben werden",
+                    )
+                if not client_id and drive_reconnect:
+                    client_id = str(existing_cfg.get("client_id") or "").strip()
+                    client_secret = str(existing_cfg.get("client_secret") or "").strip()
+                    keep_drive_client = bool(client_id and client_secret)
+                if own_drive_client and not (client_id and client_secret):
+                    raise HTTPException(
+                        400,
+                        "Für Google Drive sind eine eigene Client-ID und das zugehörige Client-Secret nötig",
+                    )
+                if drive_reconnect:
+                    drive_scope = str(existing_cfg.get("scope") or "drive")
                 root_folder_id = payload.root_folder_id.strip()
                 auto_answers.update(
                     {
@@ -822,14 +964,14 @@ def start(payload: StartRemote, request: Request) -> dict:
                         "root_folder_id": root_folder_id,
                         "service_account_file": "",
                         "config_change_team_drive": "true"
-                        if payload.team_drive
+                        if payload.team_drive and not drive_reconnect
                         else "false",
                     }
                 )
                 initial_params["scope"] = drive_scope
-                if client_id:
+                if client_id and not keep_drive_client:
                     initial_params["client_id"] = client_id
-                if client_secret:
+                if client_secret and not keep_drive_client:
                     initial_params["client_secret"] = client_secret
                 if root_folder_id:
                     initial_params["root_folder_id"] = root_folder_id
@@ -865,6 +1007,12 @@ def start(payload: StartRemote, request: Request) -> dict:
             express=bool(use_express),
             reconnect=bool(payload.reconnect and matched_existing),
             auto_answers=auto_answers,
+            require_own_client=own_drive_client,
+            original_config=dict(existing_cfg) if drive_reconnect else {},
+            original_fingerprint=_config_fingerprint(existing_cfg)
+            if drive_reconnect
+            else "",
+            live_config_path=str(_drive_live_config_path()) if own_drive_client else "",
         )
         key = secrets.token_urlsafe(32)
         _setups[key] = setup
@@ -878,18 +1026,54 @@ def start(payload: StartRemote, request: Request) -> dict:
         setup.timer = timer
         timer.start()
         try:
-            _advance(
-                setup,
-                _rc(
+            if drive_reconnect:
+                # Preserve every existing option in the private draft, except
+                # the old account token. Keep rclone's stored credential
+                # representation unchanged; only new values enter RC conversion.
+                draft = {
+                    key: value for key, value in existing_cfg.items() if key != "token"
+                }
+                _persist_remote_section_direct(
+                    setup.name, "drive", draft, config_path=Path(setup.config)
+                )
+                reconnect_params = {
+                    key: value
+                    for key, value in initial_params.items()
+                    if key in {"client_id", "client_secret"}
+                }
+                result = _rc(
+                    "config/update",
+                    {
+                        "name": setup.name,
+                        "parameters": reconnect_params,
+                        "opt": {"nonInteractive": True, "obscure": True},
+                    },
+                    setup.config,
+                )
+            else:
+                result = _rc(
                     "config/create",
                     {
                         "name": setup.name,
                         "type": setup.provider,
                         "parameters": initial_params,
-                        "opt": {"nonInteractive": True, "all": True, "obscure": True},
+                        "opt": {
+                            "nonInteractive": True,
+                            "all": not own_drive_client,
+                            "obscure": True,
+                        },
                     },
                     setup.config,
-                ),
+                )
+            if own_drive_client:
+                staged_client = _rc("config/get", {"name": setup.name}, setup.config)
+                setup.oauth_client = {
+                    field: str(staged_client.get(field) or "")
+                    for field in ("client_id", "client_secret")
+                }
+            _advance(
+                setup,
+                result,
             )
         except Exception:
             _discard(key)
@@ -961,6 +1145,117 @@ def answer(key: str, payload: RemoteAnswer, request: Request) -> dict:
         return _view(key, setup)
 
 
+def _save_drive_remote(setup: Setup) -> None:
+    """Publish only after OAuth, under the same lease used by backup workers."""
+    busy = "Während einer Sicherung, Prüfung oder Recovery kann das Drive-Remote nicht gespeichert werden"
+    lease = try_file_lock(runtime_state.DEFAULT_CANCEL_SCOPE)
+    if lease is None:
+        raise HTTPException(409, busy)
+    try:
+        try:
+            database = get_db()
+            running = any(database.job_running(kind) for kind in BACKUP_KINDS)
+            active = runtime_state.active_processes(runtime_state.DEFAULT_CANCEL_SCOPE)
+            run = runtime_state.load_run_state() or {}
+        except Exception as exc:
+            raise HTTPException(
+                503, "Laufende Jobs konnten nicht sicher geprüft werden"
+            ) from exc
+        if running or active or run.get("status") == "running":
+            raise HTTPException(409, busy)
+        live_path = _drive_live_config_path()
+        if str(live_path) != setup.live_config_path:
+            raise HTTPException(
+                409,
+                "Die aktive rclone-Konfiguration wurde geändert. Bitte neu beginnen.",
+            )
+        names = _rc("config/listremotes").get("remotes", [])
+        matches = [
+            str(name).rstrip(":")
+            for name in names
+            if str(name).rstrip(":").casefold() == setup.name.casefold()
+        ]
+        if setup.reconnect:
+            if matches != [setup.name]:
+                raise HTTPException(
+                    409,
+                    "Das Drive-Remote wurde inzwischen geändert. Bitte neu beginnen.",
+                )
+            current = _rc("config/get", {"name": setup.name})
+            if _config_fingerprint(current) != setup.original_fingerprint:
+                raise HTTPException(
+                    409,
+                    "Das Drive-Remote wurde inzwischen geändert. Bitte neu beginnen.",
+                )
+        elif matches:
+            raise HTTPException(
+                409, "Ein Remote mit diesem Namen existiert inzwischen bereits"
+            )
+
+        staged = _rc("config/get", {"name": setup.name}, setup.config)
+        if staged.get("type") != "drive":
+            raise HTTPException(
+                409, "Der Drive-Entwurf ist nicht mehr gültig. Bitte neu beginnen."
+            )
+        if setup.require_own_client:
+            if (
+                not str(staged.get("client_id") or "").strip()
+                or not str(staged.get("client_secret") or "").strip()
+            ):
+                raise HTTPException(
+                    409, "Der eigene OAuth-Client fehlt im Drive-Entwurf"
+                )
+            if any(
+                str(staged.get(key) or "") != value
+                for key, value in setup.oauth_client.items()
+            ):
+                raise HTTPException(
+                    409,
+                    "Der OAuth-Client wurde während der Anmeldung verändert. Bitte neu beginnen.",
+                )
+            token = _drive_token_fingerprint(staged)
+            if not token or (
+                setup.reconnect
+                and token == _drive_token_fingerprint(setup.original_config)
+            ):
+                raise HTTPException(
+                    409, "Bitte die Google-Anmeldung mit einem neuen Token abschließen"
+                )
+        if setup.reconnect:
+            # The authentication ceremony may emit defaults or suggestions;
+            # only its OAuth credentials may replace the original settings.
+            parameters = dict(setup.original_config)
+            for key in ("client_id", "client_secret", "token"):
+                parameters[key] = staged.get(key, "")
+        else:
+            parameters = dict(staged)
+        parameters.pop("type", None)
+        _persist_remote_section_direct(
+            setup.name,
+            "drive",
+            parameters,
+            allow_replace=setup.reconnect,
+            config_path=live_path,
+        )
+    finally:
+        lease.release()
+
+
+def _finish_saved_setup(key: str, setup: Setup) -> dict:
+    name = setup.name
+    reconnected = setup.reconnect
+    try:
+        get_db().audit_add(
+            "remote_reconnected" if reconnected else "remote_created",
+            actor="web",
+            details={"name": name, "provider": setup.provider},
+        )
+    except Exception:
+        pass
+    _discard(key)
+    return {"ok": True, "name": name, "path": name + ":", "reconnected": reconnected}
+
+
 @router.post("/setup/{key}/save")
 def save(key: str, request: Request) -> dict:
     with _lock:
@@ -969,6 +1264,9 @@ def save(key: str, request: Request) -> dict:
             raise HTTPException(
                 409, "Bitte zuerst alle Einrichtungsschritte abschließen"
             )
+        if setup.provider == "drive" and setup.require_own_client:
+            _save_drive_remote(setup)
+            return _finish_saved_setup(key, setup)
         existing = _rc("config/listremotes").get("remotes", [])
         existing_map = {n.rstrip(":").casefold(): n.rstrip(":") for n in existing}
         if setup.name.casefold() in existing_map and not setup.reconnect:
@@ -1033,23 +1331,7 @@ def save(key: str, request: Request) -> dict:
                     502,
                     "Die Anmeldung ist noch nicht vollständig. Bitte Einrichtung wiederholen.",
                 )
-        name = setup.name
-        reconnected = setup.reconnect
-        try:
-            get_db().audit_add(
-                "remote_reconnected" if reconnected else "remote_created",
-                actor="web",
-                details={"name": name, "provider": setup.provider},
-            )
-        except Exception:
-            pass
-        _discard(key)
-        return {
-            "ok": True,
-            "name": name,
-            "path": name + ":",
-            "reconnected": reconnected,
-        }
+        return _finish_saved_setup(key, setup)
 
 
 @router.delete("/setup/{key}")

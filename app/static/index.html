@@ -1421,7 +1421,7 @@
   <!-- Remote setup uses the questions provided by the installed rclone. -->
   <div class="modal" x-show="remoteSetup.show" x-cloak @click.self="closeRemoteSetup()">
     <form class="modal-dialog wide" x-ref="remoteSetupDialog" role="dialog" aria-modal="true" aria-labelledby="remote-setup-title" tabindex="-1" @submit.prevent="submitRemoteSetup()" :aria-busy="remoteSetup.busy">
-      <div class="modal-head"><h3 id="remote-setup-title">Neues Remote einbinden</h3><button type="button" class="icon-button" @click="closeRemoteSetup()" :disabled="remoteSetup.busy" aria-label="Einrichtung schließen">×</button></div>
+      <div class="modal-head"><h3 id="remote-setup-title" x-text="remoteSetup.provider === 'drive' ? 'Google Drive anmelden' : 'Remote einbinden'"></h3><button type="button" class="icon-button" @click="closeRemoteSetup()" :disabled="remoteSetup.busy" aria-label="Einrichtung schließen">×</button></div>
       <div class="modal-content stack">
         <template x-if="!remoteSetup.session"><div class="stack">
           <div class="filter-presets" role="group" aria-label="Beliebte Cloud-Anbieter">
@@ -1433,26 +1433,45 @@
             <button type="button" class="button secondary small" :class="remoteSetup.provider === 'webdav' && 'active'" @click="selectRemotePreset('webdav', 'nextcloud')">Nextcloud / WebDAV</button>
           </div>
           <div class="form-grid two">
-            <label class="field"><span>Remote-Name</span><input x-model="remoteSetup.name" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{1,63}" maxlength="64" placeholder="gdrive" :disabled="remoteSetup.busy" autocomplete="off"><small>2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche (z. B. <code>gdrive</code>).</small></label>
-            <label class="field"><span>Anbieter</span><select x-model="remoteSetup.provider" required :disabled="remoteSetup.busy"><option value="">Bitte auswählen</option><template x-for="provider in remoteSetup.providers" :key="provider.name"><option :value="provider.name" x-text="provider.description"></option></template></select></label>
+            <label class="field"><span>Remote-Name</span><input x-model="remoteSetup.name" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{1,63}" maxlength="64" placeholder="gdrive" :disabled="remoteSetup.busy || remoteSetup.reconnect" autocomplete="off"><small>2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche (z. B. <code>gdrive</code>).</small></label>
+            <label class="field"><span>Anbieter</span><select x-model="remoteSetup.provider" @change="remoteSetup.reconnect = false; remoteSetup.useStoredDriveClient = false; remoteSetup.clientId = ''; remoteSetup.clientSecret = ''" required :disabled="remoteSetup.busy"><option value="">Bitte auswählen</option><template x-for="provider in remoteSetup.providers" :key="provider.name"><option :value="provider.name" x-text="provider.description"></option></template></select></label>
           </div>
 
           <div class="stack" x-show="remoteSetup.provider === 'drive'">
-            <div class="alert info"><span class="alert-icon" aria-hidden="true">✓</span><div><strong>Google-Drive-Express-Einrichtung (ohne Terminal)</strong><span>Klicke einfach auf <strong>Weiter zur Google-Anmeldung</strong>. Du meldest dich direkt im Browser bei Google an – auf deinem PC, Mac oder Smartphone muss kein rclone installiert sein.</span></div></div>
+            <div class="alert info"><span class="alert-icon" aria-hidden="true">i</span><div><strong>Mit deinem Google-Konto verbinden</strong><span>Die Anmeldung erfolgt auf der offiziellen Google-Seite. Dein Google-Passwort wird hier nicht abgefragt. Nach der Freigabe bestätigst du das Speichern ausdrücklich.</span></div></div>
+            <div class="filter-presets" x-show="remoteSetup.driveReconnectSupported && remoteSetup.driveRemotes.length" role="group" aria-label="Google-Drive-Zugang auswählen">
+              <span>Bestehenden Zugang aktualisieren:</span>
+              <template x-for="remote in remoteSetup.driveRemotes" :key="remote.name"><button type="button" class="button secondary small" @click="selectDriveReconnect(remote)" :disabled="remoteSetup.busy" x-text="remote.name"></button></template>
+              <button type="button" class="button secondary small" @click="selectDriveReconnect(null)" :disabled="remoteSetup.busy">Neue Verbindung</button>
+            </div>
+            <p class="muted" x-show="!remoteSetup.driveReconnectSupported">Zum Erneuern eines bestehenden Google-Zugangs ist ein Server-Update nötig. Eine neue Verbindung ist möglich.</p>
+            <div class="stack" x-show="remoteSetup.driveMode === 'oauth'">
+              <p x-show="remoteSetup.reconnect">Wähle bei Google dasselbe Konto wie bisher. Ordner, Datenwege und Tresore bleiben unverändert. Speichern ist erst möglich, wenn die laufende Sicherung beendet ist.</p>
+              <label class="check-row" x-show="remoteSetup.reconnect && remoteSetup.driveRemotes.some(remote => remote.name === remoteSetup.name && remote.has_own_client)"><input type="checkbox" x-model="remoteSetup.useStoredDriveClient" :disabled="remoteSetup.busy"><span>Gespeicherte eigene API-Anbindung verwenden</span></label>
+              <div class="stack" x-show="!(remoteSetup.reconnect && remoteSetup.useStoredDriveClient)">
+                <p>Lege einmalig eine eigene OAuth-App vom Typ <strong>Desktop-App</strong> in Google Cloud an und aktiviere die Drive API. Die geteilte rclone-Anbindung läuft aus.</p>
+                <p class="muted">Bei externen OAuth-Apps im Status „Testing“ läuft die Freigabe nach sieben Tagen ab. Für dauerhafte Sicherungen den Veröffentlichungsstatus in Google Cloud prüfen.</p>
+                <div class="button-row"><a class="button secondary small" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud öffnen</a><a href="https://rclone.org/drive/#making-your-own-client-id" target="_blank" rel="noopener noreferrer">Schritt-für-Schritt-Anleitung</a></div>
+                <div class="form-grid two">
+                  <label class="field"><span>OAuth Client-ID</span><input class="mono" x-model="remoteSetup.clientId" :disabled="remoteSetup.busy" placeholder="…apps.googleusercontent.com" autocomplete="off"></label>
+                  <label class="field"><span>OAuth Client-Secret</span><input type="password" class="mono" x-model="remoteSetup.clientSecret" :disabled="remoteSetup.busy" autocomplete="off" spellcheck="false"></label>
+                </div>
+              </div>
+            </div>
 
             <details class="disclosure"><summary>Erweiterte Google-Drive-Optionen (Ordner-ID, Service-Account-JSON, Shared Drive)</summary><div class="disclosure-body stack">
               <div class="form-grid two">
-                <label class="field"><span>Anmeldeweg</span><select x-model="remoteSetup.driveMode">
+                <label class="field"><span>Anmeldeweg</span><select x-model="remoteSetup.driveMode" :disabled="remoteSetup.busy || remoteSetup.reconnect">
                   <option value="oauth">Google-Konto im Browser · Standard</option>
                   <option value="service_account">Service-Account-JSON · 1-Klick ohne Browser-Login</option>
                 </select></label>
-                <label class="field"><span>Zugriffsumfang (Scope)</span><select x-model="remoteSetup.scope">
+                <label class="field"><span>Zugriffsumfang (Scope)</span><select x-model="remoteSetup.scope" :disabled="remoteSetup.busy || remoteSetup.reconnect">
                   <option value="drive">Vollzugriff auf Google Drive · empfohlen für Backups</option>
                   <option value="drive.file">Nur von rclone erstellte Dateien · drive.file</option>
                   <option value="drive.readonly">Nur Lesezugriff · drive.readonly</option>
                 </select></label>
               </div>
-              <label class="field"><span>Auf bestimmten Google-Drive-Ordner beschränken · optional</span><input class="mono" x-model="remoteSetup.rootFolderId" placeholder="Ordner-ID aus der Drive-URL nach /folders/…" autocomplete="off"><small>Leer lassen für das gesamte Google Drive. Bei Service-Accounts hier die ID des freigegebenen Zielordners eintragen.</small></label>
+              <label class="field"><span>Auf bestimmten Google-Drive-Ordner beschränken · optional</span><input class="mono" x-model="remoteSetup.rootFolderId" placeholder="Ordner-ID aus der Drive-URL nach /folders/…" autocomplete="off" :disabled="remoteSetup.busy || remoteSetup.reconnect"><small>Beim Erneuern werden der bisherige Ordner und Zugriffsumfang beibehalten. Bei einer neuen Verbindung leer lassen für das gesamte Drive.</small></label>
 
               <div class="stack" x-show="remoteSetup.driveMode === 'service_account'">
                 <div class="button-row">
@@ -1463,11 +1482,7 @@
               </div>
 
               <div class="stack" x-show="remoteSetup.driveMode === 'oauth'">
-                <div class="form-grid two">
-                  <label class="field"><span>Eigene OAuth Client-ID · optional</span><input class="mono" x-model="remoteSetup.clientId" placeholder="Leer = rclone-Standard" autocomplete="off"></label>
-                  <label class="field"><span>Eigenes Client-Secret · optional</span><input type="password" class="mono" x-model="remoteSetup.clientSecret" placeholder="Leer = rclone-Standard" autocomplete="new-password"></label>
-                </div>
-                <label class="check-row"><input type="checkbox" x-model="remoteSetup.teamDrive"><span><strong>Als Google-Workspace Geteilte Ablage (Shared Drive) einrichten</strong></span></label>
+                <label class="check-row"><input type="checkbox" x-model="remoteSetup.teamDrive" :disabled="remoteSetup.busy || remoteSetup.reconnect"><span><strong>Als Google-Workspace Geteilte Ablage (Shared Drive) einrichten</strong></span></label>
               </div>
             </div></details>
           </div>
@@ -1532,11 +1547,11 @@
           <p x-show="remoteSetup.session.option.default">Leer lassen, um den angezeigten Standard zu verwenden.</p>
           <div class="button-row" x-show="remoteSetup.session.option.auth_url && !remoteSetup.session.option.authorize_command"><a class="button secondary small" :href="remoteSetup.session.option.auth_url" target="_blank" rel="noopener noreferrer">Im Browser autorisieren</a></div>
         </div></template>
-        <template x-if="remoteSetup.session?.ready"><p>Die Angaben für <strong x-text="remoteSetup.session.name"></strong> sind vollständig. Mit „Remote speichern“ wird der Speicher in die Serverkonfiguration übernommen. Die Erreichbarkeit kannst du anschließend über die Ordnerauswahl prüfen.</p></template>
+        <template x-if="remoteSetup.session?.ready"><div class="stack"><p>Die Angaben für <strong x-text="remoteSetup.session.name"></strong> sind vollständig. Erst mit „Remote speichern“ wird der Zugang übernommen. Bis dahin bleibt der bisherige Zugang unverändert.</p><p x-show="remoteSetup.provider === 'drive'">Die Einrichtung läuft nach insgesamt 30 Minuten ab. Während einer Sicherung ist das Speichern gesperrt; bei längeren Läufen melde dich nach deren Abschluss erneut an.</p></div></template>
         <p class="inline-error" role="alert" x-show="remoteSetup.error" x-text="remoteSetup.error"></p>
         <p x-show="remoteSetup.busy" role="status">Einrichtung wird verarbeitet…</p>
       </div>
-      <div class="modal-footer"><button type="button" class="button secondary" @click="closeRemoteSetup()" :disabled="remoteSetup.busy">Abbrechen</button><button type="submit" class="button primary" :disabled="remoteSetup.busy || (!remoteSetup.session && !remoteSetup.providers.length)" x-text="remoteSetup.session?.ready ? 'Remote speichern' : (!remoteSetup.session && remoteSetup.provider === 'drive' && remoteSetup.driveMode === 'service_account' ? 'Google Drive sofort verbinden' : (!remoteSetup.session && remoteSetup.provider === 'drive' ? 'Weiter zur Google-Anmeldung' : (!remoteSetup.session && remoteSetup.provider === 'iclouddrive' ? (remoteSetup.reconnect ? 'iCloud-Token jetzt erneuern' : (remoteSetup.appleId && remoteSetup.applePassword ? 'Weiter zum 6-stelligen Apple-Code' : 'Weiter zur iCloud-Anmeldung')) : (remoteSetup.session && remoteSetup.express ? 'Fertigstellen & Speichern' : 'Weiter'))))"></button></div>
+      <div class="modal-footer"><button type="button" class="button secondary" @click="closeRemoteSetup()" :disabled="remoteSetup.busy">Abbrechen</button><button type="submit" class="button primary" :disabled="remoteSetup.busy || (!remoteSetup.session && !remoteSetup.providers.length)" x-text="remoteSetup.session?.ready ? 'Remote speichern' : (!remoteSetup.session && remoteSetup.provider === 'drive' && remoteSetup.driveMode === 'service_account' ? 'Google Drive sofort verbinden' : (!remoteSetup.session && remoteSetup.provider === 'drive' ? 'Weiter zur Google-Anmeldung' : (!remoteSetup.session && remoteSetup.provider === 'iclouddrive' ? (remoteSetup.reconnect ? 'iCloud-Token jetzt erneuern' : (remoteSetup.appleId && remoteSetup.applePassword ? 'Weiter zum 6-stelligen Apple-Code' : 'Weiter zur iCloud-Anmeldung')) : (remoteSetup.session ? 'Antwort bestätigen' : 'Weiter'))))"></button></div>
     </form>
   </div>
 

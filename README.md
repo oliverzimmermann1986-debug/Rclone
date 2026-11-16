@@ -397,6 +397,18 @@ erfolgreichen Login oder beim Ändern des Passworts automatisch entfernt.
 
 ## Upgrade
 
+Ab Version 2.4.3 kann eine Google-Drive-Anmeldung mit eigener OAuth-App vorbereitet
+und ein bestehender Drive-Zugang ausdrücklich erneuert werden. Client-ID und
+Client-Secret stammen aus einer einmalig eingerichteten Google-Cloud-Desktop-App;
+das Google-Passwort wird ausschließlich auf der Google-Seite eingegeben.
+Beim Erneuern bleiben die konfigurierten Ordner und übrigen Remote-Optionen erhalten.
+Erst „Remote speichern“ aktiviert den neuen Zugang. Speichern ist während eines
+laufenden Backups/Checks gesperrt und verweigert zwischenzeitlich veränderte
+Remote-Konfigurationen. Entwürfe verfallen nach insgesamt 30 Minuten; bei längeren
+Sicherungen die Anmeldung erst danach durchführen. Service-Account-/Umgebungszugänge
+und verschlüsselte rclone.conf-Dateien werden über diesen neuen Erneuerungsweg nicht
+umgewandelt. Der klassische rclone-Einrichtungsweg bleibt verfügbar.
+
 Ab Version 2.4.2 bleibt bei fehlgeschlagenen Größenmessungen die eigentliche
 Fehlerursache sichtbar, auch wenn rclone zuvor lange Anbieterhinweise ausgibt.
 Messfehler sind kein Nachweis einer leeren oder erfolgreich gesicherten Kopie.

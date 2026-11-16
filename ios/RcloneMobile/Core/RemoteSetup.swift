@@ -18,19 +18,36 @@ struct ExistingICloudRemote: Decodable, Identifiable, Equatable {
     }
 }
 
+struct ExistingGoogleDriveRemote: Decodable, Identifiable, Equatable {
+    let name: String
+    let hasOwnClient: Bool
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case hasOwnClient = "has_own_client"
+    }
+}
+
 struct RemoteProvidersResponse: Decodable {
     let providers: [RemoteProvider]
     let icloudRemotes: [ExistingICloudRemote]
+    let driveRemotes: [ExistingGoogleDriveRemote]
+    let driveReconnectSupported: Bool
 
     enum CodingKeys: String, CodingKey {
         case providers
         case icloudRemotes = "icloud_remotes"
+        case driveRemotes = "drive_remotes"
+        case driveReconnectSupported = "drive_reconnect_supported"
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         providers = try container.decode([RemoteProvider].self, forKey: .providers)
         icloudRemotes = try container.decodeIfPresent([ExistingICloudRemote].self, forKey: .icloudRemotes) ?? []
+        driveRemotes = try container.decodeIfPresent([ExistingGoogleDriveRemote].self, forKey: .driveRemotes) ?? []
+        driveReconnectSupported = try container.decodeIfPresent(Bool.self, forKey: .driveReconnectSupported) ?? false
     }
 }
 
@@ -79,6 +96,9 @@ struct RemoteSetupStart: Encodable {
     let name: String
     let provider: String
     var express: Bool? = nil
+    var clientId: String? = nil
+    var clientSecret: String? = nil
+    var requireOwnClient: Bool? = nil
     var scope: String? = nil
     var rootFolderId: String? = nil
     var teamDrive: Bool? = nil
@@ -89,6 +109,9 @@ struct RemoteSetupStart: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case name, provider, express, scope, reconnect
+        case clientId = "client_id"
+        case clientSecret = "client_secret"
+        case requireOwnClient = "require_own_client"
         case rootFolderId = "root_folder_id"
         case teamDrive = "team_drive"
         case icloudService = "icloud_service"
