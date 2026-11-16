@@ -1,4 +1,7 @@
+import base64
 import json
+import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -594,3 +597,79 @@ def test_apple_wrong_password_returns_helpful_400_without_credential_leak(monkey
     assert err.value.status_code == 400
     assert "reguläre Apple-Account-Passwort" in str(err.value.detail)
     assert "secret-canary" not in str(err.value.detail)
+
+
+@pytest.mark.skipif(
+    not shutil.which("rclone"), reason="Optional offline integration needs rclone"
+)
+@pytest.mark.parametrize("reconnect", [False, True])
+def test_real_own_drive_oauth_reaches_fresh_token_question_offline(
+    tmp_path, monkeypatch, reconnect
+):
+    """Real RC state/storage only: stop before submitting any OAuth result."""
+    config = tmp_path / "rclone.conf"
+    # Isolate from inherited backend/account environment overrides as well as
+    # from the live config. All credentials below are deliberately fake.
+    for key in list(os.environ):
+        if key.startswith(("RCLONE_CONFIG_", "RCLONE_DRIVE_")):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("RCLONE_CONFIG", str(config))
+    helper_calls = []
+    monkeypatch.setattr(
+        remotes,
+        "_start_browser_auth_helper",
+        lambda _setup, command: helper_calls.append(command),
+    )
+    parameters = {
+        "client_id": "fixture.apps.googleusercontent.com",
+        "client_secret": "fixture-private-client-secret",
+        "scope": "drive.readonly",
+        "root_folder_id": "fixture-root",
+        "team_drive": "fixture-team",
+        "chunk_size": "128Mi",
+    }
+    if reconnect:
+        config.write_text(
+            "[Google]\ntype = drive\n"
+            + "".join(f"{key} = {value}\n" for key, value in parameters.items()),
+            encoding="utf-8",
+        )
+        result = remotes._rc(
+            "config/update",
+            {
+                "name": "Google",
+                "parameters": {},
+                "opt": {"nonInteractive": True, "obscure": True},
+            },
+            str(config),
+        )
+    else:
+        result = remotes._rc(
+            "config/create",
+            {
+                "name": "Google",
+                "type": "drive",
+                "parameters": parameters,
+                "opt": {"nonInteractive": True, "all": False, "obscure": True},
+            },
+            str(config),
+        )
+    directory = type("FixtureDirectory", (), {"name": str(tmp_path)})()
+    setup = remotes.Setup(
+        "owner", "Google", "drive", directory, express=True, require_own_client=True
+    )
+    remotes._advance(setup, result)
+    assert setup.option["Name"] == "config_token" and setup.state
+    assert setup.error is False and len(helper_calls) == 1
+    command = shlex.split(helper_calls[0])
+    assert command[:3] == ["rclone", "authorize", "drive"] and len(command) == 4
+    encoded = command[3]
+    authorization = json.loads(base64.b64decode(encoded + "=" * (-len(encoded) % 4)))
+    assert authorization["client_id"] == parameters["client_id"]
+    assert authorization["client_secret"] == parameters["client_secret"]
+    assert "token" not in authorization
+    stored = remotes._rc("config/get", {"name": "Google"}, setup.config)
+    # OAuth client_secret is Sensitive but is not an IsPassword option in
+    # rclone; retain its own storage representation without an extra encoding.
+    assert {key: stored[key] for key in parameters} == parameters
+    assert "token" not in stored

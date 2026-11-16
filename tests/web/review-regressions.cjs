@@ -73,6 +73,112 @@ function harness() {
   };
 }
 
+test('Google setup requires its own OAuth client before starting login', async () => {
+  const { model: m, calls } = harness();
+  Object.assign(m.remoteSetup, { provider: 'drive', name: 'gdrive' });
+  await m.submitRemoteSetup();
+  assert.equal(calls.requests.length, 0);
+  assert.match(m.remoteSetup.error, /Client-ID.*Client-Secret/);
+  assert.equal(m.remoteSetup.busy, false);
+});
+
+test('Google authorization stays a draft until an explicit save', async () => {
+  const { model: m } = harness();
+  const requests = [];
+  m.restoreDialogFocus = () => {};
+  m.$refs.remoteAnswer = { focus() {} };
+  Object.assign(m.remoteSetup, { show: true, provider: 'drive', name: 'gdrive', clientId: 'fixture-id', clientSecret: 'fixture-secret' });
+  m.api = async (method, url, body) => {
+    requests.push([method, url, plain(body)]);
+    if (url.endsWith('/save')) return { ok: true, name: 'gdrive' };
+    return { id: 'draft', name: 'gdrive', ready: url.endsWith('/answer'), step: 1, option: { default: '' } };
+  };
+  await m.submitRemoteSetup();
+  assert.equal(requests[0][2].require_own_client, true);
+  assert.equal(requests[0][2].client_id, 'fixture-id');
+  assert.equal(requests[0][2].client_secret, 'fixture-secret');
+  assert.equal(m.remoteSetup.clientSecret, '');
+  m.remoteSetup.answer = 'fixture-callback';
+  await m.submitRemoteSetup();
+  assert.equal(requests.length, 2);
+  assert.equal(m.remoteSetup.session.ready, true);
+  assert.equal(m.remoteSetup.show, true);
+  assert.equal(requests.some((request) => request[1].endsWith('/save')), false);
+  await m.submitRemoteSetup();
+  assert.equal(requests.length, 3);
+  assert.equal(requests[2][1], '/api/remotes/setup/draft/save');
+  assert.equal(m.remoteSetup.show, false);
+});
+
+test('Google reconnect retains server-side options and can use its stored own client', async () => {
+  const { model: m } = harness();
+  m.remoteSetup.driveReconnectSupported = true;
+  m.selectDriveReconnect({ name: 'existing', has_own_client: true });
+  let submitted;
+  m.api = async (_method, _url, body) => { submitted = plain(body); return { id: 'draft', ready: true }; };
+  await m.submitRemoteSetup();
+  assert.equal(submitted.name, 'existing');
+  assert.equal(submitted.reconnect, true);
+  assert.equal(submitted.require_own_client, true);
+  assert.equal(submitted.client_id, '');
+  assert.equal(submitted.client_secret, null);
+  for (const key of ['scope', 'root_folder_id', 'team_drive']) assert.equal(key in submitted, false, key);
+  assert.equal(m.remoteSetup.session.ready, true);
+});
+
+test('a busy-run save refusal keeps the authenticated Google draft retryable', async () => {
+  const { model: m } = harness();
+  Object.assign(m.remoteSetup, { provider: 'drive', session: { id: 'draft', ready: true } });
+  m.api = async () => ({ __error: true, detail: 'Sicherung läuft. Nach deren Abschluss erneut speichern.' });
+  await m.submitRemoteSetup();
+  assert.equal(m.remoteSetup.session.id, 'draft');
+  assert.equal(m.remoteSetup.session.ready, true);
+  assert.equal(m.remoteSetup.busy, false);
+  assert.match(m.remoteSetup.error, /Sicherung läuft/);
+});
+
+test('changing provider and closing setup clear the OAuth client secret', async () => {
+  const { model: m } = harness();
+  Object.assign(m.remoteSetup, { provider: 'drive', reconnect: true, useStoredDriveClient: true, clientSecret: 'fixture' });
+  m.selectRemotePreset('webdav');
+  assert.equal(m.remoteSetup.reconnect, false);
+  assert.equal(m.remoteSetup.useStoredDriveClient, false);
+  assert.equal(m.remoteSetup.clientSecret, '');
+  m.remoteSetup.clientSecret = 'fixture-again';
+  m.restoreDialogFocus = () => {};
+  await m.closeRemoteSetup();
+  assert.equal(m.remoteSetup.clientSecret, '');
+});
+
+test('pending Google starts cannot be reassigned to another provider', async () => {
+  const { model: m } = harness();
+  const pending = deferred();
+  Object.assign(m.remoteSetup, { provider: 'drive', name: 'gdrive', clientId: 'fixture-id', clientSecret: 'fixture-secret' });
+  m.api = async () => pending.promise;
+  const request = m.submitRemoteSetup();
+  assert.equal(m.remoteSetup.busy, true);
+  m.selectRemotePreset('webdav', 'nextcloud');
+  assert.equal(m.remoteSetup.provider, 'drive');
+  assert.equal(m.remoteSetup.name, 'gdrive');
+  pending.resolve({ id: 'draft', ready: true });
+  await request;
+  assert.equal(m.remoteSetup.session.id, 'draft');
+  m.selectRemotePreset('webdav');
+  assert.equal(m.remoteSetup.provider, 'drive');
+});
+
+test('failed and interrupted Google starts clear the client secret and release busy state', async () => {
+  for (const throws of [false, true]) {
+    const { model: m } = harness();
+    Object.assign(m.remoteSetup, { provider: 'drive', name: 'gdrive', clientId: 'fixture-id', clientSecret: 'fixture-secret' });
+    m.api = async () => { if (throws) throw new Error('fixture'); return { __error: true, detail: 'fixture failure' }; };
+    await m.submitRemoteSetup();
+    assert.equal(m.remoteSetup.clientSecret, '');
+    assert.equal(m.remoteSetup.busy, false);
+    assert.ok(m.remoteSetup.error);
+  }
+});
+
 test('same-page navigation preserves drafts and rejected browser navigation restores the URL', async () => {
   const { model: m, window, calls } = harness();
   m.page = 'pairs'; m.configDirty = true;

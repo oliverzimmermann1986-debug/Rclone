@@ -12,7 +12,7 @@ struct SystemView: View {
         List {
             Section("Speicher verbinden") {
                 Button { showRemoteSetup = true } label: {
-                    Label("Neues Remote einbinden", systemImage: "externaldrive.badge.plus")
+                    Label("Cloud-Speicher anmelden", systemImage: "externaldrive.badge.plus")
                 }
                 NavigationLink { CryptRemoteWizardView() } label: {
                     Label("Verschlüsseltes Remote (Crypt) anlegen", systemImage: "lock.icloud")

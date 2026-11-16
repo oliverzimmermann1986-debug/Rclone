@@ -22,6 +22,7 @@ window.app = function app() {
       show: false, busy: false, name: '', provider: '', providers: [],
       express: true, driveMode: 'oauth', scope: 'drive', rootFolderId: '',
       clientId: '', clientSecret: '', teamDrive: false,
+      driveRemotes: [], driveReconnectSupported: false, useStoredDriveClient: false,
       serviceAccountJson: '', serviceAccountResult: null,
       icloudService: 'drive', appleId: '', applePassword: '', reconnect: false, icloudRemotes: [],
       session: null, answer: '', error: '',

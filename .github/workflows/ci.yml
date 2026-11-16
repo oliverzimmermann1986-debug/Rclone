@@ -44,6 +44,15 @@ jobs:
         run: python -c "from scripts.runtime_files import supported; assert supported(), 'POSIX no-follow directory handles are required for the installer security tests'"
       - name: Tests
         run: python -m pytest -q
+      - name: Install rclone for isolated OAuth state tests
+        if: matrix.python-version == '3.12'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y rclone
+          rclone version
+      - name: Verify real Google OAuth configuration states without account access
+        if: matrix.python-version == '3.12'
+        run: python -m pytest -q tests/test_remote_setup.py -k real_own_drive
 
   installer:
     runs-on: ubuntu-24.04

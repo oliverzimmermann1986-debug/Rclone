@@ -481,6 +481,9 @@ export const pairsMethods = {
       rootFolderId: '',
       clientId: '',
       clientSecret: '',
+      driveRemotes: [],
+      driveReconnectSupported: false,
+      useStoredDriveClient: false,
       teamDrive: false,
       serviceAccountJson: '',
       serviceAccountResult: null,
@@ -499,12 +502,20 @@ export const pairsMethods = {
     if (!data || data.__error) { this.remoteSetup.error = data?.detail || 'Anbieter konnten nicht geladen werden.'; return; }
     this.remoteSetup.providers = data.providers || [];
     this.remoteSetup.icloudRemotes = data.icloud_remotes || [];
+    this.remoteSetup.driveRemotes = data.drive_remotes || [];
+    this.remoteSetup.driveReconnectSupported = data.drive_reconnect_supported === true;
   },
 
   selectRemotePreset(provider, suggestedName = '') {
+    if (this.remoteSetup.busy || this.remoteSetup.session) return;
     const defaultNames = ['', 'gdrive', 'icloud', 'icloud-fotos', 'pcloud', 'onedrive', 'nextcloud'];
+    if (this.remoteSetup.provider !== provider) {
+      this.remoteSetup.reconnect = false;
+      this.remoteSetup.useStoredDriveClient = false;
+      this.remoteSetup.clientId = '';
+      this.remoteSetup.clientSecret = '';
+    }
     this.remoteSetup.provider = provider;
-    if (provider !== 'iclouddrive') this.remoteSetup.reconnect = false;
     if (suggestedName && !this.remoteSetup.reconnect && defaultNames.includes(this.remoteSetup.name.trim())) {
       this.remoteSetup.name = suggestedName;
     }
@@ -521,6 +532,20 @@ export const pairsMethods = {
     }
   },
 
+  selectDriveReconnect(item) {
+    const state = this.remoteSetup;
+    if (state.busy || state.session || (item && !state.driveReconnectSupported)) return;
+    state.provider = 'drive';
+    state.driveMode = 'oauth';
+    state.express = true;
+    state.reconnect = Boolean(item);
+    state.useStoredDriveClient = item?.has_own_client === true;
+    state.name = item?.name || (state.driveRemotes.some((remote) => remote.name === state.name) ? 'gdrive-neu' : state.name || 'gdrive');
+    state.clientId = '';
+    state.clientSecret = '';
+    state.error = '';
+  },
+
   selectIcloudReconnect(item) {
     if (!item) return;
     this.remoteSetup.provider = 'iclouddrive';
@@ -529,6 +554,9 @@ export const pairsMethods = {
     this.remoteSetup.name = item.name || 'icloud';
     this.remoteSetup.icloudService = item.service === 'photos' ? 'photos' : 'drive';
     this.remoteSetup.appleId = item.apple_id || '';
+    this.remoteSetup.useStoredDriveClient = false;
+    this.remoteSetup.clientId = '';
+    this.remoteSetup.clientSecret = '';
     this.remoteSetup.error = '';
   },
 
@@ -565,6 +593,12 @@ export const pairsMethods = {
   async submitRemoteSetup() {
     const state = this.remoteSetup;
     if (state.busy) return;
+    const ownDriveLogin = state.provider === 'drive' && state.driveMode === 'oauth';
+    if (!state.session && ownDriveLogin && !(state.reconnect && state.useStoredDriveClient)
+      && (!(state.clientId || '').trim() || !(state.clientSecret || '').trim())) {
+      state.error = 'Trage zuerst die Client-ID und das Client-Secret deiner eigenen Google-OAuth-App ein.';
+      return;
+    }
     state.busy = true;
     state.error = '';
     const session = state.session;
@@ -597,8 +631,9 @@ export const pairsMethods = {
         provider: state.provider,
         express: Boolean(state.express),
         scope: state.scope || 'drive',
-        client_id: (state.clientId || '').trim(),
-        client_secret: (state.clientSecret || '').trim() || null,
+        client_id: state.reconnect && state.useStoredDriveClient ? '' : (state.clientId || '').trim(),
+        client_secret: state.reconnect && state.useStoredDriveClient ? null : (state.clientSecret || '').trim() || null,
+        require_own_client: ownDriveLogin,
         root_folder_id: (state.rootFolderId || '').trim(),
         team_drive: Boolean(state.teamDrive),
         icloud_service: state.icloudService || 'drive',
@@ -607,7 +642,21 @@ export const pairsMethods = {
         reconnect: Boolean(state.reconnect),
       }
       : session.ready ? {} : { step: session.step, answer: state.answer || session.option.default || '' };
-    const result = await this.api('POST', url, body, { captureError: true, timeoutMs: 70000 });
+    if (!session && ownDriveLogin && state.reconnect) {
+      delete body.scope;
+      delete body.root_folder_id;
+      delete body.team_drive;
+    }
+    let result;
+    try {
+      result = await this.api('POST', url, body, { captureError: true, timeoutMs: 70000 });
+    } catch (_) {
+      state.busy = false;
+      state.error = 'Die Einrichtung konnte nicht übertragen werden. Bitte erneut versuchen.';
+      return;
+    } finally {
+      if (!session) state.clientSecret = '';
+    }
     if (!result || result.__error) {
       state.busy = false;
       state.error = result?.detail || 'Einrichtung fehlgeschlagen. Bitte erneut versuchen.';
@@ -618,19 +667,7 @@ export const pairsMethods = {
       state.busy = false;
       state.session = null;
       await this.closeRemoteSetup();
-      this.showToast(result.reconnected ? `iCloud-Anmeldung für ${result.name} erneuert.` : `Remote ${result.name} ist angelegt.`, 'ok');
-      if (this.picker.show && this.picker.kind === 'remote') await this.loadPicker('');
-    } else if (result.ready && state.express) {
-      const saved = await this.api('POST', `/api/remotes/setup/${result.id}/save`, {}, { captureError: true, timeoutMs: 70000 });
-      state.busy = false;
-      if (!saved || saved.__error) {
-        state.session = result;
-        state.error = saved?.detail || 'Speichern fehlgeschlagen.';
-        return;
-      }
-      state.session = null;
-      await this.closeRemoteSetup();
-      this.showToast(saved.reconnected ? `iCloud-Anmeldung für ${saved.name} erneuert.` : `Remote ${saved.name} ist angelegt.`, 'ok');
+      this.showToast(result.reconnected ? `Anmeldung für ${result.name} erneuert.` : `Remote ${result.name} ist angelegt.`, 'ok');
       if (this.picker.show && this.picker.kind === 'remote') await this.loadPicker('');
     } else {
       state.busy = false;
@@ -647,6 +684,8 @@ export const pairsMethods = {
     this.remoteSetup.show = false;
     this.remoteSetup.answer = '';
     this.remoteSetup.applePassword = '';
+    this.remoteSetup.clientSecret = '';
+    this.remoteSetup.serviceAccountJson = '';
     this.remoteSetup.session = null;
     this.restoreDialogFocus();
     if (id) await this.api('DELETE', `/api/remotes/setup/${id}`, undefined, { silent: true });
