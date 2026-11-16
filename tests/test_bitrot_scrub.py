@@ -8,6 +8,7 @@ from pathlib import Path
 
 from app.db import Database
 from app.jobs import bitrot_scrub as scrub
+from app.jobs.scheduler import rclone_history_key
 
 _DAY = 86400
 _MB = 1024 * 1024
@@ -267,7 +268,9 @@ def test_listing_failure_after_full_read_still_raises(tmp_path: Path, monkeypatc
         raise AssertionError("Listing-Fehler wurde verschluckt")
 
 
-def test_truncated_pair_sets_summary_warning_but_stays_ok(tmp_path: Path, monkeypatch):
+def test_truncated_listing_without_a_checked_file_is_not_success(
+    tmp_path: Path, monkeypatch
+):
     listing = {"files": [], "scanned": 500, "truncated": True}
     monkeypatch.setattr(scrub, "_list_files", lambda *a, **kw: dict(listing))
     monkeypatch.setattr(scrub, "is_cancelled", lambda *a, **kw: False)
@@ -280,7 +283,8 @@ def test_truncated_pair_sets_summary_warning_but_stays_ok(tmp_path: Path, monkey
     }
 
     summary = scrub.run_bitrot_scrub(config_snapshot=snapshot)
-    assert summary["ok"] is True
+    assert summary["ok"] is False
+    assert summary["pairs"][0]["skipped"] is True
     assert summary["pairs"][0]["truncated"] is True
     assert "Stichprobe aus begrenztem Listing" in summary["warning"]
     assert "Cloud" in summary["warning"]
@@ -421,6 +425,7 @@ def test_run_summary_records_then_detects_bitrot(tmp_path: Path, monkeypatch):
         },
     }
 
+    pair_key = rclone_history_key(snapshot["backup"]["pairs"][0])
     first = scrub.run_bitrot_scrub(config_snapshot=snapshot)
 
     assert (first["kind"], first["ok"], first["trigger"]) == (
@@ -451,7 +456,7 @@ def test_run_summary_records_then_detects_bitrot(tmp_path: Path, monkeypatch):
         "error": None,
     }
     assert first["history_keys"] == {
-        "Cloud": "bitrotscrub:rclone:id:c1",
+        "Cloud": f"bitrotscrub:{pair_key}",
         "bitrot-scrub": "bitrotscrub:global",
     }
     assert calls[0][:5] == ["rclone", "lsjson", "-R", "--files-only", "--no-mimetype"]
@@ -460,7 +465,7 @@ def test_run_summary_records_then_detects_bitrot(tmp_path: Path, monkeypatch):
     assert notes == []
 
     # old.bin wird wieder fällig und ist beim Provider still verändert.
-    db.hash_baseline_touch("rclone:id:c1", ["old.bin"], 0)
+    db.hash_baseline_touch(pair_key, ["old.bin"], 0)
     cloud["old.bin"] = "c" * 64
     second = scrub.run_bitrot_scrub(trigger="scheduler", config_snapshot=snapshot)
 
@@ -474,9 +479,7 @@ def test_run_summary_records_then_detects_bitrot(tmp_path: Path, monkeypatch):
     assert "old.bin" not in args[2] and kwargs == {"pairs": ["Cloud"]}
     # Befund bleibt fällig, damit der Alarm bis zur Klärung wiederkehrt.
     assert (
-        db.hash_baseline_get_many("rclone:id:c1", ["old.bin"])["old.bin"][
-            "last_verified_at"
-        ]
+        db.hash_baseline_get_many(pair_key, ["old.bin"])["old.bin"]["last_verified_at"]
         == 0
     )
 
@@ -484,7 +487,7 @@ def test_run_summary_records_then_detects_bitrot(tmp_path: Path, monkeypatch):
     job_id = db.job_start("bitrotscrub")
     db.job_finish(job_id, "error", second)
     history = db.pair_last_history(
-        {"bitrotscrub:global": "bitrot-scrub", "rclone:id:c1": "Cloud"}
+        {"bitrotscrub:global": "bitrot-scrub", pair_key: "Cloud"}
     )
     assert history["bitrotscrub:global"]["last_result"]["ok"] is False
-    assert history["rclone:id:c1"]["last_result"] is None
+    assert history[pair_key]["last_result"] is None

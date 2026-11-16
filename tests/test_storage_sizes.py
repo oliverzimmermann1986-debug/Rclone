@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.routes import api_storage
+from app.jobs.scheduler import rclone_history_key
 
 
 @pytest.fixture(autouse=True)
@@ -519,7 +520,7 @@ def test_overview_keeps_last_sync_across_pair_rename(monkeypatch):
         "remote": "gd:photos",
         "direction": "push",
     }
-    key = "rclone:id:photos"
+    key = rclone_history_key(pair)
     database = _FakeDB(
         {
             key: {
@@ -558,7 +559,7 @@ def test_overview_exposes_typed_restore_proof_without_mixing_sync_history(
     }
     database = _FakeDB(
         {
-            "rclone:id:photos": {
+            rclone_history_key(pair): {
                 "last_result": None,
                 "last_success": {"ended_at": 1200, "pair": {"transferred": "2 GiB"}},
             },
@@ -657,7 +658,7 @@ def test_overview_normalizes_numeric_transfer_from_historic_run(monkeypatch):
         "remote": "gd:photos",
         "direction": "push",
     }
-    key = "rclone:id:photos"
+    key = rclone_history_key(pair)
     database = _FakeDB(
         {
             key: {
@@ -686,7 +687,7 @@ def test_overview_omits_missing_transfer_instead_of_sending_numeric_zero(monkeyp
         "remote": "gd:photos",
         "direction": "push",
     }
-    key = "rclone:id:photos"
+    key = rclone_history_key(pair)
     database = _FakeDB(
         {
             key: {
@@ -718,7 +719,7 @@ def test_overview_does_not_reuse_history_for_new_identity_or_restore_drill(
     # angewendet: Ein alter Stable-Key und restoretest:pair:* sind keine
     # Kandidaten für die neue rclone-Identität.
     database = _FakeDB(
-        {"rclone:id:new-photos": {"last_result": None, "last_success": None}}
+        {rclone_history_key(pair): {"last_result": None, "last_success": None}}
     )
     monkeypatch.setattr(api_storage, "get_config", lambda: _FakeConfig([pair]))
     monkeypatch.setattr(api_storage, "get_db", lambda: database)

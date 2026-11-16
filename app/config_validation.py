@@ -13,7 +13,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from croniter import croniter
+from .cron_utils import valid_minute_schedule
 
 from .job_definitions import legacy_job_definitions, stable_job_id
 from .pbs_identity import canonical_pbs_backup_id
@@ -78,6 +78,17 @@ CONFIG_SCHEMA_VERSION = 3
 SESSION_SECRET_PLACEHOLDER = "change-this-to-random-string-32chars-min"
 MIN_SESSION_SECRET_BYTES = 32
 MIN_SESSION_SECRET_ENTROPY_BITS = 128.0
+DEFAULT_APNS_ERROR_EVENTS = (
+    "sync_error",
+    "mount_check_failed",
+    "pair_overdue",
+    "restore_test_error",
+    "anomaly_blocked",
+    "recovery_error",
+    "bitrot_detected",
+    "boot_drill_error",
+    "lockdown",
+)
 _NOTIFICATION_EVENTS = {
     "sync_started",
     "sync_ok",
@@ -227,7 +238,7 @@ def _strict_path_ancestor(ancestor: str, child: str) -> bool:
 
 def _valid_cron(expression: str) -> bool:
     """Only accept the five-field minute-based format used by the systemd timer."""
-    return len(expression.split()) == 5 and croniter.is_valid(expression)
+    return valid_minute_schedule(expression)
 
 
 def _valid_probe(value: str) -> bool:
@@ -1682,12 +1693,7 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     apns["key_id"] = str(apns.get("key_id") or "").strip().upper()
     apns["key_file"] = _clean_path(apns.get("key_file") or "")
     apns["topic"] = str(apns.get("topic") or "de.oliverzimmermann.rclonesync").strip()
-    raw_apns_events = apns.get("events") or [
-        "sync_error",
-        "mount_check_failed",
-        "pair_overdue",
-        "restore_test_error",
-    ]
+    raw_apns_events = apns.get("events") or list(DEFAULT_APNS_ERROR_EVENTS)
     if not isinstance(raw_apns_events, list):
         errors.append("notifications.apns.events muss eine Liste sein")
         raw_apns_events = []
@@ -1924,6 +1930,14 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         drill_scratch = ""
     if drill_scratch and not _is_absolute_local(drill_scratch):
         errors.append("pbs.boot_drill.scratch_dir muss ein absoluter Pfad sein")
+    if drill_scratch:
+        for pair in backup.get("pairs") or []:
+            for endpoint in (pair.get("local"), pair.get("remote")):
+                if endpoint and _paths_overlap(drill_scratch, str(endpoint)):
+                    errors.append(
+                        "pbs.boot_drill.scratch_dir muss außerhalb aller Datenwege liegen"
+                    )
+                    break
     pbs["boot_drill"] = {
         "enabled": drill_enabled,
         "schedule": drill_schedule,

@@ -2,6 +2,9 @@
 // Teil der Alpine-Komponente app(); Methoden laufen mit this = Komponente.
 import { requestControllers } from './app-core.js';
 
+const pairTestIdentities = new WeakMap();
+let nextPairTestIdentity = 0;
+
 // Schlüssel liegen nur hier im Komponenten-State und werden beim Schließen verworfen.
 export const emptyCrypt = () => ({
   show: false, step: 1, busy: false, error: '', candidates: [], name: '', base_remote: '', base_path: '',
@@ -66,6 +69,7 @@ export const pairsMethods = {
       return;
     }
     const revision = this.config?._revision;
+    const generation = this.configEditGeneration;
     if (!revision) {
       this.showToast('Konfiguration nicht geladen', 'err');
       return;
@@ -80,15 +84,19 @@ export const pairsMethods = {
         ? result.detail
         : (result.detail?.message || 'Bulk-Aktion fehlgeschlagen');
       this.showToast(detail, 'err');
-      if (result.status === 409) await this.loadConfig();
+      if (result.status === 409 && generation === this.configEditGeneration) await this.loadConfig();
       return;
     }
     if (!result?.ok) return;
-    this.config = result.config || this.config;
+    const editedDuringAction = generation !== this.configEditGeneration;
+    if (editedDuringAction) {
+      if (result.config?._revision) this.config._revision = result.config._revision;
+      this.configDirty = true;
+    } else this.config = result.config || this.config;
     this.clearPairSelection();
     const verb = action === 'enable' ? 'aktiviert' : 'deaktiviert';
-    this.showToast(`${result.changed} Pair(e) ${verb}`);
-    await this.loadConfig();
+    this.showToast(`${result.changed} Pair(e) ${verb}${editedDuringAction ? ' · neuere Änderungen bleiben ungespeichert' : ''}`, editedDuringAction ? 'warn' : 'ok');
+    if (!editedDuringAction) await this.loadConfig();
     this.loadOverview(true);
   },
 
@@ -108,6 +116,7 @@ export const pairsMethods = {
       name: pair.name || '', paths, pathsText: paths.join('\n'),
       schedule: 'manual', namespace: '', backup_id: '',
     });
+    this.removePairAssignments(pair);
     this.config.backup.pairs.splice(idx, 1);
     delete this.pairOpen[idx];
     this.markConfigDirty();
@@ -155,14 +164,23 @@ export const pairsMethods = {
   },
 
   applyBackupDirSuggestion(pair) {
-    if (pair.direction === 'bisync') {
-      pair.backup_dir1 ||= this.suggestedBackupDir(pair.local);
-      pair.backup_dir2 ||= this.suggestedBackupDir(pair.remote);
+    if (pair.two_way ?? pair.direction === 'bisync') {
+      const suggestions = this.bisyncBackupSuggestions(pair.source ?? pair.local, pair.target ?? pair.remote);
+      pair.backup_dir1 ||= suggestions.backup_dir1;
+      pair.backup_dir2 ||= suggestions.backup_dir2;
     } else {
       const target = pair.direction === 'pull' ? pair.local : pair.remote;
       pair.backup_dir = this.suggestedBackupDir(target);
     }
     this.markConfigDirty();
+  },
+
+  bisyncBackupSuggestions(source, target) {
+    const sourceLocal = String(source || '').startsWith('/');
+    const targetLocal = String(target || '').startsWith('/');
+    const remote = sourceLocal && !targetLocal ? target : source;
+    const local = sourceLocal && !targetLocal ? source : target;
+    return { backup_dir1: this.suggestedBackupDir(remote), backup_dir2: this.suggestedBackupDir(local) };
   },
 
   backupDirMissing(pair) {
@@ -186,11 +204,22 @@ export const pairsMethods = {
   async removePair(idx) {
     const pair = this.config.backup.pairs[idx];
     if (!(await this.requestConfirmation(
-      `Pair „${pair?.name || 'ohne Namen'}“ aus der Konfiguration entfernen?`,
+      `Pair „${pair?.name || 'ohne Namen'}“ aus der Konfiguration entfernen? Jobzuordnungen werden bereinigt; Jobs ohne weitere Datenwege werden ebenfalls entfernt.`,
       { title: 'Datenweg entfernen', confirmLabel: 'Datenweg entfernen' },
     ))) return;
+    this.removePairAssignments(pair);
     this.config.backup.pairs.splice(idx, 1);
     this.markConfigDirty();
+  },
+
+  removePairAssignments(pair) {
+    if (!pair?.id) return;
+    this.config.backup.jobs = (this.config.backup.jobs || []).filter((job) => {
+      if (!(job.data_path_ids || []).includes(pair.id)) return true;
+      job.data_path_ids = job.data_path_ids.filter((id) => id !== pair.id);
+      return job.data_path_ids.length > 0;
+    });
+    this.jobPathChoice = {};
   },
 
   movePair(idx, delta) {
@@ -420,9 +449,22 @@ export const pairsMethods = {
   },
 
   async testPair(idx) {
-    this.testResults[idx] = { loading: true };
-    const result = await this.api('POST', '/api/test/rclone', { pair: this.config.backup.pairs[idx] });
-    this.testResults[idx] = result || { ok: false, error: 'Test fehlgeschlagen' };
+    const pair = this.config.backup.pairs[idx];
+    if (!pair) return;
+    const key = this.pairTestKey(pair);
+    this.testResults[key] = { loading: true };
+    const result = await this.api('POST', '/api/test/rclone', { pair });
+    this.testResults[key] = result || { ok: false, error: 'Test fehlgeschlagen' };
+  },
+
+  pairTestKey(pair) {
+    if (!pair) return '';
+    if (!pair.id && !pairTestIdentities.has(pair)) pairTestIdentities.set(pair, ++nextPairTestIdentity);
+    return `${pair.id || pairTestIdentities.get(pair)}|${JSON.stringify(pair)}`;
+  },
+
+  pairTestResult(pair) {
+    return this.testResults[this.pairTestKey(pair)];
   },
 
   async openRemoteSetup(presetProvider = '') {
@@ -657,7 +699,9 @@ export const pairsMethods = {
     state.busy = true;
     const result = await this.api('POST', `/api/remotes/crypt/${encodeURIComponent(state.result.name)}/verify`, undefined, { silent: true, captureError: true, timeoutMs: 70000 });
     state.busy = false;
-    if (result) state.verify = result.__error ? { ok: false, text: this.errorText(result) } : { ok: Boolean(result.ok), text: result.ok ? 'Lesbar' : 'Nicht lesbar' };
+    if (result) state.verify = result.__error
+      ? { ok: false, verified: false, text: this.errorText(result) }
+      : { ok: Boolean(result.ok), verified: result.verified === true, text: result.message || (result.verified === true ? 'Entschlüsselung geprüft' : (result.ok ? 'Erreichbar; Entschlüsselung ungeprüft' : 'Nicht lesbar')) };
   },
 
   async closeCrypt() {
@@ -794,7 +838,6 @@ export const pairsMethods = {
   },
 
   swapQuickPaths() {
-    [this.quick.remote, this.quick.local] = [this.quick.local, this.quick.remote];
     const direction = this.quick.direction === 'push' ? 'pull' : this.quick.direction === 'pull' ? 'push' : 'bisync';
     this.quick.direction = direction;
     this.quick.mode = direction === 'bisync' ? 'bisync' : (this.quick.mode === 'bisync' ? 'copy' : this.quick.mode);
@@ -987,7 +1030,7 @@ export const pairsMethods = {
       rclone_args: '',
       transfers: '',
       checkers: '',
-      max_delete: Number(w.maxDelete) || 100,
+      max_delete: w.maxDelete === '' || w.maxDelete === null || w.maxDelete === undefined ? 100 : Math.max(0, Number(w.maxDelete) || 0),
       allow_delete: Boolean(w.allowDelete),
       min_remote_files: 0,
       allow_empty_remote_target: false,
@@ -997,8 +1040,7 @@ export const pairsMethods = {
       mountpoint: '',
       sentinel_file: '',
       backup_dir: isBisync ? '' : (w.backupDir || ''),
-      backup_dir1: isBisync ? this.suggestedBackupDir(w.source.trim()) : '',
-      backup_dir2: isBisync ? this.suggestedBackupDir(w.target.trim()) : '',
+      ...(isBisync ? this.bisyncBackupSuggestions(w.source.trim(), w.target.trim()) : { backup_dir1: '', backup_dir2: '' }),
       pre_hook: '',
       post_hook: '',
     };

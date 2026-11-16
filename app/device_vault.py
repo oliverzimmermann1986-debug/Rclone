@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import stat
@@ -28,6 +29,7 @@ from .db import Database
 from .notifications import notify
 from .rclone_args import rclone_subprocess_env
 
+logger = logging.getLogger(__name__)
 MAX_FILE_BYTES = 50 * 1024 * 1024 * 1024
 MAX_CHUNK_BYTES = 1024 * 1024
 MAX_LIBRARY_ITEMS = 500
@@ -349,10 +351,14 @@ def create_upload(
     root = vault_root(config)
     upload_id = str(uuid.uuid4())
     blob = _blob_path(root, digest)
-    deduplicated = blob.is_file() and blob.stat().st_size == size
+    deduplicated = (
+        blob.is_file() and blob.stat().st_size == size and _hash_file(blob) == digest
+    )
     now = time.time()
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-    target_name = f"{stamp}_{digest[:10]}_{safe_filename(filename)}"
+    target_name = f"{stamp}_{digest[:10]}_{safe_filename(filename)}".encode("utf-8")[
+        :240
+    ].decode("utf-8", errors="ignore")
     target_relative = "/".join(
         (
             "Sicherpfad",
@@ -401,10 +407,21 @@ def append_chunk(
     root = vault_root(config)
     with _LOCK:
         record = _load_record(root, upload_id)
-        if record.get("status") != "receiving":
+        if record.get("status") not in {"receiving", "uploaded"}:
             raise VaultError("Dieser Upload nimmt keine weiteren Daten an")
         part = _part_path(root, upload_id)
         current = part.stat().st_size if part.exists() else 0
+        if 0 <= int(offset) < current and int(offset) + len(payload) <= current:
+            with part.open("rb") as existing:
+                existing.seek(int(offset))
+                if existing.read(len(payload)) != payload:
+                    raise VaultError(
+                        "Wiederholter Upload-Block stimmt nicht mit den vorhandenen Daten überein"
+                    )
+            record["received"] = current
+            if current == int(record.get("size") or 0):
+                record["status"] = "uploaded"
+            return _public_record(_save_record(root, record))
         if int(offset) != current:
             raise VaultError(
                 f"Upload-Versatz stimmt nicht; erwartet werden {current} Bytes"
@@ -459,7 +476,14 @@ def _prepare_blob_locked(root: Path, record: dict[str, Any]) -> Path:
     blob = _blob_path(root, digest)
     if blob.is_file():
         if blob.stat().st_size != int(record["size"]) or _hash_file(blob) != digest:
-            raise RuntimeError("Vorhandener deduplizierter Blob ist beschädigt")
+            replacement = _part_path(root, str(record["id"]))
+            if (
+                not replacement.is_file()
+                or replacement.stat().st_size != int(record["size"])
+                or _hash_file(replacement) != digest
+            ):
+                raise RuntimeError("Vorhandener deduplizierter Blob ist beschädigt")
+            os.replace(replacement, blob)
         _part_path(root, str(record["id"])).unlink(missing_ok=True)
         record["deduplicated"] = True
         return blob
@@ -642,6 +666,19 @@ def _complete_upload_locked(
         record["status"] = "transferring"
         record = _save_record(root, record)
     try:
+        pair = next(
+            (
+                item
+                for item in (config.get("backup") or {}).get("pairs", [])
+                if str(item.get("id") or item.get("name") or "")
+                == str(record.get("identity") or "")
+            ),
+            None,
+        )
+        if not isinstance(pair, Mapping) or target_root(pair) != record["target_root"]:
+            raise VaultError(
+                "Das Sicherungsziel hat sich geändert; Upload bitte am aktuellen Ziel neu starten"
+            )
         blob = _prepare_blob(root, record)
         target = _join_target(
             str(record["target_root"]), str(record["target_relative"])
@@ -684,24 +721,29 @@ def _complete_upload_locked(
             record["completed_at"] = time.time()
             record["error"] = None
             record = _save_record(root, record)
-        database.audit_add(
-            "device_vault_ready",
-            actor="ios",
-            details={
-                "id": upload_id,
-                "pair": record.get("pair"),
-                "size": record.get("size"),
-                "sha256": record.get("sha256"),
-                "deduplicated": record.get("deduplicated"),
-            },
-        )
-        notify(
-            "recovery_ready",
-            f"{record.get('pair')}: Geräte-Datei verifiziert",
-            f"{record.get('filename')} liegt geprüft im Geräte-Vault.",
-            pair=record.get("pair"),
-            vault_id=upload_id,
-        )
+        try:
+            database.audit_add(
+                "device_vault_ready",
+                actor="ios",
+                details={
+                    "id": upload_id,
+                    "pair": record.get("pair"),
+                    "size": record.get("size"),
+                    "sha256": record.get("sha256"),
+                    "deduplicated": record.get("deduplicated"),
+                },
+            )
+            notify(
+                "recovery_ready",
+                f"{record.get('pair')}: Geräte-Datei verifiziert",
+                f"{record.get('filename')} liegt geprüft im Geräte-Vault.",
+                pair=record.get("pair"),
+                vault_id=upload_id,
+            )
+        except Exception:
+            logger.exception(
+                "Vault-Datei verifiziert; Audit/Benachrichtigung fehlgeschlagen"
+            )
     except Exception as exc:
         with _LOCK:
             record["status"] = "error"

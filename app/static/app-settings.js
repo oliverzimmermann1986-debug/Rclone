@@ -124,7 +124,10 @@ export const settingsMethods = {
     draft.web.allowed_hosts = this.allowedHostsText.split('\n').map((value) => value.trim()).filter(Boolean);
     draft.web.local_browse_roots = this.browseRootsText.split('\n').map((value) => value.trim()).filter(Boolean);
     draft.backup.vpn_probes = this.vpnProbesText.split('\n').map((value) => value.trim()).filter(Boolean);
-    for (const target of (draft.pbs?.targets || [])) delete target.pathsText;
+    for (const target of (draft.pbs?.targets || [])) {
+      if (typeof target.pathsText === 'string') target.paths = target.pathsText.split('\n').map((value) => value.trim()).filter(Boolean);
+      delete target.pathsText;
+    }
     for (const pair of (draft.backup?.pairs || [])) {
       const source = (pair.source ?? pair.local ?? '').trim();
       const target = (pair.target ?? pair.remote ?? '').trim();
@@ -306,8 +309,14 @@ export const settingsMethods = {
   async validateConfigDraft() {
     if (this.pending.validate || this.configLoading || !this.configLoaded) return false;
     this.pending.validate = true;
+    const generation = this.configEditGeneration;
     this.configValidation = { loading: true, ok: null, warnings: [], errors: [], revisionMatches: true };
     const result = await this.api('POST', '/api/config/validate', { config: this.configPayload() }, { captureError: true, silent: true });
+    if (generation !== this.configEditGeneration) {
+      this.configValidation = { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true };
+      this.pending.validate = false;
+      return false;
+    }
     if (result?.__error) {
       const detail = result.detail;
       const errors = Array.isArray(detail?.errors) ? detail.errors : [detail?.message || String(detail || 'Validierung fehlgeschlagen')];
@@ -396,12 +405,13 @@ export const settingsMethods = {
   async saveFilterFile() {
     if (this.pending.filter) return false;
     this.pending.filter = true;
+    const savedContent = this.filterFile.content;
     try {
-      const result = await this.api('PUT', '/api/config/filter-file', { content: this.filterFile.content, revision: this.filterFile.revision });
+      const result = await this.api('PUT', '/api/config/filter-file', { content: savedContent, revision: this.filterFile.revision });
       if (result?.ok) {
         this.filterFile.revision = result.revision || this.filterFile.revision;
-        this.filterFile.dirty = false;
-        this.showToast(`Filter gespeichert (${result.bytes} B)`);
+        this.filterFile.dirty = this.filterFile.content !== savedContent;
+        this.showToast(this.filterFile.dirty ? 'Filter gespeichert · neuere Änderungen sind noch ungespeichert' : `Filter gespeichert (${result.bytes} B)`, this.filterFile.dirty ? 'warn' : 'ok');
         return true;
       }
       return false;
@@ -470,6 +480,17 @@ export const settingsMethods = {
     const current = Math.max(0, this.settingsTabs.indexOf(this.settingsTab));
     const next = (current + delta + this.settingsTabs.length) % this.settingsTabs.length;
     this.selectSettingsTab(this.settingsTabs[next], true);
+  },
+
+  settingsTabKey(event) {
+    const horizontal = window.matchMedia?.('(max-width: 900px)').matches;
+    if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      this.selectSettingsTab(this.settingsTabs[event.key === 'Home' ? 0 : this.settingsTabs.length - 1], true);
+    } else if ((horizontal && ['ArrowLeft', 'ArrowRight'].includes(event.key)) || (!horizontal && ['ArrowUp', 'ArrowDown'].includes(event.key))) {
+      event.preventDefault();
+      this.moveSettingsTab(['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1);
+    }
   },
 
   markConfigDirty() {
@@ -557,35 +578,45 @@ export const settingsMethods = {
       'Alle ungespeicherten Konfigurationsänderungen verwerfen und den gespeicherten Stand neu laden?',
       { title: 'Änderungen verwerfen', confirmLabel: 'Verwerfen' },
     ))) return;
-    this.configDirty = false;
-    this.configDiffOpen = false;
-    await this.loadConfig();
-    this.showToast('Ungespeicherte Änderungen verworfen');
+    if (await this.loadConfig() === true) {
+      this.configDiffOpen = false;
+      this.showToast('Ungespeicherte Änderungen verworfen');
+    }
+  },
+
+  filterTestSignature() {
+    return JSON.stringify([this.filterFile.content || '', this.filterTester.pathsText || '']);
+  },
+
+  filterTestIsCurrent() {
+    return this.filterTester.signature === this.filterTestSignature();
   },
 
   async runFilterTest() {
     const paths = String(this.filterTester.pathsText || '')
       .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+      .filter((line) => line.length > 0);
     if (!paths.length) {
       this.showToast('Bitte mindestens einen Beispielpfad eingeben.', 'warn');
       return;
     }
     this.filterTester.loading = true;
+    const signature = this.filterTestSignature();
     const result = await this.api(
       'POST',
       '/api/config/filter-test',
       { rules: this.filterFile.content || '', paths },
       { silent: true, captureError: true, requestKey: 'filter-test' },
     );
-    this.filterTester.loading = false;
     if (this.isStale(result)) return;
+    this.filterTester.loading = false;
+    if (signature !== this.filterTestSignature()) return;
     if (!result || result.__error) {
       this.showToast(this.errorText(result), 'err');
       return;
     }
     this.filterTester.results = result.results || [];
     this.filterTester.parseErrors = result.parse_errors || [];
+    this.filterTester.signature = signature;
   },
 };

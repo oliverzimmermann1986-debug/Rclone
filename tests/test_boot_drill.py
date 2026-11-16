@@ -352,6 +352,10 @@ def test_stale_scratch_dirs_are_removed_at_start(tmp_path, env):
     temp = tmp_path / "temp"
     (temp / "sicherpfad-bootdrill-alt").mkdir(parents=True)
     (temp / "sicherpfad-bootdrill-alt" / "disk.raw").write_bytes(b"\0")
+    info = (temp / "sicherpfad-bootdrill-alt").stat()
+    (temp / "sicherpfad-bootdrill-alt" / ".sicherpfad-owner").write_text(
+        json.dumps({"device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid})
+    )
     (temp / "fremd").mkdir()
 
     summary = boot_drill.run_boot_drill(

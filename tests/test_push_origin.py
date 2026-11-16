@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pytest
 import yaml
+from fastapi import Request
 
 from app import config_store, db, push_notifications
 from app.config_store import Config
 from app.config_validation import SESSION_SECRET_PLACEHOLDER
+from app.auth import SESSION_COOKIE, create_session
 from app.db import Database
 from app.routes import api_push
 
@@ -37,7 +39,16 @@ def test_registration_and_queued_incident_use_same_server_owned_identity(
 ):
     _store, database = origin_server
     registered = api_push.register_push_device(
-        api_push.PushDeviceRegistration(token=TOKEN), user="admin"
+        api_push.PushDeviceRegistration(token=TOKEN),
+        Request(
+            {
+                "type": "http",
+                "headers": [
+                    (b"cookie", f"{SESSION_COOKIE}={create_session('admin')}".encode())
+                ],
+            }
+        ),
+        user="admin",
     )
     server_id = registered["server_id"]
     assert registered["ok"] is True

@@ -98,7 +98,22 @@ def _guest_ping(connect: Callable[[str], Any], path: str) -> bool:
     try:
         with connect(path) as sock:
             sock.sendall(b'{"execute":"guest-ping"}\n')
-            return b'"return"' in sock.recv(4096)
+            response = b""
+            while len(response) < 65536:
+                chunk = sock.recv(min(4096, 65536 - len(response)))
+                if not chunk:
+                    return False
+                response += chunk
+                try:
+                    value = json.loads(response)
+                except (ValueError, UnicodeError):
+                    continue
+                return (
+                    isinstance(value, dict)
+                    and "return" in value
+                    and "error" not in value
+                )
+            return False
     except OSError:
         return False
 
@@ -178,14 +193,43 @@ def _drill(cfg, summary: dict[str, Any], run, popen, connect) -> None:
         drill["scratch_dir"]
         or cfg.get("paths", "temp_dir", default="/opt/rclone-sync/temp")
     )
+    from ..recovery_paths import validated_staging_path
+
+    probe_paths = dict(cfg.get("paths", default={}) or {})
+    probe_paths["recovery_dir"] = str(scratch_root)
+    validated_staging_path(
+        {
+            "paths": probe_paths,
+            "backup": cfg.get("backup", default={}),
+            "pbs": cfg.get("pbs", default={}),
+        }
+    )
     scratch_root.mkdir(parents=True, exist_ok=True)
     # Reste hart beendeter Läufe; sicher, weil der Drill exklusiv im PBS-Scope läuft.
     stale = [
         p
         for p in scratch_root.glob("sicherpfad-bootdrill-*")
-        if p.is_dir() and not p.is_symlink()
+        if p.is_dir()
+        and not p.is_symlink()
+        and (p / ".sicherpfad-owner").is_file()
+        and not (p / ".sicherpfad-owner").is_symlink()
     ]
     for path in stale:
+        try:
+            owner = json.loads((path / ".sicherpfad-owner").read_text(encoding="ascii"))
+            identity = path.stat()
+            if (
+                owner
+                != {
+                    "device": identity.st_dev,
+                    "inode": identity.st_ino,
+                    "uid": identity.st_uid,
+                }
+                or identity.st_uid != os.getuid()
+            ):
+                continue
+        except (OSError, ValueError):
+            continue
         shutil.rmtree(path, ignore_errors=True)
         if path.exists():
             logger.error("Alter Boot-Drill-Arbeitsbereich %s blieb bestehen", path)
@@ -207,6 +251,17 @@ def _drill(cfg, summary: dict[str, Any], run, popen, connect) -> None:
     # mkdtemp legt das Verzeichnis mit Modus 0700 an.
     scratch = Path(
         tempfile.mkdtemp(prefix="sicherpfad-bootdrill-", dir=str(scratch_root))
+    )
+    identity = scratch.stat()
+    (scratch / ".sicherpfad-owner").write_text(
+        json.dumps(
+            {
+                "device": identity.st_dev,
+                "inode": identity.st_ino,
+                "uid": identity.st_uid,
+            }
+        ),
+        encoding="ascii",
     )
     log = None
     proc = None

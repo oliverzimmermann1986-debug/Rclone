@@ -28,6 +28,7 @@ def client():
 @pytest.fixture
 def rclone(monkeypatch):
     """Fake rclone binary below the real _rc/_run path."""
+    monkeypatch.setattr(api_crypt, "_remote_listing", lambda _command: ([], False))
     state = {
         "live": {"cloud": {"type": "pcloud", "token": "tok"}, "old": {"type": "crypt"}},
         "calls": [],

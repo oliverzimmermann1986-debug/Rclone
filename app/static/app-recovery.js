@@ -8,6 +8,7 @@ export const recoveryMethods = {
     this.recovery.error = '';
     const configured = (this.config.backup?.pairs || []).filter((pair) => pair.enabled !== false && pair.name);
     if (!this.recovery.pair || !configured.some((pair) => pair.name === this.recovery.pair)) this.recovery.pair = configured[0]?.name || '';
+    const identity = this.recovery.pair;
     const vaultFilter = String(this.recovery.vault?.filterPair || '').trim();
     const vaultParams = new URLSearchParams({ limit: '200' });
     if (vaultFilter) vaultParams.set('identity', vaultFilter);
@@ -18,6 +19,7 @@ export const recoveryMethods = {
     ];
     if (this.recovery.pair) tasks.push(this.api('GET', `/api/recovery/points?identity=${encodeURIComponent(this.recovery.pair)}`, undefined, { silent: true, captureError: true, requestKey: 'recovery-points' }));
     const [staging, quarantine, vaultLibrary, points] = await Promise.all(tasks);
+    if (identity !== this.recovery.pair) return;
     if (vaultLibrary?.items) {
       this.recovery.vault.items = vaultLibrary.items;
       this.recovery.vault.error = '';
@@ -37,18 +39,29 @@ export const recoveryMethods = {
   },
 
   async selectRecoveryPair(name) {
+    this.recovery.searchGeneration = (this.recovery.searchGeneration || 0) + 1;
+    requestControllers.get('recovery-search')?.abort();
+    requestControllers.get('recovery-diff')?.abort();
+    requestControllers.get('recovery-browse')?.abort();
+    requestControllers.get('recovery-points')?.abort();
     this.recovery.pair = name;
     this.recovery.pointId = '';
     this.recovery.path = '';
+    this.recovery.points = [];
+    this.recovery.items = [];
     this.recovery.selectedPaths = [];
     this.recovery.diff = null;
+    this.recovery.searchResults = [];
+    this.recovery.searchQuery = '';
+    this.recovery.searchLoading = false;
     await this.loadRecovery();
   },
 
   async loadRecoveryPoints() {
     if (!this.recovery.pair) return;
+    const identity = this.recovery.pair;
     const result = await this.api('GET', `/api/recovery/points?identity=${encodeURIComponent(this.recovery.pair)}`, undefined, { silent: true, captureError: true, requestKey: 'recovery-points' });
-    if (this.isStale(result)) return;
+    if (this.isStale(result) || identity !== this.recovery.pair) return;
     if (result?.points) {
       this.recovery.points = result.points;
       if (!result.points.some((point) => point.id === this.recovery.pointId)) this.recovery.pointId = result.points[0]?.id || '';
@@ -57,6 +70,8 @@ export const recoveryMethods = {
 
   async loadRecoveryBrowse(path = '') {
     if (!this.recovery.pair || !this.recovery.pointId) return;
+    const identity = this.recovery.pair;
+    const pointId = this.recovery.pointId;
     this.recovery.path = path;
     this.recovery.loading = true;
     const params = new URLSearchParams({ identity: this.recovery.pair, path });
@@ -68,13 +83,15 @@ export const recoveryMethods = {
       endpoint = this.recovery.pointId === 'current' ? `/api/recovery/browse?${params}` : `/api/recovery/points/${encodeURIComponent(this.recovery.pointId)}/browse?${params}`;
     }
     const result = await this.api('GET', endpoint, undefined, { silent: true, captureError: true, requestKey: 'recovery-browse', timeoutMs: 70000 });
-    if (this.isStale(result)) return;
+    if (this.isStale(result) || identity !== this.recovery.pair || pointId !== this.recovery.pointId) return;
     if (result?.__error) this.recovery.error = typeof result.detail === 'string' ? result.detail : (result.detail?.message || 'Dateiliste konnte nicht geladen werden.');
     else if (result) { this.recovery.items = result.items || []; this.recovery.error = ''; }
     this.recovery.loading = false;
   },
 
   async loadRecoveryDiff() {
+    const identity = this.recovery.pair;
+    const pointId = this.recovery.pointId;
     if (!this.recovery.pair || !this.recovery.pointId || this.recovery.pointId === 'current') {
       this.recovery.diff = { changes: [], total: 0, message: 'Wähle einen gespeicherten Wiederherstellungspunkt.' };
       return;
@@ -82,6 +99,7 @@ export const recoveryMethods = {
     const params = new URLSearchParams({ identity: this.recovery.pair, from_point: this.recovery.pointId, to_point: 'current' });
     const result = await this.api('GET', `/api/recovery/diff?${params}`, undefined, { silent: true, captureError: true, requestKey: 'recovery-diff', timeoutMs: 70000 });
     if (this.isStale(result)) return;
+    if (identity !== this.recovery.pair || pointId !== this.recovery.pointId) return;
     if (result?.__error) { this.recovery.error = typeof result.detail === 'string' ? result.detail : (result.detail?.message || 'Bestände konnten nicht verglichen werden.'); return; }
     this.recovery.diff = result;
   },
@@ -180,9 +198,14 @@ export const recoveryMethods = {
   },
 
   async searchRecoveryFiles() {
+    const generation = (this.recovery.searchGeneration || 0) + 1;
+    this.recovery.searchGeneration = generation;
+    const identity = this.recovery.pair;
     const q = String(this.recovery.searchQuery || '').trim();
     if (q.length < 2 || !this.recovery.pair) {
       this.recovery.searchResults = [];
+      this.recovery.searchLoading = false;
+      requestControllers.get('recovery-search')?.abort();
       return;
     }
     this.recovery.searchLoading = true;
@@ -193,7 +216,9 @@ export const recoveryMethods = {
       requestKey: 'recovery-search',
       timeoutMs: 65000,
     });
+    if (generation !== this.recovery.searchGeneration || identity !== this.recovery.pair) return;
     this.recovery.searchLoading = false;
+    if (q !== String(this.recovery.searchQuery || '').trim()) return;
     if (this.isStale(result)) return;
     if (!result || result.__error) {
       this.showToast(this.errorText(result), 'err');
@@ -204,9 +229,12 @@ export const recoveryMethods = {
 
   async selectRecoverySearchResult(hit) {
     if (!hit?.point_id || !hit?.path) return;
+    const identity = this.recovery.pair;
+    if (this.recovery.pointId !== hit.point_id) this.recovery.selectedPaths = [];
     this.recovery.pointId = hit.point_id;
     const parent = hit.path.includes('/') ? hit.path.slice(0, hit.path.lastIndexOf('/')) : '';
     await this.loadRecoveryBrowse(parent);
+    if (identity !== this.recovery.pair || hit.point_id !== this.recovery.pointId) return;
     if (!this.recovery.selectedPaths.includes(hit.path)) {
       this.toggleRecoveryPath(hit.path, true);
     }

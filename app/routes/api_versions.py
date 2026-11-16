@@ -59,7 +59,9 @@ def prune_versions(
     if lease is None:
         raise HTTPException(409, busy)
     try:
-        if db.job_running("backup"):
+        if db.job_running("backup") or runtime_state.active_processes(
+            runtime_state.DEFAULT_CANCEL_SCOPE
+        ):
             raise HTTPException(409, busy)
         result = versions_lifecycle.apply_lifecycle(config, pair, dry_run=False)
     finally:

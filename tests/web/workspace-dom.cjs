@@ -56,7 +56,7 @@ function runScenario(newerServer = false) {
     $nextTick(callback) { callback(); },
     init() { this.originalInitCalled = true; },
     async navigate(next) { if (next !== 'rejected' && !this.blockNavigation) this.page = next; },
-    openJob(id) { this.actions.push(['job', id]); },
+    showJob(job) { this.actions.push(['job', job.id]); },
     runRestoreTest(pair) { this.actions.push(['restore', pair]); },
     showToast(message) { this.actions.push(['toast', message]); },
     statusLabel(status) { return status; },

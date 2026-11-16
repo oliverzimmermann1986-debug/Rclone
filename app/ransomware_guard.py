@@ -225,9 +225,21 @@ def init_canary(
             os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
             pass
-        if target.is_symlink():
-            raise ValueError(f"Canary-Datei ist ein symbolischer Link: {rel}")
-        os.replace(tmp_path, target)
+        try:
+            os.link(tmp_path, target)
+        except FileExistsError as exc:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                current_fd = os.open(target, flags)
+                with os.fdopen(current_fd, "rb") as current:
+                    if current.read(len(payload) + 1) != payload:
+                        raise ValueError(
+                            f"Canary würde eine vorhandene Datei ersetzen: {rel}"
+                        ) from exc
+            except OSError as read_error:
+                raise ValueError(
+                    f"Vorhandene Canary-Datei ist nicht sicher lesbar: {rel}"
+                ) from read_error
     finally:
         tmp_path.unlink(missing_ok=True)
 

@@ -598,6 +598,7 @@ final class AppModelLifecycleTests: XCTestCase {
         let defaults = makeDefaults()
         let client = StubAPIClient()
         client.retryResponse = ActionResponse(ok: true, jobID: 43, error: nil)
+        client.jobDetails[42] = .fixture(id: 42, status: "error", definitionID: "retry")
         let model = AppModel(defaults: defaults) { _ in client }
         await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
 
@@ -606,10 +607,41 @@ final class AppModelLifecycleTests: XCTestCase {
 
         XCTAssertTrue(started)
         XCTAssertEqual(client.retriedJobIDs, [42])
+        XCTAssertEqual(client.retriedDryRunModes, [false])
         XCTAssertEqual(model.actionMessage, "Job wurde erneut gestartet.")
         XCTAssertEqual(model.requestedRunID, 42)
         model.consumeRequestedRun(id: 42)
         XCTAssertNil(model.requestedRunID)
+    }
+
+    func testRetryKeepsTheOriginalDryRunMode() async {
+        for dryRun in [false, true] {
+            let client = StubAPIClient()
+            var previous = JobRecord.fixture(id: 42, status: "error", definitionID: "retry")
+            previous.dryRun = dryRun
+            client.jobDetails[42] = previous
+            client.retryResponse = ActionResponse(ok: true, jobID: 43, error: nil)
+            let model = AppModel(defaults: makeDefaults()) { _ in client }
+            await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+            let started = await model.retryJob(id: 42)
+
+            XCTAssertTrue(started)
+            XCTAssertEqual(client.retriedJobIDs, [42])
+            XCTAssertEqual(client.retriedDryRunModes, [dryRun])
+        }
+    }
+
+    func testRetryDoesNotStartWhenOriginalModeCannotBeLoaded() async {
+        let client = StubAPIClient()
+        client.retryResponse = ActionResponse(ok: true, jobID: 43, error: nil)
+        let model = AppModel(defaults: makeDefaults()) { _ in client }
+        await model.login(server: "https://backup.example.de", username: "admin", password: "secret")
+
+        let started = await model.retryJob(id: 42)
+
+        XCTAssertFalse(started)
+        XCTAssertTrue(client.retriedJobIDs.isEmpty)
     }
 
     func testJobDefinitionsAreAcceptedOnlyFromRevisionBoundConfigSnapshot() async {
@@ -665,6 +697,7 @@ private final class StubAPIClient: APIClientProtocol {
     var runAllResponse: ActionResponse?
     var runAllError: Error?
     var retryResponse: ActionResponse?
+    var jobDetails: [Int: JobRecord] = [:]
     var pbsError: Error?
     var unregisterPushError: Error?
     var detailedStorage: StorageOverview?
@@ -682,6 +715,7 @@ private final class StubAPIClient: APIClientProtocol {
     private(set) var doctorCallCount = 0
     private(set) var runAllCallCount = 0
     private(set) var retriedJobIDs: [Int] = []
+    private(set) var retriedDryRunModes: [Bool] = []
     private(set) var definitionsCallCount = 0
     private(set) var unregisterPushCallCount = 0
     private(set) var registeredPushTokens: [String] = []
@@ -779,11 +813,15 @@ private final class StubAPIClient: APIClientProtocol {
     }
     func downloadJobsCSV(kind: String?, status: String?, query: String) async throws -> URL { throw APIError.invalidResponse }
 
-    func getJob(id: Int) async throws -> JobRecord { throw APIError.invalidResponse }
+    func getJob(id: Int) async throws -> JobRecord {
+        guard let job = jobDetails[id] else { throw APIError.invalidResponse }
+        return job
+    }
     func getJobLog(id: Int) async throws -> JobLogResponse { throw APIError.invalidResponse }
     func downloadJobLog(id: Int) async throws -> URL { throw APIError.invalidResponse }
     func retryJob(id: Int, dryRun: Bool) async throws -> ActionResponse {
         retriedJobIDs.append(id)
+        retriedDryRunModes.append(dryRun)
         guard let retryResponse else { throw APIError.invalidResponse }
         return retryResponse
     }

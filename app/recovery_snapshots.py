@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -564,6 +565,16 @@ def load_manifest(
     ):
         raise SnapshotError("Vollständiger Stand gehört nicht zu diesem Datenweg")
     entries = value.get("entries")
+    created_at = value.get("created_at")
+    if (
+        not isinstance(created_at, (int, float))
+        or isinstance(created_at, bool)
+        or not math.isfinite(created_at)
+        or created_at <= 0
+    ):
+        raise SnapshotError(
+            "Recovery-Manifest enthält keinen gültigen Erstellungszeitpunkt"
+        )
     if not isinstance(entries, list) or len(entries) > MAX_FILES:
         raise SnapshotError("Recovery-Manifest ist beschädigt")
     seen = set()
@@ -649,6 +660,7 @@ def run_snapshot_restore(
         "id": f"recovery-{job_id}",
         "job_id": job_id,
         "pair": str(pair.get("name") or ""),
+        "identity": str(pair.get("id") or pair.get("name") or ""),
         "created_at": time.time(),
         "recovery_point": point_id,
         "status": "running",
@@ -674,6 +686,9 @@ def run_snapshot_restore(
         created = True
         data = work / "data"
         data.mkdir(mode=0o700)
+        (work / "expected-manifest.json").write_bytes(
+            (source.parent / "manifest.json").read_bytes()
+        )
         for directory in manifest["directories"]:
             (data / directory).mkdir(mode=0o700, parents=True, exist_ok=True)
         for entry in manifest["entries"]:

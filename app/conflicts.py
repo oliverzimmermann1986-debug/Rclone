@@ -187,7 +187,8 @@ def list_conflicts(
                 }
             group[side].append(_entry(item, name, int(match["n"])))
 
-    if len(groups) <= MAX_LIVE_GROUPS:
+    directories = {group["base_path"].rpartition("/")[0] for group in groups.values()}
+    if len(groups) <= MAX_LIVE_GROUPS and len(directories) <= 10:
         listings: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
         for group in groups.values():
             directory, _, base_name = group["base_path"].rpartition("/")
@@ -228,10 +229,21 @@ def _keep_both_name(
 ) -> str:
     stamp = _TS_RE.match(str(modtime or ""))
     day = stamp.group(1)[:10] if stamp else date.today().isoformat()
-    stem, ext = f"{match['base']} (Konflikt Seite{side_no} {day}", match["ext"] or ""
-    name, counter = f"{stem}){ext}", 2
-    while name in taken:  # nie eine vorhandene oder geplante Datei überschreiben
-        name, counter = f"{stem} {counter}){ext}", counter + 1
+
+    def bounded_name(counter: int) -> str:
+        tail = f" (Konflikt Seite{side_no} {day}{(' ' + str(counter)) if counter > 1 else ''})"
+        ext = (
+            (match["ext"] or "")
+            .encode("utf-8")[: 254 - len(tail.encode("utf-8"))]
+            .decode("utf-8", errors="ignore")
+        )
+        budget = 255 - len((tail + ext).encode("utf-8"))
+        stem = match["base"].encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+        return stem + tail + ext
+
+    name, counter = bounded_name(1), 2
+    while name in taken:
+        name, counter = bounded_name(counter), counter + 1
     taken.add(name)
     return name
 
@@ -249,6 +261,12 @@ def resolve_conflict(
     if not valid_rel_path(base_path):
         raise ValueError("Ungültiger Pfad")
     roots = _roots(pair)
+    if pair.get("require_mountpoint") or pair.get("sentinel_file"):
+        from .jobs.rclone_sync import _precheck_pair
+
+        valid, message = _precheck_pair(pair)
+        if not valid:
+            raise ValueError(message)
     directory, _, base_name = base_path.rpartition("/")
 
     def rel(name: str) -> str:
@@ -278,6 +296,8 @@ def resolve_conflict(
                 plan.append(
                     [
                         "moveto",
+                        "--ignore-existing",
+                        "--error-on-no-transfer",
                         "--",
                         _join(roots[side], rel(copy["name"])),
                         _join(roots[side], rel(target)),

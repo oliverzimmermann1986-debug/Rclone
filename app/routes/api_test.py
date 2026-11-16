@@ -54,7 +54,7 @@ def test_rclone(request: RcloneTest) -> dict[str, Any]:
             },
             key=str.casefold,
         )
-        if not remotes:
+        if not remotes and request.pair is None and request.pair_index is None:
             return {
                 "ok": False,
                 "error": "Keine Remotes konfiguriert. `rclone config` ausführen.",
@@ -70,7 +70,12 @@ def test_rclone(request: RcloneTest) -> dict[str, Any]:
             "configured_remote": configured,
             "remote_exists": configured in remotes if configured else None,
         }
-        if configured and not response["remote_exists"]:
+        if (
+            configured
+            and not response["remote_exists"]
+            and request.pair is None
+            and request.pair_index is None
+        ):
             return {
                 **response,
                 "ok": False,
@@ -81,7 +86,27 @@ def test_rclone(request: RcloneTest) -> dict[str, Any]:
         if request.pair is not None:
             candidate = dict(snapshot)
             candidate_backup = dict(backup)
-            candidate_backup["pairs"] = [request.pair]
+            candidate_pairs = list(backup.get("pairs") or [])
+            draft_index = next(
+                (
+                    index
+                    for index, existing in enumerate(candidate_pairs)
+                    if (
+                        request.pair.get("id")
+                        and existing.get("id") == request.pair["id"]
+                    )
+                    or (
+                        not request.pair.get("id")
+                        and existing.get("name") == request.pair.get("name")
+                    )
+                ),
+                len(candidate_pairs),
+            )
+            if draft_index == len(candidate_pairs):
+                candidate_pairs.append(request.pair)
+            else:
+                candidate_pairs[draft_index] = request.pair
+            candidate_backup["pairs"] = candidate_pairs
             candidate["backup"] = candidate_backup
             try:
                 normalized, warnings = validate_config(candidate)
@@ -89,7 +114,7 @@ def test_rclone(request: RcloneTest) -> dict[str, Any]:
                 raise HTTPException(
                     422, {"message": "Pair ungültig", "errors": exc.errors}
                 ) from exc
-            pair = (normalized.get("backup") or {}).get("pairs", [None])[0]
+            pair = normalized["backup"]["pairs"][draft_index]
             response["tested_unsaved"] = True
             response["warnings"] = warnings
         elif request.pair_index is not None:
@@ -139,15 +164,41 @@ def test_rclone(request: RcloneTest) -> dict[str, Any]:
             local_path = str(pair.get("local") or "")
             response["local_path"] = local_path
             response["local_exists"] = (
-                True if _is_remote(local_path) else Path(local_path).is_dir()
+                False if _is_remote(local_path) else Path(local_path).is_dir()
             )
+            if _is_remote(local_path):
+                source_result = subprocess.run(
+                    [
+                        "rclone",
+                        "size",
+                        "--json",
+                        "--cache-dir",
+                        cache_dir,
+                        "--",
+                        local_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    stdin=subprocess.DEVNULL,
+                    env=rclone_subprocess_env(),
+                )
+                response["local_exists"] = source_result.returncode == 0
+                if source_result.returncode:
+                    response["local_size_output"] = (
+                        source_result.stderr or source_result.stdout
+                    ).strip()[:300]
             if not response["local_exists"]:
                 response["ok"] = False
                 response["error"] = (
                     f"Lokaler Pfad fehlt oder ist kein Verzeichnis: {local_path}"
                 )
 
-        response["message"] = f"rclone ok — {len(remotes)} Remote(s)"
+        response["message"] = (
+            f"rclone ok — {len(remotes)} Remote(s)"
+            if response["ok"]
+            else "rclone-Prüfung fehlgeschlagen"
+        )
         return response
     except HTTPException:
         raise

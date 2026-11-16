@@ -438,22 +438,10 @@ def _run_global_drill(
             _detach_job_log(job_log_handler)
 
 
-def main() -> int:
+def _run_scheduler_tick() -> int:
     cfg = get_config()
     scheduler_snapshot, scheduler_config_revision = _snapshot_with_revision(cfg)
     db = get_db()
-    try:
-        from ..push_notifications import dispatch_pending_pushes
-
-        push_result = dispatch_pending_pushes(db=db)
-        if push_result.get("sent") or push_result.get("retrying"):
-            logging.getLogger("scheduler_cli").info(
-                "APNs-Outbox verarbeitet: %s", push_result
-            )
-    except Exception:
-        logging.getLogger("scheduler_cli").exception(
-            "APNs-Outbox konnte nicht verarbeitet werden"
-        )
     backup = scheduler_snapshot.get("backup") or {}
     backup_enabled = bool(backup.get("enabled", True))
 
@@ -973,6 +961,26 @@ def main() -> int:
         )
 
     return rc
+
+
+def main() -> int:
+    try:
+        return _run_scheduler_tick()
+    finally:
+        # Slow delivery must never delay starting the backups already due in
+        # this tick. Drain afterwards, also when scheduling returns early.
+        try:
+            from ..push_notifications import dispatch_pending_pushes
+
+            push_result = dispatch_pending_pushes(db=get_db())
+            if push_result.get("sent") or push_result.get("retrying"):
+                logging.getLogger("scheduler_cli").info(
+                    "APNs-Outbox verarbeitet: %s", push_result
+                )
+        except Exception:
+            logging.getLogger("scheduler_cli").exception(
+                "APNs-Outbox konnte nicht verarbeitet werden"
+            )
 
 
 if __name__ == "__main__":

@@ -345,7 +345,7 @@
       },
       async workspaceIssueAction(issue) {
         if (issue.action === 'restore') return this.runRestoreTest(issue.pair);
-        if (issue.action === 'job') return this.openJob(issue.jobId);
+        if (issue.action === 'job') return this.showJob({ id: issue.jobId });
         await this.navigate('pairs');
         if (this.page !== 'pairs') return;
         const index = (this.config.backup?.pairs || []).findIndex((pair) => pair.name === issue.pair);

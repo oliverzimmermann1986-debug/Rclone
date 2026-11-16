@@ -1127,7 +1127,8 @@ final class AppModel: ObservableObject {
 
     func retryJob(id: Int) async -> Bool {
         await runOperationalAction(success: "Job wurde erneut gestartet.") { client in
-            try await client.retryJob(id: id, dryRun: false)
+            let previous = try await client.getJob(id: id)
+            return try await client.retryJob(id: id, dryRun: previous.isDryRun)
         }
     }
 

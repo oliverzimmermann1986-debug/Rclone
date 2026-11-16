@@ -61,7 +61,7 @@ window.app = function app() {
     },
 
     overview: { loading: false, data: null },
-    status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null, bitrotscrub: null, bootdrill: null },
+    status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null, bitrotscrub: null, bootdrill: null, recovery: null },
     progress: null,
     sse: null,
     progressStream: { startedAt: null, lastMessageAt: null, retryTimer: null, retryAttempts: 0 },
@@ -104,7 +104,7 @@ window.app = function app() {
     configEditGeneration: 0,
     savedConfigSnapshot: null,
     configDiffOpen: false,
-    filterTester: { pathsText: '', results: [], parseErrors: [], loading: false },
+    filterTester: { pathsText: '', results: [], parseErrors: [], loading: false, signature: null },
     hooksAvailable: [],
     pairSearch: '',
     pairFilter: 'all',
@@ -120,6 +120,7 @@ window.app = function app() {
     jobDefinitions: { loading: false, error: '' },
     jobTimeline: { loading: false, rows: [], conflicts: [] },
     settingsTab: 'general',
+    settingsTabsHorizontal: window.matchMedia?.('(max-width: 900px)').matches || false,
     testResults: {},
     configValidation: { loading: false, ok: null, warnings: [], errors: [], revisionMatches: true },
     scheduleEditor: { mode: 'daily', time: '03:00', intervalHours: 6, intervalMinutes: 30, weekday: '0' },
@@ -128,6 +129,7 @@ window.app = function app() {
 
     plan: { loading: false, data: null, dry_run: true, definitionId: null },
     doctor: { loading: false, data: null },
+    systemBundleErrors: [],
     copies: { loading: false, data: null, error: '' },
     recovery: {
       loading: false, pair: '', points: [], pointId: '', path: '', items: [],

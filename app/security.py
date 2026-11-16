@@ -68,6 +68,13 @@ def new_csrf_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def csrf_tokens_match(cookie: str | None, supplied: str | None) -> bool:
+    """Reject malformed non-ASCII nonces without raising during comparison."""
+    if not cookie or not supplied or not cookie.isascii() or not supplied.isascii():
+        return False
+    return secrets.compare_digest(cookie, supplied)
+
+
 def require_csrf(
     request: Request,
     csrf_cookie: Optional[str] = Cookie(default=None, alias=CSRF_COOKIE),
@@ -76,11 +83,7 @@ def require_csrf(
     """Double-submit-CSRF-Prüfung für alle schreibenden API-Aufrufe."""
     if request.method.upper() in SAFE_METHODS:
         return
-    if (
-        not csrf_cookie
-        or not csrf_header
-        or not secrets.compare_digest(csrf_cookie, csrf_header)
-    ):
+    if not csrf_tokens_match(csrf_cookie, csrf_header):
         raise HTTPException(403, "CSRF-Prüfung fehlgeschlagen")
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import fnmatch
 import hashlib
 import logging
 import os
@@ -18,6 +19,8 @@ import bcrypt
 from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from ..cron_utils import valid_minute_schedule
 
 from ..auth import (
     SESSION_COOKIE,
@@ -506,7 +509,7 @@ class ConfigUpdate(BaseModel):
 class SchedulePreviewRequest(BaseModel):
     expression: str = Field(default="manual", max_length=128)
     timezone: str = Field(default="Europe/Berlin", min_length=1, max_length=128)
-    count: int = Field(default=5, ge=1, le=10)
+    count: int = Field(default=5, ge=1, le=1441)
 
 
 class PairBulkAction(BaseModel):
@@ -568,15 +571,22 @@ def update_config(
             status_code=422,
             detail={"message": "Konfiguration ungültig", "errors": exc.errors},
         ) from exc
-    if username_changed:
-        try:
-            revoke_all_push_devices()
-        except (OSError, ValueError) as exc:
-            raise HTTPException(
-                503, "Geräteregistrierungen konnten nicht widerrufen werden"
-            ) from exc
     try:
-        revision = store.replace(normalized, expected_revision=expected_revision)
+        if username_changed:
+
+            def replace_account(_current: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    revoke_all_push_devices()
+                except (OSError, ValueError) as exc:
+                    raise HTTPException(
+                        503, "Geräteregistrierungen konnten nicht widerrufen werden"
+                    ) from exc
+                return normalized
+
+            store.update(replace_account, expected_revision=expected_revision)
+            normalized, revision = store.snapshot_with_revision()
+        else:
+            revision = store.replace(normalized, expected_revision=expected_revision)
     except ConfigConflictError as exc:
         raise HTTPException(
             409,
@@ -746,7 +756,7 @@ def preview_schedule(body: SchedulePreviewRequest) -> dict[str, Any]:
             "next_runs": [],
         }
 
-    if len(expression.split()) != 5 or not croniter.is_valid(expression):
+    if not valid_minute_schedule(expression):
         raise HTTPException(422, "Zeitplan ist keine gültige 5-stellige Cron-Angabe")
     try:
         timezone = ZoneInfo(body.timezone)
@@ -970,11 +980,16 @@ def save_filter_file(body: FilterPayload) -> dict[str, Any]:
             finally:
                 os.close(lock_fd)
         revision = _filter_revision(path, encoded)
-        get_db().audit_add(
-            "filter_saved",
-            actor="web",
-            details={"bytes": len(encoded), "revision": revision},
-        )
+        try:
+            get_db().audit_add(
+                "filter_saved",
+                actor="web",
+                details={"bytes": len(encoded), "revision": revision},
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Filter gespeichert; Audit-Nachtrag fehlgeschlagen"
+            )
         return {
             "ok": True,
             "path": str(path),
@@ -1017,6 +1032,26 @@ def _rclone_glob_to_regex(pattern: str) -> str:
             parts.append("[^/]*")
         elif ch == "?":
             parts.append("[^/]")
+        elif ch == "[":
+            end = i + 1
+            if end < n and clean[end] in "!^":
+                end += 1
+            if end < n and clean[end] == "]":
+                end += 1
+            while end < n and clean[end] != "]":
+                end += 1
+            if end == n:
+                raise ValueError("Nicht abgeschlossene Zeichenklasse")
+            character_class = clean[i : end + 1]
+            if character_class.startswith("[^"):
+                character_class = "[!" + character_class[2:]
+            parts.append(
+                "(?!/)"
+                + fnmatch.translate(character_class)
+                .removesuffix("\\Z")
+                .removesuffix("\\z")
+            )
+            i = end
         else:
             parts.append(_re.escape(ch))
         i += 1
@@ -1050,7 +1085,7 @@ def evaluate_rclone_filter_rules(
             try:
                 regex = _re.compile(_rclone_glob_to_regex(pattern))
                 compiled_rules.append((idx, action, stripped, regex))
-            except _re.error as exc:
+            except (_re.error, ValueError) as exc:
                 parse_errors.append(f"Zeile {idx}: Ungültiges Muster ({exc})")
         else:
             parse_errors.append(
@@ -1059,7 +1094,7 @@ def evaluate_rclone_filter_rules(
 
     results: list[dict[str, Any]] = []
     for raw_path in sample_paths[:200]:
-        norm_path = str(raw_path or "").strip().replace("\\", "/").lstrip("/")
+        norm_path = str(raw_path or "").lstrip("/")
         if not norm_path:
             continue
         matched_action = "+"

@@ -218,7 +218,7 @@ def test_pbs_ui_has_safe_defaults_status_polling_and_job_filter():
     javascript = _app_javascript()
 
     assert (
-        "status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null, bitrotscrub: null, bootdrill: null }"
+        "status: { backup: null, check: null, quicksync: null, restoretest: null, pbs: null, bitrotscrub: null, bootdrill: null, recovery: null }"
         in javascript
     )
     assert "keep: { keep_last: 0, keep_daily: 7, keep_weekly: 4" in javascript
@@ -535,7 +535,10 @@ def test_failed_job_retry_is_revision_bound_and_visible_in_run_detail():
     assert "Job erneut starten" in html
     assert "job?.definition_id" in javascript
     assert "job?.config_revision" in javascript
-    assert "`/api/jobs/${job.id}/retry?dry_run=false`" in javascript
+    assert "`/api/jobs/${job.id}/retry?dry_run=${Boolean(job.dry_run)}`" in javascript
+    assert (
+        "${job.dry_run ? 'Dry-Run' : 'Produktiven Job'} erneut starten?" in javascript
+    )
     assert "unverändert" in javascript
 
 
@@ -647,7 +650,10 @@ def test_tags_conflicts_versions_bandwidth_preflight_diff_and_crypt_are_wired():
     # Änderungsmatrix: Abwahl nur außerhalb von bisync, Start mit exclude_paths.
     assert "openPreflight(jobModal.job)" in html
     assert "Bei bisync keine Abwahl möglich" in html
-    assert "{ exclude_paths: this.preflightExcludes() }" in javascript
+    assert (
+        "{ exclude_paths: this.preflightExcludes(), expected_revision: state.data.config_revision }"
+        in javascript
+    )
     # Restore-Diff: Farbe plus Symbol.
     assert "openStagingDiff(item)" in html
     assert "Live-Datei existiert nicht (Datei wäre neu)" in html

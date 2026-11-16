@@ -15,11 +15,11 @@ export const jobsMethods = {
   },
 
   canCancelCurrentJob() {
-    return Boolean(this.rcloneBusy() || this.progress?.running || this.pbs.status?.running);
+    return Boolean(this.rcloneBusy() || this.progress?.running || this.status?.pbs || this.status?.bootdrill || this.pbs.status?.running);
   },
 
   cancelCurrentJob() {
-    if (this.pbs.status?.running && !this.rcloneBusy()) return this.cancelPbs();
+    if ((this.pbs.status?.running || this.status?.pbs || this.status?.bootdrill) && !this.rcloneBusy()) return this.cancelPbs();
     return this.cancelBackup();
   },
 
@@ -46,10 +46,17 @@ export const jobsMethods = {
   },
 
   pauseSchedulerUntilTomorrow() {
-    const target = new Date();
-    target.setDate(target.getDate() + 1);
-    target.setHours(6, 0, 0, 0);
-    this.pauseScheduler(null, target.getTime() / 1000);
+    const timezone = this.config.backup?.timezone || 'Europe/Berlin';
+    const formatter = new Intl.DateTimeFormat('en-GB', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+    const parts = (timestamp) => Object.fromEntries(formatter.formatToParts(new Date(timestamp)).filter((part) => part.type !== 'literal').map((part) => [part.type, Number(part.value)]));
+    const today = parts(Date.now());
+    const wallTime = Date.UTC(today.year, today.month - 1, today.day + 1, 6);
+    let timestamp = wallTime;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const local = parts(timestamp);
+      timestamp += wallTime - Date.UTC(local.year, local.month - 1, local.day, local.hour, local.minute, local.second);
+    }
+    this.pauseScheduler(null, timestamp / 1000);
   },
 
   async resumeScheduler() {
@@ -119,23 +126,35 @@ export const jobsMethods = {
   },
 
   async loadJobScheduleTimeline() {
-    const jobs = (this.config.backup?.jobs || []).filter((job) => job.enabled && job.schedule && job.schedule !== 'manual');
+    const generation = (this.jobTimelineGeneration || 0) + 1;
+    this.jobTimelineGeneration = generation;
+    for (const [key, controller] of requestControllers) {
+      if (key.startsWith('timeline-')) controller.abort();
+    }
+    const jobs = (this.config.backup?.jobs || []).filter((job) => job.enabled && job.schedule && !['manual', 'off', 'disabled', 'none'].includes(job.schedule.toLowerCase())).map((job) => ({ ...job }));
     this.jobTimeline.loading = true;
     const timezone = String(this.config.backup?.timezone || 'Europe/Berlin');
     const now = Date.now() / 1000;
     const horizon = now + 24 * 3600;
-    const [durationsResp, ...previews] = await Promise.all([
-      this.api('GET', '/api/jobs/definitions/durations', undefined, { silent: true, requestKey: 'job-durations' }),
-      ...jobs.map(async (job) => {
-        const result = await this.api('POST', '/api/config/schedule-preview', { expression: job.schedule, timezone, count: 10 }, { silent: true, captureError: true, requestKey: `timeline-${job.id || job.name}` });
-        if (this.isStale(result) || !result || result.__error) return { job, runs: [], error: result?.detail?.message || result?.detail || '' };
-        return { job, runs: (result.next_runs || []).filter((run) => Number(run.timestamp) >= now && Number(run.timestamp) < horizon) };
-      }),
-    ]);
+    const durationsPromise = this.api('GET', '/api/jobs/definitions/durations', undefined, { silent: true, requestKey: 'job-durations' });
+    const previews = new Array(jobs.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(4, jobs.length) }, async () => {
+      while (next < jobs.length && generation === this.jobTimelineGeneration) {
+        const index = next++;
+        const job = jobs[index];
+        const result = await this.api('POST', '/api/config/schedule-preview', { expression: job.schedule, timezone, count: 1441 }, { silent: true, captureError: true, requestKey: `timeline-${job.id || job.name}` });
+        previews[index] = this.isStale(result) || !result || result.__error
+          ? { job, runs: [], error: result?.detail?.message || result?.detail || '' }
+          : { job, runs: (result.next_runs || []).filter((run) => Number(run.timestamp) >= now && Number(run.timestamp) < horizon) };
+      }
+    }));
+    const durationsResp = await durationsPromise;
+    if (generation !== this.jobTimelineGeneration) return;
     const durationsMap = (!this.isStale(durationsResp) && durationsResp?.durations) ? durationsResp.durations : {};
     const rows = previews.map(({ job, runs, error }) => {
       const durInfo = durationsMap[job.id] || {};
-      const avgDurationSec = Number(durInfo.avg_duration_seconds) || 0;
+      const avgDurationSec = Number(durInfo.avg_duration_sec ?? durInfo.avg_duration_seconds) || 0;
       const widthPct = avgDurationSec > 0
         ? Math.max(1.2, Math.min(35, (avgDurationSec / (24 * 3600)) * 100))
         : 1.2;
@@ -156,17 +175,25 @@ export const jobsMethods = {
     });
     const groups = new Map();
     for (const row of rows) for (const run of row.runs) {
-      const key = new Date(Number(run.timestamp) * 1000).toISOString().slice(0, 16);
+      const key = new Date(Number(run.timestamp) * 1000).toISOString().slice(0, 16) + ':00Z';
       groups.set(key, [...(groups.get(key) || []), row.name]);
     }
     this.jobTimeline = {
       loading: false,
+      startsAt: now,
+      timezone,
       rows,
       conflicts: [...groups.entries()].filter(([, names]) => names.length > 1).map(([at, names]) => ({ at, names })),
     };
   },
 
   timelineHourPosition(hour) { return hour / 24 * 100; },
+
+  timelineTime(timestamp) {
+    return new Intl.DateTimeFormat('de-DE', { timeZone: this.jobTimeline.timezone || this.config.backup?.timezone || 'Europe/Berlin', hour: '2-digit', minute: '2-digit' }).format(new Date(timestamp * 1000));
+  },
+
+  timelineHourLabel(hour) { return this.timelineTime((this.jobTimeline.startsAt || Date.now() / 1000) + hour * 3600); },
 
   async loadBandwidth() {
     this.bandwidth.loading = true;
@@ -568,12 +595,12 @@ export const jobsMethods = {
   async retryJob(job = this.jobModal.job) {
     if (!this.canRetryJob(job) || this.pending.retry) return;
     if (!(await this.requestConfirmation(
-      'Job erneut starten?\n\nDer Server startet nur dieselbe Jobdefinition, wenn sich die Konfiguration seit diesem Lauf nicht geändert hat. Andernfalls wird der Start sicher abgelehnt.',
+      `${job.dry_run ? 'Dry-Run' : 'Produktiven Job'} erneut starten?\n\nDer Server startet nur dieselbe Jobdefinition, wenn sich die Konfiguration seit diesem Lauf nicht geändert hat. Andernfalls wird der Start sicher abgelehnt.`,
       { title: 'Job erneut starten', confirmLabel: 'Job starten', tone: 'primary' },
     ))) return;
     this.pending.retry = true;
     try {
-      const result = await this.api('POST', `/api/jobs/${job.id}/retry?dry_run=false`);
+      const result = await this.api('POST', `/api/jobs/${job.id}/retry?dry_run=${Boolean(job.dry_run)}`);
       if (!result?.ok) return;
       this.showToast(`Job #${result.job_id} wurde erneut gestartet`);
       this.closeJob();
@@ -618,8 +645,16 @@ export const jobsMethods = {
     return Object.values(this.preflightExcludes()).reduce((sum, paths) => sum + paths.length, 0);
   },
 
+  canStartPreflightRun() {
+    return this.preflight.kind === 'backup' && Boolean(this.preflight.data?.config_revision) && Boolean(this.preflight.data?.pairs?.length);
+  },
+
   async startPreflightRun() {
     const state = this.preflight;
+    if (!this.canStartPreflightRun()) {
+      this.showToast('Diesen Lauf bitte mit aktuellem Plan und unverändertem Konfigurationsstand neu starten.', 'warn');
+      return;
+    }
     const names = (state.data?.pairs || []).map((pair) => pair.name).filter(Boolean);
     if (!names.length || this.pending.backup) return;
     const skipped = this.preflightExcludedCount();
@@ -633,7 +668,7 @@ export const jobsMethods = {
       const result = await this.api(
         'POST',
         `/api/jobs/backup/run?dry_run=false&pairs=${encodeURIComponent(names.join(','))}`,
-        { exclude_paths: this.preflightExcludes() },
+        { exclude_paths: this.preflightExcludes(), expected_revision: state.data.config_revision },
         { silent: true, captureError: true },
       );
       if (!result) return;

@@ -17,6 +17,7 @@ from ..crypt_remote import (
 )
 from ..db import get_db
 from ..rclone_args import rclone_subprocess_env
+from ..recovery_points import RecoveryPointError, _remote_listing
 from ..security import require_csrf
 from .api_remotes import _lock, _rc
 
@@ -149,4 +150,46 @@ def verify(name: str) -> dict:
             502,
             "Verschlüsseltes Remote ist nicht lesbar (Basis-Remote oder Pfad prüfen)",
         )
-    return {"ok": True}
+    try:
+        files, _truncated = _remote_listing(
+            ["rclone", "lsjson", "--files-only", "--max-depth", "1", "--", f"{name}:"]
+        )
+        sample = next(
+            (
+                item
+                for item in files
+                if not item.get("IsDir") and int(item.get("Size") or 0) > 0
+            ),
+            None,
+        )
+        if sample is None:
+            return {
+                "ok": True,
+                "verified": False,
+                "message": "Erreichbar; ohne vorhandene Datei wurde keine Entschlüsselung geprüft.",
+            }
+        result = subprocess.run(
+            ["rclone", "cat", "--head", "1", "--", f"{name}:{sample['Path']}"],
+            env=rclone_subprocess_env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=60,
+        )
+    except (
+        OSError,
+        subprocess.TimeoutExpired,
+        RecoveryPointError,
+        ValueError,
+        KeyError,
+    ) as exc:
+        raise HTTPException(502, "Entschlüsselung konnte nicht geprüft werden") from exc
+    if result.returncode != 0 or not result.stdout:
+        raise HTTPException(
+            502,
+            "Vorhandene Datei konnte mit diesen Schlüsseln nicht entschlüsselt werden",
+        )
+    return {
+        "ok": True,
+        "verified": True,
+        "message": "Vorhandene Datei erfolgreich entschlüsselt.",
+    }

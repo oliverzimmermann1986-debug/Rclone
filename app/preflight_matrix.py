@@ -112,6 +112,8 @@ def job_matrix(
     pairs = summary["pairs"] if "pairs" in summary else [summary]
     return {
         "job_id": job_id,
+        "kind": job.get("kind"),
+        "config_revision": str(job.get("config_revision") or ""),
         "dry_run": True,
         "pairs": [_pair_matrix(pair, root) for pair in pairs],
     }

@@ -121,7 +121,10 @@ def test_evaluate_levels(
 
 
 def test_evaluate_labels_and_hints():
-    assert evaluate(LOCK_COMPLIANCE, 200, VERSIONED)["label"] == "Ransomware-immun"
+    assert (
+        evaluate(LOCK_COMPLIANCE, 200, VERSIONED)["label"]
+        == "Object Lock im Bucket aktiv"
+    )
     assert "30 Tage" in evaluate(LOCK_COMPLIANCE, 200, VERSIONED)["hint"]
     assert evaluate(NOT_FOUND, 404, VERSIONED)["label"] == "versioniert"
     assert evaluate(NOT_FOUND, 404, UNVERSIONED)["label"] == "ohne Schutz"

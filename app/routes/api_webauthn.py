@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import base64
+import logging
 import re
 import secrets
 from pathlib import Path
@@ -51,6 +52,18 @@ from ..webauthn_service import (
 router = APIRouter(tags=["webauthn"])
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 Method = Literal["passkey", "security_key"]
+logger = logging.getLogger(__name__)
+
+
+def _audit_best_effort(
+    event: str, *, actor: str, details: dict[str, Any], database=None
+) -> None:
+    # Authentication/registration may already be committed. A reporting fault
+    # must not turn that successful security operation into an HTTP failure.
+    try:
+        (database or get_db()).audit_add(event, actor=actor, details=details)
+    except Exception:
+        logger.exception("WebAuthn-Audit %s konnte nicht gespeichert werden", event)
 
 
 class AuthenticationOptionsRequest(BaseModel):
@@ -209,11 +222,6 @@ def complete_authentication(body: CeremonyResponse, request: Request):
     clear_login_failures(key)
     clear_login_failures("webauthn-options:" + key)
     database = get_db()
-    database.audit_add(
-        "webauthn_login",
-        actor=result["username"],
-        details={"method": result["method"], "native": result["native"]},
-    )
     if result["native"]:
         token = secrets.token_urlsafe(48)
         try:
@@ -230,6 +238,12 @@ def complete_authentication(body: CeremonyResponse, request: Request):
                     raise ValueError("Dieser Schlüssel wurde inzwischen widerrufen.")
         except ValueError as exc:
             raise _ceremony_error(exc) from exc
+        _audit_best_effort(
+            "webauthn_login",
+            actor=result["username"],
+            details={"method": result["method"], "native": True},
+            database=database,
+        )
         return {"ok": True, "native_exchange_token": token}
     response = JSONResponse(content={"ok": True})
     try:
@@ -241,6 +255,12 @@ def complete_authentication(body: CeremonyResponse, request: Request):
             _set_authenticated_session(response, request, result["username"])
     except ValueError as exc:
         raise _ceremony_error(exc) from exc
+    _audit_best_effort(
+        "webauthn_login",
+        actor=result["username"],
+        details={"method": result["method"], "native": False},
+        database=database,
+    )
     return response
 
 
@@ -305,10 +325,11 @@ def create_native_registration_ticket(
         raise HTTPException(
             status_code=401, detail="Die Freigabe wurde widerrufen."
         ) from exc
-    database.audit_add(
+    _audit_best_effort(
         "webauthn_native_registration_started",
         actor=user,
         details={"method": body.method},
+        database=database,
     )
     return {"registration_token": token, "expires_in_seconds": 300}
 
@@ -347,7 +368,7 @@ def complete_native_registration(body: CeremonyResponse) -> dict[str, Any]:
         )
     except Exception as exc:
         raise _ceremony_error(exc) from exc
-    get_db().audit_add(
+    _audit_best_effort(
         "webauthn_credential_registered",
         actor=result["app_binding"],
         details={
@@ -445,7 +466,7 @@ def complete_registration(
         )
     except Exception as exc:
         raise _ceremony_error(exc) from exc
-    get_db().audit_add(
+    _audit_best_effort(
         "webauthn_credential_registered",
         actor=user,
         details={"method": result["method"], "credential_id": result["credential_id"]},
@@ -471,10 +492,11 @@ def delete_credential(
             if not existing:
                 raise HTTPException(status_code=404, detail="Schlüssel nicht gefunden")
             database.webauthn_credential_delete(credential_id)
-            database.audit_add(
+            _audit_best_effort(
                 "webauthn_credential_deleted",
                 actor=user,
                 details={"method": existing["method"], "credential_id": credential_id},
+                database=database,
             )
     except ValueError as exc:
         raise HTTPException(
@@ -512,9 +534,9 @@ def begin_reauth(
     selected_method: Method = "passkey"
     if body and body.method:
         selected_method = body.method
-    elif st.get("passkey_available"):
+    elif st.get("passkey"):
         selected_method = "passkey"
-    elif st.get("security_key_available"):
+    elif st.get("security_key"):
         selected_method = "security_key"
     try:
         return authentication_options(selected_method, native=False)
@@ -552,9 +574,19 @@ def complete_reauth(
         raise err from exc
     if result.get("native"):
         raise HTTPException(400, "Native Anmelde-Challenges sind hier nicht erlaubt.")
+    try:
+        with account_generation_guard(result["account_generation"]):
+            if session_user(request.cookies.get(SESSION_COOKIE, "")) != user:
+                raise ValueError("Die Sitzung wurde inzwischen widerrufen.")
+            if not get_db().webauthn_credential_matches(
+                result["credential_id"], result["credential_generation"]
+            ):
+                raise ValueError("Dieser Schlüssel wurde inzwischen widerrufen.")
+            token = issue_webauthn_reauth_token(request, user)
+    except ValueError as exc:
+        raise _ceremony_error(exc) from exc
     clear_reauth_failures(request)
-    token = issue_webauthn_reauth_token(request, user)
-    get_db().audit_add(
+    _audit_best_effort(
         "webauthn_stepup_reauth",
         actor=user,
         details={"method": result["method"]},

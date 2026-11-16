@@ -142,13 +142,15 @@ def bump_session_version() -> int:
     # verschwinden, damit nach erfolgreicher Rückkehr kein Altgerät mehr sendbar ist.
     from .push_notifications import revoke_all_push_devices
 
-    revoke_all_push_devices()
     result: dict[str, int] = {}
 
     def updater(data: dict) -> None:
         web = data.setdefault("web", {})
         if not isinstance(web, dict):
             raise ValueError("web muss ein Mapping sein")
+        # Serialize registration, revocation and version rotation with the
+        # configuration write lock; no registration may slip into the gap.
+        revoke_all_push_devices()
         try:
             version = int(web.get("session_version", 1) or 1)
         except (TypeError, ValueError):
@@ -461,7 +463,9 @@ def consume_webauthn_reauth_token(
 
         get_db().runtime_update(_WEBAUTHN_REAUTH_RUNTIME_KEY, _consume, default={})
     except Exception:
-        pass
+        # The callback runs before the write commits. A failed transaction must
+        # not authorize a token that is still present in persistent storage.
+        return None
     if not consumed:
         with _login_lock:
             mem_entry = _webauthn_reauth_memory.pop(token_hash, None)
