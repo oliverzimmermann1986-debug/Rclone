@@ -599,6 +599,94 @@ def test_apple_wrong_password_returns_helpful_400_without_credential_leak(monkey
     assert "secret-canary" not in str(err.value.detail)
 
 
+@pytest.mark.parametrize(
+    ("upstream_error", "provider", "expected"),
+    [
+        (
+            "authSRPComplete: HTTP error 401 (401 Unauthorized)",
+            None,
+            "Apple hat den Anmeldeschritt abgelehnt (HTTP 401)",
+        ),
+        (
+            "authFederate: unexpected status 403 Forbidden",
+            None,
+            "Apple hat den Anmeldeschritt abgelehnt (HTTP 403)",
+        ),
+        (
+            "authStart: 503 Service Temporarily Unavailable",
+            None,
+            "vorübergehend nicht verfügbar (HTTP 503)",
+        ),
+        (
+            "authSRPInit: HTTP error 429 (429 Too Many Requests)",
+            None,
+            "Apple begrenzt gerade die Anmeldeversuche",
+        ),
+        (
+            "authStart: Get https://idmsa.apple.com/: no such host",
+            None,
+            "Server konnte keine Verbindung zu Apples Anmeldedienst herstellen",
+        ),
+        (
+            "authSRPComplete: unrecognized upstream response",
+            None,
+            "Die Apple-Anmeldung konnte nicht abgeschlossen werden",
+        ),
+        (
+            "403 Forbidden",
+            "iclouddrive",
+            "Apple hat den Anmeldeschritt abgelehnt (HTTP 403)",
+        ),
+        (
+            "502 Bad Gateway",
+            "drive",
+            "rclone konnte den Einrichtungsschritt nicht abschließen",
+        ),
+    ],
+)
+def test_remote_setup_failure_explains_category_without_echoing_upstream_secrets(
+    monkeypatch, caplog, upstream_error, provider, expected
+):
+    canaries = [
+        "password-private-canary",
+        "session-private-canary",
+        "oauth-private-canary",
+        "person@example.invalid",
+    ]
+    diagnostic = json.dumps(
+        {
+            "error": upstream_error,
+            "input": {
+                "parameters": {
+                    "password": canaries[0],
+                    "cookies": canaries[1],
+                    "client_secret": canaries[2],
+                    "apple_id": canaries[3],
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(
+        remotes.subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(
+            a, 5, diagnostic, "Sensitive response: " + " ".join(canaries)
+        ),
+    )
+    payload = {"type": provider} if provider else {"name": "private-account"}
+    with caplog.at_level("WARNING", logger=remotes.__name__):
+        with pytest.raises(HTTPException) as caught:
+            remotes._rc("config/update", payload)
+    assert caught.value.status_code == 502
+    assert expected in caught.value.detail
+    assert "Remote setup failed:" in caplog.text
+    for secret in canaries:
+        assert secret not in caught.value.detail
+        assert secret not in caplog.text
+    assert "idmsa.apple.com" not in caplog.text
+    assert "Sensitive response" not in caplog.text
+
+
 @pytest.mark.skipif(
     not shutil.which("rclone"), reason="Optional offline integration needs rclone"
 )

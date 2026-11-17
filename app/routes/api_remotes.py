@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -37,6 +38,8 @@ from ..rclone_args import (
     resolve_rclone_config_path,
 )
 from ..security import require_csrf
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/remotes",
@@ -427,6 +430,98 @@ def _owner(request: Request) -> str:
     return hashlib.sha256(request.cookies.get(SESSION_COOKIE, "").encode()).hexdigest()
 
 
+def _setup_failure(
+    result: subprocess.CompletedProcess, payload: dict | None
+) -> HTTPException:
+    # Upstream errors may contain the complete submitted JSON, auth URLs or
+    # cookies. Only fixed categories and a parsed HTTP status may leave here.
+    error = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    stage = next(
+        (
+            name
+            for name in (
+                "authstart",
+                "authfederate",
+                "authsrpinit",
+                "authsrpcomplete",
+                "authwithtoken",
+                "requestpcs",
+            )
+            if f"{name}:" in error
+        ),
+        "unknown",
+    )
+    apple = (
+        (payload or {}).get("type") == "iclouddrive"
+        or stage != "unknown"
+        or "icloud" in error
+        or "apple.com" in error
+        or "incorrect username or password" in error
+    )
+    status_match = re.search(
+        r"\b(?:http(?: error)?|status(?: code)?)\s*[:=]?\s*([45]\d{2})\b",
+        error,
+    ) or re.search(
+        r"\b([45]\d{2}) (?:bad request|unauthorized|forbidden|too many requests|"
+        r"internal server error|bad gateway|service (?:temporarily )?unavailable|"
+        r"gateway timeout)\b",
+        error,
+    )
+    status = int(status_match[1]) if status_match else None
+    logger.warning(
+        "Remote setup failed: provider=%s stage=%s upstream_http=%s exit=%s",
+        "icloud" if apple else "other",
+        stage,
+        status or "unknown",
+        result.returncode,
+    )
+    if apple and "incorrect username or password" in error:
+        return HTTPException(
+            400,
+            "Apple-Anmeldung fehlgeschlagen: Apple-ID oder Passwort nicht akzeptiert. Wichtig: Für iCloud wird das reguläre Apple-Account-Passwort benötigt (kein anwendungsspezifisches Passwort).",
+        )
+    if apple and status == 429:
+        return HTTPException(
+            502,
+            "Apple begrenzt gerade die Anmeldeversuche (HTTP 429). Bitte später erneut versuchen.",
+        )
+    if apple and status and status >= 500:
+        return HTTPException(
+            502,
+            f"Apples Anmeldedienst ist vorübergehend nicht verfügbar (HTTP {status}). Bitte später erneut versuchen.",
+        )
+    if apple and status:
+        return HTTPException(
+            502,
+            f"Apple hat den Anmeldeschritt abgelehnt (HTTP {status}). Prüfe die Anmeldung bei iCloud.com und bestätige dort gegebenenfalls angezeigte Hinweise. Danach hier erneut versuchen.",
+        )
+    if apple and any(
+        marker in error
+        for marker in (
+            "connection refused",
+            "no such host",
+            "network is unreachable",
+            "i/o timeout",
+            "context deadline exceeded",
+            "tls handshake",
+            "x509:",
+        )
+    ):
+        return HTTPException(
+            502,
+            "Der Sicherpfad-Server konnte keine Verbindung zu Apples Anmeldedienst herstellen. Bitte später erneut versuchen.",
+        )
+    if apple:
+        return HTTPException(
+            502,
+            "Die Apple-Anmeldung konnte nicht abgeschlossen werden. Prüfe die Anmeldung bei iCloud.com und versuche es anschließend erneut.",
+        )
+    return HTTPException(
+        502,
+        "rclone konnte den Einrichtungsschritt nicht abschließen. Bitte Angaben prüfen.",
+    )
+
+
 def _run(args: list[str], payload: dict | None = None) -> Any:
     env = rclone_subprocess_env()
     env["RCLONE_LOG_LEVEL"] = "ERROR"
@@ -441,21 +536,7 @@ def _run(args: list[str], payload: dict | None = None) -> Any:
             timeout=60,
         )
         if result.returncode:
-            combined_err = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
-            if "incorrect username or password" in combined_err:
-                raise HTTPException(
-                    400,
-                    "Apple-Anmeldung fehlgeschlagen: Apple-ID oder Passwort nicht akzeptiert. Wichtig: Für iCloud wird das reguläre Apple-Account-Passwort benötigt (kein anwendungsspezifisches Passwort).",
-                )
-            if "503 service temporarily unavailable" in combined_err:
-                raise HTTPException(
-                    502,
-                    "Apples Anmeldedienst antwortet vorübergehend mit 503. Bitte in wenigen Sekunden erneut versuchen.",
-                )
-            raise HTTPException(
-                502,
-                "rclone konnte den Einrichtungsschritt nicht abschließen. Bitte Angaben prüfen.",
-            )
+            raise _setup_failure(result, payload)
         return json.loads(result.stdout or "{}")
     except FileNotFoundError:
         raise HTTPException(
