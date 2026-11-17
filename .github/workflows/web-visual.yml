@@ -1,0 +1,56 @@
+name: Web visual QA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, codex/web-redesign]
+    paths:
+      - 'app/static/**'
+      - 'tests/web/**'
+      - '.github/workflows/web-visual.yml'
+  pull_request:
+    paths:
+      - 'app/static/**'
+      - 'tests/web/**'
+      - '.github/workflows/web-visual.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-visual-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UI_VISUAL_OUTPUT: ${{ runner.temp }}/sicherpfad-ui-visual
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tests/web/package-lock.json
+      - name: Install pinned rendering dependencies without lifecycle scripts
+        run: npm ci --prefix tests/web --ignore-scripts --no-audit --no-fund
+      - name: Install Chromium tied to Playwright 1.65.1
+        working-directory: tests/web
+        run: node node_modules/playwright/cli.js install --with-deps chromium
+      - name: Preserve existing DOM behavior checks
+        run: npm test --prefix tests/web
+      - name: Render real application with synthetic API fixtures only
+        if: ${{ !cancelled() }}
+        run: npm run test:visual --prefix tests/web
+      - name: Upload screenshots, synthetic traces and machine-readable results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: sicherpfad-web-visual-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sicherpfad-ui-visual
+          if-no-files-found: warn
+          retention-days: 14

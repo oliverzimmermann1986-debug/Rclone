@@ -179,7 +179,7 @@ def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeyp
 
         index_page = client.get("/")
         assert index_page.status_code == 200
-        assert app_version == "2.4.4"
+        assert app_version == "2.5.0"
         asset_revision = main.web_asset_cache_revision(main.STATIC_DIR, app_version)
         for asset in (
             "manifest.json",

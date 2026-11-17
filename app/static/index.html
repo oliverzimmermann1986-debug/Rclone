@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f5ef" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121d17" media="(prefers-color-scheme: dark)">
   <meta name="mobile-web-app-capable" content="yes">
   <title>Sicherpfad</title>
   <link rel="manifest" href="/static/manifest.json?v=__APP_VERSION__">
@@ -15,18 +15,19 @@
 <body x-data="app()" @keydown.escape.window="closeOverlays()" @keydown.tab.window="trapDialogFocus($event)" @focusin.window="enforceActiveDialogFocus($event)">
   <a class="skip-link" href="#main-content">Zum Hauptinhalt</a>
   <div class="sr-only" role="status" aria-live="polite" aria-atomic="true" x-text="liveMessage"></div>
-  <div class="app-shell">
+  <div class="app-shell console-shell">
     <button type="button" class="nav-scrim" x-show="navOpen" @click="closeNavigation()" aria-label="Navigation schließen" tabindex="-1" x-cloak></button>
 
-    <aside class="sidebar" id="main-sidebar" x-ref="mainSidebar" :class="navOpen && 'open'" tabindex="-1">
+    <aside class="sidebar console-navigation" id="main-sidebar" x-ref="mainSidebar" :class="navOpen && 'open'" tabindex="-1">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true">R</div>
+        <div class="brand-mark" aria-hidden="true"><img src="/static/app-icon-192.png?v=__APP_VERSION__" alt="" width="40" height="40"></div>
         <div>
           <strong>Sicherpfad</strong>
-          <span>Proxmox Backup Console</span>
+          <span>Sicherungen verwalten</span>
         </div>
       </div>
 
+      <p class="nav-section-label">Arbeitsbereiche</p>
       <nav class="main-nav" aria-label="Hauptnavigation">
         <button :class="page==='dashboard' && 'active'" :aria-current="page==='dashboard' ? 'page' : null" @click="navigate('dashboard')">
           <span class="nav-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span></span><span>Lagebild</span>
@@ -47,6 +48,7 @@
       </nav>
 
       <div class="sidebar-status">
+        <p class="nav-section-label">Dein Server</p>
         <div class="status-line">
           <span class="status-dot" :class="systemLevel()"></span>
           <div>
@@ -56,35 +58,40 @@
         </div>
         <div class="sidebar-meta">
           <span x-text="overview.data?.system?.virtualization || '—'"></span>
-          <span x-text="'v' + (overview.data?.app?.version || '2.3.0')"></span>
+          <span x-text="overview.data?.app?.version ? 'v' + overview.data.app.version : 'Version wird geladen'"></span>
         </div>
         <p><a href="https://github.com/oliverzimmermann1986-debug/Rclone/issues" rel="noreferrer">Projekt-Feedback</a> · <a href="https://oliverzimmermann1986-debug.github.io/Rclone/impressum.html" rel="noreferrer">Projektinformationen</a></p>
       </div>
     </aside>
 
-    <div class="workspace" :inert="navigationIsModal()">
-      <header class="topbar">
-        <div class="topbar-left">
+    <div class="workspace console-workspace" :inert="navigationIsModal()">
+      <header class="topbar console-context-bar">
+        <div class="topbar-left console-context">
           <button class="icon-button mobile-menu" @click="toggleNavigation()" :aria-expanded="navOpen" aria-controls="main-sidebar" :aria-label="navOpen ? 'Navigation schließen' : 'Navigation öffnen'"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/></svg></span></button>
-          <div>
-            <div class="eyebrow">Sicherpfad</div>
+          <div class="console-location">
+            <div class="eyebrow console-breadcrumb">Verwaltung</div>
             <h1 x-text="pageTitle()"></h1>
           </div>
         </div>
-        <div class="topbar-actions">
+        <div class="topbar-actions console-context-actions">
           <span class="connection-badge" :class="connectionState" :title="connectionMessage" role="status" aria-live="polite">
             <span aria-hidden="true"></span><span x-text="connectionLabel()"></span>
           </span>
           <button class="icon-button" @click="refreshAll(true)" :disabled="refreshing" :title="refreshing ? 'Aktualisierung läuft' : 'Aktualisieren'" :aria-label="refreshing ? 'Aktualisierung läuft' : 'Aktualisieren'"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></span></button>
+          <details class="console-action-menu console-utilities">
+            <summary aria-label="Ansicht und Konto"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></span><span>Ansicht &amp; Konto</span></summary>
+            <div class="console-action-menu-items">
           <button class="theme-button density-button" @click="toggleDensity()" :title="density === 'compact' ? 'Komfortable Ansicht' : 'Kompakte Ansicht'" aria-label="Darstellungsdichte umschalten"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></svg></span><span x-text="density === 'compact' ? 'Kompakt' : 'Komfort'"></span></button>
           <button class="theme-button" @click="cycleTheme()" :title="'Darstellung: ' + themeLabel()">
             <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20z"/></svg></span><span x-text="themeLabel()"></span>
           </button>
-          <button class="icon-button" @click="logout()" title="Abmelden" aria-label="Abmelden"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg></span></button>
+          <button class="icon-button" @click="logout()" title="Abmelden" aria-label="Abmelden"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg></span><span>Abmelden</span></button>
+            </div>
+          </details>
         </div>
       </header>
 
-      <main class="content" id="main-content" tabindex="-1" :aria-label="pageTitle()">
+      <main class="content console-main" id="main-content" tabindex="-1" :aria-label="pageTitle()">
         <div class="connection-alert" :class="connectionState" x-show="connectionState !== 'online'" role="status" aria-live="polite" x-cloak>
           <span class="status-dot" :class="connectionState === 'offline' ? 'error' : (connectionState === 'degraded' ? 'warn' : 'pending')" aria-hidden="true"></span>
           <span><strong x-text="connectionLabel()"></strong><small x-text="connectionMessage"></small></span>
@@ -106,18 +113,23 @@
           <div class="stack"><span><strong>Schreibschutz von Hand zurücknehmen</strong><small>Diese Mounts wurden beim Lockdown schreibgeschützt eingehängt. Führe die Befehle als root auf dem Server aus, sobald die Ursache geklärt ist.</small></span><pre class="code-block" x-text="lockdownSteps.join('\n')"></pre><div class="button-row"><button class="button secondary small" @click="copyLockdownSteps()">Befehle kopieren</button><button class="button ghost small" @click="lockdownSteps = []">Hinweis ausblenden</button></div></div>
         </div>
         <!-- DASHBOARD -->
-        <section x-show="page==='dashboard'" x-cloak>
-          <div class="page-heading">
-            <div>
-              <span class="section-kicker">Betriebsstatus</span>
-              <h2>Backup-System im Blick</h2>
-              <p>Synchronisationen, Container-Ressourcen und letzte Ergebnisse auf einer Seite.</p>
+        <section class="console-page overview-page" x-show="page==='dashboard'" x-cloak>
+          <div class="page-heading console-heading">
+            <div class="page-intro">
+              <span class="section-kicker page-eyebrow">Lagebild</span>
+              <h2>Deine Sicherungen im Blick.</h2>
+              <p>Schutzstatus und offene Hinweise prüfen. Dann den nächsten Schritt entscheiden.</p>
             </div>
             <div class="heading-actions">
+              <button class="button primary" @click="runBackup(true)" :disabled="startBlocked()" x-text="pending.backup ? 'Startet…' : 'Dry-Run starten'"></button>
+              <details class="console-action-menu">
+                <summary>Weitere Aktionen</summary>
+                <div class="console-action-menu-items">
               <button class="button secondary" @click="loadPlan(true)" :disabled="pending.plan || startBlocked()" x-text="pending.plan ? 'Plan wird geladen…' : 'Plan prüfen'"></button>
               <button class="button secondary" @click="openQuick()">Quick-Sync</button>
-              <button class="button primary" @click="runBackup(true)" :disabled="startBlocked()" x-text="pending.backup ? 'Startet…' : 'Dry-Run starten'"></button>
               <button class="button danger" @click="openLockdown()" :disabled="lockdownState.active">Notfall-Lockdown</button>
+                </div>
+              </details>
             </div>
           </div>
 
@@ -135,7 +147,7 @@
             </template>
           </div>
 
-          <article class="scheduler-control-strip" :class="schedulerControl.paused ? 'paused' : (schedulerControl.enabled ? 'active' : 'disabled')">
+          <article class="scheduler-control-strip status-ribbon" :class="schedulerControl.paused ? 'paused' : (schedulerControl.enabled ? 'active' : 'disabled')">
             <div class="scheduler-control-copy">
               <span class="scheduler-control-icon" aria-hidden="true"><span class="icon" x-show="schedulerControl.paused"><svg viewBox="0 0 24 24"><rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/></svg></span><span class="icon" x-show="!schedulerControl.paused && schedulerControl.enabled"><svg viewBox="0 0 24 24"><polygon points="7 4 19 12 7 20 7 4"/></svg></span><span class="icon" x-show="!schedulerControl.paused && !schedulerControl.enabled"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg></span></span>
               <div><strong x-text="schedulerControlLabel()"></strong><small x-show="schedulerControl.paused" x-text="schedulerControl.reason || 'Wartungsfenster'"></small><small x-show="!schedulerControl.paused && schedulerControl.enabled">Geplante Jobs werden zu ihren nächsten Terminen automatisch gestartet.</small><small x-show="!schedulerControl.enabled">Manuelle Läufe bleiben weiterhin möglich.</small></div>
@@ -154,7 +166,7 @@
               <span class="metric-sub" x-text="busy() ? (runningKind() + ' aktiv') : 'Keine laufende Übertragung'"></span>
             </article>
             <article class="metric-card">
-              <div class="metric-head"><span>Letzter Job</span><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></span></div>
+              <div class="metric-head"><span>Letzter Lauf</span><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></span></div>
               <strong class="metric-value text" x-text="statusLabel(overview.data?.jobs?.last?.display_status || overview.data?.jobs?.last?.status)"></strong>
               <span class="metric-sub" x-text="formatTs(overview.data?.jobs?.last?.started_at)"></span>
             </article>
@@ -164,14 +176,14 @@
               <span class="metric-sub"><span x-text="overview.data?.pairs?.scheduled ?? '—'"></span> über Jobs geplant · <span x-text="overview.data?.pairs?.manual ?? '—'"></span> manuell</span>
             </article>
             <article class="metric-card">
-              <div class="metric-head"><span>Jobs letzte 24h</span><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg></span></div>
+              <div class="metric-head"><span>Läufe letzte 24h</span><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg></span></div>
               <strong class="metric-value" x-text="overview.data?.jobs?.stats_24h?.total ?? '—'"></strong>
               <span class="metric-sub"><span x-text="overview.data?.jobs?.stats_24h?.by_status?.ok || 0"></span> erfolgreich · <span x-text="overview.data?.jobs?.stats_24h?.by_status?.error || 0"></span> Fehler</span>
             </article>
           </div>
 
           <article class="copy-matrix-summary panel" x-show="copies.data || copies.error" x-cloak aria-labelledby="copy-matrix-summary-heading">
-            <div><h3 id="copy-matrix-summary-heading">Kopien-Matrix</h3><p>Bestände mit mehreren unabhängigen Sicherungszielen – gemessen an konfigurierten Speicherbereichen.</p><p class="inline-error" role="status" x-show="copies.error" x-text="copies.error"></p></div>
+            <div><h3 id="copy-matrix-summary-heading">Kopien-Verteilung</h3><p>Offene Hinweise zur Verteilung deiner Datenbestände auf die konfigurierten Sicherungsziele.</p><p class="inline-error" role="status" x-show="copies.error" x-text="copies.error"></p></div>
             <div class="copy-matrix-count" x-show="copies.data"><strong x-text="copyMatrixSummary().protected + ' / ' + copyMatrixSummary().total"></strong><span>ohne offene Hinweise</span></div>
             <ul x-show="copyMatrixSummary().atRisk.length"><template x-for="row in copyMatrixSummary().atRisk.slice(0,3)" :key="row.id"><li><strong x-text="row.source"></strong><span x-text="row.findings.join(' · ')"></span></li></template></ul>
             <button class="button secondary small" @click="navigate('doctor')">Details in System öffnen</button>
@@ -349,7 +361,7 @@
 
           <article class="panel" data-workspace-group="overview">
             <div class="panel-head">
-              <div><span class="section-kicker">Verlauf</span><h3>Letzte Jobs</h3></div>
+              <div><span class="section-kicker">Verlauf</span><h3>Letzte Läufe</h3></div>
               <button class="button ghost" @click="navigate('runs')">Alle anzeigen</button>
             </div>
             <div class="job-list compact-list">
@@ -367,10 +379,26 @@
         </section>
 
         <!-- DATENWEGE -->
-        <section x-show="page==='pairs'" x-cloak>
-          <div class="page-heading">
-            <div><h2>Datenwege verwalten</h2><p>Quelle, Ziel, Übertragungsart und Schutzregeln. Zeitpläne werden getrennt unter Jobs verwaltet.</p></div>
-            <div class="heading-actions"><button class="button secondary" @click="openRemoteSetup('iclouddrive')" :disabled="configLoading || !configLoaded">iCloud einbinden</button><button class="button secondary" @click="openRemoteSetup('drive')" :disabled="configLoading || !configLoaded">Google Drive / Remote einbinden</button><button class="button secondary" @click="openPairWizard()" :disabled="configLoading || !configLoaded">Assistent</button><button class="button secondary" @click="testRclone()" :disabled="configLoading || !configLoaded">Remotes testen</button><button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading || !configLoaded" x-text="configValidation.loading ? 'Prüfung…' : 'Konfiguration prüfen'"></button><button class="button secondary" @click="saveConfig()" :disabled="!configDirty || pending.save || configLoading" x-text="pending.save ? 'Speichert…' : 'Speichern'"></button><button class="button primary" @click="addPair()" :disabled="configLoading || !configLoaded">Sicheres Pair hinzufügen</button></div>
+        <section class="console-page data-paths-page" x-show="page==='pairs'" x-cloak>
+          <div class="page-heading console-heading">
+            <div class="page-intro"><span class="section-kicker page-eyebrow">Verbindungen</span><h2>Datenwege</h2><p>Quelle, Ziel und Schutzregeln festlegen. Wann sie laufen, bestimmst du unter Jobs.</p></div>
+            <div class="heading-actions">
+              <button class="button primary" @click="addPair()" :disabled="configLoading || !configLoaded">Datenweg hinzufügen</button>
+              <details class="console-action-menu">
+                <summary>Einrichten &amp; prüfen</summary>
+                <div class="console-action-menu-items">
+                  <button class="button secondary" @click="openRemoteSetup('iclouddrive')" :disabled="configLoading || !configLoaded">iCloud einbinden</button>
+                  <button class="button secondary" @click="openRemoteSetup('drive')" :disabled="configLoading || !configLoaded">Google Drive / Remote einbinden</button>
+                  <button class="button secondary" @click="openPairWizard()" :disabled="configLoading || !configLoaded">Datenweg-Assistent</button>
+                  <button class="button secondary" @click="testRclone()" :disabled="configLoading || !configLoaded">Verbindungen testen</button>
+                  <button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading || !configLoaded" x-text="configValidation.loading ? 'Prüfung…' : 'Konfiguration prüfen'"></button>
+                </div>
+              </details>
+            </div>
+          </div>
+          <div class="console-savebar" x-show="configDirty || pending.save" x-cloak>
+            <div role="status"><strong>Ungespeicherte Änderungen</strong><span>Speichere den Entwurf, bevor du mit dem neuen Stand sicherst.</span></div>
+            <button class="button secondary" @click="saveConfig()" :disabled="!configDirty || pending.save || configLoading" x-text="pending.save ? 'Speichert…' : 'Speichern'"></button>
           </div>
 
           <article class="panel stack" x-show="pairWizard.open" x-cloak aria-labelledby="pair-wizard-heading">
@@ -657,10 +685,20 @@
         </section>
 
         <!-- JOBDEFINITIONEN -->
-        <section x-show="page==='definitions'" x-cloak>
-          <div class="page-heading">
-            <div><h2>Jobs</h2><p>Datenwege in einer festen Reihenfolge bündeln und gemeinsam planen oder starten.</p></div>
-            <div class="heading-actions"><button class="button secondary" @click="loadJobDefinitions()" :disabled="jobDefinitions.loading">Aktualisieren</button><button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading">Prüfen</button><button class="button secondary" @click="saveConfig()" :disabled="!configDirty || pending.save" x-text="pending.save ? 'Speichert…' : 'Speichern'"></button><button class="button primary" @click="addJobDefinition()">Job hinzufügen</button></div>
+        <section class="console-page definitions-page" x-show="page==='definitions'" x-cloak>
+          <div class="page-heading console-heading">
+            <div class="page-intro"><span class="section-kicker page-eyebrow">Planung &amp; Ausführung</span><h2>Jobs</h2><p>Datenwege zusammenführen, ihre Reihenfolge festlegen und gemeinsam planen.</p></div>
+            <div class="heading-actions">
+              <button class="button primary" @click="addJobDefinition()">Job hinzufügen</button>
+              <details class="console-action-menu"><summary>Weitere Aktionen</summary><div class="console-action-menu-items">
+                <button class="button secondary" @click="loadJobDefinitions()" :disabled="jobDefinitions.loading">Aktualisieren</button>
+                <button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading">Prüfen</button>
+              </div></details>
+            </div>
+          </div>
+          <div class="console-savebar" x-show="configDirty || pending.save" x-cloak>
+            <div role="status"><strong>Ungespeicherte Änderungen</strong><span>Zuordnung und Zeitplan vor dem nächsten Start speichern.</span></div>
+            <button class="button secondary" @click="saveConfig()" :disabled="!configDirty || pending.save" x-text="pending.save ? 'Speichert…' : 'Speichern'"></button>
           </div>
 
           <div class="loading-state" x-show="jobDefinitions.loading" role="status">Jobdefinitionen werden geladen…</div>
@@ -737,10 +775,16 @@
         </section>
 
         <!-- LÄUFE -->
-        <section x-show="page==='runs'" x-cloak>
-          <div class="page-heading">
-            <div><h2>Läufe</h2><p>Unveränderliche Ergebnisse, Logs und Konfigurationsstände nachvollziehen.</p></div>
-            <div class="heading-actions"><button class="button secondary" @click="downloadJobsCsv()">CSV exportieren</button><button class="button secondary" @click="loadJobs(true)">Aktualisieren</button><button class="button danger ghost" @click="cleanupFailed()">Fehlerhistorie löschen</button></div>
+        <section class="console-page runs-page" x-show="page==='runs'" x-cloak>
+          <div class="page-heading console-heading">
+            <div class="page-intro"><span class="section-kicker page-eyebrow">Verlauf</span><h2>Läufe</h2><p>Ergebnisse prüfen und jeden Lauf mit seinem damaligen Konfigurationsstand nachvollziehen.</p></div>
+            <div class="heading-actions">
+              <button class="button primary" @click="loadJobs(true)">Aktualisieren</button>
+              <details class="console-action-menu"><summary>Export &amp; Verlauf</summary><div class="console-action-menu-items">
+                <button class="button secondary" @click="downloadJobsCsv()">CSV exportieren</button>
+                <button class="button danger ghost" @click="cleanupFailed()">Fehlerhistorie löschen</button>
+              </div></details>
+            </div>
           </div>
 
           <div class="metric-grid small-metrics">
@@ -779,11 +823,20 @@
         </section>
 
         <!-- DOCTOR -->
-        <section x-show="page==='doctor'" x-cloak>
+        <section class="console-page system-page" x-show="page==='doctor'" x-cloak>
           <div class="alert warn" x-show="systemBundleErrors.length" role="alert"><span class="alert-icon" aria-hidden="true">△</span><div><strong>Systemdaten nur teilweise aktualisiert</strong><template x-for="message in systemBundleErrors" :key="message"><p x-text="message"></p></template></div></div>
-          <div class="page-heading">
-            <div><h2>System</h2><p>Dienste, Ressourcen, Datenbank und Schutzregeln prüfen.</p><div class="button-row"><button type="button" class="button secondary" @click="openRemoteSetup()">Neues Remote einbinden</button><button type="button" class="button secondary" @click="openCrypt()">Verschlüsseltes Remote anlegen</button></div></div>
-            <div class="heading-actions"><button class="button secondary" @click="navigate('recovery')">Wiederherstellung</button><button class="button secondary" @click="navigate('settings')">Einstellungen</button><button class="button secondary" @click="downloadSupportBundle()">Support-Bundle</button><button class="button primary" @click="loadDoctor()" :disabled="doctor.loading"><span x-text="doctor.loading ? 'Prüfung läuft…' : 'Vollständige Prüfung'"></span></button></div>
+          <div class="page-heading console-heading">
+            <div class="page-intro"><span class="section-kicker page-eyebrow">Betrieb &amp; Wartung</span><h2>System</h2><p>Zustand prüfen, Schutzregeln kontrollieren und Wartung gezielt vorbereiten.</p></div>
+            <div class="heading-actions">
+              <button class="button primary" @click="loadDoctor()" :disabled="doctor.loading"><span x-text="doctor.loading ? 'Prüfung läuft…' : 'Vollständige Prüfung'"></span></button>
+              <button class="button secondary" @click="navigate('settings')">Einstellungen</button>
+              <button class="button secondary" @click="navigate('recovery')">Wiederherstellung</button>
+              <details class="console-action-menu"><summary>Werkzeuge</summary><div class="console-action-menu-items">
+                <button type="button" class="button secondary" @click="openRemoteSetup()">Neue Verbindung einrichten</button>
+                <button type="button" class="button secondary" @click="openCrypt()">Verschlüsselte Verbindung anlegen</button>
+                <button class="button secondary" @click="downloadSupportBundle()">Support-Bundle</button>
+              </div></details>
+            </div>
           </div>
 
           <div class="metric-grid">
@@ -1043,9 +1096,9 @@
           </article>
         </section>
 
-        <section x-show="page==='recovery'" x-cloak>
-          <div class="page-heading">
-            <div><h2>Wiederherstellungs-Center</h2><p>Stände prüfen und ausgewählte Dateien zuerst in ein geschütztes Staging zurückholen.</p></div>
+        <section class="console-page recovery-page" x-show="page==='recovery'" x-cloak>
+          <div class="page-heading console-heading">
+            <div class="page-intro"><span class="section-kicker page-eyebrow">System / Wiederherstellung</span><h2>Dateien zurückholen</h2><p>Stände prüfen und ausgewählte Dateien zuerst getrennt von den produktiven Ordnern wiederherstellen.</p></div>
             <div class="heading-actions"><button class="button secondary" @click="navigate('doctor')">Systemdiagnose</button><button class="button secondary" @click="loadRecovery()" :disabled="recovery.loading">Aktualisieren</button><button class="button primary" @click="startFullSnapshot()" :disabled="!recovery.pair || startBlocked()">Recovery-Punkt erstellen</button></div>
           </div>
           <div class="inline-error" x-show="recovery.error" role="alert" x-text="recovery.error"></div>
@@ -1071,9 +1124,9 @@
         </section>
 
         <!-- SETTINGS -->
-        <section x-show="page==='settings'" x-cloak>
-          <div class="page-heading settings-page-heading">
-            <div><span class="section-kicker">Anwendung</span><h2>Einstellungen</h2><p>Alle wichtigen Vorgaben verständlich gegliedert – von Zeitplanung und Leistung bis Sicherheit und Benachrichtigungen.</p></div>
+        <section class="console-page settings-page" x-show="page==='settings'" x-cloak>
+          <div class="page-heading settings-page-heading console-heading">
+            <div class="page-intro"><span class="section-kicker page-eyebrow">System / Vorgaben</span><h2>Einstellungen</h2><p>Leistung, Sicherheit und Benachrichtigungen an deinen Betrieb anpassen.</p></div>
             <div class="heading-actions settings-heading-actions">
               <span class="save-state" :class="configDirty ? 'dirty' : 'saved'" role="status" aria-live="polite"><span aria-hidden="true"></span><span x-text="configDirty ? 'Ungespeicherte Änderungen' : 'Aktueller Stand gespeichert'"></span></span>
               <button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading || !configLoaded" x-text="configValidation.loading ? 'Prüfung…' : 'Konfiguration prüfen'"></button>

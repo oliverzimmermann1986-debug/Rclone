@@ -18,6 +18,22 @@
   const headingText = (node) => node.querySelector('h3')?.textContent.trim() || '';
   const isNotice = (node) => node.matches('.alert, .alert-stack, .inline-error, .config-check, .loading-state, .skeleton-grid');
 
+  function actionMenu(nodes, label, className = '') {
+    const details = element('details', `workspace-action-menu console-action-menu ${className}`.trim());
+    details.append(element('summary', '', label));
+    const items = element('div', 'workspace-action-menu-items console-action-menu-items');
+    for (const node of nodes) items.append(node);
+    details.append(items);
+    return details;
+  }
+
+  function sectionHeading(title, meta) {
+    const heading = element('div', 'console-section-heading');
+    heading.append(element('h3', '', title));
+    if (meta) heading.append(meta);
+    return heading;
+  }
+
   function groupPage(name, definitions, classify, always = new Set()) {
     const section = page(name);
     if (!section) return;
@@ -60,7 +76,7 @@
         button.append(count);
       }
       tabs.append(button);
-      const panel = element('div', 'workspace-view');
+      const panel = element('div', `workspace-view workspace-view-${name}-${group.id}`);
       panel.id = `workspace-panel-${name}-${group.id}`;
       panel.setAttribute('role', 'tabpanel');
       panel.setAttribute('aria-labelledby', button.id);
@@ -82,10 +98,22 @@
       for (const child of Array.from(grid.children)) grid.before(child);
       grid.remove();
     }
+    const metrics = section.querySelector(':scope > .metric-grid');
+    if (metrics && metrics.children.length > 1) {
+      const summary = element('div', 'overview-summary');
+      summary.setAttribute('data-workspace-group', 'overview');
+      const lead = metrics.firstElementChild;
+      lead.classList.add('overview-lead');
+      metrics.classList.add('overview-facts');
+      metrics.before(summary);
+      summary.append(lead, metrics);
+    }
+    section.querySelector('.copy-overview')?.classList.add('overview-primary');
+    section.querySelector('.copy-matrix-summary')?.classList.add('overview-secondary');
     const always = new Set();
     const live = section.querySelector('.control-panel .live-progress');
     if (live) {
-      const progress = element('article', 'panel workspace-live');
+      const progress = element('article', 'panel workspace-live overview-live');
       progress.setAttribute('x-show', 'rcloneBusy() || progress?.running');
       progress.setAttribute('x-cloak', '');
       progress.append(live);
@@ -94,7 +122,7 @@
       else section.append(progress);
       always.add(progress);
     }
-    const attention = element('div', 'workspace-attention');
+    const attention = element('div', 'workspace-attention overview-attention');
     attention.setAttribute('x-show', 'workspaceIssues().length');
     attention.setAttribute('x-cloak', '');
     attention.setAttribute('role', 'status');
@@ -136,6 +164,32 @@
       if (node.querySelector('.health-grid')) return 'paths';
       return 'overview';
     }, always);
+    // Keep warnings and active execution ahead of optional views, in the same
+    // reading order on desktop and mobile. No state is inferred from layout.
+    let anchor = section.querySelector(':scope > .page-heading');
+    for (const node of [
+      section.querySelector(':scope > .skeleton-grid'),
+      section.querySelector(':scope > .alert-stack'),
+      attention,
+      section.querySelector(':scope > .workspace-live'),
+      scheduler,
+      section.querySelector(':scope > .workspace-tabs'),
+    ].filter(Boolean)) {
+      if (anchor) anchor.after(node);
+      anchor = node;
+    }
+    const overview = section.querySelector('#workspace-panel-dashboard-overview');
+    const copies = overview?.querySelector('.copy-overview');
+    const summary = overview?.querySelector('.overview-summary');
+    if (copies && summary) summary.after(copies);
+    const matrix = overview?.querySelector('.copy-matrix-summary');
+    const recent = overview?.querySelector('.job-list')?.closest('article');
+    if (matrix && recent) {
+      const followup = element('div', 'overview-followup');
+      matrix.before(followup);
+      recent.classList.add('overview-recent');
+      followup.append(matrix, recent);
+    }
   }
 
   function organizeSystem() {
@@ -150,6 +204,11 @@
       if (node.querySelector('.copy-matrix, .copy-table') || /Kopien je Datenbestand|Bitrot-Scrub/.test(headingText(node))) return 'copies';
       return 'health';
     });
+    const health = document.getElementById('workspace-panel-doctor-health');
+    const findings = health?.querySelector('article[data-workspace-group="health"][x-show="doctor.data"]');
+    findings?.classList.add('system-findings');
+    health?.querySelector('.metric-grid')?.classList.add('system-status-strip');
+    if (findings) health.querySelector('.workspace-view-intro')?.after(findings);
   }
 
   function organizeRecovery() {
@@ -205,6 +264,7 @@
     const template = jobs?.querySelector('.definition-list > template');
     if (template) {
       const root = template.content;
+      root.querySelector('.definition-row')?.classList.add('job-definition-record');
       const assignments = root.querySelector('.definition-assignments');
       if (assignments) {
         const details = disclosure(assignments, 'Datenwege & Ausführung', '', '!job.id');
@@ -219,15 +279,25 @@
     const pairTemplate = pairs?.querySelector('.pair-card-list > template');
     if (pairTemplate) {
       const root = pairTemplate.content;
+      const card = root.querySelector('.pair-card');
+      const top = root.querySelector('.pair-card-top');
+      if (card && top) {
+        card.classList.add('data-path-record');
+        const summary = element('div', 'data-path-summary');
+        top.after(summary);
+        for (const selector of ['.pair-tags', '.pair-warning-row', '.pair-size-row', '.pair-quick-actions']) {
+          const node = root.querySelector(selector);
+          if (node) summary.append(node);
+        }
+        const composition = root.querySelector('.composition-detail');
+        const footer = root.querySelector('.pair-footer-actions');
+        if (composition && footer) footer.before(composition);
+      }
       const actions = root.querySelector('.pair-quick-actions');
       if (actions) {
         const buttons = Array.from(actions.children).filter((node) => node.tagName === 'BUTTON');
         if (buttons.length > 2) {
-          const details = element('details', 'workspace-action-menu');
-          details.append(element('summary', '', 'Weitere Aktionen'));
-          const list = element('div', 'workspace-action-menu-items');
-          for (const button of buttons.slice(1)) list.append(button);
-          details.append(list);
+          const details = actionMenu(buttons.slice(1), 'Weitere Aktionen');
           buttons[0].after(details);
         }
       }
@@ -245,10 +315,77 @@
     if (advancedRoots) disclosure(advancedRoots, 'Hosts & Ordnerfreigaben', 'Zugriff und erlaubte Dateipfade des Servers');
   }
 
+  function organizeDataPaths() {
+    const section = page('pairs');
+    const list = section?.querySelector('.pair-card-list');
+    const toolbar = section?.querySelector(':scope > .toolbar');
+    if (!list || !toolbar) return;
+    toolbar.classList.add('data-paths-toolbar');
+    const meta = toolbar.querySelector('.toolbar-meta');
+    const tools = [toolbar.querySelector('.pair-template-action'), toolbar.querySelector('.toolbar-actions')].filter(Boolean);
+    if (tools.length) toolbar.append(actionMenu(tools, 'Ansicht & Vorlagen', 'data-paths-options'));
+    const heading = sectionHeading('Deine Datenwege', meta);
+    toolbar.before(heading);
+    list.classList.add('records-list');
+  }
+
+  function organizeJobPlanning() {
+    const section = page('definitions');
+    const list = section?.querySelector('.definition-list');
+    if (!list) return;
+    const workbench = element('div', 'definitions-workbench records-section');
+    const count = element('span', 'records-meta');
+    count.setAttribute('x-text', "(config.backup.jobs || []).length + ' konfiguriert'");
+    list.before(workbench);
+    workbench.append(sectionHeading('Deine Jobs', count), list);
+    const empty = section.querySelector(':scope > .empty-state');
+    if (empty) workbench.append(empty);
+    const timeline = section.querySelector('.schedule-timeline');
+    timeline?.classList.add('definitions-schedule');
+    const bandwidth = section.querySelector('[aria-labelledby="bandwidth-heading"]');
+    if (bandwidth) {
+      const details = disclosure(bandwidth, 'Bandbreite & Zeitfenster', 'Vergangene Übertragungen auswerten und Zeitplan-Vorschläge prüfen');
+      details.classList.add('console-disclosure', 'definitions-analysis');
+    }
+  }
+
+  function organizeHistory() {
+    const section = page('runs');
+    const toolbar = section?.querySelector('.jobs-toolbar');
+    const results = section?.querySelector(':scope > article.panel.no-padding');
+    if (!toolbar || !results) return;
+    section.querySelector(':scope > .metric-grid')?.classList.add('runs-summary');
+    const workbench = element('div', 'runs-workbench records-section');
+    const heading = sectionHeading('Ausführungsverlauf', toolbar.querySelector('.toolbar-meta'));
+    toolbar.before(workbench);
+    workbench.append(heading, toolbar, results);
+    const search = toolbar.querySelector('.job-search');
+    const chips = toolbar.querySelector('.job-filter-chips');
+    const primary = element('div', 'runs-filter-primary');
+    if (search) primary.append(search);
+    if (chips) primary.append(chips);
+    const options = element('div', 'runs-filter-options');
+    for (const select of Array.from(toolbar.children).filter((node) => node.tagName === 'SELECT')) options.append(select);
+    toolbar.append(primary, options);
+    results.classList.add('runs-results');
+  }
+
+  function prepareActionMenus(scope = document) {
+    for (const menu of scope.querySelectorAll('.console-action-menu')) {
+      menu.setAttribute('x-on:keydown.escape.stop', "$el.open = false; $el.querySelector('summary').focus()");
+      menu.setAttribute('x-on:click.outside', '$el.open = false');
+    }
+    for (const template of scope.querySelectorAll('template')) prepareActionMenus(template.content);
+  }
+
   organizeDashboard();
   organizeSystem();
   organizeRecovery();
   organizeEditors();
+  organizeDataPaths();
+  organizeJobPlanning();
+  organizeHistory();
+  prepareActionMenus();
   // Capture adds a view destination without replacing any original action.
   const copiesLink = page('dashboard')?.querySelector('.copy-matrix-summary button');
   if (copiesLink?.getAttribute('@click')?.includes("navigate('doctor')")) {
