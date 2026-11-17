@@ -409,6 +409,11 @@ Sicherungen die Anmeldung erst danach durchführen. Service-Account-/Umgebungszu
 und verschlüsselte rclone.conf-Dateien werden über diesen neuen Erneuerungsweg nicht
 umgewandelt. Der klassische rclone-Einrichtungsweg bleibt verfügbar.
 
+Ab Version 2.4.4 unterscheidet die iCloud-Einrichtung abgelehnte Apple-Anmeldeschritte,
+Anmeldelimits und Verbindungsfehler. Das Serverprotokoll enthält dazu ausschließlich
+feste Fehlerkategorien und gegebenenfalls Apples HTTP-Status; übermittelte Passwörter,
+Sitzungstoken und vollständige rclone-Fehlertexte werden nicht ausgegeben.
+
 Ab Version 2.4.2 bleibt bei fehlgeschlagenen Größenmessungen die eigentliche
 Fehlerursache sichtbar, auch wenn rclone zuvor lange Anbieterhinweise ausgibt.
 Messfehler sind kein Nachweis einer leeren oder erfolgreich gesicherten Kopie.
