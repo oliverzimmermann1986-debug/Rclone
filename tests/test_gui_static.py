@@ -36,12 +36,15 @@ class _TemplateParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.ids: list[str] = []
+        self.classes: set[str] = set()
         self.expressions: list[str] = []
 
     def handle_starttag(self, _tag: str, attrs: list[tuple[str, str | None]]) -> None:
         for key, value in attrs:
             if key == "id" and value:
                 self.ids.append(value)
+            if key == "class" and value:
+                self.classes.update(value.split())
             if value and (
                 key.startswith("@") or key.startswith("x-") or key.startswith(":")
             ):
@@ -58,8 +61,7 @@ def test_main_template_has_unique_ids_and_required_navigation():
     assert duplicates == []
     for page in ("dashboard", "pairs", "definitions", "runs", "doctor", "settings"):
         assert f"navigate('{page}')" in html
-    assert 'class="mobile-nav"' in html
-    assert 'class="sidebar"' in html
+    assert {"mobile-nav", "sidebar"} <= parser.classes
     assert "setAllPairsOpen(true)" in html
     assert "setAllPairsOpen(false)" in html
     assert "Support-Bundle" in html
@@ -130,7 +132,7 @@ def test_gui_assets_reference_current_cache_version():
         'html = html.replace("?v=__APP_VERSION__", f"?v={asset_revision}")'
         in main_source
     )
-    assert "Verifizierte Backup-Leitstelle" in login
+    assert "Sicherpfad" in login
     assert "Sicherpfad" in html
     assert "rclone-sync</strong>" not in html
     assert "rclone-sync</strong>" not in login
@@ -139,15 +141,23 @@ def test_gui_assets_reference_current_cache_version():
 
 def test_login_uses_system_theme_and_mobile_full_frame():
     login = (STATIC / "login.html").read_text(encoding="utf-8")
+    compact = re.sub(r"\s+", "", login)
 
-    assert "color-scheme:light dark" in login
-    assert "prefers-color-scheme:dark" in login
-    assert "min-height:100dvh" in login
-    assert (
-        ".shell{display:block;width:100%;min-height:100dvh;border:0;border-radius:0;box-shadow:none}"
-        in login
-    )
-    assert "font:inherit;font-size:16px" in login
+    assert re.search(r"color-scheme\s*:\s*light\s+dark", login)
+    assert "prefers-color-scheme:dark" in compact
+    assert "min-height:100dvh" in compact
+    mobile_shell = re.search(r"@media\(max-width:680px\).*?\.shell\{([^}]+)\}", compact)
+    assert mobile_shell
+    for declaration in (
+        "display:block",
+        "width:100%",
+        "min-height:100dvh",
+        "border:0",
+        "border-radius:0",
+        "box-shadow:none",
+    ):
+        assert declaration in mobile_shell[1]
+    assert "font:inherit;font-size:16px" in compact
 
 
 def test_target_picker_can_switch_storage_and_create_folders():

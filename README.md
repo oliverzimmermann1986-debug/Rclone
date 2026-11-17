@@ -409,6 +409,14 @@ Sicherungen die Anmeldung erst danach durchführen. Service-Account-/Umgebungszu
 und verschlüsselte rclone.conf-Dateien werden über diesen neuen Erneuerungsweg nicht
 umgewandelt. Der klassische rclone-Einrichtungsweg bleibt verfügbar.
 
+Ab Version 2.5.0 bietet die Webanwendung eine neu gestaltete helle und dunkle
+Oberfläche. Lagebild, Datenwege, Jobs, Läufe und System bleiben die fünf
+Arbeitsbereiche. Warnungen und laufende Übertragungen stehen im Lagebild vor
+den Detailansichten; Kopien und letzte Läufe erhalten eine klare Rangfolge.
+Nebenaktionen öffnen sich in per Tastatur bedienbaren Menüs. Mobile Ansichten,
+Anmeldung, Formulare und Dialoge verwenden dasselbe Gestaltungssystem.
+Die vorhandenen Ausführungs-, Bestätigungs- und Sicherheitsabläufe bleiben erhalten.
+
 Ab Version 2.4.4 unterscheidet die iCloud-Einrichtung abgelehnte Apple-Anmeldeschritte,
 Anmeldelimits und Verbindungsfehler. Das Serverprotokoll enthält dazu ausschließlich
 feste Fehlerkategorien und gegebenenfalls Apples HTTP-Status; übermittelte Passwörter,
@@ -782,6 +790,14 @@ Warnhinweise und Tastaturbedienung. Verhaltenstests mit kontrollierter Uhr und
 simulierten Verbindungsfehlern prüfen außerdem Teilausfälle, Fortschrittsabfragen,
 Wiederverbindung und die Bestätigung vor Restore-Tests. Eine Sichtprüfung auf
 Desktop und Mobilgerät bleibt zusätzlich erforderlich.
+
+Der Workflow `Web visual QA` rendert die tatsächlichen Webdateien mit synthetischen
+API-Antworten in einer isolierten Chromium-Umgebung. Seine Artefakte enthalten
+Screenshots für Desktop und Mobilgerät in heller und dunkler Darstellung sowie
+einen maschinenlesbaren Prüfbericht. Geprüft werden außerdem Tastaturbedienung,
+Dialogfokus, reduzierte Bewegung und ein schmaler Reflow als Annäherung an 200 %
+Browserzoom. Die echte Zoomfunktion eines konkreten Gerätebrowsers bleibt eine
+zusätzliche Sichtprüfung.
 
 
 ### Recovery-Aufbewahrung und lokale Pfade
