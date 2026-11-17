@@ -3,7 +3,7 @@ name: Web visual QA
 on:
   workflow_dispatch:
   push:
-    branches: [main, codex/web-redesign]
+    branches: [main]
     paths:
       - 'app/static/**'
       - 'tests/web/**'

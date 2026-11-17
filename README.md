@@ -791,6 +791,14 @@ simulierten Verbindungsfehlern prüfen außerdem Teilausfälle, Fortschrittsabfr
 Wiederverbindung und die Bestätigung vor Restore-Tests. Eine Sichtprüfung auf
 Desktop und Mobilgerät bleibt zusätzlich erforderlich.
 
+Der Workflow `Web visual QA` rendert die tatsächlichen Webdateien mit synthetischen
+API-Antworten in einer isolierten Chromium-Umgebung. Seine Artefakte enthalten
+Screenshots für Desktop und Mobilgerät in heller und dunkler Darstellung sowie
+einen maschinenlesbaren Prüfbericht. Geprüft werden außerdem Tastaturbedienung,
+Dialogfokus, reduzierte Bewegung und ein schmaler Reflow als Annäherung an 200 %
+Browserzoom. Die echte Zoomfunktion eines konkreten Gerätebrowsers bleibt eine
+zusätzliche Sichtprüfung.
+
 
 ### Recovery-Aufbewahrung und lokale Pfade
 

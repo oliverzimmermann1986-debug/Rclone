@@ -121,7 +121,7 @@
               <p>Schutzstatus und offene Hinweise prüfen. Dann den nächsten Schritt entscheiden.</p>
             </div>
             <div class="heading-actions">
-              <button class="button primary" @click="runBackup(true)" :disabled="startBlocked()" x-text="pending.backup ? 'Startet…' : 'Dry-Run starten'"></button>
+              <button class="button primary" @click="runBackup(true)" :disabled="startBlocked()" x-text="pending.backup ? 'Startet…' : 'Probelauf starten'"></button>
               <details class="console-action-menu">
                 <summary>Weitere Aktionen</summary>
                 <div class="console-action-menu-items">
@@ -259,7 +259,7 @@
                 <div class="safe-actions hero-actions">
                   <button class="action-tile recommended" @click="runBackup(true)" :disabled="pending.backup || lockdownState.active">
                     <span class="action-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span></span>
-                    <span><strong>Dry-Run</strong><small>Änderungen prüfen, nichts schreiben</small></span>
+                    <span><strong>Probelauf</strong><small>Änderungen prüfen, nichts schreiben</small></span>
                   </button>
                   <button class="action-tile" @click="loadPlan(true)" :disabled="pending.plan">
                     <span class="action-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></svg></span></span>
@@ -348,14 +348,14 @@
                   </div>
                   <p class="error-text" x-show="pair.error" x-text="pair.error"></p>
                   <div class="health-actions">
-                    <button @click="runSinglePair(pair.name, true)" :disabled="startBlocked()">Dry-Run</button>
+                    <button @click="runSinglePair(pair.name, true)" :disabled="startBlocked()">Probelauf</button>
                     <button @click="showJob({id: pair.job_id})" x-show="pair.job_id">Details</button>
                   </div>
                 </div>
               </template>
             </div>
             <div class="empty-state compact" x-show="!(overview.data?.pairs?.health || []).length">
-              <strong>Noch keine aktiven Datenwege</strong><span>Lege einen Datenweg an und prüfe ihn zunächst per Dry-Run.</span>
+              <strong>Noch keine aktiven Datenwege</strong><span>Lege einen Datenweg an und prüfe ihn zunächst per Probelauf.</span>
             </div>
           </article>
 
@@ -439,7 +439,7 @@
               <label class="check-row" x-show="pairWizard.twoWay || pairWizard.mode === 'sync'"><input type="checkbox" x-model="pairWizard.allowDelete"><span><strong>Löschungen für produktive Läufe freigeben</strong></span></label>
             </div>
             <div class="stack" x-show="pairWizard.step === 4">
-              <p><strong>Zusammenfassung:</strong> <code x-text="pairWizard.name"></code> (<code x-text="pairWizard.source"></code> → <code x-text="pairWizard.target"></code>, Modus: <strong x-text="pairWizard.twoWay ? 'Bi-Sync' : pairWizard.mode"></strong>). Der Datenweg wird zunächst deaktiviert angelegt, damit du vor der Aktivierung einen Dry-Run starten kannst.</p>
+              <p><strong>Zusammenfassung:</strong> <code x-text="pairWizard.name"></code> (<code x-text="pairWizard.source"></code> → <code x-text="pairWizard.target"></code>, Modus: <strong x-text="pairWizard.twoWay ? 'Bi-Sync' : pairWizard.mode"></strong>). Der Datenweg wird zunächst deaktiviert angelegt, damit du vor der Aktivierung einen Probelauf starten kannst.</p>
             </div>
             <div class="button-row">
               <button type="button" class="button secondary" x-show="pairWizard.step > 1" @click="prevPairWizardStep()">Zurück</button>
@@ -451,7 +451,7 @@
           <div class="toolbar panel slim">
             <label class="search-field"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg></span><input id="pair-search" x-model="pairSearch" placeholder="Name oder Pfad durchsuchen" aria-label="Datenwege nach Name oder Pfad durchsuchen"></label>
             <select x-model="pairFilter" aria-label="Pair-Filter">
-              <option value="all">Alle Pairs</option><option value="enabled">Nur aktiv</option><option value="disabled">Nur deaktiviert</option><option value="issues">Mit Hinweisen</option><option value="destructive">Mirror / Bi-Sync</option>
+              <option value="all">Alle Datenwege</option><option value="enabled">Nur aktiv</option><option value="disabled">Nur deaktiviert</option><option value="issues">Mit Hinweisen</option><option value="destructive">Mirror / Bi-Sync</option>
             </select>
             <div class="pair-template-action"><select x-model="newPairPreset" aria-label="Vorlage für neues Pair"><option value="push-copy">Backup: Lokaler Pfad → Remote-Pfad (Copy)</option><option value="pull-copy">Restore: Remote-Pfad → Lokaler Pfad (Copy)</option><option value="bisync">Bidirektional (Bi-Sync)</option><option value="push-sync">Mirror: Lokaler Pfad → Remote-Pfad (Sync)</option><option value="pbs">Backup: Lokale Pfade → Proxmox Backup Server</option></select><button class="button secondary small" @click="addPair(newPairPreset)">Aus Vorlage</button></div>
             <div class="toolbar-actions"><button class="button ghost small" @click="setAllPairsOpen(true)">Alle öffnen</button><button class="button ghost small" @click="setAllPairsOpen(false)">Alle schließen</button><button class="button ghost small" @click="loadPairSizes()" :disabled="storageLoading" x-text="storageLoading ? 'Berechne…' : 'Größen berechnen'"></button></div>
@@ -460,7 +460,7 @@
 
           <div class="toolbar panel slim" x-show="pairTags().length" x-cloak>
             <div class="job-filter-chips" role="group" aria-label="Datenwege nach Tag filtern"><button type="button" :aria-pressed="!activeTag" :class="!activeTag && 'active'" @click="activeTag = ''">Alle</button><template x-for="tag in pairTags()" :key="tag"><button type="button" :aria-pressed="activeTag === tag" :class="activeTag === tag && 'active'" @click="activeTag = tag" x-text="tag"></button></template></div>
-            <div class="toolbar-actions" x-show="activeTag"><button class="button secondary small" @click="runBackup(true, tagPairNames())" :disabled="startBlocked() || !tagPairNames().length" x-text="'Dry-Run für Tag „' + activeTag + '“ starten'"></button><small class="muted" x-show="!tagPairNames().length">Kein aktiver Datenweg mit diesem Tag.</small></div>
+            <div class="toolbar-actions" x-show="activeTag"><button class="button secondary small" @click="runBackup(true, tagPairNames())" :disabled="startBlocked() || !tagPairNames().length" x-text="'Probelauf für Tag „' + activeTag + '“ starten'"></button><small class="muted" x-show="!tagPairNames().length">Kein aktiver Datenweg mit diesem Tag.</small></div>
           </div>
 
           <div class="toolbar panel slim" x-show="selectedPairCount() > 0" x-cloak>
@@ -518,7 +518,7 @@
                 </div>
 
                 <div class="pair-quick-actions">
-                  <button @click="runSinglePair(pair.name, true)" :disabled="startBlocked() || !pair.name">Dry-Run</button>
+                  <button @click="runSinglePair(pair.name, true)" :disabled="startBlocked() || !pair.name">Probelauf</button>
                   <button class="danger" @click="runSinglePair(pair.name, false)" :disabled="startBlocked() || !pair.name || !pair.enabled">Produktiv</button>
                   <button @click="checkPair(pair.name)" :disabled="startBlocked() || !pair.name">Read-only Check</button>
                   <button @click="testPair(idx)">Entwurf testen</button>
@@ -553,7 +553,7 @@
                     <label class="field"><span x-text="pair.two_way ? 'Seite A · lokal oder Cloud' : 'Quelle · lokal oder Cloud'"></span><div class="input-action"><input class="mono" x-model="pair.source" @input="syncPairDirection(pair)" placeholder="/mnt/nas/fotos oder pcloud:/Fotos" :aria-label="pair.two_way ? 'Seite A' : 'Quelle'"><button @click.prevent="openPicker('source-remote', idx)" aria-label="Cloud-Remote als Quelle durchsuchen">Cloud</button><button @click.prevent="openPicker('source-local', idx)" aria-label="Lokalen Quellordner wählen">Lokal</button></div></label>
                     <label class="field"><span x-text="pair.two_way ? 'Seite B · lokal oder Cloud' : 'Ziel · lokal, Cloud oder PBS'"></span><div class="input-action"><input class="mono" x-model="pair.target" @input="syncPairDirection(pair)" placeholder="/mnt/usb1/fotos oder pcloud:/Backup" :aria-label="pair.two_way ? 'Seite B' : 'Ziel'"><button @click.prevent="openPicker('target-remote', idx)" aria-label="Cloud-Remote als Ziel durchsuchen">Cloud</button><button @click.prevent="openPicker('target-local', idx)" aria-label="Lokalen Zielordner wählen">Lokal</button><button x-show="!pair.two_way" @click.prevent="convertPairToPbs(idx)" aria-label="Pair in PBS-Backup umwandeln">PBS</button></div></label>
                   </div>
-                  <label class="field"><span>Tags (durch Komma getrennt)</span><input :value="(pair.tags || []).join(', ')" @change="setPairTags(pair, $event.target.value)" placeholder="z. B. fotos, nas" autocomplete="off" spellcheck="false"><small>Kleinbuchstaben, Ziffern, _ und -; höchstens 10. Über der Liste filtern und je Tag einen Dry-Run starten.</small></label>
+                  <label class="field"><span>Tags (durch Komma getrennt)</span><input :value="(pair.tags || []).join(', ')" @change="setPairTags(pair, $event.target.value)" placeholder="z. B. fotos, nas" autocomplete="off" spellcheck="false"><small>Kleinbuchstaben, Ziffern, _ und -; höchstens 10. Über der Liste filtern und je Tag einen Probelauf starten.</small></label>
 
                   </div>
 
@@ -728,7 +728,7 @@
                   <div class="form-grid three disclosure-body"><label class="field"><span>Ausführung</span><select x-model="job.execution_mode" @change="normalizeJobDefinition(job)"><option value="sequential">Nacheinander</option><option value="parallel">Parallel</option></select></label><label class="field"><span>Maximal parallel</span><input type="number" min="1" x-model.number="job.max_parallel" :disabled="job.execution_mode==='sequential'"></label><label class="field"><span>Wiederholung nach Fehler</span><input type="number" min="1" max="10080" x-model.number="job.retry_minutes"><small>Wartezeit in Minuten bis zum nächsten Versuch.</small></label></div>
                 </details>
 
-                <div class="definition-actions"><button class="button secondary" @click="planJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id">Plan</button><button class="button secondary" @click="runJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id || lockdownState.active">Dry-Run</button><button class="button danger" @click="runJobDefinition(job, false)" :disabled="pending.definition || configDirty || !job.id || !job.enabled || lockdownState.active">Produktiv</button><button class="button ghost" @click="removeJobDefinition(idx)">Entfernen</button><small x-show="configDirty || !job.id">Vor Plan oder Start speichern.</small></div>
+                <div class="definition-actions"><button class="button secondary" @click="planJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id">Plan</button><button class="button secondary" @click="runJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id || lockdownState.active">Probelauf</button><button class="button danger" @click="runJobDefinition(job, false)" :disabled="pending.definition || configDirty || !job.id || !job.enabled || lockdownState.active">Produktiv</button><button class="button ghost" @click="removeJobDefinition(idx)">Entfernen</button><small x-show="configDirty || !job.id">Vor Plan oder Start speichern.</small></div>
               </article>
             </template>
           </div>
@@ -815,7 +815,7 @@
                 </button>
               </template>
             </div>
-            <div class="empty-state compact" x-show="!jobs.loading && !jobs.error && jobs.items.length===0"><strong>Keine Läufe gefunden</strong><span>Ändere die Filter oder starte einen Dry-Run.</span></div>
+            <div class="empty-state compact" x-show="!jobs.loading && !jobs.error && jobs.items.length===0"><strong>Keine Läufe gefunden</strong><span>Ändere die Filter oder starte einen Probelauf.</span></div>
             <div class="job-skeletons" x-show="jobs.loading" role="status" aria-live="polite" x-cloak><span class="sr-only">Läufe werden geladen…</span><div class="skeleton-row" aria-hidden="true"></div><div class="skeleton-row" aria-hidden="true"></div><div class="skeleton-row" aria-hidden="true"></div><div class="skeleton-row" aria-hidden="true"></div></div>
             <div class="inline-error panel-error" x-show="jobs.error && !jobs.loading" role="alert"><span x-text="jobs.error"></span><button class="button secondary small" @click="loadJobs(false)">Erneut versuchen</button></div>
             <div class="pagination"><button class="button secondary" @click="prevJobs()" :disabled="jobs.offset===0">Zurück</button><span><strong x-text="jobPage()"></strong> / <span x-text="jobPages()"></span></span><button class="button secondary" @click="nextJobs()" :disabled="jobs.offset+jobs.limit>=jobs.total">Weiter</button></div>
@@ -1166,7 +1166,7 @@
                 <div class="scheduler-layout">
                   <div class="scheduler-main">
                     <section class="settings-section scheduler-operation-section">
-                      <div class="settings-section-head"><div><span class="section-kicker">Betriebssteuerung</span><h3>Automatische Läufe ein- und aussetzen</h3><p>Für Proxmox-Wartung, NAS-Neustarts oder größere Umbauten kannst du ausschließlich die Automatik pausieren. Manuelle Dry-Runs und Starts bleiben verfügbar.</p></div><span class="badge" :class="schedulerControl.paused ? 'skipped' : (config.backup.enabled ? 'ok' : 'neutral')" x-text="schedulerControlLabel()"></span></div>
+                      <div class="settings-section-head"><div><span class="section-kicker">Betriebssteuerung</span><h3>Automatische Läufe ein- und aussetzen</h3><p>Für Proxmox-Wartung, NAS-Neustarts oder größere Umbauten kannst du ausschließlich die Automatik pausieren. Manuelle Probeläufe und Starts bleiben verfügbar.</p></div><span class="badge" :class="schedulerControl.paused ? 'skipped' : (config.backup.enabled ? 'ok' : 'neutral')" x-text="schedulerControlLabel()"></span></div>
                       <label class="check-row feature-check"><input type="checkbox" x-model="config.backup.enabled"><span><strong>Automatische Zeitpläne grundsätzlich aktivieren</strong><small>Steuert den Scheduler dauerhaft. Der systemd-Timer darf dabei weiter aktiv bleiben.</small></span></label>
                       <div class="scheduler-pause-card">
                         <div><strong>Temporäres Wartungsfenster</strong><small x-show="!schedulerControl.paused">Pausiert nur geplante Starts und läuft nach Ablauf automatisch weiter.</small><small x-show="schedulerControl.paused" x-text="(schedulerControl.reason || 'Wartungsfenster') + ' · ' + schedulerControlLabel()"></small></div>
@@ -1289,7 +1289,6 @@
                         <label class="field"><span>Warnschwelle</span><div class="number-with-unit"><input type="number" min="10" max="100" x-model.number="config.backup.transfer_budget.warn_percent"><span>%</span></div></label>
                       </div>
                       <label class="check-row"><input type="checkbox" x-model="config.backup.transfer_budget.throttle_optional_jobs"><span><strong>Optionale Egress-Jobs bei Überschreitung pausieren</strong><small>Setzt automatische Bitrot-Scrubs bis zum Monatswechsel aus, sobald das Egress-Limit erreicht ist.</small></span></label>
-                      </div>
                     </section>
                   </div>
 
@@ -1449,7 +1448,7 @@
         <div class="alert warn" x-show="plan.data?.warnings?.length"><span class="alert-icon">△</span><div><strong>Warnungen</strong><ul><template x-for="warning in (plan.data?.warnings || [])" :key="warning"><li x-text="warning"></li></template></ul></div></div>
         <div class="plan-list"><template x-for="pair in (plan.data?.pairs || [])" :key="pair.name"><details class="disclosure"><summary><span class="status-dot" :class="pair.verb==='sync' ? 'warn' : 'ok'"></span><strong x-text="pair.name"></strong><span class="badge neutral" x-text="pair.verb + ' · ' + pair.direction"></span></summary><div class="disclosure-body"><pre class="code-block" x-text="pair.command"></pre></div></details></template></div>
       </div>
-      <div class="modal-footer"><button class="button secondary" @click="closePlan()">Schließen</button><button class="button primary" @click="startPlannedDryRun()" :disabled="pending.backup || pending.definition">Dry-Run starten</button></div>
+      <div class="modal-footer"><button class="button secondary" @click="closePlan()">Schließen</button><button class="button primary" @click="startPlannedDryRun()" :disabled="pending.backup || pending.definition">Probelauf starten</button></div>
     </div>
   </div>
 
@@ -1464,7 +1463,7 @@
         <label class="field"><span>Lokaler Pfad</span><div class="input-action"><input class="mono" x-model="quick.local" placeholder="/mnt/backup" aria-label="Lokaler Quick-Sync-Pfad"><button @click="openQuickPicker('local')" aria-label="Lokalen Ordner wählen">Ordner</button></div></label>
         <label class="check-row"><input type="checkbox" x-model="quick.new_target"><span><strong>Neues leeres Ziel</strong><small>Legt den lokalen Pfad an und deaktiviert dafür den Mount-Schutz (min_local_files=0). Nur setzen, wenn das Ziel bewusst neu ist.</small></span></label>
         <div class="form-grid two"><label class="field"><span>Richtung</span><select x-model="quick.direction" @change="if(quick.direction==='bisync')quick.mode='bisync';else if(quick.mode==='bisync')quick.mode='copy'"><option value="pull">Remote-Pfad → Lokaler Pfad</option><option value="push">Lokaler Pfad → Remote-Pfad</option><option value="bisync">Bidirektional – beide Seiten angleichen</option></select></label><label class="field"><span>Modus</span><select x-model="quick.mode" :disabled="quick.direction==='bisync'"><option value="copy">Copy – ohne Löschen</option><option value="sync">Sync – Mirror</option><option value="bisync" x-show="quick.direction==='bisync'">Bi-Sync</option></select></label></div>
-        <label class="check-row"><input type="checkbox" x-model="quick.dry_run"><span><strong>Dry-Run</strong><small>Nur anzeigen, welche Änderungen ausgeführt würden.</small></span></label>
+        <label class="check-row"><input type="checkbox" x-model="quick.dry_run"><span><strong>Probelauf</strong><small>Nur anzeigen, welche Änderungen ausgeführt würden.</small></span></label>
         <div class="safety-box" x-show="['sync','bisync'].includes(quick.mode) && !quick.dry_run"><div><strong>Löschschutz erforderlich</strong><span>Produktive Mirror-Läufe benötigen eine Freigabe und feste Obergrenze.</span></div><label class="field compact-field"><span>Max. Löschungen</span><input type="number" min="0" max="10000000" x-model.number="quick.max_delete"></label><label class="switch"><input type="checkbox" x-model="quick.allow_delete"><span></span><em>Freigeben</em></label></div>
       </div>
       <div class="modal-footer"><button class="button secondary" @click="closeQuick()">Abbrechen</button><button class="button primary" @click="runQuickSync()" :disabled="startBlocked() || pending.quick || !quick.remote || !quick.local" x-text="pending.quick ? 'Startet…' : 'Quick-Sync starten'"></button></div>
@@ -1634,7 +1633,7 @@
         <div class="loading-state modal-loading" x-show="jobModal.loading" role="status" aria-live="polite">Jobdetails werden geladen…</div>
         <div class="job-detail-facts"><div><small>Jobdefinition</small><strong x-text="jobModal.job?.definition_name || 'Manueller Lauf'"></strong></div><div><small>Konfigurationsstand</small><strong class="mono" x-text="jobModal.job?.config_revision || '—'"></strong></div><div><small>Gestartet</small><strong x-text="formatDateTime(jobModal.job?.started_at)"></strong></div><div><small>Beendet</small><strong x-text="formatDateTime(jobModal.job?.ended_at)"></strong></div><div><small>Dauer</small><strong x-text="jobModal.job?.ended_at ? formatDur(jobModal.job.ended_at-jobModal.job.started_at) : 'Läuft'"></strong></div><div><small>Log</small><strong x-text="jobModal.job?.log_file ? 'Vorhanden' : 'Kein Log'"></strong></div></div>
         <div class="button-row" x-show="canRetryJob(jobModal.job)"><button class="button primary" @click="retryJob(jobModal.job)" :disabled="pending.retry || lockdownState.active" x-text="pending.retry ? 'Startet…' : 'Job erneut starten'"></button><small>Nur mit unveränderter Jobdefinition und gleichem Konfigurationsstand.</small></div>
-        <div class="button-row" x-show="jobModal.job?.dry_run && ['backup', 'quicksync'].includes(jobModal.job?.kind)"><button class="button secondary" @click="openPreflight(jobModal.job)" :disabled="jobModal.job?.status === 'running'">Änderungsmatrix</button><small>Geplante Kopien, Löschungen und Verschiebungen dieses Dry-Runs prüfen und einzelne Pfade vor dem produktiven Start abwählen.</small></div>
+        <div class="button-row" x-show="jobModal.job?.dry_run && ['backup', 'quicksync'].includes(jobModal.job?.kind)"><button class="button secondary" @click="openPreflight(jobModal.job)" :disabled="jobModal.job?.status === 'running'">Änderungsmatrix</button><small>Geplante Kopien, Löschungen und Verschiebungen dieses Probelaufs prüfen und einzelne Pfade vor dem produktiven Start abwählen.</small></div>
         <div class="button-row" x-show="quickPromotion?.jobId===jobModal.job?.id && jobModal.job?.status==='ok'"><button class="button secondary" @click="promoteQuickSync()">Als deaktivierten Datenweg übernehmen</button><small>Der Entwurf wird nicht automatisch aktiviert. Prüfe Richtung, Pfade und Schutzregeln vor dem Speichern.</small></div>
         <div class="inline-error" x-show="jobModal.job?.kind === 'backup' && ['error','cancelled','stale'].includes(jobModal.job?.status) && !canRetryJob(jobModal.job)">Dieser ältere Lauf ist nicht sicher an eine Jobdefinition gebunden. Prüfe den aktuellen Jobplan und starte ihn dort neu.</div>
         <div class="job-detail-facts" x-show="jobModal.job?.kind === 'bootdrill' && jobModal.job?.summary"><div><small>Bootfähig</small><strong x-text="jobModal.job?.summary?.bootable ? 'Ja' : 'Nein'"></strong></div><div><small>Snapshot</small><strong class="mono" x-text="jobModal.job?.summary?.snapshot || '—'"></strong></div><div><small>Bis Guest Agent</small><strong x-text="jobModal.job?.summary?.seconds_to_agent != null ? jobModal.job.summary.seconds_to_agent + ' s' : '—'"></strong></div><div><small>KVM</small><strong x-text="jobModal.job?.summary?.kvm ? 'Ja' : 'Nein, emuliert'"></strong></div></div>
@@ -1683,12 +1682,12 @@
     </div>
   </div>
 
-  <!-- Änderungsmatrix eines Dry-Runs -->
+  <!-- Änderungsmatrix eines Probelaufs -->
   <div class="modal" x-show="preflight.show" @click.self="closePreflight()" x-cloak>
     <div class="modal-dialog extra-wide" id="preflight-dialog" x-ref="preflightDialog" role="dialog" aria-modal="true" aria-labelledby="preflight-dialog-title" tabindex="-1" :aria-busy="preflight.loading">
-      <div class="modal-head"><h3 id="preflight-dialog-title" x-text="'Änderungsmatrix' + (preflight.jobId ? ' · Dry-Run #' + preflight.jobId : '')"></h3><button class="icon-button" @click="closePreflight()" aria-label="Änderungsmatrix schließen" data-dialog-initial-focus>×</button></div>
+      <div class="modal-head"><h3 id="preflight-dialog-title" x-text="'Änderungsmatrix' + (preflight.jobId ? ' · Probelauf #' + preflight.jobId : '')"></h3><button class="icon-button" @click="closePreflight()" aria-label="Änderungsmatrix schließen" data-dialog-initial-focus>×</button></div>
       <div class="modal-content stack">
-        <div class="loading-state" x-show="preflight.loading" role="status">Änderungen werden aus dem Dry-Run-Log gelesen…</div>
+        <div class="loading-state" x-show="preflight.loading" role="status">Änderungen werden aus dem Probelauf-Protokoll gelesen…</div>
         <div class="inline-error" role="alert" x-show="preflight.error" x-text="preflight.error"></div>
         <p class="muted" x-show="preflight.data && preflight.kind === 'backup'">Angehakte Zeilen werden beim produktiven Start ausgeführt, abgewählte Pfade für diesen Lauf ausgenommen (höchstens 200 je Datenweg).</p>
         <template x-for="pair in (preflight.data?.pairs || [])" :key="pair.name || 'quicksync'">
@@ -1696,7 +1695,7 @@
             <div class="panel-head"><div><h4 class="subheading" x-text="pair.name || 'Quick-Sync'"></h4><small class="muted" x-text="(pair.direction || '—') + ' · ' + (pair.mode || '—')"></small></div>
               <div class="check-counts" x-show="pair.matrix"><span class="badge compact ok" x-text="'Kopie ' + (pair.matrix?.counts?.copies || 0)"></span><span class="badge compact error" x-text="'Löschen ' + (pair.matrix?.counts?.deletes || 0)"></span><span class="badge compact warn" x-text="'Verschieben ' + (pair.matrix?.counts?.moves || 0)"></span><span class="badge compact neutral" x-text="'Sonstiges ' + (pair.matrix?.counts?.other || 0)"></span></div></div>
             <p class="error-text" x-show="pair.error" x-text="pair.error"></p>
-            <p class="muted" x-show="!pair.error && !pair.matrix">Für diesen Datenweg liegt kein Dry-Run-Log vor.</p>
+            <p class="muted" x-show="!pair.error && !pair.matrix">Für diesen Datenweg liegt kein Probelauf-Protokoll vor.</p>
             <p class="muted" x-show="pair.matrix && !(pair.rows || []).length">Keine Änderungen geplant.</p>
             <p class="muted" x-show="pair.matrix?.truncated">Die Liste ist gekürzt; die Zähler umfassen alle geplanten Änderungen.</p>
             <p class="muted" x-show="pair.direction === 'bisync' && (pair.rows || []).length">Bei bisync keine Abwahl möglich.</p>
@@ -1715,7 +1714,7 @@
         </template>
       </div>
       <div class="modal-footer">
-        <small class="muted" x-show="preflight.kind === 'backup' && !preflight.data?.config_revision">Dieser alte Lauf hat keinen gebundenen Konfigurationsstand. Bitte einen neuen Dry-Run erstellen.</small><small class="muted" x-show="preflight.kind === 'quicksync'">Für den produktiven Lauf Quick-Sync ohne Dry-Run erneut starten.</small>
+        <small class="muted" x-show="preflight.kind === 'backup' && !preflight.data?.config_revision">Dieser alte Lauf hat keinen gebundenen Konfigurationsstand. Bitte einen neuen Probelauf erstellen.</small><small class="muted" x-show="preflight.kind === 'quicksync'">Für den produktiven Lauf Quick-Sync ohne Probelauf erneut starten.</small>
         <small class="muted" x-show="preflightExcludedCount()" x-text="preflightExcludedCount() + ' Pfade abgewählt'"></small>
         <button class="button secondary" @click="closePreflight()">Schließen</button>
         <button class="button danger" x-show="canStartPreflightRun()" @click="startPreflightRun()" :disabled="startBlocked()"><span x-show="!pending.backup">Produktiv starten</span><span x-show="pending.backup">Startet…</span></button>
