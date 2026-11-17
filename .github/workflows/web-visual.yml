@@ -25,8 +25,6 @@ jobs:
   render:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    env:
-      UI_VISUAL_OUTPUT: ${{ runner.temp }}/sicherpfad-ui-visual
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -45,6 +43,8 @@ jobs:
         run: npm test --prefix tests/web
       - name: Render real application with synthetic API fixtures only
         if: ${{ !cancelled() }}
+        env:
+          UI_VISUAL_OUTPUT: ${{ runner.temp }}/sicherpfad-ui-visual
         run: npm run test:visual --prefix tests/web
       - name: Upload screenshots, synthetic traces and machine-readable results
         if: ${{ !cancelled() }}

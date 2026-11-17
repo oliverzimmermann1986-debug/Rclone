@@ -151,9 +151,12 @@ async function navigate(page, id, label) {
 }
 
 async function dialogCase(page) {
-  const opener = page.locator('button[\\@click="openQuick()"]');
+  const dashboard = page.locator('main section[x-show="page===\'dashboard\'"]');
+  const opener = dashboard.locator('button[\\@click="openQuick()"]');
   if (!(await opener.isVisible())) {
-    await page.locator('.console-action-menu > summary').click();
+    const menu = opener.locator('xpath=ancestor::details[1]');
+    assert.equal(await menu.count(), 1, 'Hidden Quick-Sync action must have one owning disclosure menu.');
+    await menu.locator(':scope > summary').click();
   }
   await opener.click();
   const dialog = page.getByRole('dialog', { name: 'Quick-Sync', exact: true });

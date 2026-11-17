@@ -70,6 +70,8 @@
   --space-8: 32px;
 }
 
+html[data-theme="light"] { color-scheme: light; }
+
 html[data-theme="dark"] {
   color-scheme: dark;
   --bg:            #121d17;
