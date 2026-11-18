@@ -12,6 +12,40 @@ struct DashboardView: View {
 
     var body: some View {
         List {
+            if let lockdown = model.lockdownStatus, lockdown.active {
+                Section {
+                    NavigationLink {
+                        LockdownControlView()
+                    } label: {
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: "hand.raised.fill")
+                                .font(.title3)
+                                .foregroundStyle(.white)
+                                .frame(width: 36, height: 36)
+                                .background(.red, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .accessibilityHidden(true)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("NOTFALL-LOCKDOWN AKTIV")
+                                    .font(.subheadline.weight(.bold))
+                                    .foregroundStyle(.red)
+                                Text(
+                                    lockdown.reason?.isEmpty == false
+                                        ? (lockdown.reason ?? "")
+                                        : "Alle Sicherungen und Zeitpläne sind gesperrt."
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                Text("Tippen, um den Lockdown zu prüfen oder aufzuheben.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .listRowBackground(Color.red.opacity(0.12))
+                    .accessibilityLabel("Notfall-Lockdown aktiv. \(lockdown.reason ?? "Alle Sicherungen und Zeitpläne sind gesperrt.") Tippen zum Verwalten.")
+                }
+            }
             if let overview = model.overview {
                 Section {
                     statusSummary(overview)
@@ -179,10 +213,11 @@ struct DashboardView: View {
         }
         .refreshable { await model.refresh() }
         .confirmationDialog("Alle Jobs jetzt starten?", isPresented: $confirmRunAll, titleVisibility: .visible) {
+            Button("Probelauf starten") { Task { _ = await model.runAllJobDefinitions(dryRun: true) } }
             Button("Produktive Sicherung starten", role: .destructive) {
                 Task { if await model.runAllJobDefinitions() { successFeedback += 1 } }
             }
-            Button("Probelauf starten") { Task { _ = await model.runAllJobDefinitions(dryRun: true) } }
+
             Button("Abbrechen", role: .cancel) {}
         } message: {
             Text("Produktive Sync- und Bisync-Läufe können Zieldaten löschen. Prüfe zuerst einen Plan oder Probelauf.")
@@ -522,7 +557,7 @@ private struct IncidentCenterRow: View {
                 .foregroundStyle(hasErrors ? .red : .orange)
                 .frame(width: 30)
             VStack(alignment: .leading, spacing: 3) {
-                Text("Incident Center")
+                Text("Vorfallszentrale")
                     .font(.body.weight(.medium))
                 Text(summary)
                     .font(.caption)

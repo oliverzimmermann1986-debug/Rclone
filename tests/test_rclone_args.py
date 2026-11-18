@@ -73,3 +73,27 @@ def test_command_text_redacts_flag_and_url_credentials():
     assert "--token ***REDACTED***" in redacted
     assert "-pass ***REDACTED***" in redacted
     assert "https://user:***REDACTED***@example.test/a" in redacted
+
+
+@pytest.mark.parametrize(
+    "args",
+    (
+        ["--sftp-ssh", "/tmp/evil"],
+        ["--sftp-ssh=/tmp/evil"],
+        ["-o", "sftp.ssh=/tmp/evil"],
+        ["-o=sftp.ssh=/tmp/evil"],
+        ["-odrive.token=/tmp/evil"],
+        ["--option", "sftp.ssh=/tmp/evil"],
+        ["--option=sftp.ssh=/tmp/evil"],
+        ["--password-command", "/tmp/evil"],
+        ["--password-command=/tmp/evil"],
+        ["--token-command=/tmp/evil"],
+        ["--client-cert-command", "/tmp/evil"],
+    ),
+)
+@pytest.mark.parametrize("allow_unsafe", (False, True))
+def test_sec02_cli_execution_and_command_flags_are_unconditionally_blocked(
+    args, allow_unsafe
+):
+    with pytest.raises(UnsafeRcloneArgument, match="externer Programme"):
+        validate_rclone_args(args, allow_unsafe=allow_unsafe)

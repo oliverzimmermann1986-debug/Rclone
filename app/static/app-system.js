@@ -143,6 +143,55 @@ export const systemMethods = {
     }
   },
 
+  async verifyPairCanary(pairName) {
+    if (!pairName || this.canaryVerify?.[pairName]?.loading) return;
+    this.canaryVerify = { ...(this.canaryVerify || {}), [pairName]: { loading: true, error: '' } };
+    const result = await this.api('POST', `/api/security/canary/${encodeURIComponent(pairName)}/verify`, {}, { silent: true, captureError: true });
+    if (!result || result.__error) {
+      const error = this.errorText(result);
+      this.canaryVerify = { ...(this.canaryVerify || {}), [pairName]: { loading: false, ok: false, error } };
+      this.showToast(error, 'err');
+      return;
+    }
+    this.canaryVerify = {
+      ...(this.canaryVerify || {}),
+      [pairName]: {
+        loading: false,
+        ok: Boolean(result.ok),
+        canary: result.canary || null,
+        extension_scan: result.extension_scan || null,
+        checkedAt: Date.now() / 1000,
+        error: '',
+      },
+    };
+    if (Array.isArray(this.ransomwareStatus.data?.pairs)) {
+      this.ransomwareStatus.data.pairs = this.ransomwareStatus.data.pairs.map((item) =>
+        item.name === pairName
+          ? { ...item, canary: result.canary || item.canary, extension_scan: result.extension_scan || item.extension_scan }
+          : item,
+      );
+    }
+    const suspectCount = Number(result.extension_scan?.suspect_count ?? (result.extension_scan?.suspect_files || []).length ?? 0);
+    if (result.ok) {
+      this.showToast(`Canary-Prüfung für „${pairName}“ unauffällig`);
+    } else {
+      this.showToast(`Warnung bei „${pairName}“: ${result.canary?.reason || (suspectCount ? `${suspectCount} verdächtige Datei(en)` : 'Prüfung fehlgeschlagen')}`, 'err');
+    }
+  },
+
+  canaryVerifySummary(pairName) {
+    const state = this.canaryVerify?.[pairName];
+    if (!state || state.loading) return '';
+    if (state.error) return state.error;
+    const canaryText = !state.canary?.configured
+      ? 'Keine Canary-Datei'
+      : (state.canary.ok ? 'Canary OK' : `Canary: ${state.canary.reason || 'verändert'}`);
+    const extBlocked = Boolean(state.extension_scan?.blocked);
+    const extCount = Number(state.extension_scan?.suspect_count ?? (state.extension_scan?.suspect_files || []).length ?? 0);
+    const extText = extBlocked || extCount > 0 ? `${extCount || '!'} verdächtige Endung(en)` : 'Endungen unauffällig';
+    return `${canaryText} · ${extText}`;
+  },
+
   async loadBitrot() {
     this.bitrot.loading = true;
     const result = await this.api('GET', '/api/jobs/bitrot-scrub/status', undefined, { silent: true, requestKey: 'bitrot-status' });
@@ -423,7 +472,8 @@ export const systemMethods = {
       config_snapshot_restored: 'Snapshot wiederhergestellt', backup_requested: 'Backup angefordert',
       check_requested: 'Check angefordert', quicksync_requested: 'Quick-Sync angefordert',
       directory_created: 'Ordner angelegt', bootstrap_bundle_exported: 'Bootstrap-Paket exportiert',
-      canary_initialized: 'Canary-Datei angelegt', webauthn_reauth: 'Passkey-Bestätigung',
+      canary_initialized: 'Canary-Datei angelegt', webauthn_reauth: 'Passkey-Bestätigung', webauthn_stepup_reauth: 'Passkey-Bestätigung',
+      recovery_handover_exported: 'Notfallpaket exportiert', recovery_handover_imported: 'Notfallpaket importiert',
       webauthn_registered: 'Passkey registriert', webauthn_removed: 'Passkey entfernt',
       lockdown_triggered: 'Lockdown ausgelöst', lockdown_released: 'Lockdown aufgehoben',
       remote_created: 'Remote eingerichtet', remote_reconnected: 'Remote-Anmeldung erneuert',

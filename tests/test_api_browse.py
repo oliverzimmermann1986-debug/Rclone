@@ -214,7 +214,7 @@ def test_rclone_directories_ignores_stderr_notices(monkeypatch):
 
         def __init__(self, cmd, **kwargs):
             assert kwargs.get("stderr") == subprocess.PIPE
-            assert kwargs.get("env", {}).get("RCLONE_LOG_LEVEL") == "ERROR"
+            assert kwargs.get("env", {}).get("RCLONE_LOG_LEVEL") == "NOTICE"
             self.stdout = io.StringIO("Schoenmackers-main/\nBackups/\n")
             self.stderr = io.StringIO(
                 "2026/11/12 16:05:28 NOTICE: gdrive: shared Google Drive client_id\n"

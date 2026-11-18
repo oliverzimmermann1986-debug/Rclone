@@ -993,7 +993,7 @@ def _remote_reachable(
     if _is_remote(path):
         try:
             env = rclone_subprocess_env()
-            env["RCLONE_LOG_LEVEL"] = "ERROR"
+            env["RCLONE_LOG_LEVEL"] = "NOTICE"
             result = subprocess.run(
                 [
                     "rclone",
@@ -1019,7 +1019,7 @@ def _remote_reachable(
                 return True, "ok"
             error = (result.stderr or result.stdout or "").strip()[:500]
             lowered_error = error.lower()
-            missing = any(
+            missing = result.returncode in {3, 4} or any(
                 token in lowered_error
                 for token in (
                     "directory not found",
@@ -1029,6 +1029,11 @@ def _remote_reachable(
             )
             if missing and allow_missing:
                 return True, "Ziel wird beim ersten Sync angelegt"
+            if missing and not allow_missing and not error:
+                return (
+                    False,
+                    f"Remote-Pfad nicht gefunden (rclone exit {result.returncode})",
+                )
             if (
                 "ratelimitexceeded" in lowered_error
                 or "rate_limit_exceeded" in lowered_error
@@ -1038,6 +1043,35 @@ def _remote_reachable(
                     "Google Drive API-Limit erreicht (geteilte rclone client_id "
                     "überlastet – bitte erneut versuchen oder eigene Google OAuth "
                     "Client-ID hinterlegen)",
+                )
+            if not error:
+                from ..rclone_args import inspect_rclone_config
+
+                remote_prefix = path.split(":", 1)[0].strip()
+                try:
+                    cfg_report = inspect_rclone_config()
+                except Exception:
+                    cfg_report = {}
+                for token_entry in cfg_report.get("expiring_tokens") or []:
+                    if str(
+                        token_entry.get("remote") or ""
+                    ).casefold() == remote_prefix.casefold() and (
+                        token_entry.get("needs_attention")
+                        or (
+                            token_entry.get("expired")
+                            and not token_entry.get("has_refresh_token")
+                        )
+                    ):
+                        return (
+                            False,
+                            f"OAuth-Anmeldung für Remote '{remote_prefix}' abgelaufen "
+                            f"oder ungültig (rclone exit={result.returncode}) – "
+                            "bitte Remote neu verbinden",
+                        )
+                return (
+                    False,
+                    f"rclone lsjson --stat exit={result.returncode} "
+                    "(keine Detailmeldung von rclone)",
                 )
             return False, f"rclone lsjson --stat exit={result.returncode}: {error}"
         except subprocess.TimeoutExpired:
@@ -1803,16 +1837,26 @@ def _sync_mounted_pair(
 
         pre_hook_name = str(pair.get("pre_hook") or "").strip()
         if pre_hook_name:
-            from ..hooks import run_hook
+            from ..hooks import HookSecurityError, run_hook
 
-            hooks_dir = (config_snapshot.get("paths") or {}).get("hooks_dir")
-            hook_res = run_hook(
-                pre_hook_name,
-                phase="pre",
-                pair=pair,
-                dry_run=dry_run,
-                hooks_dir=hooks_dir,
-            )
+            try:
+                hook_res = run_hook(
+                    pre_hook_name,
+                    phase="pre",
+                    pair_name=name,
+                    direction=direction,
+                    mode=mode,
+                    dry_run=dry_run,
+                    status="",
+                    config_snapshot=config_snapshot,
+                )
+            except (HookSecurityError, ValueError) as exc:
+                hook_res = {
+                    "ok": False,
+                    "hook": pre_hook_name,
+                    "phase": "pre",
+                    "error": str(exc),
+                }
             summary["pre_hook"] = hook_res
             if not hook_res.get("ok"):
                 message = (
@@ -1904,17 +1948,26 @@ def _sync_mounted_pair(
                 logger.exception("[%s] Transfer-Trend-Auswertung fehlgeschlagen", name)
         post_hook_name = str(pair.get("post_hook") or "").strip()
         if post_hook_name and not summary["cancelled"]:
-            from ..hooks import run_hook
+            from ..hooks import HookSecurityError, run_hook
 
-            hooks_dir = (config_snapshot.get("paths") or {}).get("hooks_dir")
-            post_res = run_hook(
-                post_hook_name,
-                phase="post",
-                pair=pair,
-                dry_run=dry_run,
-                job_status="ok" if summary["ok"] else "error",
-                hooks_dir=hooks_dir,
-            )
+            try:
+                post_res = run_hook(
+                    post_hook_name,
+                    phase="post",
+                    pair_name=name,
+                    direction=direction,
+                    mode=mode,
+                    dry_run=dry_run,
+                    status="ok" if rc == 0 else "error",
+                    config_snapshot=config_snapshot,
+                )
+            except (HookSecurityError, ValueError) as exc:
+                post_res = {
+                    "ok": False,
+                    "hook": post_hook_name,
+                    "phase": "post",
+                    "error": str(exc),
+                }
             summary["post_hook"] = post_res
             if not post_res.get("ok"):
                 warn_msg = (

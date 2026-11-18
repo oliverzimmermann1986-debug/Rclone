@@ -10,6 +10,7 @@ private enum RefreshPayload {
     case jobs(Result<JobSearchResponse, Error>)
     case progress(Result<BackupProgress, Error>)
     case pbs(Result<PBSStatus, Error>)
+    case lockdown(Result<LockdownStatusResponse, Error>)
 }
 
 enum ContentLoadState: Equatable {
@@ -89,6 +90,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var doctor: DoctorResponse?
     @Published private(set) var progress: BackupProgress?
     @Published private(set) var pbs: PBSStatus?
+    @Published var lockdownStatus: LockdownStatusResponse?
     @Published private(set) var overviewState: ContentLoadState = .idle
     @Published private(set) var storageState: ContentLoadState = .idle
     @Published private(set) var configState: ContentLoadState = .idle
@@ -399,6 +401,7 @@ final class AppModel: ObservableObject {
             group.addTask { .jobs(await Self.capture { try await refreshClient.getJobs(limit: 50) }) }
             group.addTask { .progress(await Self.capture { try await refreshClient.getProgress() }) }
             group.addTask { .pbs(await Self.capture { try await refreshClient.getPBSStatus() }) }
+            group.addTask { .lockdown(await Self.capture { try await refreshClient.getLockdownStatus() }) }
 
             for await payload in group {
                 guard isCurrent(session: session, refresh: refresh) else { continue }
@@ -459,6 +462,12 @@ final class AppModel: ObservableObject {
                         acceptProgress(value)
                     case let .failure(error):
                         recordProgressFailure()
+                        handle(error, firstError: &firstError)
+                    }
+                case let .lockdown(result):
+                    if case let .success(value) = result {
+                        lockdownStatus = value
+                    } else if case let .failure(error) = result, error as? APIError == .unauthenticated {
                         handle(error, firstError: &firstError)
                     }
                 case let .pbs(result):
@@ -1767,6 +1776,7 @@ final class AppModel: ObservableObject {
         configSaveIssue = nil
         configWarnings = []
         pbs = nil
+        lockdownStatus = nil
         overviewState = .idle
         storageState = .idle
         configState = .idle

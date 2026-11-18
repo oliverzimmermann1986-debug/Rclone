@@ -16,7 +16,12 @@ from ..crypt_remote import (
     validate_base_path,
 )
 from ..db import get_db
-from ..rclone_args import rclone_subprocess_env
+from ..rclone_args import (
+    DANGEROUS_RCLONE_REMOTE_TYPES,
+    UnsafeRcloneConfigError,
+    assert_safe_rclone_config,
+    rclone_subprocess_env,
+)
 from ..recovery_points import RecoveryPointError, _remote_listing
 from ..security import require_csrf
 from .api_remotes import _lock, _rc
@@ -49,20 +54,30 @@ def _check_name(name: str) -> None:
         )
 
 
+def _require_safe_rclone_config() -> None:
+    try:
+        assert_safe_rclone_config()
+    except UnsafeRcloneConfigError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("/candidates")
 def candidates() -> dict:
+    _require_safe_rclone_config()
     remotes = _rc("config/dump")
     return {
         "candidates": [
             {"name": name, "type": conf.get("type", "")}
             for name, conf in sorted(remotes.items())
-            if conf.get("type") != "crypt"
+            if str(conf.get("type") or "").strip().lower()
+            not in {"crypt", *DANGEROUS_RCLONE_REMOTE_TYPES}
         ]
     }
 
 
 @router.post("")
 def create(payload: CreateCrypt) -> dict:
+    _require_safe_rclone_config()
     _check_name(payload.name)
     if payload.filename_encryption not in FILENAME_MODES:
         raise HTTPException(400, "Unbekannte Art der Dateinamen-Verschlüsselung")
@@ -133,6 +148,7 @@ def create(payload: CreateCrypt) -> dict:
 
 @router.post("/{name}/verify")
 def verify(name: str) -> dict:
+    _require_safe_rclone_config()
     _check_name(name)
     try:
         code = subprocess.run(

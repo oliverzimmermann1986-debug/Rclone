@@ -158,6 +158,39 @@ final class VaultQueueTests: XCTestCase {
         XCTAssertEqual(URLComponents(url: try XCTUnwrap(chunk.url), resolvingAgainstBaseURL: false)?.query, "offset=4")
         XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
     }
+
+    func testSharedInboxEnforcesByteCapAndAvailableDiskReserveBeforeCopy() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let small = folder.appendingPathComponent("small.bin")
+        let oversized = folder.appendingPathComponent("oversized.bin")
+        try Data(repeating: 0x41, count: 64).write(to: small)
+        try Data(repeating: 0x42, count: 60).write(to: oversized)
+
+        let cappedInbox = try VaultInbox(
+            root: folder.appendingPathComponent("capped"),
+            maxInboxBytes: 100,
+            minFreeReserveBytes: 0,
+            availableBytesProvider: { _ in 10_000 }
+        )
+        _ = try cappedInbox.stage(small, filename: "small.bin", sourceType: "file")
+        XCTAssertThrowsError(try cappedInbox.stage(oversized, filename: "oversized.bin", sourceType: "file")) { error in
+            XCTAssertEqual(error as? VaultInboxError, .inboxQuotaExceeded(limitBytes: 100))
+        }
+        XCTAssertEqual(try cappedInbox.items().count, 1)
+
+        let lowDiskInbox = try VaultInbox(
+            root: folder.appendingPathComponent("low-disk"),
+            maxInboxBytes: 10_000,
+            minFreeReserveBytes: 500,
+            availableBytesProvider: { _ in 200 }
+        )
+        XCTAssertThrowsError(try lowDiskInbox.stage(small, filename: "small.bin", sourceType: "file")) { error in
+            XCTAssertEqual(error as? VaultInboxError, .insufficientDiskSpace)
+        }
+        XCTAssertTrue(try lowDiskInbox.items().isEmpty)
+    }
 }
 
 private final class VaultResumeURLProtocol: URLProtocol {

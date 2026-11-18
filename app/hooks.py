@@ -52,7 +52,9 @@ def hooks_dir_from_config(config_snapshot: Mapping[str, Any] | None = None) -> P
     return Path(raw or DEFAULT_HOOKS_DIR)
 
 
-def inspect_hook_file(script_path: Path) -> dict[str, Any]:
+def inspect_hook_file(
+    script_path: Path, *, allow_current_uid: bool = False
+) -> dict[str, Any]:
     """Prüft ein einzelnes Hook-Skript auf Symlink-Freiheit, Eigentümer und Rechte."""
     name = script_path.name
     if not HOOK_NAME_RE.fullmatch(name):
@@ -91,15 +93,20 @@ def inspect_hook_file(script_path: Path) -> dict[str, Any]:
                 "reason": "Skript darf nicht gruppen- oder weltbeschreibbar sein",
             }
         allowed_uids = {0}
-        getuid = getattr(os, "getuid", None)
-        if callable(getuid):
-            allowed_uids.add(int(getuid()))
+        if allow_current_uid:
+            getuid = getattr(os, "getuid", None)
+            if callable(getuid):
+                allowed_uids.add(int(getuid()))
         if int(st.st_uid) not in allowed_uids:
             return {
                 "name": name,
                 "ok": False,
                 "mode": f"0{mode:03o}",
-                "reason": "Skript muss root oder dem Dienstnutzer gehören",
+                "reason": (
+                    "Skript muss root oder dem Dienstnutzer gehören"
+                    if allow_current_uid
+                    else "Skript muss root gehören"
+                ),
             }
         if not (mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
             return {
@@ -119,6 +126,8 @@ def inspect_hook_file(script_path: Path) -> dict[str, Any]:
 
 def list_available_hooks(
     config_snapshot: Mapping[str, Any] | None = None,
+    *,
+    allow_current_uid: bool = False,
 ) -> dict[str, Any]:
     """Listet alle im Hook-Verzeichnis gefundenen Skripte samt Sicherheitsstatus."""
     directory = hooks_dir_from_config(config_snapshot)
@@ -140,7 +149,7 @@ def list_available_hooks(
     for entry in entries:
         if entry.name.startswith("."):
             continue
-        hooks.append(inspect_hook_file(entry))
+        hooks.append(inspect_hook_file(entry, allow_current_uid=allow_current_uid))
     return {
         "directory": str(directory),
         "exists": True,
@@ -159,6 +168,7 @@ def run_hook(
     status: str = "",
     config_snapshot: Mapping[str, Any] | None = None,
     timeout_seconds: int = DEFAULT_HOOK_TIMEOUT_SECONDS,
+    allow_current_uid: bool = False,
 ) -> dict[str, Any]:
     """Führt einen allowlist-geprüften Hook ohne Shell mit bereinigter Umgebung aus."""
     clean_name = validate_hook_name(hook_name)
@@ -176,11 +186,20 @@ def run_hook(
                 raise HookSecurityError(
                     f"Hook-Verzeichnis darf nicht gruppen-/weltbeschreibbar sein: {directory}"
                 )
+            allowed_dir_uids = {0}
+            if allow_current_uid:
+                getuid = getattr(os, "getuid", None)
+                if callable(getuid):
+                    allowed_dir_uids.add(int(getuid()))
+            if int(dir_st.st_uid) not in allowed_dir_uids:
+                raise HookSecurityError(
+                    f"Hook-Verzeichnis muss root gehören: {directory}"
+                )
         except OSError as exc:
             raise HookSecurityError(f"Hook-Verzeichnis nicht prüfbar: {exc}") from exc
 
     script_path = directory / clean_name
-    inspection = inspect_hook_file(script_path)
+    inspection = inspect_hook_file(script_path, allow_current_uid=allow_current_uid)
     if not inspection.get("ok"):
         raise HookSecurityError(
             f"Hook {clean_name!r} abgelehnt: {inspection.get('reason')}"

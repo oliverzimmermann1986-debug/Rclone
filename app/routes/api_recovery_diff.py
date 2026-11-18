@@ -14,7 +14,7 @@ from ..auth import require_auth
 from ..config_store import get_config
 from ..db import get_db
 from ..jobs.selective_restore import list_staging
-from ..recovery_points import _is_remote
+from ..recovery_points import _is_link_stat, _is_remote
 from ..security import require_csrf
 from ..text_diff import SAMPLE_BYTES, diff_rows, is_probably_text
 from .api_recovery import _find_pair, _relative_path
@@ -55,27 +55,62 @@ def _read_text(real: str) -> tuple[str, dict[str, Any]]:
 def _read_text_at(root: str, relative: str) -> tuple[str, dict[str, Any]]:
     """Keep every directory and the file anchored during the bounded read."""
     base = Path(root).expanduser().absolute()
+    anchored = (
+        os.open in os.supports_dir_fd
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+    )
     try:
-        with ExitStack() as stack:
-            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-            directory = os.open(base.anchor, flags)
-            stack.callback(os.close, directory)
-            parts = (*base.parts[1:], *Path(relative).parts)
-            for part in parts[:-1]:
-                directory = os.open(part, flags, dir_fd=directory)
+        if anchored:
+            with ExitStack() as stack:
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                directory = os.open(base.anchor, flags)
                 stack.callback(os.close, directory)
-            descriptor = os.open(
-                parts[-1],
-                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
-                dir_fd=directory,
-            )
-            stream = stack.enter_context(os.fdopen(descriptor, "rb"))
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode):
+                parts = (*base.parts[1:], *Path(relative).parts)
+                for part in parts[:-1]:
+                    directory = os.open(part, flags, dir_fd=directory)
+                    stack.callback(os.close, directory)
+                descriptor = os.open(
+                    parts[-1],
+                    os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                    dir_fd=directory,
+                )
+                stream = stack.enter_context(os.fdopen(descriptor, "rb"))
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise HTTPException(
+                        400, "Nur reguläre Dateien können verglichen werden"
+                    )
+                data = stream.read(MAX_FILE_BYTES + 1)
+        else:
+            current = Path(base.anchor)
+            st_info: os.stat_result | None = None
+            for part in (None, *base.parts[1:], *Path(relative).parts):
+                if part is not None:
+                    current = current / part
+                st_info = current.lstat()
+                if _is_link_stat(st_info):
+                    raise HTTPException(
+                        400,
+                        "Dateipfad kann nicht sicher für den Vergleich geöffnet werden",
+                    )
+            real_root = os.path.realpath(base)
+            real_target = os.path.realpath(current)
+            if not Path(real_target).is_relative_to(real_root):
+                raise HTTPException(
+                    400,
+                    "Dateipfad kann nicht sicher für den Vergleich geöffnet werden",
+                )
+            assert st_info is not None
+            if not stat.S_ISREG(st_info.st_mode):
                 raise HTTPException(
                     400, "Nur reguläre Dateien können verglichen werden"
                 )
-            data = stream.read(MAX_FILE_BYTES + 1)
+            with open(real_target, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                data = stream.read(MAX_FILE_BYTES + 1)
+    except HTTPException:
+        raise
     except FileNotFoundError:
         raise
     except (OSError, AttributeError, NotImplementedError) as exc:

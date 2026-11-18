@@ -24,7 +24,11 @@ from ..db import get_db
 from ..jobs.rclone_sync import _filter_args, _is_remote
 from ..jobs.restore_test import PAIR_PREFIX as RESTORE_PAIR_PREFIX
 from ..jobs.scheduler import rclone_history_key
-from ..rclone_args import rclone_subprocess_env
+from ..rclone_args import (
+    UnsafeRcloneConfigError,
+    assert_safe_rclone_config,
+    rclone_subprocess_env,
+)
 from ..restore_evidence import evaluate_restore_evidence, restore_history_key
 from ..security import require_csrf
 
@@ -192,11 +196,22 @@ def _rclone_size_error(stderr: str, stdout: str) -> str:
     return message if len(message) <= 300 else "…" + message[-299:]
 
 
+def _require_safe_rclone_config() -> None:
+    try:
+        assert_safe_rclone_config()
+    except UnsafeRcloneConfigError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 def _rclone_size(
     remote: str, timeout: float = 45, filter_args: Sequence[str] = ()
 ) -> dict[str, Any]:
     if not remote:
         return {"path": remote, "error": "Pfad fehlt"}
+    try:
+        assert_safe_rclone_config()
+    except UnsafeRcloneConfigError as exc:
+        return {"path": remote, "error": str(exc)}
     cache_dir = os.getenv("RCLONE_CACHE_DIR", "/opt/rclone-sync/data/.rclone-cache")
     try:
         result = subprocess.run(
@@ -560,6 +575,10 @@ def _rclone_composition(
     """Aggregiert Typen lokal im Serverprozess, ohne Dateinamen offenzulegen."""
     if not path:
         return {"path": path, "error": "Pfad fehlt"}
+    try:
+        assert_safe_rclone_config()
+    except UnsafeRcloneConfigError as exc:
+        return {"path": path, "error": str(exc)}
     cache_dir = os.getenv("RCLONE_CACHE_DIR", "/opt/rclone-sync/data/.rclone-cache")
     command = [
         "rclone",
@@ -830,6 +849,8 @@ def overview(
 
     # Größen für Quelle UND Ziel jedes Pairs sind teuer (rclone size traversiert
     # beide Endpunkte). Daher nur auf ausdrückliche Anforderung und parallelisiert.
+    if include_remote:
+        _require_safe_rclone_config()
     if include_remote and output:
         deadline = time.monotonic() + _SIZE_MEASUREMENT_DEADLINE_SECONDS
         tasks: list[tuple[int, str, dict[str, Any]]] = []
@@ -885,6 +906,7 @@ def composition(
     refresh: bool = False,
 ) -> dict[str, Any]:
     """Dateityp-Verteilung eines Datenweg-Endpunkts für die Detailansicht."""
+    _require_safe_rclone_config()
     cfg = get_config()
     selected = _find_pair(cfg, pair)
     source, target = _resolve_endpoints(selected)
@@ -909,6 +931,7 @@ def pair_size(
     refresh: bool = False,
 ) -> dict[str, Any]:
     """Inkrementelle Größenmessung für genau einen ausgewählten Datenweg."""
+    _require_safe_rclone_config()
     cfg = get_config()
     selected = _find_pair(cfg, pair)
     source, target = _resolve_endpoints(selected)

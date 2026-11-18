@@ -9,7 +9,11 @@ from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .rclone_args import rclone_subprocess_env
+from .rclone_args import (
+    UnsafeRcloneConfigError,
+    assert_safe_rclone_config,
+    rclone_subprocess_env,
+)
 from .recovery_points import (
     MAX_BROWSE_ITEMS,
     REMOTE_TIMEOUT_SECONDS,
@@ -25,6 +29,13 @@ from .recovery_points import (
 from .text_diff import SAMPLE_BYTES, diff_rows, is_probably_text
 
 MAX_FILE_BYTES = 1024 * 1024
+
+
+def _ensure_safe_rclone_config() -> None:
+    try:
+        assert_safe_rclone_config()
+    except UnsafeRcloneConfigError as exc:
+        raise RecoveryPointError(f"Unsichere rclone-Konfiguration: {exc}") from exc
 
 
 def _point_side(point_id: str) -> str:
@@ -53,6 +64,10 @@ def browse_virtual_point(
     point_id: str = "current",
     relative_path: str = "",
 ) -> dict[str, Any]:
+    if _is_remote(str(pair.get("remote") or "")) or _is_remote(
+        str(pair.get("local") or "")
+    ):
+        _ensure_safe_rclone_config()
     relative = _safe_relative(relative_path)
     points = list_points(config, pair)
     by_id = {str(p["id"]): p for p in points}
@@ -185,6 +200,10 @@ def file_version_history(
     *,
     max_points: int = 30,
 ) -> dict[str, Any]:
+    if _is_remote(str(pair.get("remote") or "")) or _is_remote(
+        str(pair.get("local") or "")
+    ):
+        _ensure_safe_rclone_config()
     relative = _safe_relative(relative_path)
     if not relative:
         raise RecoveryPointError("Dateipfad fehlt")
@@ -235,6 +254,7 @@ def _read_point_text(
     run: Callable[..., Any] = subprocess.run,
 ) -> tuple[str, dict[str, Any]]:
     if _is_remote(root):
+        _ensure_safe_rclone_config()
         target = _join(root, rel)
         try:
             completed = run(

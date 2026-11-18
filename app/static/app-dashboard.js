@@ -12,6 +12,7 @@ export const dashboardMethods = {
   openLockdown() {
     this.lockdownDialog = { show: true, reason: '', password: '', error: '', submitting: false };
     this.openDialog('lockdownDialog');
+    if (!this.webauthnStatus?.loaded) this.loadWebAuthnStatus?.();
   },
 
   closeLockdown() {
@@ -20,13 +21,14 @@ export const dashboardMethods = {
     this.restoreDialogFocus();
   },
 
-  async triggerLockdown() {
+  async triggerLockdown(reauthToken = '') {
     const dialog = this.lockdownDialog;
-    if (dialog.submitting || !dialog.password) return;
+    const secret = String(reauthToken || dialog.password || '');
+    if (dialog.submitting || !secret) return;
     dialog.submitting = true;
     dialog.error = '';
     // Der Server beendet Läufe und remountet Mounts; das kann ~30 s dauern.
-    const result = await this.api('POST', '/api/lockdown', { password: dialog.password, reason: dialog.reason.trim() }, { silent: true, captureError: true, timeoutMs: 120000 });
+    const result = await this.api('POST', '/api/lockdown', { password: secret, reason: dialog.reason.trim() }, { silent: true, captureError: true, timeoutMs: 120000 });
     dialog.password = '';
     dialog.submitting = false;
     if (!result) return;
@@ -34,6 +36,19 @@ export const dashboardMethods = {
     this.lockdownDialog.show = false;
     this.showToast('Lockdown ausgelöst · alle Sitzungen wurden abgemeldet', 'warn');
     setTimeout(() => { window.location = '/login'; }, 1500);
+  },
+
+  async triggerLockdownWithWebAuthn() {
+    const dialog = this.lockdownDialog;
+    if (dialog.submitting) return;
+    dialog.error = '';
+    const outcome = await this.obtainWebAuthnReauthToken?.();
+    if (outcome?.error) {
+      dialog.error = outcome.error;
+      return;
+    }
+    if (!outcome?.token) return;
+    await this.triggerLockdown(outcome.token);
   },
 
   async releaseLockdown() {

@@ -28,6 +28,10 @@ export const pairsMethods = {
     pair.sentinel_file ||= '';
     if (pair.sqlite_backup === undefined) pair.sqlite_backup = false;
     pair.canary_file ||= '';
+    if (pair.recovery_snapshots === undefined) pair.recovery_snapshots = false;
+    pair.failure_domain ??= pair.location_id || '';
+    pair.airgap_device ||= '';
+    if (pair.zfs_snapshot === undefined || pair.direction !== 'push') pair.zfs_snapshot = false;
     pair.backup_dir ||= '';
     pair.backup_dir1 ||= '';
     pair.backup_dir2 ||= '';
@@ -103,8 +107,23 @@ export const pairsMethods = {
   syncPairDirection(pair) {
     if (pair.two_way === 'true') pair.two_way = true;
     if (pair.two_way === 'false') pair.two_way = false;
-    if (pair.two_way) pair.mode = 'bisync';
-    else if (pair.mode === 'bisync') pair.mode = 'copy';
+
+    if (pair.two_way) {
+      pair.direction = 'bisync';
+      pair.mode = 'bisync';
+    } else {
+      if (pair.mode === 'bisync') pair.mode = 'copy';
+      if (pair.source !== undefined || pair.target !== undefined) {
+        const src = String(pair.source || '').trim();
+        const dst = String(pair.target || '').trim();
+        if (src || dst) pair.direction = (dst.startsWith('/') && !src.startsWith('/')) ? 'pull' : 'push';
+        else if (pair.direction === 'bisync' || !pair.direction) pair.direction = 'push';
+      } else if (!pair.direction) {
+        pair.direction = 'push';
+      }
+    }
+    if (pair.direction !== 'push') pair.zfs_snapshot = false;
+    if (pair.direction === 'pull') pair.sqlite_backup = false;
     this.markConfigDirty();
   },
   convertPairToPbs(idx) {
@@ -144,6 +163,7 @@ export const pairsMethods = {
       transfers: '', checkers: '', max_delete: 100, allow_delete: false,
       min_remote_files: 0, allow_empty_remote_target: false, min_free_gb: 0, max_success_age_hours: 48, require_mountpoint: false,
       mountpoint: '', sentinel_file: '',
+      recovery_snapshots: false, failure_domain: '', airgap_device: '', zfs_snapshot: false,
       backup_dir: '', backup_dir1: '', backup_dir2: '',
       pre_hook: '', post_hook: '',
     };
@@ -267,6 +287,8 @@ export const pairsMethods = {
     if (destructive && pair.enabled && !pair.allow_delete) issues.push('Löschen nicht freigegeben');
     if (destructive && pair.enabled && (pair.max_delete === '' || pair.max_delete === null || pair.max_delete === undefined || Number(pair.max_delete) < 0)) issues.push('Löschlimit fehlt');
     if (pair.require_mountpoint && !String(pair.mountpoint || '').trim()) issues.push('Mountpoint fehlt');
+    if (pair.airgap_device && !String(pair.airgap_device).trim().startsWith('/dev/')) issues.push('Air-Gap-Gerät muss mit /dev/ beginnen');
+    if (pair.zfs_snapshot && pair.direction !== 'push') issues.push('ZFS-Snapshot nur bei Push möglich');
     const tags = pair.tags || [];
     if (tags.length > 10 || tags.some((tag) => !/^[a-z0-9][a-z0-9_-]{0,23}$/.test(tag))) issues.push('Tags ungültig (a–z, 0–9, _ und -, höchstens 10)');
     return issues;
@@ -772,12 +794,14 @@ export const pairsMethods = {
   },
 
   pickerCanSwitchKind() {
-    return this.picker.mode?.startsWith('target-') || ['remote', 'remote-local'].includes(this.picker.mode);
+    return this.picker.mode?.startsWith('target-') || this.picker.mode?.startsWith('wizard-') || ['remote', 'remote-local'].includes(this.picker.mode);
   },
 
   switchPickerKind(kind) {
     if (!this.pickerCanSwitchKind() || !['local', 'remote'].includes(kind) || this.picker.kind === kind) return;
-    if (this.picker.mode?.startsWith('target-')) this.picker.mode = `target-${kind}`;
+    if (this.picker.mode?.startsWith('wizard-source-')) this.picker.mode = `wizard-source-${kind}`;
+    else if (this.picker.mode?.startsWith('wizard-target-')) this.picker.mode = `wizard-target-${kind}`;
+    else if (this.picker.mode?.startsWith('target-')) this.picker.mode = `target-${kind}`;
     else this.picker.mode = kind === 'remote' ? 'remote' : 'remote-local';
     this.picker.kind = kind;
     this.picker.search = '';
@@ -905,6 +929,7 @@ export const pairsMethods = {
       transfers: '', checkers: '', max_delete: draft.max_delete, allow_delete: false,
       min_remote_files: 0, allow_empty_remote_target: false, min_free_gb: 0,
       max_success_age_hours: 48, require_mountpoint: false, mountpoint: '', sentinel_file: '',
+      recovery_snapshots: false, failure_domain: '', airgap_device: '', zfs_snapshot: false,
       backup_dir: '', backup_dir1: '', backup_dir2: '',
     };
     this.config.backup.pairs.push(pair);
@@ -935,7 +960,11 @@ export const pairsMethods = {
       this.showToast(`Pfad hinzugefügt: ${path}`);
       return;
     }
-    if (idx === -1) {
+    if (mode?.startsWith('wizard-source-')) {
+      this.pairWizard.source = path;
+    } else if (mode?.startsWith('wizard-target-')) {
+      this.pairWizard.target = path;
+    } else if (idx === -1) {
       if (mode === 'remote' || mode === 'remote-local') this.quick.remote = path;
       else this.quick.local = path;
     } else if (mode.startsWith('source-') || mode.startsWith('target-')) {
@@ -1078,6 +1107,10 @@ export const pairsMethods = {
       require_mountpoint: Boolean(w.requireMountpoint),
       mountpoint: '',
       sentinel_file: '',
+      recovery_snapshots: false,
+      failure_domain: '',
+      airgap_device: '',
+      zfs_snapshot: false,
       backup_dir: isBisync ? '' : (w.backupDir || ''),
       ...(isBisync ? this.bisyncBackupSuggestions(w.source.trim(), w.target.trim()) : { backup_dir1: '', backup_dir2: '' }),
       pre_hook: '',

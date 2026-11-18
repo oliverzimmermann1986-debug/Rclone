@@ -30,7 +30,7 @@ def test_remote_precheck_uses_supported_lsjson_flags(monkeypatch):
     assert "--contimeout" in captured[0]
     assert "--low-level-retries" in captured[0]
     assert captured_kwargs[0]["timeout"] == 90
-    assert captured_kwargs[0]["env"]["RCLONE_LOG_LEVEL"] == "ERROR"
+    assert captured_kwargs[0]["env"]["RCLONE_LOG_LEVEL"] == "NOTICE"
 
 
 def test_remote_precheck_formats_drive_rate_limit_cleanly(monkeypatch):
@@ -535,3 +535,51 @@ def test_one_line_stats_progress_advances_watchdog_but_eta_jitter_does_not():
         )
         is True
     )
+
+
+@pytest.mark.parametrize("code", [3, 4])
+def test_remote_precheck_exit_3_and_4_empty_stderr_handles_allow_missing(
+    monkeypatch, code
+):
+    class Result:
+        returncode = code
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(rclone_sync.subprocess, "run", lambda *_a, **_kw: Result())
+
+    assert rclone_sync._remote_reachable("gdrive:/NeuerOrdner", allow_missing=True) == (
+        True,
+        "Ziel wird beim ersten Sync angelegt",
+    )
+    ok, msg = rclone_sync._remote_reachable("gdrive:/Fehlt", allow_missing=False)
+    assert ok is False
+    assert msg == f"Remote-Pfad nicht gefunden (rclone exit {code})"
+
+
+def test_remote_precheck_exit_1_empty_stderr_reports_oauth_or_clean_message(
+    tmp_path: Path, monkeypatch
+):
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(rclone_sync.subprocess, "run", lambda *_a, **_kw: Result())
+
+    conf = tmp_path / "rclone.conf"
+    conf.write_text(
+        '[gdrive]\ntype = drive\ntoken = {"access_token":"x","expiry":"2020-01-01T00:00:00Z"}\n'
+        "[pcloud]\ntype = pcloud\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RCLONE_CONFIG", str(conf))
+
+    ok_oauth, msg_oauth = rclone_sync._remote_reachable("gdrive:/Fotos")
+    assert ok_oauth is False
+    assert "OAuth-Anmeldung" in msg_oauth
+    assert "gdrive" in msg_oauth
+
+    ok_other, msg_other = rclone_sync._remote_reachable("pcloud:/Fotos")
+    assert ok_other is False
+    assert msg_other == "rclone lsjson --stat exit=1 (keine Detailmeldung von rclone)"

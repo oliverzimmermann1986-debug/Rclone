@@ -132,7 +132,11 @@ export const settingsMethods = {
       const source = (pair.source ?? pair.local ?? '').trim();
       const target = (pair.target ?? pair.remote ?? '').trim();
       const isLocal = (value) => value.startsWith('/');
-      if (pair.two_way) {
+      const hasEndpoints = pair.source !== undefined || pair.target !== undefined || pair.two_way !== undefined;
+      if (!hasEndpoints && pair.direction) {
+        if (pair.direction === 'bisync') pair.mode = 'bisync';
+        else if (pair.mode === 'bisync') pair.mode = 'copy';
+      } else if (pair.two_way) {
         pair.direction = 'bisync'; pair.mode = 'bisync';
         // Gemischtes Bisync: Cloud-Seite ins remote-Feld, lokale Seite in local (Mount-Schutz).
         if (isLocal(source) && !isLocal(target)) { pair.remote = target; pair.local = source; }
@@ -146,6 +150,8 @@ export const settingsMethods = {
         pair.direction = 'push'; pair.remote = target; pair.local = source;
       }
       if (pair.two_way === false && pair.mode === 'bisync') pair.mode = 'copy';
+      if (pair.direction !== 'push') pair.zfs_snapshot = false;
+      if ('failure_domain' in pair && 'location_id' in pair) delete pair.location_id;
       delete pair.source; delete pair.target; delete pair.two_way; delete pair.schedule;
     }
     return draft;

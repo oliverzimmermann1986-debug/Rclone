@@ -486,6 +486,9 @@ private struct DataPathEditor: View {
     @State private var recoverySnapshots: Bool
     @State private var maxSuccessAgeHoursText: String
     @State private var excludeText: String
+    @State private var failureDomain: String
+    @State private var airgapDevice: String
+    @State private var zfsSnapshot: Bool
     @State private var browseTarget: BrowseTarget?
 
     init(pair: PairConfig?, save: @escaping (PairConfig) -> Void) {
@@ -514,6 +517,9 @@ private struct DataPathEditor: View {
         }
         _maxSuccessAgeHoursText = State(initialValue: initialAge)
         _excludeText = State(initialValue: pair?.exclude ?? "")
+        _failureDomain = State(initialValue: pair?.failureDomain ?? "")
+        _airgapDevice = State(initialValue: pair?.airgapDevice ?? "")
+        _zfsSnapshot = State(initialValue: pair?.direction == "push" ? (pair?.zfsSnapshot ?? false) : false)
     }
 
     var body: some View {
@@ -542,6 +548,11 @@ private struct DataPathEditor: View {
                         Text("Bi-Sync").tag("bisync")
                     }
                     .pickerStyle(.segmented)
+                    .onChange(of: direction) { _, newDirection in
+                        if newDirection != "push" {
+                            zfsSnapshot = false
+                        }
+                    }
                     if direction != "bisync" {
                         Picker("Modus", selection: $mode) {
                             Text("Kopieren").tag("copy")
@@ -565,6 +576,15 @@ private struct DataPathEditor: View {
                             .foregroundStyle(.secondary)
                     }
                     Toggle("Lokale Recovery-Snapshots", isOn: $recoverySnapshots)
+                    if direction == "push" {
+                        Toggle("Atomarer ZFS-Quell-Snapshot", isOn: $zfsSnapshot)
+                    }
+                    TextField("Ausfalldomäne (3-2-1, z. B. cloud, nas, usb)", text: $failureDomain)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("Airgap-Gerät (z. B. /dev/disk/by-uuid/…)", text: $airgapDevice)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                     TextField("Überfälligkeits-Frist in Std. (leer = Standard)", text: $maxSuccessAgeHoursText)
                         .keyboardType(.decimalPad)
                     VStack(alignment: .leading, spacing: 4) {
@@ -713,7 +733,10 @@ private struct DataPathEditor: View {
                 sentinelFile: sentinelFile,
                 recoverySnapshots: recoverySnapshots,
                 maxSuccessAgeHours: ageHours,
-                exclude: normalizedExclude
+                exclude: normalizedExclude,
+                failureDomain: failureDomain.trimmingCharacters(in: .whitespacesAndNewlines),
+                airgapDevice: airgapDevice.trimmingCharacters(in: .whitespacesAndNewlines),
+                zfsSnapshot: direction == "push" && zfsSnapshot
             )
         } else {
             updated = PairConfig(
@@ -734,7 +757,10 @@ private struct DataPathEditor: View {
                 sentinelFile: sentinelFile,
                 recoverySnapshots: recoverySnapshots,
                 maxSuccessAgeHours: ageHours,
-                exclude: normalizedExclude
+                exclude: normalizedExclude,
+                failureDomain: failureDomain.trimmingCharacters(in: .whitespacesAndNewlines),
+                airgapDevice: airgapDevice.trimmingCharacters(in: .whitespacesAndNewlines),
+                zfsSnapshot: direction == "push" && zfsSnapshot
             )
         }
         save(updated)

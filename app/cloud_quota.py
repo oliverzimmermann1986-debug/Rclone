@@ -477,6 +477,13 @@ def should_throttle_optional_job(
     *,
     now: float | None = None,
 ) -> tuple[bool, str]:
+    settings = budget_settings(config)
+    if (
+        not settings["enabled"]
+        or not settings["throttle_optional_jobs"]
+        or settings["monthly_egress_gb"] <= 0
+    ):
+        return False, ""
     usage = monthly_transfer_usage(db, config, now=now)
     if usage.get("throttle_optional_active"):
         return (

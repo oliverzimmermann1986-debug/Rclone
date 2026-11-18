@@ -18,7 +18,7 @@
   <div class="app-shell console-shell">
     <button type="button" class="nav-scrim" x-show="navOpen" @click="closeNavigation()" aria-label="Navigation schließen" tabindex="-1" x-cloak></button>
 
-    <aside class="sidebar console-navigation" id="main-sidebar" x-ref="mainSidebar" :class="navOpen && 'open'" tabindex="-1">
+    <aside class="sidebar console-navigation" id="main-sidebar" x-ref="mainSidebar" :class="navOpen && 'open'" :inert="Boolean(activeDialog())" tabindex="-1">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true"><img src="/static/app-icon-192.png?v=__APP_VERSION__" alt="" width="40" height="40"></div>
         <div>
@@ -42,7 +42,7 @@
         <button :class="page==='runs' && 'active'" :aria-current="page==='runs' ? 'page' : null" @click="navigate('runs')">
           <span class="nav-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></span></span><span>Läufe</span>
         </button>
-        <button :class="['doctor','recovery'].includes(page) && 'active'" :aria-current="['doctor','recovery'].includes(page) ? 'page' : null" @click="navigate('doctor')">
+        <button :class="['doctor', 'recovery', 'settings'].includes(page) && 'active'" :aria-current="['doctor', 'recovery', 'settings'].includes(page) ? 'page' : null" @click="navigate('doctor')">
           <span class="nav-icon"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span></span><span>System</span>
         </button>
       </nav>
@@ -64,7 +64,7 @@
       </div>
     </aside>
 
-    <div class="workspace console-workspace" :inert="navigationIsModal()">
+    <div class="workspace console-workspace" :inert="navigationIsModal() || Boolean(activeDialog())">
       <header class="topbar console-context-bar">
         <div class="topbar-left console-context">
           <button class="icon-button mobile-menu" @click="toggleNavigation()" :aria-expanded="navOpen" aria-controls="main-sidebar" :aria-label="navOpen ? 'Navigation schließen' : 'Navigation öffnen'"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/></svg></span></button>
@@ -111,6 +111,20 @@
         <div class="alert info lockdown-steps" x-show="lockdownSteps.length" role="status" x-cloak>
           <span class="alert-icon" aria-hidden="true">i</span>
           <div class="stack"><span><strong>Schreibschutz von Hand zurücknehmen</strong><small>Diese Mounts wurden beim Lockdown schreibgeschützt eingehängt. Führe die Befehle als root auf dem Server aus, sobald die Ursache geklärt ist.</small></span><pre class="code-block" x-text="lockdownSteps.join('\n')"></pre><div class="button-row"><button class="button secondary small" @click="copyLockdownSteps()">Befehle kopieren</button><button class="button ghost small" @click="lockdownSteps = []">Hinweis ausblenden</button></div></div>
+        </div>
+        <div class="alert info preflight-callout" x-show="lastDryRun" role="status" x-cloak>
+          <span class="alert-icon" aria-hidden="true">i</span>
+          <div class="stack">
+            <span>
+              <strong x-text="latestDryRunJob()?.status === 'running' ? ('Probelauf #' + lastDryRun?.id + ' läuft…') : ('Probelauf #' + lastDryRun?.id + ' bereit zur Prüfung')"></strong>
+              <small x-text="latestDryRunJob()?.status === 'running' ? 'Nach Abschluss kannst du alle geplanten Kopien, Löschungen und Verschiebungen in der Änderungsmatrix prüfen.' : 'Prüfe die geplanten Kopien, Löschungen und Verschiebungen in der Änderungsmatrix, bevor du produktiv startest.'"></small>
+            </span>
+            <div class="button-row">
+              <button type="button" class="button primary small" @click="openPreflightMatrix()" :disabled="latestDryRunJob()?.status === 'running'">Änderungsmatrix öffnen</button>
+              <button type="button" class="button secondary small" @click="showJob(latestDryRunJob())">Laufdetails</button>
+              <button type="button" class="button ghost small" @click="lastDryRun = null">Ausblenden</button>
+            </div>
+          </div>
         </div>
         <!-- DASHBOARD -->
         <section class="console-page overview-page" x-show="page==='dashboard'" x-cloak>
@@ -416,12 +430,12 @@
               </div>
               <div class="form-grid two">
                 <label class="field"><span>Name des Datenwegs</span><input x-model="pairWizard.name" placeholder="z. B. NAS-Dokumente"></label>
-                <label class="field"><span>Quellpfad · lokal oder Cloud</span><input class="mono" x-model="pairWizard.source" placeholder="/mnt/nas/dokumente"></label>
+                <label class="field"><span>Quellpfad · lokal oder Cloud</span><div class="input-action"><input class="mono" x-model="pairWizard.source" placeholder="/mnt/nas/dokumente"><button type="button" @click="openPicker('wizard-source-local', -2)" aria-label="Lokalen Quellordner im Assistenten wählen">Lokal</button><button type="button" @click="openPicker('wizard-source-remote', -2)" aria-label="Cloud-Quellordner im Assistenten wählen">Cloud</button><button type="button" @click="openRemoteSetup()" aria-label="Neues Cloud-Remote für Quelle einbinden">Neues Remote</button></div></label>
               </div>
             </div>
             <div class="stack" x-show="pairWizard.step === 2">
               <div class="form-grid two">
-                <label class="field"><span>Zielpfad · Cloud oder lokal</span><input class="mono" x-model="pairWizard.target" placeholder="gdrive:/Backup/Dokumente"></label>
+                <label class="field"><span>Zielpfad · Cloud oder lokal</span><div class="input-action"><input class="mono" x-model="pairWizard.target" placeholder="gdrive:/Backup/Dokumente"><button type="button" @click="openPicker('wizard-target-local', -2)" aria-label="Lokalen Zielordner im Assistenten wählen">Lokal</button><button type="button" @click="openPicker('wizard-target-remote', -2)" aria-label="Cloud-Zielordner im Assistenten wählen">Cloud</button><button type="button" @click="openRemoteSetup()" aria-label="Neues Cloud-Remote für Ziel einbinden">Neues Remote</button></div></label>
                 <label class="field"><span>Sync-Richtung</span><select x-model="pairWizard.twoWay"><option :value="false">Einweg (Quelle → Ziel)</option><option :value="true">Bidirektional (Bi-Sync)</option></select></label>
               </div>
               <div class="button-row">
@@ -592,6 +606,14 @@
                       <div class="form-grid two" x-show="pair.direction!=='pull'">
                         <label class="field"><span>Ransomware-Canary-Datei (relativ zur Quelle)</span><div class="input-action"><input class="mono" x-model="pair.canary_file" placeholder=".sicherpfad-canary.txt"><button type="button" @click.prevent="initPairCanary(pair.name, pair.canary_file)" :disabled="!pair.name || configDirty">Canary anlegen</button></div><small>Wird vor jedem produktiven Sync per SHA-256 geprüft.</small></label>
                       </div>
+                      <div class="form-grid two">
+                        <label class="field"><span>Ausfalldomäne (Failure-Domain)</span><input x-model.trim="pair.failure_domain" maxlength="128" placeholder="z. B. cloud-eu, hetzner-storagebox, heim-nas"><small>Kennzeichnet getrennte physische oder logische Standorte in der Kopien-Matrix.</small></label>
+                        <label class="field"><span>Air-Gap-Blockgerät</span><input class="mono" x-model.trim="pair.airgap_device" maxlength="256" placeholder="/dev/disk/by-uuid/..."><small>Optionales Wechselmedium unter <code>/dev/…</code> für isolierte Offline-Sicherungen.</small></label>
+                      </div>
+                      <div class="form-grid two">
+                        <div class="field"><span>Recovery-Snapshots</span><label class="switch"><input type="checkbox" x-model="pair.recovery_snapshots"><span></span><em>Vollständige lokale Recovery-Snapshots erlauben</em></label><small>Aktiviert prüfsummengesicherte Komplettstände im Recovery-Center.</small></div>
+                        <div class="field"><span>ZFS-Quellsnapshot</span><label class="switch"><input type="checkbox" x-model="pair.zfs_snapshot" :disabled="pair.direction !== 'push'"><span></span><em x-text="pair.direction === 'push' ? 'Atomaren ZFS-Snapshot vor Push-Lauf nutzen' : 'Nur bei Einweg-Push verfügbar'"></em></label><small>Nur bei Richtung Push aktivierbar; wird bei Pull oder Bi-Sync automatisch deaktiviert.</small></div>
+                      </div>
 
                       <div class="inline-error" x-show="backupDirMissing(pair)" role="status">
                         <span>Ohne Versionsablage sind überschriebene und gelöschte Dateien sofort weg — auch bei einer Verschlüsselung an der Quelle, die der Löschschutz nicht erkennt.</span>
@@ -720,13 +742,13 @@
                     </template>
                     <span class="muted" x-show="!job.data_path_ids.length">Noch kein Datenweg zugewiesen.</span>
                   </div>
-                  <details class="assignment-picker"><summary><span>Datenwege auswählen</span><small x-text="job.data_path_ids.length + ' zugewiesen' "></small></summary><div class="assignment-checkboxes"><template x-for="pair in (config.backup.pairs || [])" :key="pair.id || pair.name"><label class="check-row"><input type="checkbox" :checked="job.data_path_ids.includes(pair.id)" :disabled="!pair.id" @change="toggleJobPathAssignment(job, pair.id, $event.target.checked)"><span><strong x-text="pair.name || 'Unbenannter Datenweg'"></strong><small x-text="(pair.local || pair.source || 'Quelle fehlt') + ' → ' + (pair.remote || pair.target || 'Ziel fehlt')"></small></span></label></template><p class="muted" x-show="!(config.backup.pairs || []).length">Lege zuerst einen Datenweg an.</p></div></details>
+                  <div class="assignment-picker"><div class="assignment-picker-head"><span>Datenwege auswählen</span><small x-text="job.data_path_ids.length + ' zugewiesen' "></small></div><div class="assignment-checkboxes"><template x-for="pair in (config.backup.pairs || [])" :key="pair.id || pair.name"><label class="check-row"><input type="checkbox" :checked="job.data_path_ids.includes(pair.id)" :disabled="!pair.id" @change="toggleJobPathAssignment(job, pair.id, $event.target.checked)"><span><strong x-text="pair.name || 'Unbenannter Datenweg'"></strong><small x-text="(pair.local || pair.source || 'Quelle fehlt') + ' → ' + (pair.remote || pair.target || 'Ziel fehlt')"></small></span></label></template><p class="muted" x-show="!(config.backup.pairs || []).length">Lege zuerst einen Datenweg an.</p></div></div>
                 </div>
 
-                <details class="disclosure definition-options">
-                  <summary>Ausführung und Wiederholung</summary>
-                  <div class="form-grid three disclosure-body"><label class="field"><span>Ausführung</span><select x-model="job.execution_mode" @change="normalizeJobDefinition(job)"><option value="sequential">Nacheinander</option><option value="parallel">Parallel</option></select></label><label class="field"><span>Maximal parallel</span><input type="number" min="1" x-model.number="job.max_parallel" :disabled="job.execution_mode==='sequential'"></label><label class="field"><span>Wiederholung nach Fehler</span><input type="number" min="1" max="10080" x-model.number="job.retry_minutes"><small>Wartezeit in Minuten bis zum nächsten Versuch.</small></label></div>
-                </details>
+                <div class="definition-options">
+                  <h4 class="subheading">Ausführung und Wiederholung</h4>
+                  <div class="form-grid three"><label class="field"><span>Ausführung</span><select x-model="job.execution_mode" @change="normalizeJobDefinition(job)"><option value="sequential">Nacheinander</option><option value="parallel">Parallel</option></select></label><label class="field"><span>Maximal parallel</span><input type="number" min="1" x-model.number="job.max_parallel" :disabled="job.execution_mode==='sequential'"></label><label class="field"><span>Wiederholung nach Fehler</span><input type="number" min="1" max="10080" x-model.number="job.retry_minutes"><small>Wartezeit in Minuten bis zum nächsten Versuch.</small></label></div>
+                </div>
 
                 <div class="definition-actions"><button class="button secondary" @click="planJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id">Plan</button><button class="button secondary" @click="runJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id || lockdownState.active">Probelauf</button><button class="button danger" @click="runJobDefinition(job, false)" :disabled="pending.definition || configDirty || !job.id || !job.enabled || lockdownState.active">Produktiv</button><button class="button ghost" @click="removeJobDefinition(idx)">Entfernen</button><small x-show="configDirty || !job.id">Vor Plan oder Start speichern.</small></div>
               </article>
@@ -839,7 +861,7 @@
             </div>
           </div>
 
-          <div class="metric-grid">
+          <div class="metric-grid" data-workspace-group="health">
             <article class="metric-card"><div class="metric-head"><span>Virtualisierung</span></div><strong class="metric-value text" x-text="overview.data?.system?.virtualization || '—'"></strong><span class="metric-sub" x-text="overview.data?.system?.hostname || '—'"></span></article>
             <article class="metric-card"><div class="metric-head"><span>Webdienst</span></div><strong class="metric-value text" x-text="overview.data?.services?.web?.active || '—'"></strong><span class="metric-sub" x-text="overview.data?.services?.web?.enabled || '—'"></span></article>
             <article class="metric-card"><div class="metric-head"><span>Scheduler</span></div><strong class="metric-value text" x-text="schedulerControlLabel()"></strong><span class="metric-sub" x-text="(overview.data?.services?.scheduler?.active || '—') + ' · Timer ' + (overview.data?.services?.scheduler?.enabled || '—')"></span></article>
@@ -870,7 +892,7 @@
             </div>
           </article>
 
-          <article class="panel" x-show="!doctor.data && !doctor.loading"><div class="empty-state compact"><strong>Noch keine vollständige Prüfung</strong><span>Die Prüfung testet Konfiguration, rclone, systemd, Mountpoints, Sentinel-Dateien und Löschschutz.</span><button class="button primary" @click="loadDoctor()">Prüfung starten</button></div></article>
+          <article class="panel" data-workspace-group="health" x-show="!doctor.data && !doctor.loading"><div class="empty-state compact"><strong>Noch keine vollständige Prüfung</strong><span>Die Prüfung testet Konfiguration, rclone, systemd, Mountpoints, Sentinel-Dateien und Löschschutz.</span><button class="button primary" @click="loadDoctor()">Prüfung starten</button></div></article>
 
           <article class="panel stack" data-workspace-group="health" aria-labelledby="vpn-heading">
             <div class="panel-head"><div><h3 id="vpn-heading">VPN-Tunnel</h3><p>WireGuard-Handshakes, Tailscale-Geräte und die Erreichbarkeit der Prüfziele aus <button type="button" class="button ghost small" @click="selectSettingsTab('general'); navigate('settings')">Einstellungen → Allgemein</button>.</p></div><button class="button secondary" @click="loadVpn(true)" :disabled="vpn.loading" x-text="vpn.loading ? 'Prüft…' : 'Aktualisieren'"></button></div>
@@ -1021,9 +1043,9 @@
                 <thead><tr><th>Datenweg</th><th>Canary-Status</th><th>Datei</th><th>Aktion</th></tr></thead>
                 <tbody><template x-for="rp in (ransomwareStatus.data?.pairs || [])" :key="rp.name"><tr>
                   <td data-label="Datenweg"><strong x-text="rp.name"></strong></td>
-                  <td data-label="Canary-Status"><span class="badge compact" :class="!rp.canary?.configured ? 'neutral' : (rp.canary?.ok ? 'ok' : 'error')" x-text="!rp.canary?.configured ? 'Nicht eingerichtet' : (rp.canary?.ok ? 'Unversehrt' : ('Alarm: ' + (rp.canary?.reason || 'verändert')))"></span></td>
+                  <td data-label="Canary-Status"><span class="badge compact" :class="!rp.canary?.configured ? 'neutral' : (rp.canary?.ok ? 'ok' : 'error')" x-text="!rp.canary?.configured ? 'Nicht eingerichtet' : (rp.canary?.ok ? 'Unversehrt' : ('Alarm: ' + (rp.canary?.reason || 'verändert')))"></span><small class="muted" style="display:block;margin-top:4px;" x-show="canaryVerifySummary(rp.name)" :class="canaryVerify[rp.name]?.ok === false && 'error-text'" x-text="canaryVerifySummary(rp.name)"></small></td>
                   <td data-label="Datei" class="mono" x-text="rp.canary?.canary_file || '—'"></td>
-                  <td data-label="Aktion"><button class="button secondary small" @click="initPairCanary(rp.name)" x-text="rp.canary?.configured ? 'Neu initialisieren' : 'Canary anlegen'"></button></td>
+                  <td data-label="Aktion"><div class="button-row"><button type="button" class="button secondary small" @click="verifyPairCanary(rp.name)" :disabled="canaryVerify[rp.name]?.loading" x-text="canaryVerify[rp.name]?.loading ? 'Prüft…' : 'Canary prüfen'"></button><button type="button" class="button secondary small" @click="initPairCanary(rp.name)" x-text="rp.canary?.configured ? 'Neu initialisieren' : 'Canary anlegen'"></button></div></td>
                 </tr></template></tbody>
               </table>
             </div>
@@ -1102,7 +1124,7 @@
             <div class="heading-actions"><button class="button secondary" @click="navigate('doctor')">Systemdiagnose</button><button class="button secondary" @click="loadRecovery()" :disabled="recovery.loading">Aktualisieren</button><button class="button primary" @click="startFullSnapshot()" :disabled="!recovery.pair || startBlocked()">Recovery-Punkt erstellen</button></div>
           </div>
           <div class="inline-error" x-show="recovery.error" role="alert" x-text="recovery.error"></div>
-          <article class="panel recovery-browser-panel">
+          <article class="panel recovery-browser-panel" data-workspace-group="restore">
             <div class="form-grid three recovery-controls">
               <label class="field"><span>Datenweg</span><select x-model="recovery.pair" @change="selectRecoveryPair(recovery.pair)"><option value="">Kein Datenweg verfügbar</option><template x-for="pair in (config.backup?.pairs || [])" :key="pair.name"><option :value="pair.name" x-text="pair.name"></option></template></select></label>
               <label class="field"><span>Wiederherstellungspunkt</span><select x-model="recovery.pointId" @change="recovery.path='';recovery.selectedPaths=[];recovery.diff=null;loadRecoveryBrowse('')"><option value="">Bitte auswählen</option><template x-for="point in recovery.points" :key="point.id"><option :value="point.id" x-text="point.label || point.id"></option></template></select><small x-text="recovery.points.find(p => p.id === recovery.pointId)?.warning || ''"></small></label>
@@ -1111,16 +1133,68 @@
             <div class="recovery-browser-head"><nav class="picker-breadcrumbs" aria-label="Recovery-Pfad"><template x-for="(crumb, crumbIndex) in recoveryBreadcrumbs()" :key="crumb.path"><span class="picker-crumb"><button type="button" @click="loadRecoveryBrowse(crumb.path)" :disabled="recovery.loading || crumb.path===recovery.path" x-text="crumb.label"></button><span x-show="crumbIndex < recoveryBreadcrumbs().length - 1" aria-hidden="true">/</span></span></template></nav><label class="check-row" x-show="recovery.pointId && recovery.pointId!=='current' && !recovery.pointId.startsWith('full-')"><input type="checkbox" x-model="recovery.timeTravel" @change="loadRecoveryBrowse(recovery.path)"><span><strong>Virtueller Zeitreise-Baum</strong><small>Versionsordner mit Live-Bestand zusammenführen</small></span></label><label class="field recovery-size-limit"><span>Limit dieser Anfrage (MiB)</span><input type="number" min="1" max="51200" x-model.number="recovery.maxTotalMb"></label></div>
             <div class="input-action"><input x-model="recovery.searchQuery" @keydown.enter.prevent="searchRecoveryFiles()" placeholder="Datei über alle Wiederherstellungspunkte suchen (mind. 2 Zeichen)…" aria-label="Dateisuche über alle Wiederherstellungspunkte"><button type="button" class="button secondary small" @click="searchRecoveryFiles()" :disabled="recovery.searchLoading || (recovery.searchQuery || '').trim().length < 2" x-text="recovery.searchLoading ? 'Sucht…' : 'Punkte durchsuchen'"></button></div>
             <div class="snapshot-diff-list" x-show="recovery.searchResults.length" x-cloak><template x-for="hit in recovery.searchResults" :key="hit.point_id + ':' + hit.path"><div><code x-text="hit.path"></code><span x-text="hit.point_label + ' · ' + formatBytes(hit.size || 0)"></span><button type="button" class="button secondary small" @click="selectRecoverySearchResult(hit)">Im Punkt auswählen</button></div></template></div>
-            <div class="recovery-file-list" :aria-busy="recovery.loading"><div class="loading-state" x-show="recovery.loading" role="status">Bestand wird geladen…</div><template x-for="item in recovery.items" :key="item.path"><div class="recovery-file-row"><template x-if="item.is_dir"><button type="button" class="picker-open" @click="loadRecoveryBrowse(item.path)"><span class="folder-icon" aria-hidden="true">□</span><span><strong x-text="item.name"></strong><small>Ordner öffnen</small></span></button></template><template x-if="!item.is_dir"><div class="inline-actions"><label class="check-row"><input type="checkbox" :checked="recovery.selectedPaths.includes(item.path)" :disabled="recovery.selectedPaths.length>=100 && !recovery.selectedPaths.includes(item.path)" @change="toggleRecoveryPath(item.path, $event.target.checked)"><span><strong class="mono" x-text="item.name"></strong><small x-text="item.size === null || item.size === undefined ? 'Größe unbekannt' : formatBytes(item.size)"></small></span></label><button type="button" class="button ghost small" x-show="recovery.pointId && recovery.pointId !== 'current'" @click="openTimeTravelDiff(item)">Diff zum Live-Stand</button></div></template></div></template><div class="empty-state compact" x-show="!recovery.loading && !recovery.error && !recovery.items.length"><strong>Keine Einträge an diesem Ort</strong></div></div>
+            <div class="recovery-file-list" :aria-busy="recovery.loading"><div class="loading-state" x-show="recovery.loading" role="status">Bestand wird geladen…</div><template x-for="item in recovery.items" :key="item.path"><div class="recovery-file-row"><template x-if="item.is_dir"><button type="button" class="picker-open" @click="loadRecoveryBrowse(item.path)"><span class="folder-icon" aria-hidden="true">□</span><span><strong x-text="item.name"></strong><small>Ordner öffnen</small></span></button></template><template x-if="!item.is_dir"><div class="inline-actions"><label class="check-row"><input type="checkbox" :checked="recovery.selectedPaths.includes(item.path)" :disabled="recovery.selectedPaths.length>=100 && !recovery.selectedPaths.includes(item.path)" @change="toggleRecoveryPath(item.path, $event.target.checked)"><span><strong class="mono" x-text="item.name"></strong><small x-text="item.size === null || item.size === undefined ? 'Größe unbekannt' : formatBytes(item.size)"></small></span></label><button type="button" class="button ghost small" @click="loadTimeTravelHistory(item)">Versionen</button><button type="button" class="button ghost small" x-show="recovery.pointId && recovery.pointId !== 'current'" @click="openTimeTravelDiff(item)">Diff zum Live-Stand</button></div></template></div></template><div class="empty-state compact" x-show="!recovery.loading && !recovery.error && !recovery.items.length"><strong>Keine Einträge an diesem Ort</strong></div></div>
+            <div class="snapshot-diff stack" x-show="recovery.fileHistory?.path" x-cloak role="region" aria-label="Dateiversionen">
+              <div class="panel-head">
+                <div><h4 class="subheading">Versionsverlauf · <code x-text="recovery.fileHistory.path"></code></h4></div>
+                <button type="button" class="button ghost small" @click="closeTimeTravelHistory()">Schließen</button>
+              </div>
+              <div class="loading-state compact-loading" x-show="recovery.fileHistory.loading" role="status">Versionen werden geladen…</div>
+              <p class="inline-error" role="alert" x-show="recovery.fileHistory.error" x-text="recovery.fileHistory.error"></p>
+              <p class="muted" x-show="!recovery.fileHistory.loading && !recovery.fileHistory.error && !(recovery.fileHistory.versions || []).length">Keine gespeicherten Versionen für diese Datei gefunden.</p>
+              <div class="snapshot-diff-list" x-show="(recovery.fileHistory.versions || []).length">
+                <template x-for="(ver, vIdx) in (recovery.fileHistory.versions || [])" :key="(ver.point_id || ver.id || vIdx) + ':' + vIdx">
+                  <div>
+                    <code x-text="ver.point_label || ver.label || ver.point_id || ver.id || 'Stand'"></code>
+                    <span x-text="formatBytes(ver.size) + ' · ' + formatHistoryTimestamp(ver.modified_at ?? ver.mtime ?? ver.created_at ?? ver.timestamp)"></span>
+                    <b aria-hidden="true">→</b>
+                    <span><button type="button" class="button secondary small" x-show="(ver.point_id || ver.source_point || ver.id) && (ver.point_id || ver.source_point || ver.id) !== 'current'" @click="openTimeTravelDiff({ path: recovery.fileHistory.path, source_point: ver.point_id || ver.source_point || ver.id })">Diff zum Live-Stand</button><span class="badge compact neutral" x-show="(ver.point_id || ver.source_point || ver.id) === 'current'">Live-Stand</span></span>
+                  </div>
+                </template>
+              </div>
+            </div>
             <div class="recovery-browser-footer"><span x-text="recovery.selectedPaths.length + ' Einträge ausgewählt · höchstens 100'"></span><button class="button primary" @click="startSelectiveRestore()" :disabled="!recovery.selectedPaths.length || startBlocked()">Auswahl ins Staging wiederherstellen</button></div>
           </article>
-          <article class="panel snapshot-diff" x-show="recovery.diff" x-cloak><div class="panel-head"><div><h3>Bestandsvergleich</h3><p x-text="recovery.diff?.warning || ('Vergleich per ' + (recovery.diff?.verification || 'Metadaten'))"></p></div></div><p role="status" x-show="recovery.diff?.truncated">Der Vergleich wurde begrenzt. Weitere Änderungen können fehlen.</p><div class="diff-counts"><span x-text="(recovery.diff?.counts?.added || 0) + ' neu'"></span><span x-text="(recovery.diff?.counts?.changed || 0) + ' geändert'"></span><span x-text="(recovery.diff?.counts?.removed || 0) + ' fehlen im aktuellen Stand'"></span></div><div class="snapshot-diff-list"><template x-for="item in [...(recovery.diff?.added || []).map(item=>({...item, kind:'Neu'})), ...(recovery.diff?.changed || []).map(item=>({...item, kind:'Geändert'})), ...(recovery.diff?.removed || []).map(item=>({...item, kind:'Fehlt'})), ...(recovery.diff?.unverified || []).map(item=>({...item, kind:'Ungeprüft'}))].slice(0,500)" :key="item.kind + item.path"><div><code x-text="item.path"></code><span x-text="item.kind"></span><span x-text="item.size === undefined ? '' : formatBytes(item.size)"></span></div></template></div></article>
+          <article class="panel snapshot-diff" data-workspace-group="restore" x-show="recovery.diff" x-cloak><div class="panel-head"><div><h3>Bestandsvergleich</h3><p x-text="recovery.diff?.warning || ('Vergleich per ' + (recovery.diff?.verification || 'Metadaten'))"></p></div></div><p role="status" x-show="recovery.diff?.truncated">Der Vergleich wurde begrenzt. Weitere Änderungen können fehlen.</p><div class="diff-counts"><span x-text="(recovery.diff?.counts?.added || 0) + ' neu'"></span><span x-text="(recovery.diff?.counts?.changed || 0) + ' geändert'"></span><span x-text="(recovery.diff?.counts?.removed || 0) + ' fehlen im aktuellen Stand'"></span></div><div class="snapshot-diff-list"><template x-for="item in [...(recovery.diff?.added || []).map(item=>({...item, kind:'Neu'})), ...(recovery.diff?.changed || []).map(item=>({...item, kind:'Geändert'})), ...(recovery.diff?.removed || []).map(item=>({...item, kind:'Fehlt'})), ...(recovery.diff?.unverified || []).map(item=>({...item, kind:'Ungeprüft'}))].slice(0,500)" :key="item.kind + item.path"><div><code x-text="item.path"></code><span x-text="item.kind"></span><span x-text="item.size === undefined ? '' : formatBytes(item.size)"></span></div></template></div></article>
           <div class="recovery-secondary-grid">
             <article class="panel" data-workspace-group="staging" aria-labelledby="vault-library-heading"><div class="panel-head"><div><h3 id="vault-library-heading">Geräte-Vault</h3><p>Vom iPhone direkt gesicherte Fotos und Dateien mit SHA-256-Prüfsumme.</p></div><div class="heading-actions"><select x-model="recovery.vault.filterPair" @change="loadVaultLibrary()" aria-label="Geräte-Vault nach Datenweg filtern"><option value="">Alle Datenwege</option><template x-for="pair in (config.backup?.pairs || [])" :key="pair.name"><option :value="pair.name" x-text="pair.name"></option></template></select><button type="button" class="button secondary small" @click="loadVaultLibrary()" :disabled="recovery.vault.loading" x-text="recovery.vault.loading ? 'Lädt…' : 'Aktualisieren'"></button></div></div><p class="inline-error" role="status" x-show="recovery.vault.error" x-text="recovery.vault.error"></p><div class="empty-state compact" x-show="!recovery.vault.loading && !recovery.vault.items.length"><strong>Keine Geräte-Vault-Einträge</strong><span>Direkt über die iPhone-App übertragene Fotos und Dokumente erscheinen hier.</span></div><template x-for="vItem in recovery.vault.items" :key="vItem.id"><div class="recovery-record"><strong x-text="vItem.filename || vItem.id"></strong><span class="badge" :class="(vItem.verified || vItem.status === 'ready') ? 'ok' : (vItem.status === 'error' ? 'error' : 'neutral')" x-text="vaultStatusLabel(vItem)"></span><small x-text="(vItem.device_name || 'iPhone') + ' · ' + (vItem.pair || vItem.identity || '—') + ' · ' + formatBytes(vItem.size || 0) + ' · ' + formatDateTime(vItem.completed_at || vItem.updated_at || vItem.created_at)"></small><code class="mono" x-text="(vItem.target_relative ? (vItem.target_relative + ' · ') : '') + 'SHA-256 ' + String(vItem.sha256 || '').slice(0, 16) + '…'"></code><div class="button-row"><button type="button" class="button secondary small" x-show="vItem.verified || vItem.status === 'ready' || vItem.status === 'remote'" @click="downloadVaultItem(vItem)">Herunterladen</button><button type="button" class="button secondary small" :disabled="vItem.status === 'queued' || vItem.status === 'transferring'" @click="removeVaultLocalCopy(vItem)">Lokale Kopie entfernen</button></div></div></template></article>
-            <article class="panel"><div class="panel-head"><div><h3>Staging-Bereich</h3><p>Wiederhergestellte Daten bleiben getrennt von den produktiven Ordnern.</p></div></div><div class="empty-state compact" x-show="!recovery.staging.length"><strong>Keine Staging-Wiederherstellungen</strong></div><template x-for="item in recovery.staging" :key="item.id"><div class="recovery-record"><strong x-text="item.pair + ' · Job #' + item.job_id"></strong><span class="badge" :class="item.verified ? 'ok' : item.status" x-text="item.verified ? 'Prüfsumme bestätigt' : (item.status || 'In Bearbeitung')"></span><small x-text="formatDateTime(item.created_at) + ' · ' + (item.files || 0) + ' Dateien · ' + formatBytes(item.bytes || 0)"></small><code class="mono" x-text="item.staging_path || 'Ziel wird vorbereitet'"></code><div class="input-action staging-diff" x-show="item.status !== 'running' && item.staging_path"><label class="field"><span>Datei mit Live-Stand vergleichen</span><input class="mono" x-model="stagingDiffPaths[item.id]" @keydown.enter.prevent="openStagingDiff(item)" placeholder="Relativer Pfad, z. B. ordner/datei.txt" spellcheck="false"></label><button type="button" @click="openStagingDiff(item)" :disabled="!(stagingDiffPaths[item.id] || '').trim()" :aria-label="'Staging ' + item.pair + ' mit Live-Stand vergleichen'">Vergleichen</button></div><div class="button-row" x-show="item.status !== 'running'"><button type="button" class="button secondary small" x-show="item.staging_path" @click="downloadRecoveryStaging(item)">Als ZIP laden</button><button type="button" class="button secondary small" @click="removeRecoveryStaging(item)">Staging entfernen</button></div></div></template></article>
-            <article class="panel"><div class="panel-head"><div><h3>Quarantäne</h3><p>Unerwartete Quellenänderungen müssen geprüft und mit Passwort bestätigt werden.</p></div></div><div class="empty-state compact" x-show="!recovery.quarantine.length"><strong>Keine aktiven Quarantänen</strong></div><template x-for="item in recovery.quarantine" :key="item.history_key"><div class="recovery-record"><strong x-text="item.pair"></strong><span class="badge warn" x-text="item.reason === 'unexpected_source_drop' ? 'Unerwarteter Quellenrückgang' : 'Quelle weicht vom bestätigten Bestand ab'"></span><small x-text="formatDateTime(item.detected_at)"></small><p x-text="'Dateirückgang: ' + (item.file_drop_percent ?? '–') + ' % · Größenrückgang: ' + (item.size_drop_percent ?? '–') + ' %'"></p><p x-text="'Dateien: ' + (item.previous_count ?? '–') + ' → ' + (item.current_count ?? '–') + ' · Größe: ' + formatBytes(item.previous_bytes || 0) + ' → ' + formatBytes(item.current_bytes || 0)"></p><p>Mount, Quellpfad und Bestand außerhalb der Anwendung prüfen. Die Freigabe erlaubt wieder produktive Läufe mit möglichen Löschungen.</p><button class="button secondary small" @click="acknowledgeQuarantine(item)">Prüfen und Quarantäne bestätigen</button></div></template></article>
+            <article class="panel staging-panel" data-workspace-group="staging"><div class="panel-head"><div><h3>Staging-Bereich</h3><p>Wiederhergestellte Daten bleiben getrennt von den produktiven Ordnern.</p></div></div><div class="empty-state compact" x-show="!recovery.staging.length"><strong>Keine Staging-Wiederherstellungen</strong></div><template x-for="item in recovery.staging" :key="item.id"><div class="recovery-record"><strong x-text="item.pair + ' · Job #' + item.job_id"></strong><span class="badge" :class="item.verified ? 'ok' : item.status" x-text="item.verified ? 'Prüfsumme bestätigt' : (item.status || 'In Bearbeitung')"></span><small x-text="formatDateTime(item.created_at) + ' · ' + (item.files || 0) + ' Dateien · ' + formatBytes(item.bytes || 0)"></small><code class="mono" x-text="item.staging_path || 'Ziel wird vorbereitet'"></code><div class="input-action staging-diff" x-show="item.status !== 'running' && item.staging_path"><label class="field"><span>Datei mit Live-Stand vergleichen</span><input class="mono" x-model="stagingDiffPaths[item.id]" @keydown.enter.prevent="openStagingDiff(item)" placeholder="Relativer Pfad, z. B. ordner/datei.txt" spellcheck="false"></label><button type="button" @click="openStagingDiff(item)" :disabled="!(stagingDiffPaths[item.id] || '').trim()" :aria-label="'Staging ' + item.pair + ' mit Live-Stand vergleichen'">Vergleichen</button></div><div class="button-row" x-show="item.status !== 'running'"><button type="button" class="button secondary small" x-show="item.staging_path" @click="downloadRecoveryStaging(item)">Als ZIP laden</button><button type="button" class="button secondary small" @click="removeRecoveryStaging(item)">Staging entfernen</button></div></div></template></article>
+            <article class="panel quarantine-panel" data-workspace-group="quarantine"><div class="panel-head"><div><h3>Quarantäne</h3><p>Unerwartete Quellenänderungen müssen geprüft und mit Passwort bestätigt werden.</p></div></div><div class="empty-state compact" x-show="!recovery.quarantine.length"><strong>Keine aktiven Quarantänen</strong></div><template x-for="item in recovery.quarantine" :key="item.history_key"><div class="recovery-record"><strong x-text="item.pair"></strong><span class="badge warn" x-text="item.reason === 'unexpected_source_drop' ? 'Unerwarteter Quellenrückgang' : 'Quelle weicht vom bestätigten Bestand ab'"></span><small x-text="formatDateTime(item.detected_at)"></small><p x-text="'Dateirückgang: ' + (item.file_drop_percent ?? '–') + ' % · Größenrückgang: ' + (item.size_drop_percent ?? '–') + ' %'"></p><p x-text="'Dateien: ' + (item.previous_count ?? '–') + ' → ' + (item.current_count ?? '–') + ' · Größe: ' + formatBytes(item.previous_bytes || 0) + ' → ' + formatBytes(item.current_bytes || 0)"></p><p>Mount, Quellpfad und Bestand außerhalb der Anwendung prüfen. Die Freigabe erlaubt wieder produktive Läufe mit möglichen Löschungen.</p><button class="button secondary small" @click="acknowledgeQuarantine(item)">Prüfen und Quarantäne bestätigen</button></div></template></article>
           </div>
-          <article class="panel handover-panel"><div class="panel-head"><div><h3>Verschlüsseltes Notfallpaket</h3><p>Die Passphrase wird nicht in das Paket geschrieben. Bewahre sie getrennt und offline auf. Die Akte rettet ausschließlich inventarisierte Vault-Dateien, deren Zielkopien noch erreichbar sind; sie ersetzt kein vollständiges Serverbackup.</p></div></div><div class="form-grid two"><label class="field"><span>Aktuelles Passwort</span><input type="password" autocomplete="current-password" x-model="recovery.handover.password"></label><label class="field"><span>Passphrase · mindestens 12 Zeichen</span><input type="password" autocomplete="new-password" x-model="recovery.handover.passphrase" minlength="12"></label><label class="field"><span>Passphrase wiederholen</span><input type="password" autocomplete="new-password" x-model="recovery.handover.repeat"></label></div><label class="check-row"><input type="checkbox" x-model="recovery.handover.includePaths"><span><strong>Pfade in das Paket aufnehmen</strong><small>Pfade sind betriebliche Informationen. Nur aktivieren, wenn die Empfängerperson sie benötigt.</small></span></label><div class="button-row"><button class="button primary" @click="downloadRecoveryHandover()">Verschlüsseltes Paket herunterladen</button><button class="button secondary" @click="printHandoverKey()">Separaten Passphrase-Beleg drucken</button></div></article>
+          <article class="panel handover-panel" data-workspace-group="handover"><div class="panel-head"><div><h3>Verschlüsseltes Notfallpaket</h3><p>Die Passphrase wird nicht in das Paket geschrieben. Bewahre sie getrennt und offline auf. Die Akte rettet ausschließlich inventarisierte Vault-Dateien, deren Zielkopien noch erreichbar sind; sie ersetzt kein vollständiges Serverbackup.</p></div></div><div class="form-grid two"><label class="field"><span>Aktuelles Passwort</span><input type="password" autocomplete="current-password" x-model="recovery.handover.password"></label><label class="field"><span>Passphrase · mindestens 12 Zeichen</span><input type="password" autocomplete="new-password" x-model="recovery.handover.passphrase" minlength="12"></label><label class="field"><span>Passphrase wiederholen</span><input type="password" autocomplete="new-password" x-model="recovery.handover.repeat"></label></div><label class="check-row"><input type="checkbox" x-model="recovery.handover.includePaths"><span><strong>Pfade in das Paket aufnehmen</strong><small>Pfade sind betriebliche Informationen. Nur aktivieren, wenn die Empfängerperson sie benötigt.</small></span></label><div class="button-row"><button class="button primary" @click="downloadRecoveryHandover()">Verschlüsseltes Paket herunterladen</button><button class="button secondary" @click="printHandoverKey()">Separaten Passphrase-Beleg drucken</button></div>
+            <div class="snapshot-restore">
+              <div><h4 class="subheading">Notfallpaket prüfen &amp; auf neuem Server importieren</h4><p>Lade eine vorhandene <code>recovery-handover.encrypted.json</code>-Datei oder füge den JSON-Inhalt ein, um das Inventar zu entschlüsseln und erreichbare Vault-Bestände diesem Server zuzuordnen.</p></div>
+              <div class="button-row">
+                <label class="button secondary small"><input type="file" accept=".json,application/json" hidden @change="loadHandoverImportFile($event)">Notfallpaket-Datei auswählen</label>
+                <small class="mono muted" x-show="recovery.handoverImport.fileName" x-text="recovery.handoverImport.fileName"></small>
+              </div>
+              <label class="field"><span>Verschlüsseltes Paket (JSON)</span><textarea class="mono" rows="4" x-model="recovery.handoverImport.envelopeText" placeholder='{"schema":"rclone-recovery-handover-v1","salt_b64":"…","nonce_b64":"…","ciphertext_b64":"…"}' spellcheck="false"></textarea></label>
+              <div class="form-grid two">
+                <label class="field"><span>Übergabe-Passphrase (mind. 12 Zeichen)</span><input type="password" autocomplete="off" x-model="recovery.handoverImport.passphrase" minlength="12"></label>
+                <label class="field"><span>Aktuelles Serverpasswort (für Import, leer = Passkey/Dialog)</span><input type="password" autocomplete="current-password" x-model="recovery.handoverImport.password"></label>
+              </div>
+              <div class="stack" x-show="handoverPreviewSources().length" x-cloak>
+                <h4 class="subheading">Datenweg-Zuordnung auf diesem Server</h4>
+                <div class="form-grid two">
+                  <template x-for="src in handoverPreviewSources()" :key="src.key">
+                    <label class="field"><span x-text="src.label + (src.count != null ? (' (' + src.count + ' Einträge)') : '')"></span><select x-model="recovery.handoverImport.mappings[src.key]"><option value="">Datenweg auf diesem Server wählen…</option><template x-for="pair in (config.backup?.pairs || [])" :key="pair.name"><option :value="pair.name" x-text="pair.name"></option></template></select></label>
+                  </template>
+                </div>
+              </div>
+              <div class="button-row">
+                <button type="button" class="button secondary" @click="previewRecoveryHandover()" :disabled="recovery.handoverImport.busy" x-text="recovery.handoverImport.busy ? 'Prüft…' : 'Vorschau entschlüsseln'"></button>
+                <button type="button" class="button primary" @click="importRecoveryHandover()" :disabled="recovery.handoverImport.busy" x-text="recovery.handoverImport.busy ? 'Importiert…' : 'Notfallpaket importieren'"></button>
+              </div>
+              <p class="inline-error" role="alert" x-show="recovery.handoverImport.error" x-text="recovery.handoverImport.error"></p>
+              <div class="snapshot-diff" x-show="recovery.handoverImport.preview" x-cloak role="status">
+                <strong x-text="'Paket entschlüsselt' + ((recovery.handoverImport.preview?.hostname || recovery.handoverImport.preview?.recovery_pass?.hostname) ? (' · Ursprungsserver: ' + (recovery.handoverImport.preview?.hostname || recovery.handoverImport.preview?.recovery_pass?.hostname)) : '')"></strong>
+                <small x-text="'Erstellt: ' + formatDateTime(recovery.handoverImport.preview?.created_at || recovery.handoverImport.preview?.recovery_pass?.generated_at) + (recovery.handoverImport.preview?.total != null || recovery.handoverImport.preview?.items_count != null ? (' · Einträge: ' + (recovery.handoverImport.preview?.total ?? recovery.handoverImport.preview?.items_count)) : '')"></small>
+              </div>
+              <div class="snapshot-diff" x-show="recovery.handoverImport.result" x-cloak role="status">
+                <strong x-text="'Import abgeschlossen · ' + (recovery.handoverImport.result?.imported ?? 0) + ' Einträge übernommen · ' + (recovery.handoverImport.result?.already_present ?? 0) + ' bereits vorhanden'"></strong>
+              </div>
+            </div>
+          </article>
         </section>
 
         <!-- SETTINGS -->
@@ -1379,7 +1453,7 @@
                   <label class="field"><span>Arbeitsverzeichnis</span><input class="mono" x-model="config.pbs.boot_drill.scratch_dir" placeholder="/opt/rclone-sync/temp" spellcheck="false"><small>Absoluter Pfad mit Platz für das ganze Disk-Image. Leer = Temporäres Verzeichnis (paths.temp_dir).</small></label>
                 </div>
                 <div class="inherit-note"><strong>Voraussetzungen:</strong> QEMU im Gast und Zugriff auf /dev/kvm; beides muss die systemd-Unit freigeben. Ohne /dev/kvm läuft der Drill emuliert und deutlich langsamer. <strong>Datenschutz:</strong> Das Image enthält Produktivdaten und wird nach dem Drill gelöscht. Die gespeicherte Konsolenausgabe kann Hostnamen enthalten.</div>
-                <div class="inherit-note"><strong>Targets:</strong> PBS-Backups legst du im Pair-Konfigurator an (Seite „Pairs" → Vorlage „Backup: Lokale Pfade → Proxmox Backup Server").</div>
+                <div class="inherit-note"><strong>Targets:</strong> PBS-Backups legst du im Konfigurator unter Datenwege an (Vorlage „Backup: Lokale Pfade → Proxmox Backup Server“). <button type="button" class="button secondary small" @click="navigate('pairs')">Zu Datenwege wechseln</button></div>
                 <div class="inherit-note" x-show="pbs.status && !pbs.status.client_available"><strong>Hinweis:</strong> proxmox-backup-client ist im Container nicht installiert. Installationsbefehle stehen in config.example.yaml bzw. am Ende von scripts/install.sh.</div>
               </article>
 
@@ -1398,7 +1472,7 @@
         <button :class="page==='pairs' && 'active'" :aria-current="page==='pairs' ? 'page' : null" @click="navigate('pairs')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg></span><small>Datenwege</small></button>
         <button :class="page==='definitions' && 'active'" :aria-current="page==='definitions' ? 'page' : null" @click="navigate('definitions')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></span><small>Jobs</small></button>
         <button :class="page==='runs' && 'active'" :aria-current="page==='runs' ? 'page' : null" @click="navigate('runs')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8"/></svg></span><small>Läufe</small></button>
-        <button :class="page==='doctor' && 'active'" :aria-current="page==='doctor' ? 'page' : null" @click="navigate('doctor')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span><small>System</small></button>
+        <button :class="['doctor', 'recovery', 'settings'].includes(page) && 'active'" :aria-current="['doctor', 'recovery', 'settings'].includes(page) ? 'page' : null" @click="navigate('doctor')"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span><small>System</small></button>
       </nav>
     </div>
   </div>
@@ -1436,7 +1510,7 @@
         <div class="inline-error" x-show="lockdownDialog.error" role="alert" x-text="lockdownDialog.error"></div>
         <p x-show="lockdownDialog.submitting" role="status">Lockdown läuft. Das kann bis zu einer halben Minute dauern…</p>
       </div>
-      <div class="modal-footer"><button type="button" class="button secondary" @click="closeLockdown()" :disabled="lockdownDialog.submitting">Abbrechen</button><button type="submit" class="button danger" :disabled="lockdownDialog.submitting || !lockdownDialog.password" x-text="lockdownDialog.submitting ? 'Wird ausgelöst…' : 'Lockdown auslösen'"></button></div>
+      <div class="modal-footer"><button type="button" class="button secondary" @click="closeLockdown()" :disabled="lockdownDialog.submitting">Abbrechen</button><button type="button" class="button secondary" x-show="hasWebAuthnCredentials()" @click="triggerLockdownWithWebAuthn()" :disabled="lockdownDialog.submitting">Mit Passkey auslösen</button><button type="submit" class="button danger" :disabled="lockdownDialog.submitting || !lockdownDialog.password" x-text="lockdownDialog.submitting ? 'Wird ausgelöst…' : 'Lockdown auslösen'"></button></div>
     </form>
   </div>
 
@@ -1471,8 +1545,8 @@
   </div>
 
   <!-- Remote setup uses the questions provided by the installed rclone. -->
-  <div class="modal" x-show="remoteSetup.show" x-cloak @click.self="closeRemoteSetup()">
-    <form class="modal-dialog wide" x-ref="remoteSetupDialog" role="dialog" aria-modal="true" aria-labelledby="remote-setup-title" tabindex="-1" @submit.prevent="submitRemoteSetup()" :aria-busy="remoteSetup.busy">
+  <div class="modal remote-setup-modal" x-show="remoteSetup.show" x-cloak @click.self="closeRemoteSetup()">
+    <form class="modal-dialog wide remote-setup-dialog" x-ref="remoteSetupDialog" role="dialog" aria-modal="true" aria-labelledby="remote-setup-title" tabindex="-1" @submit.prevent="submitRemoteSetup()" :aria-busy="remoteSetup.busy">
       <div class="modal-head"><h3 id="remote-setup-title" x-text="remoteSetup.provider === 'drive' ? 'Google Drive anmelden' : 'Remote einbinden'"></h3><button type="button" class="icon-button" @click="closeRemoteSetup()" :disabled="remoteSetup.busy" aria-label="Einrichtung schließen">×</button></div>
       <div class="modal-content stack">
         <template x-if="!remoteSetup.session"><div class="stack">
@@ -1485,7 +1559,7 @@
             <button type="button" class="button secondary small" :class="remoteSetup.provider === 'webdav' && 'active'" @click="selectRemotePreset('webdav', 'nextcloud')">Nextcloud / WebDAV</button>
           </div>
           <div class="form-grid two">
-            <label class="field"><span>Remote-Name</span><input x-model="remoteSetup.name" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{1,63}" maxlength="64" placeholder="gdrive" :disabled="remoteSetup.busy || remoteSetup.reconnect" autocomplete="off"><small>2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche (z. B. <code>gdrive</code>).</small></label>
+            <label class="field"><span>Remote-Name</span><input x-model="remoteSetup.name" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{1,63}" maxlength="64" placeholder="gdrive" :disabled="remoteSetup.busy || remoteSetup.reconnect" autocomplete="off" data-dialog-initial-focus><small>2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche (z. B. <code>gdrive</code>).</small></label>
             <label class="field"><span>Anbieter</span><select x-model="remoteSetup.provider" @change="remoteSetup.reconnect = false; remoteSetup.useStoredDriveClient = false; remoteSetup.clientId = ''; remoteSetup.clientSecret = ''" required :disabled="remoteSetup.busy"><option value="">Bitte auswählen</option><template x-for="provider in remoteSetup.providers" :key="provider.name"><option :value="provider.name" x-text="provider.description"></option></template></select></label>
           </div>
 
@@ -1633,7 +1707,7 @@
         <div class="loading-state modal-loading" x-show="jobModal.loading" role="status" aria-live="polite">Jobdetails werden geladen…</div>
         <div class="job-detail-facts"><div><small>Jobdefinition</small><strong x-text="jobModal.job?.definition_name || 'Manueller Lauf'"></strong></div><div><small>Konfigurationsstand</small><strong class="mono" x-text="jobModal.job?.config_revision || '—'"></strong></div><div><small>Gestartet</small><strong x-text="formatDateTime(jobModal.job?.started_at)"></strong></div><div><small>Beendet</small><strong x-text="formatDateTime(jobModal.job?.ended_at)"></strong></div><div><small>Dauer</small><strong x-text="jobModal.job?.ended_at ? formatDur(jobModal.job.ended_at-jobModal.job.started_at) : 'Läuft'"></strong></div><div><small>Log</small><strong x-text="jobModal.job?.log_file ? 'Vorhanden' : 'Kein Log'"></strong></div></div>
         <div class="button-row" x-show="canRetryJob(jobModal.job)"><button class="button primary" @click="retryJob(jobModal.job)" :disabled="pending.retry || lockdownState.active" x-text="pending.retry ? 'Startet…' : 'Job erneut starten'"></button><small>Nur mit unveränderter Jobdefinition und gleichem Konfigurationsstand.</small></div>
-        <div class="button-row" x-show="jobModal.job?.dry_run && ['backup', 'quicksync'].includes(jobModal.job?.kind)"><button class="button secondary" @click="openPreflight(jobModal.job)" :disabled="jobModal.job?.status === 'running'">Änderungsmatrix</button><small>Geplante Kopien, Löschungen und Verschiebungen dieses Probelaufs prüfen und einzelne Pfade vor dem produktiven Start abwählen.</small></div>
+        <div class="button-row" x-show="jobModal.job?.dry_run && ['backup', 'quicksync'].includes(jobModal.job?.kind)"><button class="button primary" @click="openPreflight(jobModal.job)" :disabled="jobModal.job?.status === 'running'">Änderungsmatrix</button><small>Geplante Kopien, Löschungen und Verschiebungen dieses Probelaufs prüfen und einzelne Pfade vor dem produktiven Start abwählen.</small></div>
         <div class="button-row" x-show="quickPromotion?.jobId===jobModal.job?.id && jobModal.job?.status==='ok'"><button class="button secondary" @click="promoteQuickSync()">Als deaktivierten Datenweg übernehmen</button><small>Der Entwurf wird nicht automatisch aktiviert. Prüfe Richtung, Pfade und Schutzregeln vor dem Speichern.</small></div>
         <div class="inline-error" x-show="jobModal.job?.kind === 'backup' && ['error','cancelled','stale'].includes(jobModal.job?.status) && !canRetryJob(jobModal.job)">Dieser ältere Lauf ist nicht sicher an eine Jobdefinition gebunden. Prüfe den aktuellen Jobplan und starte ihn dort neu.</div>
         <div class="job-detail-facts" x-show="jobModal.job?.kind === 'bootdrill' && jobModal.job?.summary"><div><small>Bootfähig</small><strong x-text="jobModal.job?.summary?.bootable ? 'Ja' : 'Nein'"></strong></div><div><small>Snapshot</small><strong class="mono" x-text="jobModal.job?.summary?.snapshot || '—'"></strong></div><div><small>Bis Guest Agent</small><strong x-text="jobModal.job?.summary?.seconds_to_agent != null ? jobModal.job.summary.seconds_to_agent + ' s' : '—'"></strong></div><div><small>KVM</small><strong x-text="jobModal.job?.summary?.kvm ? 'Ja' : 'Nein, emuliert'"></strong></div></div>
@@ -1683,7 +1757,7 @@
   </div>
 
   <!-- Änderungsmatrix eines Probelaufs -->
-  <div class="modal" x-show="preflight.show" @click.self="closePreflight()" x-cloak>
+  <div class="modal preflight-modal" x-show="preflight.show" @click.self="closePreflight()" x-cloak>
     <div class="modal-dialog extra-wide" id="preflight-dialog" x-ref="preflightDialog" role="dialog" aria-modal="true" aria-labelledby="preflight-dialog-title" tabindex="-1" :aria-busy="preflight.loading">
       <div class="modal-head"><h3 id="preflight-dialog-title" x-text="'Änderungsmatrix' + (preflight.jobId ? ' · Probelauf #' + preflight.jobId : '')"></h3><button class="icon-button" @click="closePreflight()" aria-label="Änderungsmatrix schließen" data-dialog-initial-focus>×</button></div>
       <div class="modal-content stack">
@@ -1794,7 +1868,7 @@
     </form>
   </div>
 
-  <div class="unsaved-bar" x-show="configDirty || filterFile.dirty" x-cloak>
+  <div class="unsaved-bar" :class="(busy() || progress?.running) && 'above-progress'" x-show="configDirty || filterFile.dirty" x-cloak>
     <span><strong>Ungespeicherte Änderungen</strong><small>Speichere, bevor du die Seite verlässt.</small><div class="snapshot-diff-list" x-show="configDiffOpen && configDirty" x-cloak><template x-for="diff in configDiffEntries()" :key="diff.path"><div><code x-text="diff.path"></code><span x-text="diff.before"></span><b aria-hidden="true">→</b><span x-text="diff.after"></span></div></template></div></span>
     <div class="button-row">
       <button type="button" class="button secondary small" x-show="configDirty" @click="toggleConfigDiff()" x-text="configDiffOpen ? 'Unterschiede ausblenden' : 'Unterschiede prüfen'"></button>
@@ -1820,7 +1894,7 @@
     </section>
   </div>
 
-  <div class="toast" :class="[toast.type, (configDirty || filterFile.dirty) && 'above-unsaved']" x-show="toast.show" x-transition.opacity :role="toast.type === 'err' ? 'alert' : 'status'" :aria-live="toast.type === 'err' ? 'assertive' : 'polite'" x-cloak><span class="toast-symbol" aria-hidden="true" x-text="toast.type === 'err' ? '!' : (toast.type === 'warn' ? '△' : '✓')"></span><span x-text="toast.msg"></span><button @click="dismissToast()" aria-label="Meldung schließen">×</button></div>
+  <div class="toast" :class="[toast.type, (configDirty || filterFile.dirty) && 'above-unsaved', (busy() || progress?.running) && 'above-progress']" x-show="toast.show" x-transition.opacity :role="toast.type === 'err' ? 'alert' : 'status'" :aria-live="toast.type === 'err' ? 'assertive' : 'polite'" x-cloak><span class="toast-symbol" aria-hidden="true" x-text="toast.type === 'err' ? '!' : (toast.type === 'warn' ? '△' : '✓')"></span><span x-text="toast.msg"></span><button @click="dismissToast()" aria-label="Meldung schließen">×</button></div>
   <script src="/static/ui-helpers.js?v=__APP_VERSION__"></script>
   <!-- Reihenfolge tragend: Modul app.js setzt window.app, workspace.js wrappt es, erst dann startet Alpine. -->
   <script type="module" src="/static/app.js?v=__APP_VERSION__"></script>

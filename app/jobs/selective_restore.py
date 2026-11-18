@@ -18,7 +18,7 @@ from typing import Any, Mapping, Sequence
 
 from ..db import Database
 from ..notifications import notify
-from ..rclone_args import rclone_subprocess_env
+from ..rclone_args import assert_safe_rclone_config, rclone_subprocess_env
 from ..recovery_paths import recovery_path, validated_staging_path
 from ..restore_evidence import pair_binding
 from .rclone_sync import _rclone_cache_args
@@ -209,6 +209,7 @@ def staging_root(
 
 
 def _run(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    assert_safe_rclone_config()
     return subprocess.run(
         command,
         capture_output=True,

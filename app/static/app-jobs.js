@@ -333,6 +333,7 @@ export const jobsMethods = {
         `/api/jobs/definitions/${encodeURIComponent(job.id)}/run?dry_run=${dryRun}`,
       );
       if (result?.ok) {
+        if (dryRun && result.job_id) this.lastDryRun = { id: result.job_id, kind: 'backup', status: 'running', dry_run: true, label: job.name };
         this.showToast(dryRun ? `Dry-Run für „${job.name}“ gestartet` : `„${job.name}“ gestartet`);
         setTimeout(() => { this.refreshStatus(true); this.loadJobs(true); }, 400);
       }
@@ -399,6 +400,7 @@ export const jobsMethods = {
       const scope = pairs ? `&pairs=${encodeURIComponent(pairs.join(','))}` : '';
       const result = await this.api('POST', `/api/jobs/backup/run?dry_run=${dryRun}${scope}`);
       if (result?.ok) {
+        if (dryRun && result.job_id) this.lastDryRun = { id: result.job_id, kind: 'backup', status: 'running', dry_run: true };
         this.showToast(dryRun ? 'Dry-Run gestartet' : 'Backup gestartet');
         setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
       }
@@ -428,6 +430,7 @@ export const jobsMethods = {
     try {
       const result = await this.api('POST', `/api/jobs/backup/run-pair/${encodeURIComponent(name)}?dry_run=${dryRun}`);
       if (result?.ok) {
+        if (dryRun && result.job_id) this.lastDryRun = { id: result.job_id, kind: 'backup', status: 'running', dry_run: true, label: name };
         this.showToast(dryRun ? `Dry-Run für „${name}“ gestartet` : `„${name}“ gestartet`);
         setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
       }
@@ -495,6 +498,7 @@ export const jobsMethods = {
       const result = await this.api('POST', '/api/jobs/backup/quick', payload);
       if (result?.ok) {
         if (result.job_id) this.quickPromotion = { jobId: result.job_id, draft: promotion };
+        if (result.job_id && payload.dry_run) this.lastDryRun = { id: result.job_id, kind: 'quicksync', status: 'running', dry_run: true };
         this.showToast('Quick-Sync gestartet');
         this.closeQuick();
         setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
@@ -611,6 +615,32 @@ export const jobsMethods = {
     }
   },
 
+  latestDryRunJob() {
+    if (!this.lastDryRun?.id) return null;
+    const matched = [...(this.recentJobs || []), ...(this.jobs?.items || [])]
+      .find((item) => item?.id === this.lastDryRun.id);
+    if (matched) return matched;
+    const stillRunning = (this.status?.backup?.id === this.lastDryRun.id)
+      || (this.status?.quicksync?.id === this.lastDryRun.id)
+      || (this.progress?.running && this.progress?.job_id === this.lastDryRun.id);
+    return { ...this.lastDryRun, status: stillRunning ? 'running' : 'ok' };
+  },
+
+  async openPreflightMatrix(job = null) {
+    const target = job || this.latestDryRunJob();
+    if (!target?.id) return;
+    if (target.status === 'running') {
+      const latest = await this.api('GET', `/api/jobs/${target.id}`, undefined, { silent: true });
+      if (!latest || latest.status === 'running') {
+        this.showToast('Probelauf läuft noch – Änderungsmatrix steht direkt nach Abschluss bereit.', 'warn');
+        this.showJob(latest || target);
+        return;
+      }
+      return this.openPreflight(latest);
+    }
+    return this.openPreflight(target);
+  },
+
   async openPreflight(job) {
     if (!job?.id) return;
     this.preflight = { show: true, loading: true, kind: job.kind, jobId: job.id, data: null, excluded: {}, error: '' };
@@ -674,6 +704,7 @@ export const jobsMethods = {
       if (!result) return;
       if (result.__error) { state.error = this.errorText(result); return; }
       if (result.ok) {
+        this.lastDryRun = null;
         this.showToast('Backup gestartet');
         this.closePreflight();
         this.closeJob();

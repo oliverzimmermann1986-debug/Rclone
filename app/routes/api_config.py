@@ -1145,6 +1145,7 @@ class BootstrapExportRequest(BaseModel):
     current_password: str = Field(min_length=1, max_length=1024)
     passphrase: str = Field(min_length=12, max_length=512)
     include_secrets: bool = False
+    include_rclone_conf: bool = False
 
 
 @router.post("/bootstrap-export")
@@ -1167,6 +1168,7 @@ def export_encrypted_bootstrap(
             passphrase=body.passphrase,
             revision=revision,
             include_secrets=body.include_secrets,
+            include_rclone_conf=body.include_rclone_conf,
         )
     except BootstrapExportError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -1176,6 +1178,7 @@ def export_encrypted_bootstrap(
         details={
             "revision": revision,
             "include_secrets": bool(body.include_secrets),
+            "include_rclone_conf": bool(body.include_rclone_conf),
             "sha256": bundle["sha256"],
         },
     )

@@ -3,29 +3,32 @@ import UIKit
 
 struct StatusBadge: View {
     let status: String?
+    @ScaledMetric(relativeTo: .caption) private var horizontalPadding: CGFloat = 9
+    @ScaledMetric(relativeTo: .caption) private var verticalPadding: CGFloat = 5
 
-    private var isWarning: Bool {
-        ["warn", "warning", "partial"].contains(status?.lowercased() ?? "")
+    private var symbolName: String {
+        StatusStyle.symbol(for: status)
     }
 
     var body: some View {
         Label(StatusStyle.label(for: status), systemImage: StatusStyle.symbol(for: status))
             .font(.caption.weight(.semibold))
             .foregroundStyle(StatusStyle.color(for: status))
-            .labelStyle(CompactStatusLabelStyle(isWarning: isWarning))
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
+            .labelStyle(CompactStatusLabelStyle(usesSemanticIcon: symbolName != "circle.fill"))
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
             .background(StatusStyle.color(for: status).opacity(0.12), in: Capsule())
             .accessibilityLabel("Status: \(StatusStyle.label(for: status))")
     }
 }
 
 private struct CompactStatusLabelStyle: LabelStyle {
-    let isWarning: Bool
+    let usesSemanticIcon: Bool
+    @ScaledMetric(relativeTo: .caption2) private var dotSize: CGFloat = 7
 
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 5) {
-            configuration.icon.font(isWarning ? .caption2 : .system(size: 7))
+            configuration.icon.font(usesSemanticIcon ? .caption2 : .system(size: dotSize))
             configuration.title
         }
     }

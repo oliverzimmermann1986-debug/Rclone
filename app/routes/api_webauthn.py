@@ -18,8 +18,10 @@ from webauthn.helpers.exceptions import WebAuthnException
 from ..auth import (
     SESSION_COOKIE,
     account_generation_guard,
+    bump_session_version,
     clear_login_failures,
     clear_reauth_failures,
+    client_host,
     create_session,
     issue_webauthn_reauth_token,
     login_key,
@@ -568,10 +570,36 @@ def complete_reauth(
         result = finish_authentication(body.challenge_id, body.credential)
     except Exception as exc:
         retry = record_reauth_failure(request)
-        err = _ceremony_error(exc)
-        if retry:
-            err.headers = {"Retry-After": str(retry)}
-        raise err from exc
+        if retry > 0:
+            raw_session = str(request.cookies.get(SESSION_COOKIE, "") or "")
+            if raw_session and session_user(raw_session) is not None:
+                try:
+                    new_ver = bump_session_version()
+                    _audit_best_effort(
+                        "reauth_lockout_session_revoked",
+                        actor=str(user or "admin"),
+                        details={
+                            "client": client_host(request),
+                            "session_version": new_ver,
+                            "retry_after_seconds": int(retry),
+                            "via": "webauthn",
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Sitzungswiderruf nach WebAuthn-Reauth-Sperre fehlgeschlagen"
+                    )
+            retry_sec = max(1, int(retry))
+            raise HTTPException(
+                429,
+                {
+                    "message": "Zu viele falsche Bestätigungen",
+                    "reauth_required": True,
+                    "retry_after_seconds": retry_sec,
+                },
+                headers={"Retry-After": str(retry_sec)},
+            ) from exc
+        raise _ceremony_error(exc) from exc
     if result.get("native"):
         raise HTTPException(400, "Native Anmelde-Challenges sind hier nicht erlaubt.")
     try:

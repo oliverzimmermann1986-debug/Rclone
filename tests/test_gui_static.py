@@ -89,6 +89,7 @@ def test_template_direct_calls_exist_in_alpine_component():
         "app",
         "if",
         "in",
+        "Boolean",
         "String",
         "Number",
         "Math",
@@ -378,7 +379,8 @@ def test_confirmation_navigation_and_pair_actions_are_accessible():
     assert "this.focusableElements(this.$refs.mainSidebar)[0]?.focus()" in javascript
     assert "this.navigationIsModal() ? this.$refs.mainSidebar : null" in javascript
     assert 'x-ref="mainSidebar"' in html
-    assert ':inert="navigationIsModal()"' in html
+    assert ':inert="Boolean(activeDialog())"' in html
+    assert ':inert="navigationIsModal() || Boolean(activeDialog())"' in html
     assert "document.getElementById('main-content')?.focus" in javascript
     assert (
         "target?.isConnected ? target : document.getElementById('main-content')"

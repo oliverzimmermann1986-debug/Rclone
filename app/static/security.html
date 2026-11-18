@@ -1,26 +1,267 @@
 <!doctype html>
-<html lang="de">
+<html lang="de" data-theme="system">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f4f5ef" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121d17" media="(prefers-color-scheme: dark)">
   <title>Sichere Anmeldung · Sicherpfad</title>
   <style>
-    :root{font:15px/1.45 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:light dark;--bg:#f6f7f9;--panel:#fff;--text:#171a1f;--soft:#66707c;--border:#d3d8de;--green:#147d58;--red:#b42336}@media(prefers-color-scheme:dark){:root{--bg:#16181d;--panel:#1d2026;--text:#eceef1;--soft:#a8b0bb;--border:#3c424c;--green:#39ad7a;--red:#ff8585}}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}main{width:min(720px,100%);margin:auto;padding:40px 22px 80px}a{color:var(--green)}h1{font-size:31px;letter-spacing:-.04em;margin:24px 0 6px}p{color:var(--soft)}section{margin-top:24px;padding:22px;border:1px solid var(--border);border-radius:16px;background:var(--panel)}h2{margin:0 0 6px;font-size:19px}label{display:block;margin-top:14px;color:var(--soft);font-weight:600}input{width:100%;min-height:44px;margin-top:5px;padding:0 11px;border:1px solid var(--border);border-radius:10px;background:var(--bg);color:var(--text);font:inherit}button{min-height:42px;margin-top:14px;padding:0 15px;border:0;border-radius:10px;background:var(--green);color:#fff;font-weight:700}button.danger{margin:0;background:transparent;color:var(--red);border:1px solid var(--border)}.credential{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-top:1px solid var(--border)}.credential:first-child{border:0}.credential strong,.credential small{display:block}.credential small{color:var(--soft)}.message{margin-top:16px;color:var(--soft)}.message.error{color:var(--red)}[hidden]{display:none}
+    :root {
+      color-scheme: light dark;
+      --bg: #f4f5ef;
+      --panel: #ffffff;
+      --field: #f7f8f3;
+      --border: #e1e6db;
+      --border-strong: #859183;
+      --text: #202d26;
+      --soft: #56625a;
+      --faint: #59635a;
+      --primary: #2b6548;
+      --primary-hover: #204f38;
+      --on-primary: #ffffff;
+      --ok: #257246;
+      --ok-bg: #eaf5eb;
+      --danger: #b1343d;
+      --danger-bg: #fbecee;
+    }
+    html[data-theme="light"] { color-scheme: light; }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #121d17;
+      --panel: #1b2921;
+      --field: #213128;
+      --border: #324333;
+      --border-strong: #6c8369;
+      --text: #eef3e9;
+      --soft: #b6c3b2;
+      --faint: #a1b09e;
+      --primary: #bbd994;
+      --primary-hover: #d0e7ae;
+      --on-primary: #192a1c;
+      --ok: #8bd4a2;
+      --ok-bg: #213e2c;
+      --danger: #ffabb2;
+      --danger-bg: #432b30;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #121d17;
+        --panel: #1b2921;
+        --field: #213128;
+        --border: #324333;
+        --border-strong: #6c8369;
+        --text: #eef3e9;
+        --soft: #b6c3b2;
+        --faint: #a1b09e;
+        --primary: #bbd994;
+        --primary-hover: #d0e7ae;
+        --on-primary: #192a1c;
+        --ok: #8bd4a2;
+        --ok-bg: #213e2c;
+        --danger: #ffabb2;
+        --danger-bg: #432b30;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      background: var(--bg);
+      color: var(--text);
+      font: 400 14px/1.6 "Geist", "Inter Tight", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    main {
+      width: min(760px, 100%);
+      margin: 0 auto;
+      padding: calc(36px + env(safe-area-inset-top)) 22px calc(72px + env(safe-area-inset-bottom));
+    }
+    .top-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 44px;
+      color: var(--primary);
+      font-weight: 600;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .top-link:hover { color: var(--primary-hover); }
+    .brand-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .brand-row img { width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0; }
+    .eyebrow {
+      display: block;
+      color: var(--faint);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 4px 0 8px;
+      font-size: clamp(26px, 3vw, 32px);
+      letter-spacing: -.035em;
+      line-height: 1.18;
+      overflow-wrap: anywhere;
+    }
+    p { margin: 0; color: var(--soft); overflow-wrap: anywhere; }
+    section {
+      margin-top: 24px;
+      padding: 24px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--panel);
+      box-shadow: 0 2px 3px rgba(28, 48, 32, .03);
+    }
+    h2 {
+      margin: 0 0 6px;
+      font-size: 18px;
+      letter-spacing: -.025em;
+      overflow-wrap: anywhere;
+    }
+    label {
+      display: block;
+      margin-top: 16px;
+      color: var(--soft);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    input {
+      display: block;
+      width: 100%;
+      min-height: 46px;
+      margin-top: 6px;
+      padding: 10px 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      background: var(--field);
+      color: var(--text);
+      font: inherit;
+      font-size: 16px;
+      transition: border-color 140ms ease-out, box-shadow 140ms ease-out;
+    }
+    input:hover { border-color: var(--soft); }
+    input:focus {
+      outline: 0;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+    }
+    input::placeholder { color: var(--faint); }
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+    button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 10px 16px;
+      border: 1px solid var(--primary);
+      border-radius: 10px;
+      background: var(--primary);
+      color: var(--on-primary);
+      font: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 140ms ease-out, border-color 140ms ease-out;
+    }
+    button:hover:not(:disabled) {
+      background: var(--primary-hover);
+      border-color: var(--primary-hover);
+    }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    button.secondary {
+      border-color: var(--border-strong);
+      background: var(--panel);
+      color: var(--text);
+    }
+    button.secondary:hover:not(:disabled) {
+      border-color: var(--primary);
+      background: var(--field);
+    }
+    button.danger {
+      margin: 0;
+      border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+      background: var(--panel);
+      color: var(--danger);
+    }
+    button.danger:hover:not(:disabled) {
+      border-color: var(--danger);
+      background: var(--danger-bg);
+    }
+    :where(button, a):focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 3px;
+    }
+    .credential {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding: 14px 0;
+      border-top: 1px solid var(--border);
+    }
+    .credential:first-child { border: 0; padding-top: 6px; }
+    .credential strong, .credential small { display: block; overflow-wrap: anywhere; }
+    .credential small { margin-top: 2px; color: var(--soft); font-size: 12.5px; }
+    .message {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border: 1px solid color-mix(in srgb, var(--ok) 32%, var(--border));
+      border-radius: 10px;
+      background: var(--ok-bg);
+      color: var(--ok);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .message.error {
+      border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+      background: var(--danger-bg);
+      color: var(--danger);
+    }
+    [hidden] { display: none !important; }
+    @media (max-width: 600px) {
+      section { padding: 20px; }
+      .button-row { flex-direction: column; }
+      .button-row button { width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      input, button { transition: none; }
+    }
   </style>
 </head>
 <body data-webauthn-security>
   <main>
-    <a href="/">← Zurück zur Übersicht</a>
-    <h1>Sichere Anmeldung</h1>
-    <p>Registriere einen Passkey für dieses Gerät oder einen physischen FIDO2-Schlüssel. Dein Passwort bleibt als Rückfallweg aktiv.</p>
+    <a class="top-link" href="/">← Zurück zur Übersicht</a>
+    <div class="brand-row">
+      <img src="/static/app-icon-192.png" alt="" width="40" height="40">
+      <div>
+        <span class="eyebrow">Sicherpfad · Zugangsschutz</span>
+        <h1>Sichere Anmeldung</h1>
+      </div>
+    </div>
+    <p>Registriere einen Passkey für dieses Gerät oder einen physischen FIDO2-Sicherheitsschlüssel. Dein Passwort bleibt als Rückfallweg aktiv.</p>
     <section>
       <h2>Neuen Schlüssel registrieren</h2>
-      <label>Name<input data-webauthn-label maxlength="80" placeholder="z. B. iPhone oder YubiKey"></label>
+      <label>Bezeichnung<input data-webauthn-label maxlength="80" placeholder="z. B. iPhone oder YubiKey"></label>
       <label>Aktuelles Passwort<input data-webauthn-password type="password" autocomplete="current-password" required></label>
-      <button type="button" data-webauthn-action="register" data-method="passkey">Passkey hinzufügen</button>
-      <button type="button" data-webauthn-action="register" data-method="security_key">Sicherheitsschlüssel hinzufügen</button>
-      <div class="message" data-webauthn-error hidden></div>
+      <div class="button-row">
+        <button type="button" data-webauthn-action="register" data-method="passkey">Passkey hinzufügen</button>
+        <button type="button" class="secondary" data-webauthn-action="register" data-method="security_key">Sicherheitsschlüssel hinzufügen</button>
+      </div>
+      <div class="message" role="status" aria-live="polite" data-webauthn-error hidden></div>
     </section>
     <section>
       <h2>Registrierte Anmeldearten</h2>

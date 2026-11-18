@@ -93,8 +93,18 @@ enum StatusStyle {
 
     static func symbol(for value: String?) -> String {
         switch value?.lowercased() {
+        case "ok", "active", "healthy": "checkmark.circle.fill"
+        case "running": "arrow.triangle.2.circlepath"
         case "warn", "warning", "partial": "exclamationmark.triangle.fill"
+        case "overdue": "exclamationmark.triangle.fill"
+        case "stale": "clock.badge.exclamationmark"
+        case "error", "failed", "inactive": "exclamationmark.octagon.fill"
+        case "cancelled", "skipped": "minus.circle"
         default: "circle.fill"
         }
+    }
+
+    static func icon(for value: String?) -> String {
+        symbol(for: value)
     }
 }

@@ -15,7 +15,11 @@ from pydantic import BaseModel, Field
 from ..auth import require_auth
 from ..config_store import get_config
 from ..db import get_db
-from ..rclone_args import rclone_subprocess_env
+from ..rclone_args import (
+    UnsafeRcloneConfigError,
+    assert_safe_rclone_config,
+    rclone_subprocess_env,
+)
 from ..security import (
     DEFAULT_HIDDEN_REMOTE_PATHS,
     ensure_within,
@@ -81,7 +85,15 @@ def _hidden_remote_paths() -> set[str]:
     )
 
 
+def _require_safe_rclone_config() -> None:
+    try:
+        assert_safe_rclone_config()
+    except UnsafeRcloneConfigError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 def _rclone_remotes() -> list[str]:
+    _require_safe_rclone_config()
     result = subprocess.run(
         ["rclone", "listremotes"],
         capture_output=True,
@@ -100,8 +112,9 @@ def _rclone_remotes() -> list[str]:
 
 def _rclone_directories(path: str) -> tuple[list[str], bool]:
     """Liest höchstens 1.001 Zeilen und beendet rclone danach kontrolliert."""
+    _require_safe_rclone_config()
     env = rclone_subprocess_env()
-    env["RCLONE_LOG_LEVEL"] = "ERROR"
+    env["RCLONE_LOG_LEVEL"] = "NOTICE"
     proc = subprocess.Popen(
         [
             "rclone",
@@ -206,6 +219,7 @@ def _browse_roots() -> list[Path]:
 def browse_rclone(path: str = "") -> dict[str, Any]:
     """Listet ausschließlich bereits konfigurierte rclone-Remotes."""
     try:
+        _require_safe_rclone_config()
         remotes = _rclone_remotes()
         hidden = _hidden_remote_paths()
         if not path:
@@ -400,6 +414,7 @@ def create_directory(payload: CreateDirectoryPayload) -> dict[str, Any]:
         if _is_hidden_remote_path(created_path, hidden):
             raise HTTPException(403, "Dieser Remote-Pfad ist im Browser ausgeblendet")
         try:
+            _require_safe_rclone_config()
             names, _truncated = _rclone_directories(parent_text)
             if any(existing.casefold() == name.casefold() for existing in names):
                 raise HTTPException(

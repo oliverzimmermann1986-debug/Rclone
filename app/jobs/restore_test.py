@@ -766,6 +766,41 @@ def run_restore_test(
     )
     cfg = _SnapshotConfig(snapshot)
     settings = restore_test_settings(cfg)
+    if str(trigger or "").strip().lower() in {"scheduler", "auto", "automatic"}:
+        try:
+            from ..cloud_quota import should_throttle_optional_job
+            from ..db import get_db
+
+            throttled, throttle_reason = should_throttle_optional_job(
+                get_db(), snapshot
+            )
+        except Exception:
+            throttled, throttle_reason = False, ""
+        if throttled:
+            logger.info("Restore-Drill gedrosselt: %s", throttle_reason)
+            return {
+                "kind": JOB_KIND,
+                "ok": True,
+                "skipped": True,
+                "throttled": True,
+                "cancelled": False,
+                "trigger": trigger,
+                "reason": "transfer_budget_throttled",
+                "warning": throttle_reason,
+                "pairs": [
+                    {
+                        "name": AGGREGATE_RUN_NAME,
+                        "ok": True,
+                        "skipped": True,
+                        "verified": 0,
+                        "sample_size": 0,
+                        "pairs_tested": 0,
+                    }
+                ],
+                "verified_files": 0,
+                "sampled_files": 0,
+                "history_keys": {AGGREGATE_RUN_NAME: HISTORY_KEY},
+            }
     if reset_cancel_state:
         reset_cancel(DEFAULT_CANCEL_SCOPE)
 

@@ -319,3 +319,47 @@ def test_insights_endpoint_maps_and_caches(monkeypatch):
 
     settings["enabled"] = False
     assert api_pbs.pbs_insights(refresh=True) == {"enabled": False}
+
+
+def test_verify_summary_computes_real_stale_count_and_newest_verify(monkeypatch):
+    now = 1_750_000_000
+    recent_ts = now - 5 * 86400
+    stale_upid_ts = now - 45 * 86400
+    stale_fallback_ts = now - 60 * 86400
+    pbs_upid = (
+        f"UPID:pbs:00001234:000ABCDE:00000001:{stale_upid_ts:08X}:"
+        "verificationjob:store:root@pam:"
+    )
+    snapshots = [
+        {
+            "backup-time": now - 10 * 86400,
+            "verification": {"state": "ok", "endtime": recent_ts},
+        },
+        {
+            "backup-time": now - 2 * 86400,
+            "verification": {"state": "ok", "upid": pbs_upid},
+        },
+        {
+            "backup-time": stale_fallback_ts,
+            "verification": {"state": "ok", "upid": "UPID:short"},
+        },
+        {
+            "backup-time": now - 86400,
+            "verification": {"state": "failed", "upid": "UPID:fail"},
+        },
+        {"backup-time": now - 3600},
+    ]
+    monkeypatch.setattr(pbs_api, "_fetch", lambda _s, _p, _t: (snapshots, None))
+
+    summary = pbs_api.verify_summary(_settings(), now=now)
+    assert summary == {
+        "ok": False,
+        "total": 5,
+        "total_snapshots": 5,
+        "verified": 3,
+        "verified_ok": 3,
+        "failed": 1,
+        "unverified": 1,
+        "stale": 2,
+        "newest_verify": recent_ts,
+    }

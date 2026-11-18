@@ -15,8 +15,14 @@ def test_status_style_distinguishes_limited_proof_from_failed_restore():
     assert 'case "error", "failed", "inactive", "stale": .red' in source
     assert 'case "stale": "Unterbrochen"' in source
     assert 'case "error", "failed": "Fehler"' in source
+    assert 'case "ok", "active", "healthy": "checkmark.circle.fill"' in source
+    assert 'case "running": "arrow.triangle.2.circlepath"' in source
     assert (
         'case "warn", "warning", "partial": "exclamationmark.triangle.fill"' in source
+    )
+    assert 'case "stale": "clock.badge.exclamationmark"' in source
+    assert (
+        'case "error", "failed", "inactive": "exclamationmark.octagon.fill"' in source
     )
 
 
@@ -24,7 +30,11 @@ def test_status_badge_warning_is_not_only_a_color_change():
     source = (IOS / "Views" / "Components.swift").read_text(encoding="utf-8")
     assert "systemImage: StatusStyle.symbol(for: status)" in source
     assert '.accessibilityLabel("Status: \\(StatusStyle.label(for: status))")' in source
-    assert "configuration.icon.font(isWarning ? .caption2 : .system(size: 7))" in source
+    assert "@ScaledMetric" in source
+    assert (
+        "configuration.icon.font(usesSemanticIcon ? .caption2 : .system(size: dotSize))"
+        in source
+    )
     assert ".font(.caption.weight(.semibold))" in source
 
 
