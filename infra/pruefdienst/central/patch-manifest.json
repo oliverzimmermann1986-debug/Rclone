@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "description": "Exact-match integration patch for the existing trusted controller. Apply to a private staging copy, run all central unit tests there, then deploy reviewed files without changing credentials.",
+  "files": [
+    {
+      "name": "core.cjs",
+      "sha256Before": "7b86687eeba14d2dcd55340e88696216d994952e3d9710037782e97905c147e6",
+      "replacements": [
+        {
+          "before": "const crypto = require('node:crypto');",
+          "after": "const crypto = require('node:crypto');\nconst { PULL_SUPERSEDED, isPullRef, isAllowedPullRef, augmentRefs, preserveSharedPullRun } = require('./pull-requests.cjs');"
+        },
+        {
+          "before": "const cancellationReason = signal => signal.reason === BRANCH_SUPERSEDED ? BRANCH_SUPERSEDED : MAIN_SUPERSEDED;",
+          "after": "const cancellationReason = signal => signal.reason === PULL_SUPERSEDED ? PULL_SUPERSEDED : signal.reason === BRANCH_SUPERSEDED ? BRANCH_SUPERSEDED : MAIN_SUPERSEDED;"
+        },
+        {
+          "before": "const superseded = j => j.result?.state === 'error' && [MAIN_SUPERSEDED, BRANCH_SUPERSEDED].includes(j.result.description);",
+          "after": "const superseded = j => j.result?.state === 'error' && [MAIN_SUPERSEDED, BRANCH_SUPERSEDED, PULL_SUPERSEDED].includes(j.result.description);"
+        },
+        {
+          "before": "    const reason = ref === 'refs/heads/main' ? MAIN_SUPERSEDED : BRANCH_SUPERSEDED;",
+          "after": "    const reason = isPullRef(ref) ? PULL_SUPERSEDED : ref === 'refs/heads/main' ? MAIN_SUPERSEDED : BRANCH_SUPERSEDED;"
+        },
+        {
+          "before": "      if (old.repo !== repo || !refsOf(old).includes(ref) || hasTag(old) || old.sha === sha || old.phase === 'done') continue;",
+          "after": "      if (old.repo !== repo || !refsOf(old).includes(ref) || hasTag(old) || old.sha === sha || old.phase === 'done') continue;\n      if (preserveSharedPullRun(refsOf(old), ref)) continue;"
+        },
+        {
+          "before": "    if (ref.startsWith('refs/heads/')) this.cancelBranch(repo, ref, sha);",
+          "after": "    if (ref.startsWith('refs/heads/') || isPullRef(ref)) this.cancelBranch(repo, ref, sha);"
+        },
+        {
+          "before": "    const refs = await api.refs(repo.full_name, branch);",
+          "after": "    const refs = await augmentRefs(api, repo.full_name, branch, await api.refs(repo.full_name, branch), config.pullRequestRepos);"
+        },
+        {
+          "before": "      if (ref !== branchRef && !ref.startsWith('refs/tags/')) continue;",
+          "after": "      if (ref !== branchRef && !ref.startsWith('refs/tags/') && !isAllowedPullRef(repo.full_name, ref, config.pullRequestRepos)) continue;"
+        },
+        {
+          "before": "      if (ref === branchRef) queue.cancelBranch(repo.full_name, branchRef, sha);",
+          "after": "      if (ref === branchRef || isAllowedPullRef(repo.full_name, ref, config.pullRequestRepos)) queue.cancelBranch(repo.full_name, ref, sha);"
+        }
+      ]
+    },
+    {
+      "name": "service.cjs",
+      "sha256Before": "82a7b5f9c659db0528df2ce7ab2392493e295267ee19f6097570d8ecd2427670",
+      "replacements": [
+        {
+          "before": "const fs = require('node:fs');",
+          "after": "const fs = require('node:fs');\nconst { pullRequestRepos } = require('./pull-requests.cjs');"
+        },
+        {
+          "before": "  return { ...v, stateDir: '/var/lib/ci-runner' };",
+          "after": "  return { ...v, pullRequestRepos: pullRequestRepos(v.pullRequestRepos, v.owner), stateDir: '/var/lib/ci-runner' };"
+        }
+      ]
+    },
+    {
+      "name": "executor.cjs",
+      "sha256Before": "c1dd8d0119988cf4fefe55673043838941ec0e5137d363f71240fb58bc0368a1",
+      "replacements": [
+        {
+          "before": "['schoenmackers', 'aeon-seals'].includes(job.config.image)",
+          "after": "['schoenmackers', 'aeon-seals', 'rclone'].includes(job.config.image)"
+        }
+      ]
+    },
+    {
+      "name": "direct-run.cjs",
+      "sha256Before": "9071c616712a2f3546cbf99d7f08432b17f17af4e15ab2ecf2d8ca6dacca065b",
+      "replacements": [
+        {
+          "before": "if (!validReport && customCommand) {",
+          "after": "if (!validReport && customCommand && jobConfig.image !== 'rclone') {"
+        },
+        {
+          "before": "['schoenmackers', 'aeon-seals'].includes(jobConfig.image)",
+          "after": "['schoenmackers', 'aeon-seals', 'rclone'].includes(jobConfig.image)"
+        }
+      ]
+    }
+  ]
+}

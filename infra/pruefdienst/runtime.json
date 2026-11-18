@@ -1,0 +1,14 @@
+{
+  "profile": "rclone",
+  "imageId": "sha256:6f72dd4f6ee9ae434c3cf8753a9f9a3f575215a5d15e63d155adf6af7fcc7336",
+  "baseImageId": "sha256:7ab1d115ae1844be581d7119200ea68b1f9cfe65ffe4a01274c1b2bbe735d7c6",
+  "python": ["3.10.22", "3.11.18", "3.12.16", "3.13.18"],
+  "pythonInstaller": "uv 0.13.9 (wheel SHA-256 in uv-requirements.lock)",
+  "node": "24.22.3",
+  "rclone": ["1.60.1-DEV (Debian package)", "1.74.4"],
+  "playwright": "1.65.1",
+  "chromium": "159.0.8154.6",
+  "uid": 1000,
+  "postgres": false,
+  "baselineController": "pristine /usr/local/lib/ci-runner/*.cjs at migration; patched file digests in central/patch-manifest.json"
+}

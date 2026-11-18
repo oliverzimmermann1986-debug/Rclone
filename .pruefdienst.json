@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "image": "rclone",
+  "command": "bash scripts/ci/verify.sh",
+  "timeoutSeconds": 3600,
+  "postgres": false
+}

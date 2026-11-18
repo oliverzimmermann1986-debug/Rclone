@@ -2,17 +2,6 @@ name: Web visual QA
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'app/static/**'
-      - 'tests/web/**'
-      - '.github/workflows/web-visual.yml'
-  pull_request:
-    paths:
-      - 'app/static/**'
-      - 'tests/web/**'
-      - '.github/workflows/web-visual.yml'
 
 permissions:
   contents: read
