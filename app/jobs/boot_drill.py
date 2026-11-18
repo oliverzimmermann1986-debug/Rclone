@@ -58,6 +58,7 @@ BOOT_DRILL_HISTORY_KEY = "bootdrill:global"
 QEMU_BINARY = "qemu-system-x86_64"
 # Schutz vor Options-Injection in die argv von proxmox-backup-client.
 _GROUP_RE = re.compile(r"^[a-z]+/[A-Za-z0-9_][A-Za-z0-9._-]*$")
+_ARCHIVE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}\.img\.fidx$")
 _LIST_TIMEOUT_SEC = 300
 _POLL_SEC = 2
 _SERIAL_TAIL_BYTES = 2048
@@ -166,11 +167,15 @@ def _drill(cfg, summary: dict[str, Any], run, popen, connect) -> None:
     if not snapshots:
         raise RuntimeError(f"Keine Snapshots in Gruppe {group}")
     latest = max(snapshots, key=lambda s: int(s.get("backup-time") or 0))
+    b_type = str(latest.get("backup-type") or "").strip()
+    b_id = str(latest.get("backup-id") or "").strip()
+    returned_group = f"{b_type}/{b_id}"
+    if not _GROUP_RE.fullmatch(returned_group):
+        raise RuntimeError(
+            f"Ungültige Snapshot-Gruppe in PBS-Antwort: {returned_group!r}"
+        )
     stamp = datetime.fromtimestamp(int(latest["backup-time"]), tz=timezone.utc)
-    snapshot = (
-        f"{latest['backup-type']}/{latest['backup-id']}/"
-        f"{stamp.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-    )
+    snapshot = f"{returned_group}/{stamp.strftime('%Y-%m-%dT%H:%M:%SZ')}"
     summary["snapshot"] = snapshot
 
     wanted = drill["archive"]
@@ -187,6 +192,8 @@ def _drill(cfg, summary: dict[str, Any], run, popen, connect) -> None:
             else f"Snapshot {snapshot} enthält kein Disk-Image (*.img.fidx)"
         )
     archive = str(entry["filename"])
+    if not _ARCHIVE_RE.fullmatch(archive):
+        raise RuntimeError(f"Ungültiger Archivname in PBS-Antwort: {archive!r}")
     summary["archive"] = archive
 
     scratch_root = Path(
@@ -218,15 +225,11 @@ def _drill(cfg, summary: dict[str, Any], run, popen, connect) -> None:
         try:
             owner = json.loads((path / ".sicherpfad-owner").read_text(encoding="ascii"))
             identity = path.stat()
-            if (
-                owner
-                != {
-                    "device": identity.st_dev,
-                    "inode": identity.st_ino,
-                    "uid": identity.st_uid,
-                }
-                or identity.st_uid != os.getuid()
-            ):
+            if owner != {
+                "device": identity.st_dev,
+                "inode": identity.st_ino,
+                "uid": identity.st_uid,
+            } or (hasattr(os, "getuid") and identity.st_uid != os.getuid()):
                 continue
         except (OSError, ValueError):
             continue
@@ -302,8 +305,8 @@ def _drill(cfg, summary: dict[str, Any], run, popen, connect) -> None:
             "-nodefaults",
             "-no-user-config",
             "-snapshot",
-            "-drive", f"file={disk},format=raw,if=virtio",
-            "-chardev", f"socket,id=qga0,path={sock_path},server=on,wait=off",
+            "-drive", f"file={str(disk).replace(',', ',,')},format=raw,if=virtio",
+            "-chardev", f"socket,id=qga0,path={sock_path.replace(',', ',,')},server=on,wait=off",
             "-device", "virtio-serial",
             "-device", "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0",
             "-serial", f"file:{scratch / 'serial.log'}",

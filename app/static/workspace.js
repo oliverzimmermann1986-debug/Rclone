@@ -200,8 +200,8 @@
       ['audit', 'Aktivitäten', 'Bedien- und Konfigurationsaktionen nachvollziehen.'],
     ], (node) => {
       if (node.classList.contains('audit-panel')) return 'audit';
-      if (node.classList.contains('recovery-panel') || /Logs und Datenbank/.test(headingText(node))) return 'maintenance';
-      if (node.querySelector('.copy-matrix, .copy-table') || /Kopien je Datenbestand|Bitrot-Scrub/.test(headingText(node))) return 'copies';
+      if (node.classList.contains('recovery-panel') || node.classList.contains('maintenance-panel') || /Logs und Datenbank/.test(headingText(node))) return 'maintenance';
+      if (node.classList.contains('copies-panel') || node.querySelector('.copy-matrix, .copy-table') || /Kopien je Datenbestand|Bitrot-Scrub/.test(headingText(node))) return 'copies';
       return 'health';
     });
     const health = document.getElementById('workspace-panel-doctor-health');
@@ -226,8 +226,8 @@
       ['handover', 'Notfallpaket', 'Eine verschlüsselte Übergabeakte für erreichbare Vault-Zielkopien erstellen.'],
     ], (node) => {
       const title = headingText(node);
-      if (/Staging-Bereich/.test(title)) return 'staging';
-      if (/Quarantäne/.test(title)) return 'quarantine';
+      if (node.classList.contains('staging-panel') || /Staging-Bereich/.test(title)) return 'staging';
+      if (node.classList.contains('quarantine-panel') || /Quarantäne/.test(title)) return 'quarantine';
       if (node.classList.contains('handover-panel') || /Notfallpaket/.test(title)) return 'handover';
       // Unknown newer restore-plan controls deliberately remain in the default view.
       return 'restore';
@@ -267,12 +267,46 @@
       root.querySelector('.definition-row')?.classList.add('job-definition-record');
       const assignments = root.querySelector('.definition-assignments');
       if (assignments) {
+        const pickerDetails = assignments.querySelector('details.assignment-picker');
+        if (pickerDetails) {
+          const flatPicker = element('div', 'assignment-picker');
+          const pickerSummary = pickerDetails.querySelector(':scope > summary');
+          if (pickerSummary) {
+            const head = element('div', 'assignment-picker-head');
+            while (pickerSummary.firstChild) head.append(pickerSummary.firstChild);
+            flatPicker.append(head);
+            pickerSummary.remove();
+          }
+          while (pickerDetails.firstChild) flatPicker.append(pickerDetails.firstChild);
+          pickerDetails.replaceWith(flatPicker);
+        }
         const details = disclosure(assignments, 'Datenwege & Ausführung', '', '!job.id');
         const count = element('small');
         count.setAttribute('x-text', "job.data_path_ids.length + ' Datenweg(e) zugewiesen'");
         details.querySelector('summary > span').append(count);
         const options = root.querySelector('.definition-options');
-        if (options) details.append(options.closest('details') || options);
+        if (options) {
+          const optionsDetails = options.closest('details');
+          if (optionsDetails && optionsDetails !== details) {
+            const summaryText = optionsDetails.querySelector(':scope > summary')?.textContent.trim();
+            if (options === optionsDetails) {
+              const flatOptions = element('div', 'definition-options');
+              if (summaryText) flatOptions.append(element('h4', 'subheading', summaryText));
+              optionsDetails.querySelector(':scope > summary')?.remove();
+              while (optionsDetails.firstChild) flatOptions.append(optionsDetails.firstChild);
+              details.append(flatOptions);
+              optionsDetails.remove();
+            } else {
+              if (summaryText && !options.querySelector('h4, .subheading')) {
+                options.prepend(element('h4', 'subheading', summaryText));
+              }
+              details.append(options);
+              optionsDetails.remove();
+            }
+          } else {
+            details.append(options);
+          }
+        }
       }
     }
     const pairs = page('pairs');

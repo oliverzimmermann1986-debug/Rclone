@@ -102,6 +102,7 @@ struct LockdownControlView: View {
         guard let client = model.client else { return }
         do {
             status = try await client.getLockdownStatus()
+            model.lockdownStatus = status
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -208,6 +209,10 @@ struct ObjectLockAndScrubView: View {
                 ForEach(ransomware.pairs) { pair in
                     CanaryPairRow(
                         pair: pair,
+                        working: working,
+                        onVerify: {
+                            Task { await verifyCanary(for: pair.name) }
+                        },
                         onInit: {
                             if pair.canary.configured {
                                 canaryPassword = ""
@@ -227,7 +232,7 @@ struct ObjectLockAndScrubView: View {
     private var objectLockSection: some View {
         Section("Unveränderbar-Siegel (S3 Object Lock)") {
             if let objectLock {
-                let lockedCount = objectLock.buckets.filter { $0.level == "locked" }.count
+                let lockedCount = objectLock.buckets.filter { $0.level == "immutable" }.count
                 HStack {
                     Image(systemName: lockedCount == objectLock.buckets.count && !objectLock.buckets.isEmpty ? "lock.shield.fill" : "shield.lefthalf.filled")
                         .foregroundStyle(lockedCount == objectLock.buckets.count && !objectLock.buckets.isEmpty ? .green : .orange)
@@ -238,9 +243,9 @@ struct ObjectLockAndScrubView: View {
                         HStack {
                             Text("\(item.remote):\(item.bucket)").font(.subheadline.weight(.medium))
                             Spacer()
-                            Text(item.label)
+                            Label(item.label, systemImage: objectLockSymbol(for: item.level))
                                 .font(.caption)
-                                .foregroundStyle(item.level == "locked" ? .green : .secondary)
+                                .foregroundStyle(objectLockColor(for: item.level))
                         }
                         Text(item.hint).font(.caption).foregroundStyle(.secondary)
                     }
@@ -261,9 +266,15 @@ struct ObjectLockAndScrubView: View {
                         .foregroundStyle(scrubStatus.due ? .orange : .secondary)
                 }
                 if let last = scrubStatus.lastJob {
-                    Text("Letzter Lauf: \(last.status)")
+                    HStack {
+                        Text("Letzter Lauf: \(AppFormat.date(last.startedAt))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        StatusBadge(status: last.effectiveStatus)
+                    }
                         .font(.caption)
-                        .foregroundStyle(last.status == "success" ? Color.secondary : Color.red)
+
                 }
             }
             Button {
@@ -285,9 +296,15 @@ struct ObjectLockAndScrubView: View {
                         .foregroundStyle(bootDrill.due ? .orange : .secondary)
                 }
                 if let last = bootDrill.last {
-                    Text("Letzter Test: \(last.status)")
+                    HStack {
+                        Text("Letzter Test: \(AppFormat.date(last.startedAt))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        StatusBadge(status: last.effectiveStatus)
+                    }
                         .font(.caption)
-                        .foregroundStyle(last.status == "success" ? Color.secondary : Color.red)
+
                 }
             }
             Button {
@@ -309,6 +326,46 @@ struct ObjectLockAndScrubView: View {
         scrubStatus = await scrubTask
         bootDrill = await drillTask
         ransomware = await rwTask
+    }
+
+    private func objectLockColor(for level: String) -> Color {
+        switch level {
+        case "immutable": return .green
+        case "governance": return .blue
+        case "versioned": return .orange
+        case "error": return .red
+        default: return .secondary
+        }
+    }
+
+    private func objectLockSymbol(for level: String) -> String {
+        switch level {
+        case "immutable": return "lock.shield.fill"
+        case "governance": return "shield.lefthalf.filled"
+        case "versioned": return "clock.arrow.circlepath"
+        case "error": return "exclamationmark.octagon.fill"
+        default: return "shield.slash"
+        }
+    }
+
+    private func verifyCanary(for pairName: String) async {
+        guard let client = model.client else { errorMessage = APIError.unauthenticated.localizedDescription; return }
+        working = true
+        feedback = nil
+        errorMessage = nil
+        defer { working = false }
+        do {
+            let res = try await client.verifyPairCanary(pairName: pairName)
+            if res.ok {
+                feedback = "Canary-Prüfung für \(res.pair) bestanden."
+            } else {
+                let detail = res.canary.error ?? res.extensionScan?.error ?? "Verdächtige Änderungen erkannt."
+                errorMessage = "Canary-Alarm bei \(res.pair): \(detail)"
+            }
+            ransomware = try? await client.getRansomwareStatus()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func initCanary(for pairName: String, currentPassword: String?) async {
@@ -369,6 +426,8 @@ struct ObjectLockAndScrubView: View {
 
 private struct CanaryPairRow: View {
     let pair: RansomwarePairStatus
+    let working: Bool
+    let onVerify: () -> Void
     let onInit: () -> Void
 
     var body: some View {
@@ -381,12 +440,24 @@ private struct CanaryPairRow: View {
                         Text(pair.canary.ok ? "Canary OK" : "Canary Alarm!")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(pair.canary.ok ? .green : .red)
+                        Button("Prüfen", action: onVerify)
+                            .font(.caption2)
+                            .buttonStyle(.bordered)
+                            .disabled(working)
                         Button("Neu anlegen", action: onInit)
                             .font(.caption2)
                             .buttonStyle(.bordered)
                     }
                 } else {
-                    Button("Canary anlegen", action: onInit)
+                    HStack(spacing: 8) {
+                        Button("Prüfen", action: onVerify)
+                            .font(.caption2)
+                            .buttonStyle(.bordered)
+                            .disabled(working)
+                        Button("Canary anlegen", action: onInit)
+                            .font(.caption)
+                            .disabled(working)
+                    }
                         .font(.caption)
                 }
             }
@@ -613,9 +684,13 @@ struct LineDiffViewerView: View {
                 Text(diff.path).font(.subheadline.monospaced())
                 HStack(spacing: 12) {
                     Text("+\(diff.stats.insert)").foregroundStyle(.green)
+                        .accessibilityLabel("\(diff.stats.insert) Zeilen eingefügt")
                     Text("-\(diff.stats.delete)").foregroundStyle(.red)
+                        .accessibilityLabel("\(diff.stats.delete) Zeilen gelöscht")
                     Text("~\(diff.stats.replace)").foregroundStyle(.orange)
+                        .accessibilityLabel("\(diff.stats.replace) Zeilen geändert")
                     Text("=\(diff.stats.equal)").foregroundStyle(.secondary)
+                        .accessibilityLabel("\(diff.stats.equal) Zeilen unverändert")
                 }
                 .font(.caption.monospaced())
             }
@@ -686,6 +761,23 @@ struct TimeTravelBrowserView: View {
         }
         .navigationTitle("Zeitreise: \(pairName)")
         .task { await loadInitial() }
+        .sheet(item: $historyResult) { history in
+            NavigationStack {
+                TimeTravelHistorySheetView(
+                    history: history,
+                    onDiffVersion: { pointID in
+                        let path = history.path
+                        historyResult = nil
+                        Task { await loadDiffForVersion(path: path, pointID: pointID) }
+                    },
+                    onStageVersion: { pointID in
+                        let path = history.path
+                        historyResult = nil
+                        Task { await restoreVersionToStaging(path: path, pointID: pointID) }
+                    }
+                )
+            }
+        }
         .sheet(item: $diffResult) { diff in
             NavigationStack {
                 LineDiffViewerView(diff: diff)
@@ -736,6 +828,9 @@ struct TimeTravelBrowserView: View {
                         currentPath = item.path
                         Task { await browse() }
                     },
+                    onShowHistory: {
+                        Task { await loadHistory(for: item) }
+                    },
                     onDiffToCurrent: {
                         Task { await loadDiff(for: item) }
                     },
@@ -764,6 +859,49 @@ struct TimeTravelBrowserView: View {
         do {
             let res = try await client.browseTimeTravel(identity: identity, pointID: selectedPointID, path: currentPath)
             items = res.items
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadHistory(for item: TimeTravelItem) async {
+        guard let client = model.client else { return }
+        errorMessage = nil
+        do {
+            historyResult = try await client.getTimeTravelHistory(identity: identity, path: item.path)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadDiffForVersion(path: String, pointID: String) async {
+        guard let client = model.client else { return }
+        errorMessage = nil
+        do {
+            diffResult = try await client.getTimeTravelDiff(
+                identity: identity,
+                path: path,
+                fromPoint: pointID,
+                toPoint: "current"
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func restoreVersionToStaging(path: String, pointID: String) async {
+        guard let client = model.client else { errorMessage = APIError.unauthenticated.localizedDescription; return }
+        feedback = nil
+        errorMessage = nil
+        do {
+            let req = SelectiveRestoreRequest(
+                identity: identity,
+                paths: [path],
+                maxTotalMB: 500,
+                pointID: pointID
+            )
+            let res = try await client.startSelectiveRestore(req)
+            feedback = "Wiederherstellung ins Staging gestartet (Job #\(res.jobID))."
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -810,6 +948,7 @@ extension TextDiffResponse: Identifiable {
 private struct TimeTravelItemRow: View {
     let item: TimeTravelItem
     let onOpenFolder: () -> Void
+    let onShowHistory: () -> Void
     let onDiffToCurrent: () -> Void
     let onStageRestore: () -> Void
 
@@ -834,6 +973,8 @@ private struct TimeTravelItemRow: View {
             }
             if !item.isDirectory {
                 HStack(spacing: 12) {
+                    Button("Versionen", action: onShowHistory)
+                        .buttonStyle(.bordered)
                     Button("Diff zu Live", action: onDiffToCurrent)
                         .buttonStyle(.bordered)
                     Button("Ins Staging holen", action: onStageRestore)
@@ -851,6 +992,61 @@ private struct TimeTravelItemRow: View {
         case "displaced_later": return "Später überschrieben"
         case "unchanged": return "Unverändert"
         default: return "Live"
+        }
+    }
+}
+
+private struct TimeTravelHistorySheetView: View {
+    @Environment(\.dismiss) private var dismiss
+    let history: TimeTravelHistoryResponse
+    let onDiffVersion: (String) -> Void
+    let onStageVersion: (String) -> Void
+
+    var body: some View {
+        List {
+            Section("Datei") {
+                Text(history.path)
+                    .font(.subheadline.monospaced())
+                    .textSelection(.enabled)
+            }
+            Section("Verfügbare Stände (\(history.versions.count))") {
+                if history.versions.isEmpty {
+                    Text("Keine älteren Stände für diese Datei gefunden.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(history.versions) { entry in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(entry.label).font(.subheadline.weight(.semibold))
+                                Spacer()
+                                Text(entry.kind)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text("\(AppFormat.date(entry.createdAt)) · \(AppFormat.bytes(entry.size))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 10) {
+                                if entry.pointID != "current" {
+                                    Button("Diff zu Live") { onDiffVersion(entry.pointID) }
+                                        .buttonStyle(.bordered)
+                                }
+                                Button("Ins Staging holen") { onStageVersion(entry.pointID) }
+                                    .buttonStyle(.borderedProminent)
+                            }
+                            .font(.caption2)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Dateiversionen")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Fertig") { dismiss() }
+            }
         }
     }
 }

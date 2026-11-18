@@ -68,6 +68,7 @@ _ALLOWED_JOB_KINDS = {
     "recovery",
     "pbs",
     "bitrotscrub",
+    "bootdrill",
 }
 
 _locks: dict[str, threading.Lock] = {"backup": threading.Lock()}

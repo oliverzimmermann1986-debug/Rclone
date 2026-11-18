@@ -923,6 +923,9 @@ struct PairConfig: Codable, Identifiable {
     let recoverySnapshots: Bool
     let maxSuccessAgeHours: Double
     let exclude: String
+    let failureDomain: String
+    let airgapDevice: String
+    let zfsSnapshot: Bool
     private let extras: [String: JSONValue]
 
     var legacySchedule: String? {
@@ -937,6 +940,7 @@ struct PairConfig: Codable, Identifiable {
         minLocalFiles: Int = 1, minRemoteFiles: Int = 0,
         requireMountpoint: Bool = false, mountpoint: String = "", sentinelFile: String = "",
         recoverySnapshots: Bool = false, maxSuccessAgeHours: Double = 0, exclude: String = "",
+        failureDomain: String = "", airgapDevice: String = "", zfsSnapshot: Bool = false,
         extras: [String: JSONValue] = [:]
     ) {
         self.stableID = stableID
@@ -957,7 +961,14 @@ struct PairConfig: Codable, Identifiable {
         self.recoverySnapshots = recoverySnapshots
         self.maxSuccessAgeHours = maxSuccessAgeHours
         self.exclude = exclude
-        self.extras = extras
+        self.failureDomain = failureDomain
+        self.airgapDevice = airgapDevice
+        self.zfsSnapshot = direction == "push" ? zfsSnapshot : false
+        var cleanedExtras = extras
+        if direction != "push" {
+            cleanedExtras.removeValue(forKey: "zfs_snapshot")
+        }
+        self.extras = cleanedExtras
     }
 
     init(from decoder: Decoder) throws {
@@ -980,6 +991,10 @@ struct PairConfig: Codable, Identifiable {
         sentinelFile = try values.decodeIfPresent(String.self, forKey: key("sentinel_file")) ?? ""
         recoverySnapshots = try values.decodeIfPresent(Bool.self, forKey: key("recovery_snapshots")) ?? false
         maxSuccessAgeHours = try values.decodeIfPresent(Double.self, forKey: key("max_success_age_hours")) ?? 0
+        failureDomain = try values.decodeIfPresent(String.self, forKey: key("failure_domain")) ?? ""
+        airgapDevice = try values.decodeIfPresent(String.self, forKey: key("airgap_device")) ?? ""
+        let decodedZfs = try values.decodeIfPresent(Bool.self, forKey: key("zfs_snapshot")) ?? false
+        zfsSnapshot = direction == "push" ? decodedZfs : false
         if let textExclude = try? values.decodeIfPresent(String.self, forKey: key("exclude")) {
             exclude = textExclude
         } else if let listExclude = try? values.decodeIfPresent([String].self, forKey: key("exclude")) {
@@ -991,7 +1006,8 @@ struct PairConfig: Codable, Identifiable {
             "id", "name", "local", "remote", "direction", "mode", "enabled",
             "allow_delete", "max_delete", "backup_dir", "min_local_files", "min_remote_files",
             "require_mountpoint", "mountpoint", "sentinel_file",
-            "recovery_snapshots", "max_success_age_hours", "exclude"
+            "recovery_snapshots", "max_success_age_hours", "exclude",
+            "failure_domain", "airgap_device", "zfs_snapshot"
         ])
         var preserved: [String: JSONValue] = [:]
         for codingKey in values.allKeys where !known.contains(codingKey.stringValue) {
@@ -1022,6 +1038,15 @@ struct PairConfig: Codable, Identifiable {
         try values.encode(recoverySnapshots, forKey: key("recovery_snapshots"))
         try values.encode(maxSuccessAgeHours, forKey: key("max_success_age_hours"))
         try values.encode(exclude, forKey: key("exclude"))
+        if !failureDomain.isEmpty {
+            try values.encode(failureDomain, forKey: key("failure_domain"))
+        }
+        if !airgapDevice.isEmpty {
+            try values.encode(airgapDevice, forKey: key("airgap_device"))
+        }
+        if direction == "push" && zfsSnapshot {
+            try values.encode(true, forKey: key("zfs_snapshot"))
+        }
     }
 
     func replacing(
@@ -1029,7 +1054,8 @@ struct PairConfig: Codable, Identifiable {
         enabled: Bool, allowDelete: Bool, maxDelete: Int?, backupDir: String,
         minLocalFiles: Int, minRemoteFiles: Int, requireMountpoint: Bool,
         mountpoint: String, sentinelFile: String,
-        recoverySnapshots: Bool? = nil, maxSuccessAgeHours: Double? = nil, exclude: String? = nil
+        recoverySnapshots: Bool? = nil, maxSuccessAgeHours: Double? = nil, exclude: String? = nil,
+        failureDomain: String? = nil, airgapDevice: String? = nil, zfsSnapshot: Bool? = nil
     ) -> PairConfig {
         PairConfig(
             stableID: stableID,
@@ -1050,6 +1076,9 @@ struct PairConfig: Codable, Identifiable {
             recoverySnapshots: recoverySnapshots ?? self.recoverySnapshots,
             maxSuccessAgeHours: maxSuccessAgeHours ?? self.maxSuccessAgeHours,
             exclude: exclude ?? self.exclude,
+            failureDomain: failureDomain ?? self.failureDomain,
+            airgapDevice: airgapDevice ?? self.airgapDevice,
+            zfsSnapshot: direction == "push" ? (zfsSnapshot ?? self.zfsSnapshot) : false,
             extras: extras
         )
     }

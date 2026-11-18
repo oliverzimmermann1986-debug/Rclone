@@ -627,7 +627,7 @@ export const coreMethods = {
     dialogFocusStack.push(document.activeElement);
     this.$nextTick(() => {
       this.focusOpenedDialog(refName);
-      window.setTimeout(() => {
+      (window.setTimeout || setTimeout)(() => {
         if (generation !== dialogFocusGeneration) return;
         this.focusOpenedDialog(refName);
       }, DIALOG_FOCUS_RETRY_MS);
@@ -679,23 +679,34 @@ export const coreMethods = {
     dialogFocusGeneration += 1;
     const target = dialogFocusStack.pop();
     this.$nextTick(() => {
-      const focusTarget = target?.isConnected ? target : document.getElementById('main-content');
-      focusTarget?.focus();
+      const underlyingDialog = this.activeDialog();
+      if (underlyingDialog) {
+        const insideUnderlying = typeof underlyingDialog.contains === 'function' ? underlyingDialog.contains(target) : target?.isConnected;
+        const canFocusTarget = Boolean(target?.isConnected && insideUnderlying && (typeof target.getClientRects !== 'function' || this.visibleElement(target)));
+        const fallback = canFocusTarget ? target : (this.focusableElements(underlyingDialog)[0] || underlyingDialog);
+        fallback?.focus?.({ preventScroll: true });
+        return;
+      }
+      const candidate = target?.isConnected ? target : document.getElementById('main-content');
+      const focusTarget = (candidate && candidate !== document.getElementById('main-content') && typeof candidate.getClientRects === 'function' && !this.visibleElement(candidate))
+        ? document.getElementById('main-content')
+        : candidate;
+      focusTarget?.focus?.({ preventScroll: true });
     });
   },
 
   activeDialog() {
     if (this.commandPalette.show) return this.$refs.commandPaletteDialog;
-    if (this.remoteSetup.show) return this.$refs.remoteSetupDialog;
     if (this.confirmationDialog.show) return this.$refs.confirmationDialog;
     if (this.currentPasswordDialog.show) return this.$refs.currentPasswordDialog;
     if (this.lockdownDialog.show) return this.$refs.lockdownDialog;
+    if (this.remoteSetup.show) return this.$refs.remoteSetupDialog;
     if (this.preflight.show) return this.$refs.preflightDialog;
     if (this.conflictDialog.show) return this.$refs.conflictDialog;
     if (this.diffDialog.show) return this.$refs.diffDialog;
     if (this.crypt.show) return this.$refs.cryptDialog;
-    if (this.jobModal.show) return this.$refs.jobDialog;
     if (this.picker.show) return this.$refs.pickerDialog;
+    if (this.jobModal.show) return this.$refs.jobDialog;
     if (this.quickModal.show) return this.$refs.quickDialog;
     if (this.plan.data) return this.$refs.planDialog;
     return null;
@@ -807,32 +818,48 @@ export const coreMethods = {
     return window.btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
   },
 
-  async reauthWithWebAuthn() {
-    if (!window.PublicKeyCredential || !navigator.credentials?.get) {
-      this.currentPasswordDialog.error = 'WebAuthn wird in diesem Browser nicht unterstützt.';
-      return;
+  async loadWebAuthnStatus() {
+    const result = await this.api('GET', '/api/webauthn/status', undefined, { silent: true, captureError: true, requestKey: 'webauthn-status' });
+    if (result && !result.__error && !this.isStale(result)) {
+      this.webauthnStatus = {
+        loaded: true,
+        enabled: Boolean(result.enabled),
+        passkey: Boolean(result.passkey),
+        security_key: Boolean(result.security_key),
+      };
     }
-    this.currentPasswordDialog.error = '';
+    return this.webauthnStatus;
+  },
+
+  hasWebAuthnCredentials() {
+    return Boolean(this.webauthnStatus?.enabled && (this.webauthnStatus?.passkey || this.webauthnStatus?.security_key));
+  },
+
+  async obtainWebAuthnReauthToken() {
+    if (!window.PublicKeyCredential || !navigator.credentials?.get) {
+      return { error: 'WebAuthn wird in diesem Browser nicht unterstützt.' };
+    }
     const options = await this.api('POST', '/api/webauthn/reauth/options', {}, { silent: true, captureError: true });
     if (!options || options.__error) {
-      this.currentPasswordDialog.error = this.errorText(options);
-      return;
+      return { error: this.errorText(options) };
     }
     try {
+      const rawOptions = options.publicKey || options;
       const publicKey = {
-        ...options,
-        challenge: this._b64urlToBytes(options.challenge),
-        allowCredentials: (options.allowCredentials || []).map((cred) => ({
+        ...rawOptions,
+        challenge: this._b64urlToBytes(rawOptions.challenge),
+        allowCredentials: (rawOptions.allowCredentials || []).map((cred) => ({
           ...cred,
           id: this._b64urlToBytes(cred.id),
         })),
       };
       const assertion = await navigator.credentials.get({ publicKey });
-      if (!assertion) return;
+      if (!assertion) return { cancelled: true };
       const credential = {
         id: assertion.id,
         rawId: this._bytesToB64url(assertion.rawId),
         type: assertion.type,
+        authenticatorAttachment: assertion.authenticatorAttachment || null,
         response: {
           authenticatorData: this._bytesToB64url(assertion.response.authenticatorData),
           clientDataJSON: this._bytesToB64url(assertion.response.clientDataJSON),
@@ -840,20 +867,32 @@ export const coreMethods = {
           userHandle: assertion.response.userHandle ? this._bytesToB64url(assertion.response.userHandle) : null,
         },
       };
-      const verified = await this.api('POST', '/api/webauthn/reauth/verify', { credential }, { silent: true, captureError: true });
+      const verifyPayload = options.challenge_id ? { challenge_id: options.challenge_id, credential } : { credential };
+      const verified = await this.api('POST', '/api/webauthn/reauth/verify', verifyPayload, { silent: true, captureError: true });
       if (!verified || verified.__error || !verified.reauth_token) {
-        this.currentPasswordDialog.error = this.errorText(verified);
-        return;
+        return { error: this.errorText(verified) };
       }
-      const resolve = currentPasswordResolver;
-      currentPasswordResolver = null;
-      this.currentPasswordDialog.show = false;
-      this.currentPasswordDialog.password = '';
-      this.restoreDialogFocus();
-      resolve?.(verified.reauth_token);
+      return { token: verified.reauth_token };
     } catch (err) {
-      this.currentPasswordDialog.error = err?.message || 'Passkey-Bestätigung abgebrochen.';
+      if (err?.name === 'NotAllowedError') return { error: 'Passkey-Bestätigung abgebrochen.' };
+      return { error: err?.message || 'Passkey-Bestätigung abgebrochen.' };
     }
+  },
+
+  async reauthWithWebAuthn() {
+    this.currentPasswordDialog.error = '';
+    const outcome = await this.obtainWebAuthnReauthToken();
+    if (outcome?.error) {
+      this.currentPasswordDialog.error = outcome.error;
+      return;
+    }
+    if (!outcome?.token) return;
+    const resolve = currentPasswordResolver;
+    currentPasswordResolver = null;
+    this.currentPasswordDialog.show = false;
+    this.currentPasswordDialog.password = '';
+    this.restoreDialogFocus();
+    resolve?.(outcome.token);
   },
 
   trapDialogFocus(event) {
@@ -880,16 +919,17 @@ export const coreMethods = {
   },
 
   closeOverlays() {
-    if (this.remoteSetup.show) this.closeRemoteSetup();
+    if (this.commandPalette?.show) this.closeCommandPalette();
     else if (this.confirmationDialog.show) this.respondConfirmation(false);
     else if (this.currentPasswordDialog.show) this.cancelCurrentPassword();
     else if (this.lockdownDialog.show) this.closeLockdown();
+    else if (this.remoteSetup.show) this.closeRemoteSetup();
     else if (this.preflight.show) this.closePreflight();
     else if (this.conflictDialog.show) this.closeConflicts();
     else if (this.diffDialog.show) this.closeDiff();
     else if (this.crypt.show) this.closeCrypt();
-    else if (this.jobModal.show) this.closeJob();
     else if (this.picker.show) this.closePicker();
+    else if (this.jobModal.show) this.closeJob();
     else if (this.quickModal.show) this.closeQuick();
     else if (this.plan.data) this.closePlan();
     else this.closeNavigation();

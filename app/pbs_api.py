@@ -247,15 +247,55 @@ def maintenance_active(
     return dict(result)
 
 
-def verify_summary(settings: Mapping[str, Any]) -> dict[str, Any]:
+_VERIFY_STALE_SECONDS = 30 * 86400
+
+
+def _extract_verify_timestamp(
+    item: Mapping[str, Any], v_state: Mapping[str, Any]
+) -> Optional[int]:
+    for key in (
+        "last_verify",
+        "last-verify",
+        "verified_at",
+        "endtime",
+        "starttime",
+        "time",
+    ):
+        val = _num(v_state.get(key))
+        if val is not None and val > 0:
+            return int(val)
+    upid = v_state.get("upid")
+    if isinstance(upid, str) and upid.startswith("UPID:"):
+        parts = upid.split(":")
+        for idx in (5, 4):
+            if idx < len(parts) and len(parts[idx]) == 8:
+                try:
+                    parsed_ts = int(parts[idx], 16)
+                except ValueError:
+                    continue
+                if parsed_ts >= 946_684_800:
+                    return parsed_ts
+    fallback = _num(item.get("backup-time"))
+    if fallback is not None and fallback > 0:
+        return int(fallback)
+    return None
+
+
+def verify_summary(
+    settings: Mapping[str, Any], *, now: Optional[float] = None
+) -> dict[str, Any]:
     """Aggregiert den Verifikationsstatus der Snapshots im PBS-Datastore."""
     data, error = _fetch(settings, "/admin/datastore/{store}/snapshots", list)
     if error:
         return {"error": error}
+    now_ts = time.time() if now is None else float(now)
+    stale_cutoff = now_ts - _VERIFY_STALE_SECONDS
     total = 0
     verified = 0
     failed = 0
     unverified = 0
+    stale = 0
+    newest_verify: Optional[int] = None
     for item in data:
         if not isinstance(item, dict):
             continue
@@ -265,6 +305,12 @@ def verify_summary(settings: Mapping[str, Any]) -> dict[str, Any]:
             state = str(v_state.get("state") or "").lower()
             if state == "ok":
                 verified += 1
+                verify_ts = _extract_verify_timestamp(item, v_state)
+                if verify_ts is not None:
+                    if newest_verify is None or verify_ts > newest_verify:
+                        newest_verify = verify_ts
+                    if verify_ts < stale_cutoff:
+                        stale += 1
             elif state == "failed":
                 failed += 1
             else:
@@ -279,5 +325,6 @@ def verify_summary(settings: Mapping[str, Any]) -> dict[str, Any]:
         "verified_ok": verified,
         "failed": failed,
         "unverified": unverified,
-        "stale": 0,
+        "stale": stale,
+        "newest_verify": newest_verify,
     }

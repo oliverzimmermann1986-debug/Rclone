@@ -44,6 +44,8 @@ export const recoveryMethods = {
     requestControllers.get('recovery-diff')?.abort();
     requestControllers.get('recovery-browse')?.abort();
     requestControllers.get('recovery-points')?.abort();
+    requestControllers.get('timetravel-history')?.abort();
+    this.recovery.fileHistory = { loading: false, path: '', versions: [], error: '' };
     this.recovery.pair = name;
     this.recovery.pointId = '';
     this.recovery.path = '';
@@ -240,6 +242,39 @@ export const recoveryMethods = {
     }
   },
 
+  async loadTimeTravelHistory(item) {
+    const filePath = typeof item === 'string' ? item : item?.path;
+    if (!filePath || !this.recovery.pair) return;
+    const identity = this.recovery.pair;
+    this.recovery.fileHistory = { loading: true, path: filePath, versions: [], error: '' };
+    const params = new URLSearchParams({ identity, path: filePath });
+    const result = await this.api('GET', `/api/recovery/timetravel/history?${params}`, undefined, {
+      silent: true,
+      captureError: true,
+      requestKey: 'timetravel-history',
+      timeoutMs: 65000,
+    });
+    if (this.isStale(result) || identity !== this.recovery.pair || this.recovery.fileHistory?.path !== filePath) return;
+    this.recovery.fileHistory.loading = false;
+    if (!result || result.__error) {
+      this.recovery.fileHistory.error = this.errorText(result);
+      return;
+    }
+    this.recovery.fileHistory.versions = result.versions || result.history || result.items || result.points || [];
+  },
+
+  closeTimeTravelHistory() {
+    requestControllers.get('timetravel-history')?.abort();
+    this.recovery.fileHistory = { loading: false, path: '', versions: [], error: '' };
+  },
+
+  formatHistoryTimestamp(value) {
+    if (value === null || value === undefined || value === '') return '—';
+    if (typeof value === 'number' || /^\d+(\.\d+)?$/.test(String(value))) return this.formatDateTime(Number(value));
+    const parsed = Date.parse(String(value));
+    return Number.isFinite(parsed) ? this.formatDateTime(parsed / 1000) : String(value);
+  },
+
   async openTimeTravelDiff(item) {
     if (!item?.path || !this.recovery.pair) return;
     const fromPoint = item.source_point || this.recovery.pointId || 'current';
@@ -316,6 +351,160 @@ export const recoveryMethods = {
     printWindow.document.close();
     printWindow.focus();
     printWindow.print();
+  },
+
+  async loadHandoverImportFile(event) {
+    const file = event?.target?.files?.[0];
+    if (!file) return;
+    const state = this.recovery.handoverImport ||= {
+      envelopeText: '', fileName: '', passphrase: '', password: '',
+      busy: false, preview: null, mappings: {}, result: null, error: '',
+    };
+    try {
+      state.envelopeText = await file.text();
+      state.fileName = file.name || '';
+      state.preview = null;
+      state.result = null;
+      state.error = '';
+    } catch (_) {
+      state.error = 'Notfallpaket-Datei konnte nicht gelesen werden.';
+    } finally {
+      event.target.value = '';
+    }
+  },
+
+  parseHandoverEnvelope() {
+    const state = this.recovery.handoverImport ||= {
+      envelopeText: '', fileName: '', passphrase: '', password: '',
+      busy: false, preview: null, mappings: {}, result: null, error: '',
+    };
+    const raw = String(state.envelopeText || '').trim();
+    if (!raw) {
+      state.error = 'Bitte ein verschlüsseltes Notfallpaket (JSON) auswählen oder einfügen.';
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        state.error = 'Das Notfallpaket muss ein gültiges JSON-Objekt sein.';
+        return null;
+      }
+      return parsed;
+    } catch (_) {
+      state.error = 'Das Notfallpaket enthält kein gültiges JSON.';
+      return null;
+    }
+  },
+
+  handoverPreviewSources() {
+    const preview = this.recovery.handoverImport?.preview;
+    if (!preview || typeof preview !== 'object') return [];
+    const list = preview.groups || preview.pairs || preview.sources
+      || preview.rescue_inventory?.groups || preview.rescue_inventory?.pairs;
+    if (Array.isArray(list)) {
+      return list.map((entry, idx) => {
+        const key = String(entry?.key ?? entry?.source_key ?? entry?.pair_id ?? entry?.identity ?? entry?.id ?? entry?.pair ?? entry?.name ?? idx);
+        const label = String(entry?.pair || entry?.name || entry?.label || key);
+        const count = entry?.count ?? entry?.items_count ?? entry?.files ?? null;
+        return { key, label, count };
+      });
+    }
+    if (preview.mappings && typeof preview.mappings === 'object' && !Array.isArray(preview.mappings)) {
+      return Object.keys(preview.mappings).map((key) => ({ key, label: key, count: null }));
+    }
+    return [];
+  },
+
+  async previewRecoveryHandover() {
+    const state = this.recovery.handoverImport ||= {
+      envelopeText: '', fileName: '', passphrase: '', password: '',
+      busy: false, preview: null, mappings: {}, result: null, error: '',
+    };
+    if (state.busy) return;
+    state.error = '';
+    state.result = null;
+    const envelope = this.parseHandoverEnvelope();
+    if (!envelope) return;
+    if (String(state.passphrase || '').length < 12) {
+      state.error = 'Bitte die Übergabe-Passphrase (mindestens 12 Zeichen) eingeben.';
+      return;
+    }
+    state.busy = true;
+    try {
+      const result = await this.api(
+        'POST',
+        '/api/recovery/handover/preview',
+        { envelope, passphrase: state.passphrase },
+        { silent: true, captureError: true },
+      );
+      if (!result || result.__error) {
+        state.preview = null;
+        state.error = this.errorText(result);
+        return;
+      }
+      state.preview = result;
+      const configuredNames = new Set((this.config.backup?.pairs || []).map((p) => p?.name).filter(Boolean));
+      const nextMappings = { ...(result.mappings && typeof result.mappings === 'object' && !Array.isArray(result.mappings) ? result.mappings : {}) };
+      const rawList = result.groups || result.pairs || result.sources || [];
+      if (Array.isArray(rawList)) {
+        for (const entry of rawList) {
+          const key = String(entry?.key ?? entry?.source_key ?? entry?.pair_id ?? entry?.identity ?? entry?.id ?? entry?.pair ?? entry?.name ?? '');
+          if (!key) continue;
+          const suggested = entry?.matched_pair || entry?.suggested_pair || entry?.target_pair || entry?.target
+            || (configuredNames.has(entry?.pair) ? entry.pair : (configuredNames.has(entry?.name) ? entry.name : ''));
+          if (suggested && !(key in nextMappings)) nextMappings[key] = suggested;
+        }
+      }
+      state.mappings = nextMappings;
+      this.showToast('Notfallpaket entschlüsselt – Vorschau geladen');
+    } finally {
+      state.busy = false;
+    }
+  },
+
+  async importRecoveryHandover() {
+    const state = this.recovery.handoverImport ||= {
+      envelopeText: '', fileName: '', passphrase: '', password: '',
+      busy: false, preview: null, mappings: {}, result: null, error: '',
+    };
+    if (state.busy) return;
+    state.error = '';
+    const envelope = this.parseHandoverEnvelope();
+    if (!envelope) return;
+    if (String(state.passphrase || '').length < 12) {
+      state.error = 'Bitte die Übergabe-Passphrase (mindestens 12 Zeichen) eingeben.';
+      return;
+    }
+    let currentPassword = String(state.password || '');
+    if (!currentPassword) {
+      currentPassword = await this.requestCurrentPassword('Aktuelles Passwort oder Passkey bestätigen, um das Notfallpaket zu importieren.');
+      if (!currentPassword) return;
+    }
+    const cleanMappings = {};
+    for (const [key, value] of Object.entries(state.mappings || {})) {
+      const trimmed = String(value || '').trim();
+      if (key && trimmed) cleanMappings[key] = trimmed;
+    }
+    state.busy = true;
+    try {
+      const result = await this.api(
+        'POST',
+        '/api/recovery/handover/import',
+        { envelope, passphrase: state.passphrase, current_password: currentPassword, mappings: cleanMappings },
+        { silent: true, captureError: true },
+      );
+      state.password = '';
+      if (!result || result.__error) {
+        state.error = this.errorText(result);
+        return;
+      }
+      state.result = result;
+      this.showToast(`Notfallpaket importiert (${result.imported ?? 0} neu, ${result.already_present ?? 0} vorhanden)`);
+      await this.loadVaultLibrary();
+      this.loadAudit?.();
+    } finally {
+      state.busy = false;
+    }
   },
 
   recoveryBreadcrumbs() {

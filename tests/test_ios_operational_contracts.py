@@ -89,7 +89,7 @@ def test_dashboard_exposes_distinct_evidence_based_protection_score():
     assert "Restore-Nachweise" in assessment
     assert "Frische erfolgreiche Läufe" in assessment
     assert "Schutzschild" in assessment
-    assert "Incident Center" in incidents
+    assert "Vorfallszentrale" in incidents
     assert "Empfohlener nächster Schritt" in incidents
     assert 'return (\n                "Restore-Test"' in incidents
     assert "activeRestoreTestPairs" in model
@@ -374,3 +374,93 @@ def test_native_target_browser_can_switch_storage_and_create_folders():
     assert "allowsKindSwitch: target == .remote" in operations
     assert "allowsKindSwitch: target == .remote" in config
     assert "createDirectory(" in operations
+
+
+def test_incident_center_overhaul_separates_sections_actions_and_deduplicates_job_summaries():
+    incidents = _swift("Views/IncidentCenterView.swift")
+    dashboard = _swift("Views/DashboardView.swift")
+
+    assert '.navigationTitle("Vorfallszentrale")' in incidents
+    assert 'Text("Vorfallszentrale")' in dashboard
+    assert (
+        "ForEach(Array(currentIncidents.enumerated()), id: \\.element.id)" in incidents
+    )
+    assert "isGenericJobFailureSummaryText" in incidents
+    assert "extractSummaryJobID" in incidents
+    assert '"Cloud-Vorabprüfung"' in incidents
+    assert '"Cloud-Anmeldung"' in incidents
+    assert '"API-Limit"' in incidents
+    assert '"Zielpfad fehlt"' in incidents
+    assert ".sheet(isPresented: $showingSettings) { SettingsView() }" in incidents
+    # Action rows must live outside the combined informational accessibility element.
+    assert incidents.index(
+        ".accessibilityElement(children: .combine)"
+    ) < incidents.index('Label("Betroffenen Datenweg prüfen"')
+    assert incidents.index(
+        ".accessibilityElement(children: .combine)"
+    ) < incidents.index('Label("Zugehörigen Lauf öffnen"')
+
+
+def test_security_hardening_path_encoding_no_force_url_inbox_quota_and_protected_offline_store():
+    api = _swift("Core/APIClient.swift")
+    offline = _swift("Core/RecoveryOfflineStore.swift")
+    inbox = (ROOT / "ios" / "Shared" / "VaultInbox.swift").read_text(encoding="utf-8")
+
+    assert "URL(string:" in api
+    assert (
+        ")!"
+        not in api.split("private func url(for path: String)", 1)[1].split(
+            "private func performDataRequest", 1
+        )[0]
+    )
+    assert '"/api/recovery/staging/\\(Self.queryEncode(' not in api
+    assert '"/api/vault/library/\\(Self.queryEncode(' not in api
+    assert '"/api/remotes/setup/\\(Self.queryEncode(' not in api
+    assert '"/api/pairs/\\(Self.queryEncode(' not in api
+    assert '"/api/security/canary/\\(Self.queryEncode(' not in api
+
+    assert "volumeAvailableCapacityForImportantUsageKey" in inbox
+    assert "systemFreeSize" in inbox
+    assert "defaultMaxInboxBytes: Int64 = 4 * 1024 * 1024 * 1024" in inbox
+    assert "inboxQuotaExceeded" in inbox
+
+    assert ".posixPermissions: 0o600" in offline
+    assert "FileProtectionType.complete" in offline
+    assert (
+        "values.isExcludedFromBackup = true" in offline
+        or "fileValues.isExcludedFromBackup = true" in offline
+    )
+    assert "defaults.removeObject(forKey: entryKey)" in offline
+
+
+def test_usability_staging_export_diff_lockdown_banner_safe_run_and_pair_zfs_guard():
+    staging = _swift("Views/RecoveryStagingView.swift")
+    dashboard = _swift("Views/DashboardView.swift")
+    model = _swift("Core/AppModel.swift")
+    models = _swift("Core/Models.swift")
+    config = _swift("Views/ConfigurationViews.swift")
+
+    export_pos = staging.index('"Als ZIP exportieren"')
+    diff_pos = staging.index('"Abweichungen prüfen"')
+    delete_pos = staging.index('"Staging entfernen"')
+    assert export_pos < delete_pos
+    assert diff_pos < delete_pos
+    assert "ShareLink(" in staging
+    assert "getStagingDiff(" in staging
+
+    assert "@Published var lockdownStatus: LockdownStatusResponse?" in model
+    assert "refreshClient.getLockdownStatus()" in model
+    assert "NOTFALL-LOCKDOWN AKTIV" in dashboard
+    assert "LockdownControlView()" in dashboard
+
+    assert dashboard.index('Button("Probelauf starten")') < dashboard.index(
+        'Button("Produktive Sicherung starten"'
+    )
+
+    assert '"failure_domain"' in models
+    assert '"airgap_device"' in models
+    assert '"zfs_snapshot"' in models
+    assert 'cleanedExtras.removeValue(forKey: "zfs_snapshot")' in models
+    assert 'Toggle("Atomarer ZFS-Quell-Snapshot"' in config
+    assert "Ausfalldomäne" in config
+    assert "Airgap-Gerät" in config

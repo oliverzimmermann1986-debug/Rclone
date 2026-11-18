@@ -61,12 +61,59 @@ struct ProtectionIncident: Identifiable {
 }
 
 extension ProtectionIncident {
+    static func sanitizeMessage(_ raw: String) -> String {
+        var cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return "" }
+        cleaned = cleaned.replacingOccurrences(
+            of: #":\s+(?=/\s)"#,
+            with: " ",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #":\s*(?=\))"#,
+            with: "",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"(?<=\S):\s*$"#,
+            with: "",
+            options: .regularExpression
+        )
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isGenericJobFailureSummaryText(_ message: String) -> Bool {
+        let lowered = message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let prefixes = [
+            "letzte sicherung ist fehlgeschlagen",
+            "letzte sicherung wurde unterbrochen",
+            "der letzte job ist fehlgeschlagen",
+            "letzter job ist fehlgeschlagen",
+            "letzter job wurde unterbrochen",
+            "letzter testlauf (ohne änderungen) ist fehlgeschlagen",
+            "letzter testlauf (ohne änderungen) wurde unterbrochen",
+            "letzter vergleichslauf ist fehlgeschlagen",
+            "letzter quick-sync ist fehlgeschlagen"
+        ]
+        return prefixes.contains { lowered.hasPrefix($0) }
+    }
+
+    private static func extractSummaryJobID(from message: String) -> Int? {
+        guard isGenericJobFailureSummaryText(message),
+              let regex = try? NSRegularExpression(pattern: #"\(Lauf\s*#(\d+)\)"#, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: message, range: NSRange(message.startIndex..<message.endIndex, in: message)),
+              let idRange = Range(match.range(at: 1), in: message) else {
+            return nil
+        }
+        return Int(message[idRange])
+    }
+
     static func collect(overview: OverviewResponse, storage: StorageOverview?) -> [ProtectionIncident] {
         var incidents: [ProtectionIncident] = []
 
         func append(message: String, severity: String, pairName: String? = nil, jobID: Int? = nil,
                     recommendation: String? = nil, category: String? = nil, restoreReason: RestoreIncidentReason? = nil) {
-            let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = sanitizeMessage(message)
             guard !normalized.isEmpty else { return }
             let classified = classify(normalized)
             let incidentCategory = category ?? classified.category
@@ -119,7 +166,7 @@ extension ProtectionIncident {
         }
 
         for alert in overview.alerts where ["error", "warn", "warning"].contains(alert.level.lowercased()) {
-            var jobID = alert.jobID
+            var jobID = alert.jobID ?? extractSummaryJobID(from: alert.message)
             if jobID == nil,
                ["Der letzte Job ist fehlgeschlagen", "Der letzte Job ist fehlgeschlagen."].contains(
                    alert.message.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -129,7 +176,7 @@ extension ProtectionIncident {
             append(message: alert.message, severity: alert.level.lowercased() == "error" ? "error" : "warning", jobID: jobID)
         }
         for pair in overview.pairs.health {
-            let error = pair.error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let error = sanitizeMessage(pair.error ?? "")
             if pair.hasFailure {
                 let message = error.isEmpty
                     ? "Der letzte Lauf dieses Datenwegs ist fehlgeschlagen. Protokoll prüfen."
@@ -147,7 +194,7 @@ extension ProtectionIncident {
                     category: "Prüfumfang", restoreReason: reason)
                 continue
             }
-            let error = evidence?.error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let error = sanitizeMessage(evidence?.error ?? "")
             let failed = reason == .failed
             let failureClassification = classify(error.isEmpty ? reason.message : error)
             let failureRecommendation = failureClassification.category == "Betrieb"
@@ -162,10 +209,21 @@ extension ProtectionIncident {
                 restoreReason: reason
             )
         }
+
+        let pairErrorJobIDs = Set(
+            incidents.compactMap { $0.pairName != nil && $0.severity == "error" ? $0.jobID : nil }
+        )
+        incidents.removeAll { incident in
+            incident.pairName == nil
+                && incident.severity == "error"
+                && isGenericJobFailureSummaryText(incident.message)
+                && incident.jobID.map(pairErrorJobIDs.contains) == true
+        }
+
         return incidents.sorted { ($0.severity == "error" ? 0 : 1) < ($1.severity == "error" ? 0 : 1) }
     }
 
-    private static func classify(_ message: String) -> (category: String, recommendation: String) {
+    static func classify(_ message: String) -> (category: String, recommendation: String) {
         let value = message.lowercased()
         if value.contains("permission") || value.contains("berechtigung") || value.contains("access denied") {
             return ("Berechtigung", "Eigentümer und Zugriffsrechte des betroffenen Ordners auf dem Server prüfen. Danach zuerst einen Testlauf starten.")
@@ -179,6 +237,27 @@ extension ProtectionIncident {
         if (value.contains("prüfumfang begrenzt") || value.contains("teil-stichprobe"))
             && !value.contains("fehlgeschlagen") && !value.contains("checksum") && !value.contains("prüfsumme") {
             return ("Prüfumfang", "Angeforderte Dateizahl beibehalten und Dateiauswahl sowie Prüfprotokoll prüfen. Das Datenlimit nur bewusst erhöhen, wenn es die Stichprobe begrenzt; danach erneut prüfen.")
+        }
+        if value.contains("api-limit") || value.contains("rate_limit") || value.contains("rate limit")
+            || value.contains("too many requests") || value.contains("http 429") {
+            return ("API-Limit", "Der Cloud-Anbieter drosselt Anfragen vorübergehend. Bei Google Drive eine eigene OAuth-Client-ID hinterlegen oder den Zeitplan entzerren, danach einen Probelauf starten.")
+        }
+        if value.contains("oauth") || value.contains("token") || value.contains("client_id")
+            || value.contains("refresh_token") || value.contains("invalid_grant") {
+            return ("Cloud-Anmeldung", "Cloud-Zugangstoken oder Client-ID ist ungültig oder abgelaufen. Das betroffene Remote unter „Neues Remote einbinden“ neu autorisieren und die Verbindung prüfen.")
+        }
+        if value.contains("exit=3") || value.contains("exit=4") || value.contains("directory not found") {
+            return ("Zielpfad fehlt", "Der konfigurierte Ziel- oder Quellordner existiert auf dem Remote nicht. Pfad im Datenweg kontrollieren oder den Zielordner im Browser anlegen.")
+        }
+        if (value.contains("pre-check") || value.contains("precheck"))
+            && value.contains("remote: ok") && value.contains("local:") {
+            return ("Lokaler Quellpfad", "Die lokale Vorabprüfung hat den Lauf gestoppt. Lokalen Ordner, Mountpoint, Mindestdateizahl und Sentinel-Datei auf dem Server prüfen.")
+        }
+        if value.contains("pre-check") || value.contains("precheck") || value.contains("lsjson") {
+            return ("Cloud-Vorabprüfung", "Das Cloud-Ziel hat die Vorabprüfung (lsjson) abgelehnt. Cloud-Anmeldung, Remote-Konfiguration und Erreichbarkeit prüfen und danach „Datenweg prüfen“ starten.")
+        }
+        if value.contains("exit=1") {
+            return ("Remote-Zugriff", "rclone meldet einen Verbindungs-, Konfigurations- oder Zugriffsabbruch (exit=1). Prüfprotokoll des Laufs und Zugangsdaten kontrollieren, bevor ein Probelauf startet.")
         }
         if value.contains("mount") || value.contains("sentinel") || value.contains("directory") || value.contains("ordner") {
             return ("Speicherpfad", "Mount und Schutzdatei auf dem Server kontrollieren. Nicht blind neu starten, solange das Ziel fehlt.")
@@ -230,46 +309,71 @@ struct IncidentCenterView: View {
                     description: Text("Derzeit liegt kein klassifizierter Fehler oder überfälliger Datenweg vor.")
                 )
             } else {
-                Section {
-                    ForEach(currentIncidents) { incident in
-                        VStack(alignment: .leading, spacing: 9) {
-                            Label(incident.category, systemImage: incident.symbol)
-                                .font(.headline)
-                                .foregroundStyle(incident.color)
+                ForEach(Array(currentIncidents.enumerated()), id: \.element.id) { index, incident in
+                    Section {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Label(incident.category, systemImage: incident.symbol)
+                                    .font(.headline)
+                                    .foregroundStyle(incident.color)
+                                Spacer()
+                                if let id = incident.jobID {
+                                    Text("Lauf #\(id)")
+                                        .font(.caption.monospacedDigit().weight(.medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                             Text(incident.message)
                                 .font(.subheadline)
                                 .textSelection(.enabled)
-                            Divider()
-                            Label("Empfohlener nächster Schritt", systemImage: "arrow.turn.down.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            Text(incident.recommendation)
-                                .font(.subheadline)
-                            if let name = incident.restoreTestPairName {
-                                IncidentRestoreTestButton(pairName: name)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Label("Empfohlener nächster Schritt", systemImage: "arrow.turn.down.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Text(incident.recommendation)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.primary)
                             }
-                            if let name = incident.pairName {
-                                NavigationLink("Betroffenen Datenweg prüfen") {
-                                    IncidentDataPathView(pairName: name, isRestoreIncident: incident.restoreReason != nil)
-                                }
-                            }
-                            if let id = incident.jobID {
-                                Button("Zugehörigen Lauf öffnen") {
-                                    dismiss()
-                                    model.requestRunNavigation(id: id)
-                                }
-                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                Color.secondary.opacity(0.08),
+                                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            )
                         }
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 4)
                         .accessibilityElement(children: .combine)
+
+                        if let name = incident.restoreTestPairName {
+                            IncidentRestoreTestButton(pairName: name)
+                        }
+                        if let name = incident.pairName {
+                            NavigationLink {
+                                IncidentDataPathView(pairName: name, isRestoreIncident: incident.restoreReason != nil)
+                            } label: {
+                                Label("Betroffenen Datenweg prüfen", systemImage: "point.3.connected.trianglepath.dotted")
+                            }
+                            .accessibilityLabel("Betroffenen Datenweg \(name) prüfen")
+                        }
+                        if let id = incident.jobID {
+                            Button {
+                                dismiss()
+                                model.requestRunNavigation(id: id)
+                            } label: {
+                                Label("Zugehörigen Lauf öffnen", systemImage: "doc.text.magnifyingglass")
+                            }
+                            .accessibilityLabel("Zugehörigen Lauf Nummer \(id) öffnen")
+                        }
+                    } footer: {
+                        if index == currentIncidents.count - 1 {
+                            Text("Empfehlungen ändern keine Daten. Produktive Wiederholungen bleiben eine bewusste Nutzeraktion.")
+                        }
                     }
-                } footer: {
-                    Text("Empfehlungen ändern keine Daten. Produktive Wiederholungen bleiben eine bewusste Nutzeraktion.")
                 }
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Incident Center")
+        .navigationTitle("Vorfallszentrale")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) { Button("Fertig") { dismiss() } }
@@ -292,25 +396,37 @@ private struct IncidentRestoreTestButton: View {
     }
 
     var body: some View {
-        Button(isRestoreTesting ? "Restore-Test läuft …" : "Restore-Test starten") { confirm = true }
-            .disabled(!canStart)
-            .confirmationDialog("Restore-Test für \(pairName) starten?", isPresented: $confirm, titleVisibility: .visible) {
-                Button("Restore-Test starten") {
-                    // Recheck after confirmation: another action may have started in the meantime.
-                    guard canStart else { return }
-                    isStarting = true
-                    Task {
-                        defer { isStarting = false }
-                        let ok = await model.runRestoreTest(pair: pairName)
-                        result = ok
-                            ? "Restore-Test gestartet. Der Nachweis wird nach Abschluss aktualisiert."
-                            : "Restore-Test konnte nicht gestartet werden. Bitte die Fehlermeldung prüfen."
-                    }
+        Button {
+            confirm = true
+        } label: {
+            Label(
+                isRestoreTesting ? "Restore-Test läuft …" : "Restore-Test starten",
+                systemImage: "arrow.uturn.backward.circle"
+            )
+        }
+        .disabled(!canStart)
+        .accessibilityLabel(
+            isRestoreTesting
+                ? "Restore-Test für \(pairName) läuft"
+                : "Restore-Test für \(pairName) starten"
+        )
+        .confirmationDialog("Restore-Test für \(pairName) starten?", isPresented: $confirm, titleVisibility: .visible) {
+            Button("Restore-Test starten") {
+                // Recheck after confirmation: another action may have started in the meantime.
+                guard canStart else { return }
+                isStarting = true
+                Task {
+                    defer { isStarting = false }
+                    let ok = await model.runRestoreTest(pair: pairName)
+                    result = ok
+                        ? "Restore-Test gestartet. Der Nachweis wird nach Abschluss aktualisiert."
+                        : "Restore-Test konnte nicht gestartet werden. Bitte die Fehlermeldung prüfen."
                 }
-                Button("Abbrechen", role: .cancel) {}
-            } message: {
-                Text("Eine Stichprobe aus der Sicherung wird in ein temporäres Prüfverzeichnis zurückgeholt, per Prüfsumme geprüft und anschließend gelöscht. Die Originale bleiben unverändert.")
             }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Eine Stichprobe aus der Sicherung wird in ein temporäres Prüfverzeichnis zurückgeholt, per Prüfsumme geprüft und anschließend gelöscht. Die Originale bleiben unverändert.")
+        }
         if let result { Text(result).font(.caption).foregroundStyle(.secondary) }
     }
 }
@@ -349,6 +465,7 @@ private struct IncidentDataPathView: View {
             }
         }
         .navigationTitle(pairName)
+        .sheet(isPresented: $showingSettings) { SettingsView() }
         .confirmationDialog("Probelauf ohne Dateiänderungen starten?", isPresented: $confirm) {
             Button("Probelauf starten") {
                 Task {

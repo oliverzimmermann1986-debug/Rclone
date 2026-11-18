@@ -71,4 +71,53 @@ final class RecoverySetupTests: XCTestCase {
         let full = Data(#"{"id":"full-123","label":"Komplett","kind":"full","complete":true,"files":3,"total_bytes":99,"storage":"server"}"#.utf8)
         XCTAssertTrue(try JSONDecoder().decode(RecoveryPoint.self, from: full).complete == true)
     }
+
+    func testOfflineStoreUsesProtectedFileAndMigratesLegacyUserDefaults() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "offline-store-\(UUID().uuidString)", isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let suiteName = "RecoveryOfflineStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let passJSON = Data(#"""
+        {
+          "schema":"rclone-recovery-pass-v1",
+          "generated_at":1730000000,
+          "app_version":"2.4.0",
+          "hostname":"backup-srv",
+          "protection":{"score":92,"state":"ready","components":[]},
+          "data_paths":[],
+          "quarantine":{"active":0,"items":[]},
+          "paths_included":false
+        }
+        """#.utf8)
+        let pass = try JSONDecoder().decode(RecoveryPassResponse.self, from: passJSON)
+        let store = RecoveryOfflineStore(directory: tempDir, defaults: defaults)
+        let server = "https://backup.example.de"
+        let username = "admin"
+        let entryKey = store.key(server: server, username: username)
+
+        // Legacy UserDefaults entry migrates seamlessly on load and removes UserDefaults copy.
+        defaults.set(passJSON, forKey: entryKey)
+        let migrated = try XCTUnwrap(store.load(server: server, username: username))
+        XCTAssertEqual(migrated.hostname, "backup-srv")
+        XCTAssertNil(defaults.data(forKey: entryKey))
+
+        let fileURL = store.fileURL(forServer: server, username: username)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+        let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let resourceValues = try fileURL.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertEqual(resourceValues.isExcludedFromBackup, true)
+
+        // Direct save and remove operate on the protected file without touching UserDefaults.
+        store.save(pass, server: server, username: username)
+        XCTAssertNil(defaults.data(forKey: entryKey))
+        XCTAssertEqual(store.load(server: server, username: username)?.protection.score, 92)
+        store.remove(server: server, username: username)
+        XCTAssertNil(store.load(server: server, username: username))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
 }

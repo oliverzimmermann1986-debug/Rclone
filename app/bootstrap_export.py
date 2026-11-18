@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import secrets
 import stat
+import tempfile
 import time
 from typing import Any, Mapping
 
@@ -164,13 +165,15 @@ def decrypt_bootstrap_bundle(
         raise BootstrapExportError("Passphrase fehlt")
     try:
         iterations = int(envelope.get("iterations") or KDF_ITERATIONS)
-        if iterations < 100_000 or iterations > 5_000_000:
+        if iterations < 100_000 or iterations > 1_000_000:
             raise BootstrapExportError("Ungültige KDF-Iterationen im Paket")
         salt = base64.b64decode(str(envelope.get("salt") or ""), validate=True)
         nonce = base64.b64decode(str(envelope.get("nonce") or ""), validate=True)
         ciphertext = base64.b64decode(
             str(envelope.get("ciphertext") or ""), validate=True
         )
+    except BootstrapExportError:
+        raise
     except (ValueError, TypeError) as exc:
         raise BootstrapExportError("Paket-Kodierung ist beschädigt") from exc
     if len(salt) != 16 or len(nonce) != 12 or not ciphertext:
@@ -261,10 +264,17 @@ def write_automatic_bootstrap_export(
         for dest in (archive_path, latest_path):
             if dest.is_symlink():
                 raise BootstrapExportError(f"Zieldatei ist ein Symlink: {dest}")
-            tmp_path = dest.with_suffix(".tmp")
-            flags = os.O_CREAT | os.O_TRUNC | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(tmp_path, flags, stat.S_IRUSR | stat.S_IWUSR)
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{dest.name}.",
+                suffix=".tmp",
+                dir=str(target_dir),
+            )
+            tmp_path = Path(tmp_name)
             try:
+                try:
+                    os.chmod(tmp_path, 0o600)
+                except OSError:
+                    pass
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(raw_bytes)
                     stream.flush()

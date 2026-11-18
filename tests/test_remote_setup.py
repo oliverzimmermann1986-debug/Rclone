@@ -237,7 +237,7 @@ def test_real_cloud_setup_uses_remote_authorization(
 @pytest.mark.skipif(not shutil.which("rclone"), reason="rclone binary unavailable")
 def test_real_rclone_webdav_roundtrip(client, tmp_path, monkeypatch):
     live = tmp_path / "live.conf"
-    live.write_text("[existing]\ntype = local\n", encoding="utf-8")
+    live.write_text("[existing]\ntype = s3\n", encoding="utf-8")
     monkeypatch.setenv("RCLONE_CONFIG", str(live))
     monkeypatch.setattr(
         remotes,
@@ -322,7 +322,7 @@ def test_icloud_express_direct_credentials_obscures_password_and_saves_without_r
     client, tmp_path, monkeypatch
 ):
     live_conf = tmp_path / "rclone.conf"
-    live_conf.write_text("[existing]\ntype = local\n", encoding="utf-8")
+    live_conf.write_text("[existing]\ntype = s3\n", encoding="utf-8")
     monkeypatch.setenv("RCLONE_CONFIG", str(live_conf))
     monkeypatch.setattr(
         remotes,

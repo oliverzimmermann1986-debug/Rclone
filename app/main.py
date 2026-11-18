@@ -495,6 +495,14 @@ def _same_origin(request: Request) -> bool:
         parsed = urlsplit(origin)
     except ValueError:
         return False
+    if request_is_https(request) and parsed.scheme.lower() == "http":
+        logger.warning(
+            "Origin-Prüfung fehlgeschlagen: unverschlüsselte HTTP-Origin %r "
+            "gegen HTTPS-Anfrage abgelehnt (path=%s)",
+            origin,
+            request.url.path,
+        )
+        return False
     # Nur der Host:Port zählt. Das Schema weicht legitim ab, wenn ein
     # TLS-Reverse-Proxy davor liegt, dessen X-Forwarded-Proto uvicorn nicht
     # vertraut (--forwarded-allow-ips) — der Browser sendet dann https, die

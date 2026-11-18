@@ -111,6 +111,7 @@ enum APIError: LocalizedError, Equatable {
 
 protocol APIClientProtocol: AnyObject {
     func getRecoveryStaging() async throws -> RecoveryStagingResponse
+    func downloadRecoveryStagingArchive(recoveryID: String) async throws -> URL
     func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse
     func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse
     func getRemoteProviders() async throws -> RemoteProvidersResponse
@@ -210,6 +211,7 @@ protocol APIClientProtocol: AnyObject {
     func getCloudQuota(refresh: Bool) async throws -> CloudQuotaResponse
     func getRansomwareStatus() async throws -> RansomwareStatusResponse
     func initPairCanary(pair: String, filename: String?, currentPassword: String?) async throws -> CanaryInitResponse
+    func verifyPairCanary(pairName: String) async throws -> CanaryVerifyResponse
     func browseTimeTravel(identity: String, pointID: String, path: String) async throws -> TimeTravelBrowseResponse
     func getTimeTravelHistory(identity: String, path: String) async throws -> TimeTravelHistoryResponse
     func getTimeTravelDiff(identity: String, path: String, fromPoint: String, toPoint: String) async throws -> TextDiffResponse
@@ -242,6 +244,7 @@ extension APIClientProtocol {
     func getCloudQuota(refresh: Bool) async throws -> CloudQuotaResponse { throw APIError.serverFeatureUnavailable(feature: "Cloud-Kontingent & Egress-Wächter") }
     func getRansomwareStatus() async throws -> RansomwareStatusResponse { throw APIError.serverFeatureUnavailable(feature: "Ransomware-Früherkennung") }
     func initPairCanary(pair: String, filename: String?, currentPassword: String?) async throws -> CanaryInitResponse { throw APIError.serverFeatureUnavailable(feature: "Canary-Schutz") }
+    func verifyPairCanary(pairName: String) async throws -> CanaryVerifyResponse { throw APIError.serverFeatureUnavailable(feature: "Canary-Schutz") }
     func browseTimeTravel(identity: String, pointID: String, path: String) async throws -> TimeTravelBrowseResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitreise-Browser") }
     func getTimeTravelHistory(identity: String, path: String) async throws -> TimeTravelHistoryResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitreise-Browser") }
     func getTimeTravelDiff(identity: String, path: String, fromPoint: String, toPoint: String) async throws -> TextDiffResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitreise-Diff") }
@@ -254,6 +257,7 @@ extension APIClientProtocol {
     func getBandwidthSuggestions() async throws -> BandwidthSuggestionsResponse { throw APIError.serverFeatureUnavailable(feature: "Zeitfenster-Vorschläge") }
     func streamProgress(onUpdate: @escaping (BackupProgress) async -> Void) async throws { throw APIError.serverFeatureUnavailable(feature: "Live-Fortschrittsstream") }
     func getRecoveryStaging() async throws -> RecoveryStagingResponse { throw APIError.serverFeatureUnavailable(feature: "Recovery-Staging") }
+    func downloadRecoveryStagingArchive(recoveryID: String) async throws -> URL { throw APIError.serverFeatureUnavailable(feature: "Recovery-Staging") }
     func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
     func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse { throw APIError.invalidResponse }
     func getRemoteProviders() async throws -> RemoteProvidersResponse { throw APIError.serverFeatureUnavailable(feature: "Neue Remotes") }
@@ -573,7 +577,7 @@ final class APIClient: APIClientProtocol {
 
     func login(username: String, password: String) async throws {
         clearCookies()
-        var challengeRequest = URLRequest(url: url(for: "/api/auth/login"))
+        var challengeRequest = URLRequest(url: try url(for: "/api/auth/login"))
         challengeRequest.httpMethod = "GET"
         challengeRequest.timeoutInterval = 8
         let challenge: NativeLoginChallenge
@@ -588,7 +592,7 @@ final class APIClient: APIClientProtocol {
             throw APIError.loginSecurityFailed
         }
 
-        var request = URLRequest(url: url(for: "/api/auth/login"))
+        var request = URLRequest(url: try url(for: "/api/auth/login"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -631,7 +635,7 @@ final class APIClient: APIClientProtocol {
 
     func exchangeWebAuthnToken(_ token: String, verifier: String) async throws {
         clearCookies()
-        var request = URLRequest(url: url(for: "/api/webauthn/native/exchange"))
+        var request = URLRequest(url: try url(for: "/api/webauthn/native/exchange"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -652,7 +656,7 @@ final class APIClient: APIClientProtocol {
     }
 
     func getWebAuthnCredentials() async throws -> WebAuthnCredentialsResponse {
-        var request = URLRequest(url: url(for: "/api/webauthn/credentials"))
+        var request = URLRequest(url: try url(for: "/api/webauthn/credentials"))
         request.httpMethod = "GET"
         try addCSRF(to: &request)
         return try await send(request)
@@ -680,7 +684,7 @@ final class APIClient: APIClientProtocol {
     }
 
     private func loginLegacy(username: String, password: String) async throws {
-        var challengeRequest = URLRequest(url: url(for: "/login"))
+        var challengeRequest = URLRequest(url: try url(for: "/login"))
         challengeRequest.httpMethod = "GET"
         challengeRequest.timeoutInterval = 8
         let (challengeData, challengeResponse) = try await performDataRequest(challengeRequest, using: loginSession)
@@ -690,7 +694,7 @@ final class APIClient: APIClientProtocol {
             throw APIError.loginSecurityFailed
         }
 
-        var request = URLRequest(url: url(for: "/login"))
+        var request = URLRequest(url: try url(for: "/login"))
         request.httpMethod = "POST"
         request.timeoutInterval = 8
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -876,7 +880,7 @@ final class APIClient: APIClientProtocol {
         data: Data
     ) async throws -> VaultUploadStatus {
         var request = URLRequest(
-            url: url(for: "/api/vault/uploads/\(Self.pathEncode(uploadID))?offset=\(offset)")
+            url: try url(for: "/api/vault/uploads/\(Self.pathEncode(uploadID))?offset=\(offset)")
         )
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
@@ -961,12 +965,21 @@ final class APIClient: APIClientProtocol {
 
     func getRecoveryStaging() async throws -> RecoveryStagingResponse { try await get("/api/recovery/staging") }
 
+    func downloadRecoveryStagingArchive(recoveryID: String) async throws -> URL {
+        try await download(
+            "/api/recovery/staging/\(Self.pathEncode(recoveryID))/download",
+            filename: "\(recoveryID)-\(UUID().uuidString).zip",
+            using: vaultDownloadSession,
+            timeout: 960
+        )
+    }
+
     func removeRecoveryStaging(id: String, currentPassword: String) async throws -> ActionResponse {
-        try await delete("/api/recovery/staging/\(Self.queryEncode(id))", body: ["current_password": currentPassword])
+        try await delete("/api/recovery/staging/\(Self.pathEncode(id))", body: ["current_password": currentPassword])
     }
 
     func removeVaultLocalCopy(uploadID: String, currentPassword: String) async throws -> ActionResponse {
-        try await delete("/api/vault/library/\(Self.queryEncode(uploadID))", body: ["current_password": currentPassword])
+        try await delete("/api/vault/library/\(Self.pathEncode(uploadID))", body: ["current_password": currentPassword])
     }
 
     func getRemoteProviders() async throws -> RemoteProvidersResponse {
@@ -988,15 +1001,15 @@ final class APIClient: APIClientProtocol {
     }
 
     func answerRemoteSetup(id: String, answer: String, step: Int) async throws -> RemoteSetupSession {
-        try await post("/api/remotes/setup/\(Self.queryEncode(id))/answer", body: RemoteSetupAnswer(answer: answer, step: step), timeout: 70)
+        try await post("/api/remotes/setup/\(Self.pathEncode(id))/answer", body: RemoteSetupAnswer(answer: answer, step: step), timeout: 70)
     }
 
     func saveRemoteSetup(id: String) async throws -> RemoteSetupSaved {
-        try await post("/api/remotes/setup/\(Self.queryEncode(id))/save", body: [String: String](), timeout: 70)
+        try await post("/api/remotes/setup/\(Self.pathEncode(id))/save", body: [String: String](), timeout: 70)
     }
 
     func cancelRemoteSetup(id: String) async throws {
-        let _: ActionResponse = try await delete("/api/remotes/setup/\(Self.queryEncode(id))", body: [String: String]())
+        let _: ActionResponse = try await delete("/api/remotes/setup/\(Self.pathEncode(id))", body: [String: String]())
     }
 
     func browseRemote(path: String = "") async throws -> BrowseResponse {
@@ -1056,19 +1069,19 @@ final class APIClient: APIClientProtocol {
     }
 
     func getPairConflicts(name: String) async throws -> PairConflictsResponse {
-        try await get("/api/pairs/\(Self.queryEncode(name))/conflicts")
+        try await get("/api/pairs/\(Self.pathEncode(name))/conflicts")
     }
 
     func resolvePairConflict(name: String, basePath: String, choice: String, password: String? = nil) async throws -> ConflictResolveResponse {
         try await post(
-            "/api/pairs/\(Self.queryEncode(name))/conflicts/resolve",
+            "/api/pairs/\(Self.pathEncode(name))/conflicts/resolve",
             body: ConflictResolveRequest(basePath: basePath, choice: choice, password: password),
             timeout: 30
         )
     }
 
     func getStagingDiff(recoveryID: String, path: String) async throws -> TextDiffResponse {
-        try await get("/api/recovery/staging/\(Self.queryEncode(recoveryID))/diff?path=\(Self.queryEncode(path))")
+        try await get("/api/recovery/staging/\(Self.pathEncode(recoveryID))/diff?path=\(Self.queryEncode(path))")
     }
 
     func getCloudQuota(refresh: Bool = false) async throws -> CloudQuotaResponse {
@@ -1081,8 +1094,16 @@ final class APIClient: APIClientProtocol {
 
     func initPairCanary(pair: String, filename: String? = nil, currentPassword: String? = nil) async throws -> CanaryInitResponse {
         try await post(
-            "/api/security/canary/\(Self.queryEncode(pair))/init",
+            "/api/security/canary/\(Self.pathEncode(pair))/init",
             body: CanaryInitRequest(filename: filename, currentPassword: currentPassword),
+            timeout: 30
+        )
+    }
+
+    func verifyPairCanary(pairName: String) async throws -> CanaryVerifyResponse {
+        try await post(
+            "/api/security/canary/\(Self.pathEncode(pairName))/verify",
+            body: [String: String](),
             timeout: 30
         )
     }
@@ -1231,7 +1252,7 @@ final class APIClient: APIClientProtocol {
     func streamProgress(
         onUpdate: @escaping (BackupProgress) async -> Void
     ) async throws {
-        var request = URLRequest(url: url(for: "/api/jobs/progress/stream"))
+        var request = URLRequest(url: try url(for: "/api/jobs/progress/stream"))
         request.httpMethod = "GET"
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 90
@@ -1288,7 +1309,7 @@ final class APIClient: APIClientProtocol {
 
     func logout() async throws -> LogoutResult {
         defer { clearLocalSession() }
-        var request = URLRequest(url: url(for: "/logout"))
+        var request = URLRequest(url: try url(for: "/logout"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(origin, forHTTPHeaderField: "Origin")
@@ -1351,14 +1372,14 @@ final class APIClient: APIClientProtocol {
     }
 
     private func get<T: Decodable>(_ path: String, timeout: TimeInterval? = nil) async throws -> T {
-        var request = URLRequest(url: url(for: path))
+        var request = URLRequest(url: try url(for: path))
         request.httpMethod = "GET"
         if let timeout { request.timeoutInterval = timeout }
         return try await send(request)
     }
 
     private func post<T: Decodable>(_ path: String) async throws -> T {
-        var request = URLRequest(url: url(for: path))
+        var request = URLRequest(url: try url(for: path))
         request.httpMethod = "POST"
         request.setValue(origin, forHTTPHeaderField: "Origin")
         try addCSRF(to: &request)
@@ -1371,7 +1392,7 @@ final class APIClient: APIClientProtocol {
         using requestSession: URLSession? = nil,
         timeout: TimeInterval? = nil
     ) async throws -> T {
-        var request = URLRequest(url: url(for: path))
+        var request = URLRequest(url: try url(for: path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(origin, forHTTPHeaderField: "Origin")
@@ -1401,7 +1422,7 @@ final class APIClient: APIClientProtocol {
 
     private func download(_ path: String, filename: String, using requestSession: URLSession? = nil, timeout: TimeInterval? = nil) async throws -> URL {
         let epoch = exportEpoch()
-        var request = URLRequest(url: url(for: path))
+        var request = URLRequest(url: try url(for: path))
         request.httpMethod = "GET"
         if let timeout { request.timeoutInterval = timeout }
         let (temporary, response) = try await performDownloadRequest(request, using: requestSession ?? session)
@@ -1423,7 +1444,7 @@ final class APIClient: APIClientProtocol {
         filename: String
     ) async throws -> URL {
         let epoch = exportEpoch()
-        var request = URLRequest(url: url(for: path))
+        var request = URLRequest(url: try url(for: path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(origin, forHTTPHeaderField: "Origin")
@@ -1465,6 +1486,12 @@ final class APIClient: APIClientProtocol {
                 .posixPermissions: 0o600,
                 .protectionKey: FileProtectionType.complete
             ], ofItemAtPath: target.path)
+            var excludedValues = URLResourceValues()
+            excludedValues.isExcludedFromBackup = true
+            var excludedDir = directory
+            try excludedDir.setResourceValues(excludedValues)
+            var excludedTarget = target
+            try excludedTarget.setResourceValues(excludedValues)
             return target
         } catch {
             try? files.removeItem(at: directory)
@@ -1473,7 +1500,7 @@ final class APIClient: APIClientProtocol {
     }
 
     private func put<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
-        var request = URLRequest(url: url(for: path))
+        var request = URLRequest(url: try url(for: path))
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(origin, forHTTPHeaderField: "Origin")
@@ -1488,7 +1515,7 @@ final class APIClient: APIClientProtocol {
         using requestSession: URLSession? = nil,
         timeout: TimeInterval? = nil
     ) async throws -> T {
-        var request = URLRequest(url: url(for: path))
+        var request = URLRequest(url: try url(for: path))
         request.httpMethod = "DELETE"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(origin, forHTTPHeaderField: "Origin")
@@ -1587,9 +1614,13 @@ final class APIClient: APIClientProtocol {
         return components?.string?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? baseURL.absoluteString
     }
 
-    private func url(for path: String) -> URL {
+    private func url(for path: String) throws -> URL {
         let prefix = baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return URL(string: prefix + (path.hasPrefix("/") ? path : "/" + path))!
+        let combined = prefix + (path.hasPrefix("/") ? path : "/" + path)
+        guard let candidate = URL(string: combined), originPolicy.allows(candidate) else {
+            throw APIError.invalidServer
+        }
+        return candidate
     }
 
     private func performDataRequest(
@@ -1625,7 +1656,9 @@ final class APIClient: APIClientProtocol {
     }
 
     private static func pathEncode(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#"))) ?? value
+        if value == "." { return "%2E" }
+        if value == ".." { return "%2E%2E" }
+        return value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#"))) ?? value
     }
 
     private static func errorMessage(_ data: Data) -> String? {

@@ -105,6 +105,12 @@ final class APIClientExportTests: XCTestCase {
             #endif
         }
         XCTAssertNotEqual(get.deletingLastPathComponent(), post.deletingLastPathComponent())
+        let stagingZip = try await client.downloadRecoveryStagingArchive(recoveryID: "recovery-42")
+        defer { try? FileManager.default.removeItem(at: stagingZip.deletingLastPathComponent()) }
+        let stagingAttrs = try FileManager.default.attributesOfItem(atPath: stagingZip.path)
+        XCTAssertEqual((stagingAttrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        let stagingValues = try stagingZip.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertEqual(stagingValues.isExcludedFromBackup, true)
     }
 }
 

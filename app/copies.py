@@ -166,12 +166,48 @@ def _direction_endpoints(pair: Mapping[str, Any]) -> tuple[str, str]:
     return _normalize(pair.get("remote")), _normalize(pair.get("local"))
 
 
+def _pbs_target_domain(
+    pbs: Mapping[str, Any], target: Mapping[str, Any]
+) -> tuple[str, dict[str, Any], bool]:
+    from .pbs_api import PbsApiError, parse_repository
+
+    repo_raw = str(pbs.get("repository") or "").strip()
+    ns = str(target.get("namespace") or pbs.get("namespace") or "").strip()
+    try:
+        parsed = parse_repository(repo_raw)
+        host = str(parsed["host"])
+        datastore = str(parsed["datastore"])
+        domain_key = f"{host}:{datastore}"
+        target_display = f"pbs:{host}:{datastore}" + (f"/{ns}" if ns else "")
+        is_offsite = host.casefold() not in {"", "localhost", "127.0.0.1", "::1"}
+    except (PbsApiError, ValueError):
+        location = (repo_raw.rpartition("@")[2] or repo_raw or "datastore").strip()
+        domain_key = location
+        target_display = f"pbs:{location}" + (f"/{ns}" if ns else "")
+        is_offsite = not location.casefold().startswith(
+            ("localhost:", "127.0.0.1:", "[::1]:")
+        )
+    domain = {
+        "id": f"pbs:{domain_key.casefold()}",
+        "label": f"PBS ({domain_key})",
+        "kind": "pbs",
+        "confidence": "high",
+        "source": "pbs_repository",
+        "resolved_path": None,
+        "warning": None,
+    }
+    return target_display, domain, is_offsite
+
+
 def build_matrix(cfg, db, *, now: Optional[float] = None) -> dict[str, Any]:
-    """Gruppiert aktive Pairs nach Quelle und bewertet die Abdeckung."""
-    from .jobs.scheduler import rclone_history_key
+    """Gruppiert aktive Pairs und PBS-Targets nach Quelle und bewertet die Abdeckung."""
+    from .jobs.pbs_backup import pbs_history_key, pbs_settings, pbs_targets
+    from .jobs.scheduler import _is_disabled, rclone_history_key
 
     now_value = float(time.time() if now is None else now)
-    backup = cfg.get("backup", default={}) or {}
+    backup = (
+        cfg.get("backup") if isinstance(cfg, Mapping) else cfg.get("backup", default={})
+    ) or {}
     scheduled_ids = scheduled_data_path_ids(cfg)
 
     pairs = [
@@ -182,7 +218,16 @@ def build_matrix(cfg, db, *, now: Optional[float] = None) -> dict[str, Any]:
         and str(pair.get("name") or "")
     ]
 
+    pbs = pbs_settings(cfg)
+    active_pbs_targets = (
+        [t for t in pbs_targets(pbs) if t.get("enabled", True)]
+        if bool(pbs.get("enabled", False))
+        else []
+    )
+
     identities = {rclone_history_key(pair): str(pair.get("name")) for pair in pairs}
+    for target in active_pbs_targets:
+        identities[pbs_history_key(pbs, target)] = f"pbs:{target['name']}"
     histories = db.pair_last_history(identities) if identities else {}
 
     sources: dict[str, dict[str, Any]] = {}
@@ -245,6 +290,55 @@ def build_matrix(cfg, db, *, now: Optional[float] = None) -> dict[str, Any]:
                 ),
             }
         )
+
+    for pbs_target in active_pbs_targets:
+        t_name = f"pbs:{pbs_target['name']}"
+        h_key = pbs_history_key(pbs, pbs_target)
+        history = histories.get(h_key) or {}
+        success = history.get("last_success") or {}
+        last_success = float(success["ended_at"]) if success.get("ended_at") else None
+        latest = history.get("last_result") or {}
+        target_display, domain, is_offsite = _pbs_target_domain(pbs, pbs_target)
+        scope_id = str(domain["id"])
+        is_scheduled = not _is_disabled(str(pbs_target.get("schedule") or "manual"))
+
+        for raw_src in pbs_target.get("paths") or []:
+            source = _normalize(raw_src)
+            if not source:
+                continue
+            entry = sources.setdefault(
+                source,
+                {"source": source, "copies": [], "domains": {}},
+            )
+            aggregate = entry["domains"].setdefault(
+                scope_id,
+                {
+                    **domain,
+                    "targets": [],
+                    "warnings": [],
+                },
+            )
+            if target_display not in aggregate["targets"]:
+                aggregate["targets"].append(target_display)
+            entry["copies"].append(
+                {
+                    "pair": t_name,
+                    "target": target_display,
+                    "scope": domain["label"],
+                    "scope_id": scope_id,
+                    "failure_domain": domain,
+                    "remote": is_offsite,
+                    "direction": "push",
+                    "mode": "pbs",
+                    "scheduled": is_scheduled,
+                    "last_success": last_success,
+                    "age_hours": round((now_value - last_success) / 3600.0, 1)
+                    if last_success is not None
+                    else None,
+                    "last_status": latest.get("status") if latest else None,
+                    "versioned": True,
+                }
+            )
 
     rows: list[dict[str, Any]] = []
     for entry in sources.values():

@@ -33,6 +33,9 @@ from ..jobs.job_lifecycle import BACKUP_KINDS
 from ..jobs.locks import try_file_lock
 from ..rclone_args import (
     DANGEROUS_RCLONE_CONFIG_KEYS,
+    DANGEROUS_RCLONE_REMOTE_TYPES,
+    DANGEROUS_RCLONE_TRUTHY_KEYS,
+    UnsafeRcloneConfigError,
     assert_safe_rclone_config,
     rclone_subprocess_env,
     resolve_rclone_config_path,
@@ -522,9 +525,38 @@ def _setup_failure(
     )
 
 
+def _assert_safe_config_http(config_path: Any = None) -> None:
+    try:
+        assert_safe_rclone_config(config_path)
+    except UnsafeRcloneConfigError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def _validate_remote_parameters(provider: str, parameters: dict[str, Any]) -> None:
+    provider_clean = str(provider or "").strip().lower()
+    type_clean = str(parameters.get("type") or provider_clean).strip().lower()
+    if (
+        provider_clean in DANGEROUS_RCLONE_REMOTE_TYPES
+        or type_clean in DANGEROUS_RCLONE_REMOTE_TYPES
+    ):
+        raise HTTPException(
+            400, "Lokale oder Alias-Remotes sind aus Sicherheitsgründen nicht erlaubt"
+        )
+    for raw_key, raw_val in parameters.items():
+        key_clean = str(raw_key or "").strip().lower()
+        if not key_clean:
+            continue
+        if key_clean in DANGEROUS_RCLONE_CONFIG_KEYS or key_clean.endswith("_command"):
+            raise HTTPException(400, f"Unzulässiger Konfigurationsschlüssel: {raw_key}")
+        if key_clean in DANGEROUS_RCLONE_TRUTHY_KEYS and str(
+            raw_val or ""
+        ).strip().lower() in {"true", "1", "yes", "on"}:
+            raise HTTPException(400, f"Unzulässige Konfigurationsoption: {raw_key}")
+
+
 def _run(args: list[str], payload: dict | None = None) -> Any:
     env = rclone_subprocess_env()
-    env["RCLONE_LOG_LEVEL"] = "ERROR"
+    env["RCLONE_LOG_LEVEL"] = "NOTICE"
     try:
         result = subprocess.run(
             ["rclone", *args, "--json", json.dumps(payload or {})],
@@ -727,6 +759,8 @@ def _provider_items() -> list[dict[str, str]]:
                 ),
             }
             for p in data.get("providers", [])
+            if str(p.get("Name") or "").strip().lower()
+            not in DANGEROUS_RCLONE_REMOTE_TYPES
         ],
         key=lambda p: (
             preferred.index(p["name"]) if p["name"] in preferred else len(preferred),
@@ -840,6 +874,7 @@ def _persist_remote_section_direct(
     """Schreibt ein bereits verifiziertes Remote (z. B. iCloud mit 2FA-Trust-Token) atomar in rclone.conf, ohne erneut eine 2FA-Anmeldung auszulösen."""
     if not _NAME_RE.fullmatch(name):
         raise HTTPException(400, "Ungültiger Remote-Name")
+    _validate_remote_parameters(provider, parameters)
     clean_entries: list[tuple[str, str]] = [("type", provider)]
     for raw_key, raw_val in parameters.items():
         k = str(raw_key or "").strip()
@@ -916,7 +951,7 @@ def _persist_remote_section_direct(
             os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
             pass
-        assert_safe_rclone_config(tmp_path)
+        _assert_safe_config_http(tmp_path)
         os.replace(tmp_path, live_path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
@@ -938,6 +973,10 @@ def start(payload: StartRemote, request: Request) -> dict:
     if not _NAME_RE.fullmatch(payload.name):
         raise HTTPException(
             400, "Remote-Name: 2–64 Buchstaben, Ziffern, Bindestriche oder Unterstriche"
+        )
+    if payload.provider.strip().lower() in DANGEROUS_RCLONE_REMOTE_TYPES:
+        raise HTTPException(
+            400, "Lokale oder Alias-Remotes sind aus Sicherheitsgründen nicht erlaubt"
         )
     if payload.provider not in {p["name"] for p in _provider_items()}:
         raise HTTPException(400, "Unbekannter Remote-Anbieter")
@@ -1176,6 +1215,16 @@ def answer(key: str, payload: RemoteAnswer, request: Request) -> dict:
                 400, "Die Angabe ist zu lang oder enthält ungültige Zeichen"
             )
         opt_name = str(setup.option.get("Name") or "")
+        opt_name_lower = opt_name.strip().lower()
+        if (
+            opt_name_lower in DANGEROUS_RCLONE_CONFIG_KEYS
+            or opt_name_lower.endswith("_command")
+            or (
+                opt_name_lower in DANGEROUS_RCLONE_TRUTHY_KEYS
+                and value.strip().lower() in {"true", "1", "yes", "on"}
+            )
+        ):
+            raise HTTPException(400, f"Unzulässige Konfigurationsoption: {opt_name}")
         if "token" in opt_name.lower():
             value = _complete_browser_auth_if_needed(setup, value)
         elif setup.provider == "iclouddrive" and opt_name in {
@@ -1223,6 +1272,7 @@ def answer(key: str, payload: RemoteAnswer, request: Request) -> dict:
                 setup.config,
             ),
         )
+        _assert_safe_config_http(setup.config)
         return _view(key, setup)
 
 
@@ -1273,7 +1323,9 @@ def _save_drive_remote(setup: Setup) -> None:
                 409, "Ein Remote mit diesem Namen existiert inzwischen bereits"
             )
 
+        _assert_safe_config_http(setup.config)
         staged = _rc("config/get", {"name": setup.name}, setup.config)
+        _validate_remote_parameters("drive", staged)
         if staged.get("type") != "drive":
             raise HTTPException(
                 409, "Der Drive-Entwurf ist nicht mehr gültig. Bitte neu beginnen."
@@ -1318,6 +1370,7 @@ def _save_drive_remote(setup: Setup) -> None:
             allow_replace=setup.reconnect,
             config_path=live_path,
         )
+        _assert_safe_config_http(live_path)
     finally:
         lease.release()
 
@@ -1341,6 +1394,11 @@ def _finish_saved_setup(key: str, setup: Setup) -> dict:
 def save(key: str, request: Request) -> dict:
     with _lock:
         setup = _get(key, request)
+        if setup.provider.strip().lower() in DANGEROUS_RCLONE_REMOTE_TYPES:
+            raise HTTPException(
+                400,
+                "Lokale oder Alias-Remotes sind aus Sicherheitsgründen nicht erlaubt",
+            )
         if setup.state or setup.error:
             raise HTTPException(
                 409, "Bitte zuerst alle Einrichtungsschritte abschließen"
@@ -1348,13 +1406,15 @@ def save(key: str, request: Request) -> dict:
         if setup.provider == "drive" and setup.require_own_client:
             _save_drive_remote(setup)
             return _finish_saved_setup(key, setup)
+        _assert_safe_config_http(setup.config)
         existing = _rc("config/listremotes").get("remotes", [])
         existing_map = {n.rstrip(":").casefold(): n.rstrip(":") for n in existing}
         if setup.name.casefold() in existing_map and not setup.reconnect:
             raise HTTPException(
                 409, "Ein Remote mit diesem Namen existiert inzwischen bereits"
             )
-        parameters = _rc("config/get", {"name": setup.name}, setup.config)
+        parameters = dict(_rc("config/get", {"name": setup.name}, setup.config))
+        _validate_remote_parameters(setup.provider, parameters)
         parameters.pop("type", None)
         if setup.provider == "iclouddrive" or setup.reconnect:
             _persist_remote_section_direct(
@@ -1363,6 +1423,7 @@ def save(key: str, request: Request) -> dict:
                 parameters,
                 allow_replace=setup.reconnect,
             )
+            _assert_safe_config_http()
         else:
             # The staged OAuth flow is already complete. Recreating the section must
             # not prompt for another login or open a browser on the server.
@@ -1412,6 +1473,14 @@ def save(key: str, request: Request) -> dict:
                     502,
                     "Die Anmeldung ist noch nicht vollständig. Bitte Einrichtung wiederholen.",
                 )
+            try:
+                _assert_safe_config_http()
+            except HTTPException:
+                try:
+                    _rc("config/delete", {"name": setup.name})
+                except Exception:
+                    pass
+                raise
         return _finish_saved_setup(key, setup)
 
 
@@ -1458,6 +1527,7 @@ def create_google_drive_service_account(
     client_email = str(parsed_sa["client_email"]).strip()
 
     with _lock:
+        _assert_safe_config_http()
         existing = _rc("config/listremotes").get("remotes", [])
         if name.casefold() in {n.rstrip(":").casefold() for n in existing}:
             raise HTTPException(409, "Ein Remote mit diesem Namen existiert bereits")
@@ -1534,6 +1604,7 @@ def create_google_drive_service_account(
                     502,
                     "Google-Drive-Service-Account konnte nicht in rclone angelegt werden.",
                 )
+            _assert_safe_config_http()
         except Exception:
             sa_file.unlink(missing_ok=True)
             raise

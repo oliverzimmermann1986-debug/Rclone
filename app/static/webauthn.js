@@ -1,6 +1,13 @@
 (() => {
   "use strict";
 
+  try {
+    const savedTheme = window.localStorage.getItem("rclone-sync-theme");
+    if (savedTheme === "light" || savedTheme === "dark" || savedTheme === "system") {
+      document.documentElement.dataset.theme = savedTheme;
+    }
+  } catch (_) { /* localStorage optional */ }
+
   const errorBox = document.querySelector("[data-webauthn-error]");
 
   function showError(message, isError = true) {

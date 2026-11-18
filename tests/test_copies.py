@@ -385,3 +385,75 @@ def test_sources_sorted_by_risk_first(tmp_path):
     )
     # Die riskanteste Quelle (eine Kopie) steht oben.
     assert matrix["sources"][0]["source"] == "/srv/einzeln"
+
+
+def test_pbs_targets_count_as_distinct_versioned_copy_in_matrix(tmp_path):
+    from app.jobs.pbs_backup import pbs_history_key
+
+    db = Database(tmp_path / "pbs-copies.db")
+    now = 1_000_000.0
+    pair = _pair(
+        "cloud-fibu",
+        "/srv/fibu",
+        "wasabi:fibu",
+        backup_dir="wasabi:fibu-versions/{date}",
+        failure_domain="Wasabi EU",
+    )
+    pbs_cfg = {
+        "enabled": True,
+        "repository": "backup@pbs!tok@pbs.example:datastore1",
+        "targets": [
+            {
+                "id": "c" * 32,
+                "name": "fibu-pbs",
+                "paths": ["/srv/fibu"],
+                "schedule": "0 1 * * *",
+            }
+        ],
+    }
+    config = _Cfg(
+        {
+            "backup": {"pairs": [pair], "default_schedule": "0 3 * * *"},
+            "pbs": pbs_cfg,
+        }
+    )
+
+    b_job = db.job_start("backup")
+    db.job_finish(
+        b_job,
+        "ok",
+        {
+            "ok": True,
+            "pairs": [{"name": "cloud-fibu", "ok": True}],
+            "history_keys": {"cloud-fibu": rclone_history_key(pair)},
+        },
+    )
+    p_job = db.job_start("pbs")
+    p_key = pbs_history_key(pbs_cfg, pbs_cfg["targets"][0])
+    db.job_finish(
+        p_job,
+        "ok",
+        {
+            "ok": True,
+            "pairs": [{"name": "pbs:fibu-pbs", "ok": True, "history_key": p_key}],
+            "history_keys": {"pbs:fibu-pbs": p_key},
+        },
+    )
+    with db.conn() as connection:
+        connection.execute("UPDATE pair_runs SET ended_at=?", (now - 1800,))
+        connection.execute(
+            "UPDATE pair_history_state SET last_success_at=?", (now - 1800,)
+        )
+
+    matrix = build_matrix(config, db, now=now)
+    row = matrix["sources"][0]
+    assert row["source"] == "/srv/fibu"
+    assert row["copy_count"] == 2
+    assert row["scope_count"] == 2
+    assert row["offsite_count"] == 2
+    assert {d["id"] for d in row["domains"]} == {
+        "explicit:wasabi eu",
+        "pbs:pbs.example:datastore1",
+    }
+    assert row["findings"] == []
+    assert row["level"] == "ok"

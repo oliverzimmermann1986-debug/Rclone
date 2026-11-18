@@ -51,6 +51,7 @@ window.app = function app() {
     },
     lockdownState: { active: false },
     lockdownDialog: { show: false, reason: '', password: '', error: '', submitting: false },
+    webauthnStatus: { loaded: false, enabled: false, passkey: false, security_key: false },
     lockdownSteps: [],
     currentPasswordDialog: { show: false, password: '', error: '' },
     confirmationDialog: {
@@ -139,6 +140,8 @@ window.app = function app() {
       searchQuery: '', searchResults: [], searchLoading: false,
       vault: { loading: false, items: [], filterPair: '', error: '' },
       handover: { password: '', passphrase: '', repeat: '', includePaths: false, downloaded: false },
+      handoverImport: { envelopeText: '', fileName: '', passphrase: '', password: '', busy: false, preview: null, mappings: {}, result: null, error: '' },
+      fileHistory: { loading: false, path: '', versions: [], error: '' },
     },
     storageComposition: { loading: {}, data: {}, errors: {} },
     maintenance: { logs: [], loading: false, prune: null, database: null, logQuery: '' },
@@ -151,6 +154,7 @@ window.app = function app() {
     bitrot: { loading: false, error: false, data: null, baselines: {} },
     cloudQuota: { loading: false, error: false, data: null },
     ransomwareStatus: { loading: false, error: false, data: null },
+    canaryVerify: {},
     vpn: { loading: false, error: false, data: null },
     activeTag: '',
     conflictCounts: {},
@@ -180,6 +184,7 @@ window.app = function app() {
       logSearch: '', logFilter: 'all', autoRefresh: true,
     },
     quickPromotion: null,
+    lastDryRun: null,
     commandPalette: { show: false, query: '', selectedIndex: 0 },
     toast: { show: false, msg: '', type: 'ok', timer: null },
   };

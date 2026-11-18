@@ -729,7 +729,20 @@ def download_staging_archive(
             "Staging stimmt nicht mit dem ursprünglichen Prüfnachweis überein. Bitte neu wiederherstellen.",
         ) from exc
 
-    spooled = tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b")
+    paths_cfg = config.get("paths") if isinstance(config.get("paths"), Mapping) else {}
+    raw_temp_dir = str((paths_cfg or {}).get("temp_dir") or "").strip()
+    spool_dir: str | None = None
+    if raw_temp_dir:
+        temp_dir = Path(raw_temp_dir).expanduser()
+        temp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            temp_dir.chmod(0o700)
+        except OSError:
+            pass
+        spool_dir = str(temp_dir)
+    spooled = tempfile.SpooledTemporaryFile(
+        max_size=16 * 1024 * 1024, mode="w+b", dir=spool_dir
+    )
     checksum_lines: list[str] = []
     try:
         with zipfile.ZipFile(

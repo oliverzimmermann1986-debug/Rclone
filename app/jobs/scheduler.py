@@ -605,6 +605,19 @@ def restore_test_due(cfg, db, *, now: Optional[float] = None) -> Dict[str, Any]:
         backup = cfg.get("backup") or {}
     else:
         backup = cfg.get("backup", default={}) or {}
+    try:
+        from ..cloud_quota import should_throttle_optional_job
+
+        snapshot = cfg if isinstance(cfg, Mapping) else {"backup": dict(backup)}
+        throttled, throttle_reason = should_throttle_optional_job(db, snapshot, now=now)
+        if throttled:
+            return {
+                "due": False,
+                "reason": "transfer_budget_throttled",
+                "detail": throttle_reason,
+            }
+    except Exception:
+        pass
     timezone_name = str(backup.get("timezone") or DEFAULT_TIMEZONE)
     retry_sec = (
         _bounded_int(

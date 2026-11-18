@@ -16,7 +16,11 @@ from typing import Any, Iterator, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .jobs.restore_test import _endpoints
-from .rclone_args import rclone_subprocess_env
+from .rclone_args import (
+    UnsafeRcloneConfigError,
+    assert_safe_rclone_config,
+    rclone_subprocess_env,
+)
 from .recovery_walk import WalkLimitError, bounded_walk
 
 MAX_POINTS = 180
@@ -216,6 +220,10 @@ def _parse_point_time(name: str, display_timezone: ZoneInfo) -> float | None:
 
 def _remote_chunks(command: list[str]) -> Iterator[bytes]:
     """Bound output while a watchdog also covers a blocked pipe read."""
+    try:
+        assert_safe_rclone_config()
+    except UnsafeRcloneConfigError as exc:
+        raise RecoveryPointError(f"Unsichere rclone-Konfiguration: {exc}") from exc
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,

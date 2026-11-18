@@ -133,6 +133,81 @@ final class ConfigurationModelTests: XCTestCase {
         let heatmap = try JSONDecoder().decode(BandwidthHeatmapResponse.self, from: heatmapData)
         XCTAssertEqual(heatmap.days, 90)
         XCTAssertEqual(heatmap.samples.first?.first, 3)
+
+        let scrubDict = Data(#"{"last_job":null,"due":{"due":true,"reason":"interval_elapsed","next_run":1730000000}}"#.utf8)
+        let decodedScrubDict = try JSONDecoder().decode(BitrotScrubStatusResponse.self, from: scrubDict)
+        XCTAssertTrue(decodedScrubDict.due)
+        XCTAssertEqual(decodedScrubDict.dueDetail?.reason, "interval_elapsed")
+        XCTAssertEqual(decodedScrubDict.dueDetail?.nextRun, 1_730_000_000)
+
+        let scrubBool = Data(#"{"last_job":null,"due":false}"#.utf8)
+        XCTAssertFalse(try JSONDecoder().decode(BitrotScrubStatusResponse.self, from: scrubBool).due)
+
+        let drillDict = Data(#"{"running":false,"last":null,"due":{"due":true,"reason":"never_ran","next_run":null}}"#.utf8)
+        let decodedDrillDict = try JSONDecoder().decode(BootDrillStatusResponse.self, from: drillDict)
+        XCTAssertTrue(decodedDrillDict.due)
+        XCTAssertEqual(decodedDrillDict.dueDetail?.reason, "never_ran")
+
+        let drillBool = Data(#"{"running":true,"last":null,"due":false}"#.utf8)
+        let decodedDrillBool = try JSONDecoder().decode(BootDrillStatusResponse.self, from: drillBool)
+        XCTAssertTrue(decodedDrillBool.running)
+        XCTAssertFalse(decodedDrillBool.due)
+
+        let canaryVerify = Data(#"{"pair":"Fotos","canary":{"configured":true,"ok":true,"canary_file":".sicherpfad-canary"},"extension_scan":{"blocked":false,"suspect_count":0},"ok":true}"#.utf8)
+        let decodedCanary = try JSONDecoder().decode(CanaryVerifyResponse.self, from: canaryVerify)
+        XCTAssertTrue(decodedCanary.ok)
+        XCTAssertEqual(decodedCanary.pair, "Fotos")
+    }
+
+    func testPairConfigAdvancedFieldsAndZfsPushGuardClearHiddenZfsSnapshot() throws {
+        let data = Data(#"""
+        {
+          "id":"22222222222222222222222222222222",
+          "name":"ZFS-Tresor",
+          "local":"/tank/tresor",
+          "remote":"pcloud:/Tresor",
+          "direction":"push",
+          "mode":"copy",
+          "enabled":true,
+          "failure_domain":"cloud-eu",
+          "airgap_device":"/dev/disk/by-uuid/usb-1",
+          "zfs_snapshot":true
+        }
+        """#.utf8)
+        let pushPair = try JSONDecoder().decode(PairConfig.self, from: data)
+        XCTAssertEqual(pushPair.failureDomain, "cloud-eu")
+        XCTAssertEqual(pushPair.airgapDevice, "/dev/disk/by-uuid/usb-1")
+        XCTAssertTrue(pushPair.zfsSnapshot)
+
+        let pushRaw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(pushPair)) as? [String: Any])
+        XCTAssertEqual(pushRaw["failure_domain"] as? String, "cloud-eu")
+        XCTAssertEqual(pushRaw["airgap_device"] as? String, "/dev/disk/by-uuid/usb-1")
+        XCTAssertEqual(pushRaw["zfs_snapshot"] as? Bool, true)
+
+        let switchedPull = pushPair.replacing(
+            name: pushPair.name, local: pushPair.local, remote: pushPair.remote,
+            direction: "pull", mode: "copy", enabled: true,
+            allowDelete: false, maxDelete: nil, backupDir: "",
+            minLocalFiles: 1, minRemoteFiles: 0, requireMountpoint: false,
+            mountpoint: "", sentinelFile: ""
+        )
+        XCTAssertFalse(switchedPull.zfsSnapshot)
+        let pullRaw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(switchedPull)) as? [String: Any])
+        XCTAssertNil(pullRaw["zfs_snapshot"])
+
+        let legacyExtrasPull = PairConfig(
+            stableID: "33333333333333333333333333333333",
+            name: "Legacy",
+            local: "/tank/legacy",
+            remote: "pcloud:/Legacy",
+            direction: "bisync",
+            mode: "bisync",
+            zfsSnapshot: true,
+            extras: ["zfs_snapshot": .bool(true)]
+        )
+        XCTAssertFalse(legacyExtrasPull.zfsSnapshot)
+        let bisyncRaw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacyExtrasPull)) as? [String: Any])
+        XCTAssertNil(bisyncRaw["zfs_snapshot"])
     }
 
     func testJobDefinitionRoundTripsCanonicalOrderingFields() throws {

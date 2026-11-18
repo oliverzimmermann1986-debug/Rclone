@@ -123,7 +123,7 @@ struct SettingsButton: View {
     }
 }
 
-private struct SettingsView: View {
+struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var confirmLogout = false

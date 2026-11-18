@@ -11,8 +11,8 @@ final class IncidentCenterTests: XCTestCase {
             jobs: JobOverview(last: last, lastSuccess: nil, lastError: nil), alerts: alerts, generatedAt: fixture.generatedAt)
     }
 
-    private func health(error: String, status: String = "error", jobID: Int = 81) throws -> PairHealth {
-        let fields: [String: Any] = ["name": "Fotos", "history_key": "photos", "direction": "push",
+    private func health(name: String = "Fotos", error: String, status: String = "error", jobID: Int = 81) throws -> PairHealth {
+        let fields: [String: Any] = ["name": name, "history_key": name.lowercased(), "direction": "push",
             "mode": "copy", "last_status": status, "job_id": jobID, "error": error]
         return try JSONDecoder().decode(PairHealth.self, from: JSONSerialization.data(withJSONObject: fields))
     }
@@ -280,5 +280,66 @@ final class IncidentCenterTests: XCTestCase {
         XCTAssertEqual(job.effectiveStatus, "warning")
         let old = Data(#"{"id":80,"kind":"backup","status":"error","started_at":1}"#.utf8)
         XCTAssertEqual(try JSONDecoder().decode(JobRecord.self, from: old).effectiveStatus, "error")
+    }
+
+    func testGenericJobSummaryIsSuppressedWhenSameJobHasPairErrorsEvenViaRegexFallback() throws {
+        let pairErrors = try [
+            health(name: "Fotos gdrive", error: "Pre-Check fehlgeschlagen (remote: rclone lsjson --stat exit=1:  / local: ok)", status: "skipped", jobID: 245),
+            health(name: "Paperless Tresor pCloud", error: "Pre-Check fehlgeschlagen (remote: rclone lsjson --stat exit=3 / local: ok)", status: "skipped", jobID: 245),
+            health(name: "Paperless Tresor GDrive", error: "Pre-Check fehlgeschlagen (remote: oauth token expired / local: ok)", status: "skipped", jobID: 245)
+        ]
+        for explicitJobID in [Optional(245), nil] {
+            let summaryAlert = SystemAlert(
+                level: "error",
+                message: "Letzte Sicherung ist fehlgeschlagen (Lauf #245).",
+                jobID: explicitJobID,
+                kind: "backup",
+                source: "last_job"
+            )
+            let incidents = ProtectionIncident.collect(
+                overview: try overview(health: pairErrors, alerts: [summaryAlert]),
+                storage: nil
+            )
+            XCTAssertEqual(incidents.count, 3)
+            XCTAssertEqual(
+                Set(incidents.compactMap(\.pairName)),
+                Set(["Fotos gdrive", "Paperless Tresor pCloud", "Paperless Tresor GDrive"])
+            )
+            XCTAssertFalse(incidents.contains { $0.pairName == nil })
+        }
+
+        // Without pair errors for #245, the summary alert remains visible and extracts jobID 245.
+        let standalone = ProtectionIncident.collect(
+            overview: try overview(
+                health: [],
+                alerts: [SystemAlert(level: "error", message: "Letzte Sicherung ist fehlgeschlagen (Lauf #245).")]
+            ),
+            storage: nil
+        )
+        XCTAssertEqual(standalone.count, 1)
+        XCTAssertEqual(standalone.first?.jobID, 245)
+    }
+
+    func testPrecheckLsjsonOAuthAndRateLimitClassificationAndBlankColonCleanup() throws {
+        let sanitized = ProtectionIncident.sanitizeMessage(
+            "Pre-Check fehlgeschlagen (remote: rclone lsjson --stat exit=1:  / local: ok)"
+        )
+        XCTAssertEqual(sanitized, "Pre-Check fehlgeschlagen (remote: rclone lsjson --stat exit=1 / local: ok)")
+        XCTAssertEqual(ProtectionIncident.sanitizeMessage("exit=1:  / local: ok"), "exit=1 / local: ok")
+
+        let lsjson = ProtectionIncident.classify(sanitized)
+        XCTAssertEqual(lsjson.category, "Cloud-Vorabprüfung")
+        XCTAssertTrue(lsjson.recommendation.contains("lsjson"))
+
+        let missingPath = ProtectionIncident.classify("Pre-Check fehlgeschlagen (remote: lsjson --stat exit=3 / local: ok)")
+        XCTAssertEqual(missingPath.category, "Zielpfad fehlt")
+
+        let oauth = ProtectionIncident.classify("oauth invalid_grant: token has been expired or revoked (client_id)")
+        XCTAssertEqual(oauth.category, "Cloud-Anmeldung")
+        XCTAssertTrue(oauth.recommendation.contains("Remote"))
+
+        let rateLimit = ProtectionIncident.classify("HTTP 429 Too Many Requests: rate_limit / api-limit exceeded")
+        XCTAssertEqual(rateLimit.category, "API-Limit")
+        XCTAssertTrue(rateLimit.recommendation.contains("Client-ID"))
     }
 }

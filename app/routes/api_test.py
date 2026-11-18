@@ -15,8 +15,12 @@ from ..auth import require_auth
 from ..config_store import get_config
 from ..config_validation import ConfigValidationError, validate_config
 from ..jobs.rclone_sync import _is_remote
-from ..rclone_args import rclone_subprocess_env
-from ..security import require_csrf
+from ..rclone_args import (
+    UnsafeRcloneConfigError,
+    assert_safe_rclone_config,
+    rclone_subprocess_env,
+)
+from ..security import ensure_within, parse_browse_roots, require_csrf
 
 router = APIRouter(
     prefix="/api/test",
@@ -30,9 +34,47 @@ class RcloneTest(BaseModel):
     pair: Optional[dict[str, Any]] = None
 
 
+def _saved_local_paths(backup: dict[str, Any]) -> set[Path]:
+    allowed: set[Path] = set()
+    for saved in backup.get("pairs") or []:
+        if not isinstance(saved, dict):
+            continue
+        for key in ("local", "remote"):
+            raw = str(saved.get(key) or "").strip()
+            if raw and not _is_remote(raw):
+                try:
+                    allowed.add(Path(raw).expanduser().resolve(strict=False))
+                except (OSError, RuntimeError):
+                    continue
+    return allowed
+
+
+def _enforce_unsaved_local_browse_roots(
+    pair: dict[str, Any], snapshot: dict[str, Any], backup: dict[str, Any]
+) -> None:
+    saved_paths = _saved_local_paths(backup)
+    configured_roots = (snapshot.get("web") or {}).get(
+        "local_browse_roots",
+        ["/mnt", "/media", "/srv", "/opt/rclone-sync/data"],
+    )
+    browse_roots = parse_browse_roots(configured_roots)
+    for key in ("local", "remote"):
+        raw = str(pair.get(key) or "").strip()
+        if not raw or _is_remote(raw):
+            continue
+        resolved = Path(raw).expanduser().resolve(strict=False)
+        if resolved in saved_paths:
+            continue
+        ensure_within(Path(raw), browse_roots)
+
+
 @router.post("/rclone")
 def test_rclone(request: RcloneTest) -> dict[str, Any]:
     try:
+        try:
+            assert_safe_rclone_config()
+        except UnsafeRcloneConfigError as exc:
+            raise HTTPException(400, str(exc)) from exc
         remotes_result = subprocess.run(
             ["rclone", "listremotes"],
             capture_output=True,
@@ -115,6 +157,7 @@ def test_rclone(request: RcloneTest) -> dict[str, Any]:
                     422, {"message": "Pair ungültig", "errors": exc.errors}
                 ) from exc
             pair = normalized["backup"]["pairs"][draft_index]
+            _enforce_unsaved_local_browse_roots(pair, snapshot, backup)
             response["tested_unsaved"] = True
             response["warnings"] = warnings
         elif request.pair_index is not None:

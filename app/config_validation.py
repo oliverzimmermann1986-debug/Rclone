@@ -530,11 +530,17 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     if "hooks_dir" in paths and paths.get("hooks_dir") not in (None, ""):
         try:
             hooks_dir_val = _clean_path(paths.get("hooks_dir"))
-            if not _is_absolute_local(hooks_dir_val):
-                errors.append("paths.hooks_dir muss absolut sein")
-            paths["hooks_dir"] = hooks_dir_val
+            normalized_hooks_dir = hooks_dir_val.rstrip("/") or "/"
+            if normalized_hooks_dir != "/etc/rclone-sync/hooks.d":
+                errors.append(
+                    "paths.hooks_dir darf nicht überschrieben werden "
+                    "(nur /etc/rclone-sync/hooks.d erlaubt)"
+                )
+            paths["hooks_dir"] = "/etc/rclone-sync/hooks.d"
         except ValueError as exc:
             errors.append(f"paths.hooks_dir {exc}")
+    elif "hooks_dir" in paths:
+        paths["hooks_dir"] = "/etc/rclone-sync/hooks.d"
 
     backup = cfg.setdefault("backup", {})
     if not isinstance(backup, dict):
@@ -1930,6 +1936,16 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         drill_scratch = ""
     if drill_scratch and not _is_absolute_local(drill_scratch):
         errors.append("pbs.boot_drill.scratch_dir muss ein absoluter Pfad sein")
+    if drill_scratch:
+        scratch_after_drive = (
+            drill_scratch[len(Path(drill_scratch).drive) :]
+            if os.name == "nt" and not drill_scratch.startswith("/")
+            else drill_scratch
+        )
+        if "," in drill_scratch or ":" in scratch_after_drive:
+            errors.append(
+                "pbs.boot_drill.scratch_dir darf weder ',' noch ':' enthalten"
+            )
     if drill_scratch:
         for pair in backup.get("pairs") or []:
             for endpoint in (pair.get("local"), pair.get("remote")):

@@ -58,13 +58,46 @@ struct ObjectLockBucketItem: Decodable, Identifiable, Equatable {
     let error: String?
 }
 
+struct DueStatusDetail: Decodable, Equatable {
+    let due: Bool
+    var reason: String? = nil
+    var nextRun: Double? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case due, reason
+        case nextRun = "next_run"
+    }
+}
+
 struct BitrotScrubStatusResponse: Decodable {
     let lastJob: JobRecord?
     let due: Bool
+    let dueDetail: DueStatusDetail?
 
     enum CodingKeys: String, CodingKey {
         case due
         case lastJob = "last_job"
+    }
+
+    init(lastJob: JobRecord? = nil, due: Bool, dueDetail: DueStatusDetail? = nil) {
+        self.lastJob = lastJob
+        self.due = due
+        self.dueDetail = dueDetail
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        lastJob = try container.decodeIfPresent(JobRecord.self, forKey: .lastJob)
+        if let detail = try? container.decode(DueStatusDetail.self, forKey: .due) {
+            due = detail.due
+            dueDetail = detail
+        } else if let flag = try? container.decode(Bool.self, forKey: .due) {
+            due = flag
+            dueDetail = DueStatusDetail(due: flag)
+        } else {
+            due = false
+            dueDetail = nil
+        }
     }
 }
 
@@ -72,6 +105,34 @@ struct BootDrillStatusResponse: Decodable {
     let running: Bool
     let last: JobRecord?
     let due: Bool
+    let dueDetail: DueStatusDetail?
+
+    enum CodingKeys: String, CodingKey {
+        case running, last, due
+    }
+
+    init(running: Bool, last: JobRecord? = nil, due: Bool, dueDetail: DueStatusDetail? = nil) {
+        self.running = running
+        self.last = last
+        self.due = due
+        self.dueDetail = dueDetail
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        running = try container.decodeIfPresent(Bool.self, forKey: .running) ?? false
+        last = try container.decodeIfPresent(JobRecord.self, forKey: .last)
+        if let detail = try? container.decode(DueStatusDetail.self, forKey: .due) {
+            due = detail.due
+            dueDetail = detail
+        } else if let flag = try? container.decode(Bool.self, forKey: .due) {
+            due = flag
+            dueDetail = DueStatusDetail(due: flag)
+        } else {
+            due = false
+            dueDetail = nil
+        }
+    }
 }
 
 struct BootDrillStartResponse: Decodable, Equatable {
@@ -283,6 +344,42 @@ struct CanaryInitResponse: Decodable, Equatable {
     }
 }
 
+struct SuspectExtensionScanSummary: Decodable, Equatable {
+    var blocked: Bool = false
+    var suspectCount: Int? = nil
+    var error: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case blocked, error
+        case suspectCount = "suspect_count"
+    }
+
+    init(blocked: Bool = false, suspectCount: Int? = nil, error: String? = nil) {
+        self.blocked = blocked
+        self.suspectCount = suspectCount
+        self.error = error
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        blocked = try container.decodeIfPresent(Bool.self, forKey: .blocked) ?? false
+        suspectCount = try container.decodeIfPresent(Int.self, forKey: .suspectCount)
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+    }
+}
+
+struct CanaryVerifyResponse: Decodable, Equatable {
+    let pair: String
+    let canary: CanaryCheckStatus
+    var extensionScan: SuspectExtensionScanSummary? = nil
+    let ok: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case pair, canary, ok
+        case extensionScan = "extension_scan"
+    }
+}
+
 struct TimeTravelBrowseResponse: Decodable, Equatable {
     let pair: String
     let pointID: String
@@ -313,7 +410,8 @@ struct TimeTravelItem: Decodable, Identifiable, Equatable {
     }
 }
 
-struct TimeTravelHistoryResponse: Decodable, Equatable {
+struct TimeTravelHistoryResponse: Decodable, Identifiable, Equatable {
+    var id: String { "\(pair):\(path)" }
     let pair: String
     let path: String
     let versions: [TimeTravelVersionEntry]

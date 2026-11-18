@@ -18,7 +18,7 @@ _MAX_ARGS = 256
 _MAX_ARG_LENGTH = 4096
 _BLOCKED_SHORT_OPTIONS = {"n", "i"}
 
-_EXECUTION_FLAGS = {"--metadata-mapper"}
+_EXECUTION_FLAGS = {"--metadata-mapper", "--sftp-ssh", "-o", "--option"}
 
 _EXACT_BLOCKED = {
     "--",
@@ -230,11 +230,29 @@ def validate_parsed_rclone_args(
             raise ValueError("Leeres oder zu langes rclone-Argument")
         if any(char in token for char in ("\x00", "\r", "\n")):
             raise ValueError("rclone-Argument enthält Steuerzeichen")
-    execution_flags = [
-        token.split("=", 1)[0]
-        for token in normalized
-        if token.split("=", 1)[0].lower() in _EXECUTION_FLAGS
-    ]
+    execution_flags: list[str] = []
+    for token in normalized:
+        raw_flag = token.split("=", 1)[0]
+        flag = raw_flag.lower()
+        short_option_cluster = (
+            flag.startswith("-")
+            and not flag.startswith("--")
+            and 2 <= len(flag[1:]) <= 4
+            and flag[1:].isalpha()
+            and "o" in flag[1:]
+        )
+        attached_short_option = (
+            token.startswith("-o")
+            and not token.startswith("--")
+            and (len(token) == 2 or token[2] in {"=", "."} or "=" in token)
+        )
+        if (
+            flag in _EXECUTION_FLAGS
+            or (flag.startswith("-") and flag.endswith("-command"))
+            or short_option_cluster
+            or attached_short_option
+        ):
+            execution_flags.append(raw_flag)
     if execution_flags:
         raise UnsafeRcloneArgument(
             "rclone-Flags zur Ausführung externer Programme sind auch im "
@@ -276,6 +294,9 @@ DANGEROUS_RCLONE_CONFIG_KEYS = frozenset(
         "client_cert_command",
     }
 )
+DANGEROUS_RCLONE_REMOTE_TYPES = frozenset({"local", "alias"})
+DANGEROUS_RCLONE_TRUTHY_KEYS = frozenset({"links", "copy_links"})
+_TRUTHY_CONFIG_VALUES = frozenset({"true", "1", "yes", "on"})
 
 
 class UnsafeRcloneConfigError(ValueError):
@@ -286,9 +307,14 @@ def resolve_rclone_config_path(explicit: Path | str | None = None) -> Path | Non
     """Ermittelt die aktive rclone.conf ohne Aufruf externer Prozesse."""
     from pathlib import Path as _Path
 
+    if explicit is not None and str(explicit).strip():
+        target = _Path(explicit).expanduser()
+        try:
+            return target if target.is_file() else None
+        except OSError:
+            return None
+
     candidates: list[_Path] = []
-    if explicit:
-        candidates.append(_Path(explicit).expanduser())
     env_cfg = os.environ.get("RCLONE_CONFIG", "").strip()
     if env_cfg:
         candidates.append(_Path(env_cfg).expanduser())
@@ -423,6 +449,23 @@ def inspect_rclone_config(
         if not val_clean:
             continue
         if key_clean in DANGEROUS_RCLONE_CONFIG_KEYS or key_clean.endswith("_command"):
+            dangerous_directives.append(
+                {
+                    "remote": current_section or "global",
+                    "key": key_clean,
+                }
+            )
+        elif key_clean == "type" and val_clean.lower() in DANGEROUS_RCLONE_REMOTE_TYPES:
+            dangerous_directives.append(
+                {
+                    "remote": current_section or "global",
+                    "key": f"type={val_clean.lower()}",
+                }
+            )
+        elif (
+            key_clean in DANGEROUS_RCLONE_TRUTHY_KEYS
+            and val_clean.lower() in _TRUTHY_CONFIG_VALUES
+        ):
             dangerous_directives.append(
                 {
                     "remote": current_section or "global",
