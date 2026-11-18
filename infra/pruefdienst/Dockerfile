@@ -43,5 +43,7 @@ RUN npm ci --prefix /opt/rclone-ci/web --ignore-scripts --no-audit --no-fund \
     && ln -s /work/repo /opt/rclone-sync \
     && chmod -R a+rX /opt/rclone-ci
 COPY controller/ /opt/rclone-ci/controller/
-RUN chmod -R a+rX /opt/rclone-ci/controller
+COPY container-entry.sh /opt/pruefdienst/container-entry.sh
+RUN chmod -R a+rX /opt/rclone-ci/controller \
+    && chmod 755 /opt/pruefdienst/container-entry.sh
 USER 1000:1000

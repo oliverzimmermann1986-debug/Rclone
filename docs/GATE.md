@@ -72,7 +72,7 @@ und Werkzeugversionen. Beide vorhandenen Docker-Daemons verwenden denselben ID.
 
 Vor einem Neubau den dort genannten Basis-ID lokal prüfen und genau diesen als
 `pruefdienst-rclone-base-7ab1d115ae18` markieren; der Build nutzt `--pull=false`.
-Zum Build-Kontext gehören `Dockerfile`, `uv-requirements.lock`,
+Zum Build-Kontext gehören `Dockerfile`, `container-entry.sh`, `uv-requirements.lock`,
 `web/package.json`/`web/package-lock.json` aus `tests/web` und die unveränderten
 zentralen `.cjs`-Dateien unter `controller/`. Systemwerkzeuge und Browser werden
 im Image vorbereitet, nicht mit zusätzlichen Rechten im Testlauf installiert.

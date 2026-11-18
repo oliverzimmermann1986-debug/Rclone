@@ -73,7 +73,10 @@ def stage(source: Path, destination: Path) -> list[str]:
     originals = sorted(source.glob("*.cjs"))
     if not originals or len(originals) > 64:
         raise ValueError("Controller snapshot file inventory is invalid")
-    if any(p.is_symlink() or not p.is_file() or p.stat().st_size > 2_000_000 for p in originals):
+    if any(
+        p.is_symlink() or not p.is_file() or p.stat().st_size > 2_000_000
+        for p in originals
+    ):
         raise ValueError("Controller snapshot contains an invalid file")
     if not any(p.name.endswith(".unit.test.cjs") for p in originals):
         raise ValueError("Original controller regression tests are missing")
@@ -100,7 +103,9 @@ def main() -> int:
         names = stage(args.source, args.destination)
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.exit(1, f"Controller staging failed: {error}\n")
-    print(json.dumps({"controllerStaged": str(args.destination), "files": sorted(names)}))
+    print(
+        json.dumps({"controllerStaged": str(args.destination), "files": sorted(names)})
+    )
     return 0
 
 
