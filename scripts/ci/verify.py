@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import io
 import json
 import os
 import re
@@ -22,7 +20,7 @@ REPORT = Path("reports/unified-quality-report.json")
 PYTHONS = ("3.10", "3.11", "3.12", "3.13")
 LEGACY_RCLONE = Path("/usr/bin/rclone")
 PRODUCTION_RCLONE = Path("/opt/rclone-ci/rclone-1.74.4/rclone")
-MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_REPORT_BYTES = 14 * 1024 * 1024
 GATES = (
     "runtime",
@@ -445,7 +443,10 @@ def web_behavior(plan: Plan) -> dict:
     # Separate commands retain each independent test summary in the report.
     suites = {}
     for script in ("runtime-behavior.cjs", "review-regressions.cjs"):
-        output = plan.command("web-behavior", ["node", f"tests/web/{script}"])
+        output = plan.command(
+            "web-behavior",
+            ["node", "--test", "--test-reporter=tap", f"tests/web/{script}"],
+        )
         suites[script] = node_summary(output)
     for script, marker in (
         ("workspace-dom.cjs", "Workspace DOM checks passed:"),
@@ -486,8 +487,8 @@ def evidence(plan: Plan) -> dict:
         *plan.directory.glob("web-visual/*"),
     ]
     names = []
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+    archive = plan.root / "reports/rclone-ci-evidence.zip"
+    with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED) as bundle:
         for file in sorted(files):
             if (
                 file.is_symlink()
@@ -512,19 +513,25 @@ def evidence(plan: Plan) -> dict:
     for key in (f"python-tests-{version}" for version in PYTHONS):
         if plan.item(key)["status"] == "passed" and f"{key}.xml" not in names:
             raise ValueError("Missing passed-suite JUnit evidence: " + key)
-    raw = archive.getvalue()
-    if not names or len(raw) > MAX_ARCHIVE_BYTES:
+    size = archive.stat().st_size
+    if not names or size > MAX_ARCHIVE_BYTES:
         raise ValueError("Missing or oversized CI evidence archive")
+    digest = hashlib.sha256()
+    with archive.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    plan.report["evidenceFiles"] = names
     plan.report["artifacts"] = [
         {
             "name": "rclone-ci-evidence.zip",
-            "encoding": "base64",
-            "sha256": hashlib.sha256(raw).hexdigest(),
-            "files": names,
-            "content": base64.b64encode(raw).decode("ascii"),
+            "path": "reports/rclone-ci-evidence.zip",
+            "encoding": "binary",
+            "sha256": digest.hexdigest(),
+            "bytes": size,
+            "files": len(names),
         }
     ]
-    return {"files": len(names), "archiveBytes": len(raw)}
+    return {"files": len(names), "archiveBytes": size}
 
 
 def main() -> int:

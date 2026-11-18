@@ -4,11 +4,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { augmentRefs, pullRequestRepos, isPullRef, isAllowedPullRef,
+const { augmentRefs, pullRequestRepos, requiredProfiles, isPullRef, isAllowedPullRef,
   preserveSharedPullRun, PULL_SUPERSEDED } = require('./pull-requests.cjs');
 // Run from a staging copy of the real controller after applying the manifest.
 // Missing controller files are an error, never a skipped integration check.
-const { Queue, discover, refsOf, cancellationReason } = require('./core.cjs');
+const { Queue, discover, refsOf, cancellationReason, validate } = require('./core.cjs');
 const { configuration } = require('./service.cjs');
 const { Executor } = require('./executor.cjs');
 
@@ -17,7 +17,8 @@ const sha = n => n.toString(16).padStart(40, '0');
 const configured = [repo.toLowerCase()];
 const check = { version: 1, image: 'rclone', command: 'bash scripts/ci/verify.sh', timeoutSeconds: 7200, postgres: false };
 const config = { owner: 'owner', accountType: 'user', logRepo: 'owner/logs', images: { rclone: 'sha256:' + 'a'.repeat(64) },
-  checkTokenExpires: '2030-01-01', logTokenExpires: '2030-01-01', pullRequestRepos: configured };
+  checkTokenExpires: '2030-01-01', logTokenExpires: '2030-01-01', pullRequestRepos: configured,
+  requiredProfiles: { 'owner/rclone': 'rclone' } };
 const row = (number = 12, commit = sha(2)) => ({ number, state: 'open', base: { ref: 'main', repo: { full_name: repo } },
   head: { sha: commit, repo: { full_name: repo, fork: false } } });
 function apiFor(rows, refs = [{ ref: branch, sha: sha(1) }]) {
@@ -151,4 +152,48 @@ test('rclone exit zero without a real report remains an error', async t => {
   assert.match(output.result.description, /Release-Report/);
   assert.equal(output.report, undefined);
   assert.equal(executor.slots.size, 0, 'cleanup releases the slot');
+});
+
+test('required profile configuration is optional, owner-scoped and registered', () => {
+  assert.deepEqual(requiredProfiles(undefined, 'owner', config.images), {});
+  assert.deepEqual(requiredProfiles({ 'OWNER/Rclone': 'rclone' }, 'owner', config.images), { 'owner/rclone': 'rclone' });
+  for (const value of [null, [], { 'foreign/Rclone': 'rclone' }, { 'owner/Rclone': 'missing' },
+    { 'owner/Rclone': 'rclone', 'OWNER/rclone': 'rclone' }])
+    assert.throws(() => requiredProfiles(value, 'owner', config.images));
+});
+
+test('Rclone cannot switch to a generic profile or shorten its required command', async () => {
+  const q = new Queue(), api = apiFor([row()]);
+  api.file = async () => JSON.stringify({ ...check, image: 'rezepte', command: 'true' });
+  await discover(api, { ...config, images: { ...config.images, rezepte: 'sha256:' + 'b'.repeat(64) } }, q);
+  assert.ok(q.jobs.length > 0 && q.jobs.every(job => job.phase === 'publishing' && job.result.state === 'error'));
+  assert.equal(q.next(), null);
+  assert.throws(() => validate(JSON.stringify({ ...check, command: 'true' }), config.images), /vollstaendigen/);
+  assert.throws(() => validate(JSON.stringify({ ...check, postgres: true }), config.images), /vollstaendigen/);
+});
+
+test('work shared by two PRs stops only after both heads have been replaced', () => {
+  const q = new Queue(), old = q.add(repo, pr, sha(1), check), running = q.next();
+  const second = 'refs/pull/13/head';
+  q.add(repo, second, sha(1), check);
+  q.add(repo, pr, sha(2), check);
+  assert.equal(running.signal.aborted, false);
+  assert.deepEqual(refsOf(old), [pr, second], 'historical refs remain available for the log');
+  q.add(repo, second, sha(3), check);
+  assert.equal(running.signal.aborted, true);
+  assert.equal(running.signal.reason, PULL_SUPERSEDED);
+});
+
+test('an existing ref returning to a still-live shared SHA is reactivated', () => {
+  const q = new Queue(), old = q.add(repo, pr, sha(1), check), running = q.next();
+  const second = 'refs/pull/13/head';
+  q.add(repo, second, sha(1), check);
+  q.add(repo, pr, sha(2), check);
+  assert.deepEqual(old.replacedRefs, [pr]);
+  assert.equal(q.known(repo, pr, sha(1)), true);
+  assert.deepEqual(old.replacedRefs, []);
+  q.add(repo, second, sha(3), check);
+  assert.equal(running.signal.aborted, false);
+  q.add(repo, pr, sha(4), check);
+  assert.equal(running.signal.aborted, true);
 });

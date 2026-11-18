@@ -1,7 +1,7 @@
 # Rclone opt-in for the shared Prüfdienst controller
 
 The base controller belongs to `Schoenmackers/deploy/ci-runner`. The deployed
-HappySrv copy is the operational baseline; its four modified source digests are
+HappySrv copy is the operational baseline; its five modified source digests are
 recorded in `patch-manifest.json`. This directory carries only Rclone's reviewed
 extension and exact-match integration patches. It does not replace or rewrite
 the other project's sources or grant additional token permissions.
@@ -9,7 +9,8 @@ the other project's sources or grant additional token permissions.
 The host configuration enables pull-request discovery explicitly:
 
 ```json
-"pullRequestRepos": ["oliverzimmermann1986-debug/Rclone"]
+"pullRequestRepos": ["oliverzimmermann1986-debug/Rclone"],
+"requiredProfiles": {"oliverzimmermann1986-debug/Rclone": "rclone"}
 ```
 
 Without this setting, existing repositories retain default-branch/tag discovery.
@@ -17,17 +18,51 @@ The opt-in adds open PR heads against the default branch from the same repositor
 forks, closed PRs, removed heads and unrelated base repositories are excluded.
 The existing paginated GitHub API client is reused. Invalid commits and API
 failures fail closed. No GitHub token is copied into test containers.
+The separate required-profile binding prevents a changed repository checkfile
+from switching Rclone to a generic profile to avoid the report requirements.
+Rclone also requires `postgres: false` and exactly `bash scripts/ci/verify.sh`.
 
 Queue results still belong to one exact SHA. Replacing a sole PR cancels its old
-work; replacing one ref on a job still shared by another PR/main ref leaves that
-job running. A new head gets its own result. A later tag can reuse a completed
+work; replacing one ref on a job still shared by another current PR/main ref
+leaves that job running. Replaced refs are tracked separately from historical log
+metadata; the old work stops once its last current ref is replaced. Returning a
+ref to a still-live shared SHA reactivates it. A new head gets its own result.
+A later tag can reuse a completed
 successful check of the same SHA, while genuine failures and cleanup errors stay
 blocking. Closing a PR does not abort an already queued/running check; that bounded
 extra work may finish on its old SHA and cannot make a different SHA green.
 
-The `rclone` image profile additionally requires a valid nonempty controller
-report. A successful shell exit without a report cannot produce a green status,
-including direct runs with a custom command. Other image profiles are unchanged.
+The `rclone` profile requires the complete, successful 21-gate report for its exact
+SHA, including all four Python suites without failures/skips, both OAuth cases,
+all 48 browser cases, Node results and the evidence member manifest. A successful
+shell exit with a missing/partial report cannot produce a green status, including
+direct runs with a custom command. Other image profiles are unchanged.
+
+## Binary evidence
+
+The report contains metadata only for the single fixed
+`reports/rclone-ci-evidence.zip`, at most 64 MiB. The controller reads that fixed
+container path over bounded `docker cp` stdout. It accepts exactly one regular tar
+entry with the fixed basename, checked header checksum, size, complete zero padding,
+ZIP signature and report SHA-256. It never extracts container-controlled paths on
+the host. Missing or mismatching evidence prevents a successful result.
+Failed runs keep their ZIP as well when the completed exact-SHA report has the
+full 21-gate plan and valid artifact metadata; failed browser cases may naturally
+have fewer screenshots. This cannot satisfy the strict green contract. If the
+failure ZIP itself is missing or invalid, the original failed gate remains the
+result and `controllerEvidenceError` explains the unavailable archive. Partial
+plans, wrong SHAs and contradictory reports remain controller errors without an
+artifact.
+
+The checked ZIP travels separately from the bounded JSON report. Publishing
+validates its canonical base64, hash, size and name again and writes a binary Git
+blob under `logs/<UTC-date>/<64-hex-job-id>.zip` beside the log and report. The
+report's `publishedArtifact` points to that fixed ZIP name. The existing parentless
+30-day log snapshots retain only the matching bounded filename form; expired ZIPs
+are removed with logs/reports. Only Rclone jobs can publish this artifact. After
+successful publication its base64 content is removed from persisted job state;
+publication failures keep it for retry. Direct trial runs retain the ZIP only in
+their existing root-private run directory, with mode 0600.
 
 ## Isolated regression check
 
@@ -46,14 +81,15 @@ The destination must be new. Staging verifies every recorded source hash and
 requires each replacement anchor to occur exactly once before creating a copy.
 A changed base, missing original tests, symlinks, a writable baseline, or a missing
 controller module fails the gate. Existing controller tests run alongside the new
-configuration, discovery, API failure, cancellation, SHA sharing and missing-report
-regressions. The staging script is not a host deployment command.
+configuration, discovery, API failure, cancellation, SHA sharing, profile-binding,
+full-report, evidence transport, binary publishing and retention regressions. The
+staging script is not a host deployment command.
 
 ## Host update and future controller updates
 
 The coordinator applies the reviewed exact replacements to a private controller
 backup/staging directory, checks syntax and the isolated test result, then deploys
-only `pull-requests.cjs` and the four changed controller modules. Credentials,
+only the two new helpers and the five changed controller modules. Credentials,
 firewall, Docker restrictions and unrelated repository configuration stay intact.
 Restart the existing service only after its active queue is safe to restart.
 

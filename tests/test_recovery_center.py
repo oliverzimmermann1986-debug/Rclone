@@ -185,8 +185,7 @@ def test_recovery_default_uses_configured_data_directory(tmp_path):
     assert selective_restore.staging_root(config) == tmp_path / "data" / "recovery"
     assert (
         selective_restore._staging_path({})
-        .as_posix()
-        .endswith("/opt/rclone-sync/data/recovery")
+        == Path("/opt/rclone-sync/data/recovery").resolve()
     )
 
 

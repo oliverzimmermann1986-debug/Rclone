@@ -22,6 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
         "tests/test_install_pinned_xcodegen.py",
         "requirements.txt",
         "requirements-dev.txt",
+        ".pruefdienst.json",
+        "docs/GATE.md",
+        "README.md",
+        "scripts/ci/verify.py",
+        "infra/pruefdienst/central/pull-requests.cjs",
     ),
 )
 def test_native_security_changes_select_ios_build(event, changed_path):

@@ -23,6 +23,19 @@ function pullRequestRepos(value, owner) {
 
 function isPullRef(ref) { return typeof ref === 'string' && PULL_REF.test(ref); }
 
+function requiredProfiles(value, owner, images) {
+  if (value === undefined) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > 64)
+    throw new Error('Verbindliche Pruefprofile ungueltig');
+  const entries = Object.entries(value);
+  const repos = pullRequestRepos(entries.map(([repo]) => repo), owner);
+  return Object.fromEntries(entries.map(([, profile], index) => {
+    if (typeof profile !== 'string' || !/^[a-z][a-z0-9-]*$/.test(profile) || !Object.hasOwn(images, profile))
+      throw new Error('Verbindliches Pruefprofil ist nicht registriert');
+    return [repos[index], profile];
+  }));
+}
+
 function isAllowedPullRef(repo, ref, configured = []) {
   return typeof repo === 'string' && isPullRef(ref) &&
     configured.some(value => value.toLowerCase() === repo.toLowerCase());
@@ -52,11 +65,11 @@ async function augmentRefs(api, repo, base, refs, configured = []) {
   return [...refs, ...Array.from(found, ([ref, sha]) => ({ ref, sha }))];
 }
 
-function preserveSharedPullRun(refs, replacedRef) {
+function preserveSharedPullRun(refs, replacedRef, replacedRefs = []) {
   // The result belongs to an exact SHA. Keep work still shared with another
   // PR/main ref; a replacement gets its own SHA/job and can never inherit green.
-  return refs.some(isPullRef) && refs.some(ref => ref !== replacedRef);
+  return refs.some(isPullRef) && refs.some(ref => ref !== replacedRef && !replacedRefs.includes(ref));
 }
 
-module.exports = { PULL_SUPERSEDED, pullRequestRepos, isPullRef, isAllowedPullRef,
+module.exports = { PULL_SUPERSEDED, pullRequestRepos, requiredProfiles, isPullRef, isAllowedPullRef,
   augmentRefs, preserveSharedPullRun };

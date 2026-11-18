@@ -18,7 +18,12 @@ import shutil
 
 HERE = Path(__file__).resolve().parent
 SOURCE = Path("/opt/rclone-ci/controller")
-ADDITIONS = ("pull-requests.cjs", "pull-requests.unit.test.cjs")
+ADDITIONS = (
+    "pull-requests.cjs",
+    "pull-requests.unit.test.cjs",
+    "rclone-evidence.cjs",
+    "rclone-evidence.unit.test.cjs",
+)
 
 
 def patched_sources(source: Path, manifest: dict) -> dict[str, bytes]:

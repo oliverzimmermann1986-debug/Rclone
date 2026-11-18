@@ -55,10 +55,12 @@ produktiven Sicherungs-/Wiederherstellungslauf aus.
 ## Berichte
 
 Das bestehende private Repository `pruefprotokolle` erhält Log und JSON-Bericht.
-Der Bericht enthält Testzahlen, Fehler und ein SHA-256-geprüftes, auf 8 MiB
-begrenztes ZIP mit JUnit, Logs, 48 Screenshots und sechs synthetischen Traces.
-Die zentrale Aufbewahrung beträgt 30 Tage. Nach Herunterladen des Berichts lässt
-sich das ZIP in einer geeigneten isolierten Umgebung wiederherstellen:
+Der Bericht enthält Testzahlen, Fehler und die Metadaten eines SHA-256-geprüften,
+auf 64 MiB begrenzten ZIP mit JUnit, Logs, 48 Screenshots und sechs synthetischen
+Traces. Das ZIP wird als eigene Binärdatei neben dem Bericht veröffentlicht;
+es wird nicht in dessen begrenztes JSON eingebettet. Die zentrale Aufbewahrung
+beträgt 30 Tage. Nach Herunterladen von Bericht und ZIP lässt sich der Nachweis
+in einer geeigneten isolierten Umgebung prüfen:
 
 ```bash
 python scripts/ci/evidence.py bericht.json test-results/rclone-ci-evidence.zip
@@ -81,5 +83,7 @@ Die optionale Controller-Erweiterung unter `infra/pruefdienst/central` wird zuer
 auf einer privaten Kopie der freigegebenen Steuerung angewandt und mit deren
 bisherigen Tests geprüft. Neues Profil und PR-Freigabe werden danach in der
 root-geschützten Dienstkonfiguration ergänzt. Ein späteres Controller-Update muss
-die Erweiterung bewusst erhalten oder neu prüfen. Die Zugangsdaten gelangen
+die Erweiterung bewusst erhalten oder neu prüfen. Die Dienstkonfiguration bindet
+Rclone an sein Pflichtprofil; ein Wechsel auf ein anderes Profil kann die
+Pflichtprüfungen nicht umgehen. Die Zugangsdaten gelangen
 nicht in Testcontainer. Der produktive Sicherpfad-Server ist kein Testziel.

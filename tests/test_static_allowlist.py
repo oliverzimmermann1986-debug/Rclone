@@ -109,7 +109,11 @@ def test_allowed_asset_preserves_query_head_range_and_conditional_requests(
     response = client.get("/static/app.js?v=2.2.1")
     assert response.status_code == 200
     assert response.content == b"console.log('ok');"
-    assert response.headers["content-type"].startswith("text/javascript")
+    # The OS MIME database selects either registered JavaScript media type.
+    assert response.headers["content-type"].split(";", 1)[0] in {
+        "text/javascript",
+        "application/javascript",
+    }
     assert response.headers["accept-ranges"] == "bytes"
 
     head = client.head("/static/app.js?v=2.2.1")

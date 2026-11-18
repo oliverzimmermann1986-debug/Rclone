@@ -1,9 +1,10 @@
 """Fail-closed central CI reporting and evidence recovery boundaries."""
 
-import base64
 import hashlib
+import io
 import json
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -262,52 +263,133 @@ def test_passing_visual_gate_requires_preserved_screenshots_and_traces(tmp_path)
         verify.evidence(plan)
 
 
-def artifact_report(tmp_path, *, raw=b"fixture zip bytes", digest=None):
+def artifact_report(tmp_path, *, raw=None, digest=None):
+    if raw is None:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as bundle:
+            bundle.writestr("fixture.xml", "external-only-fixture-payload")
+        raw = buffer.getvalue()
+    archive = tmp_path / "downloaded.zip"
+    archive.write_bytes(raw)
     artifact = {
         "name": "rclone-ci-evidence.zip",
-        "encoding": "base64",
-        "content": base64.b64encode(raw).decode(),
+        "path": "reports/rclone-ci-evidence.zip",
+        "encoding": "binary",
         "sha256": digest or hashlib.sha256(raw).hexdigest(),
+        "bytes": len(raw),
+        "files": 1,
     }
     path = tmp_path / "quality.json"
-    path.write_text(json.dumps({"artifacts": [artifact]}), encoding="utf-8")
-    return path
+    path.write_text(
+        json.dumps({"artifacts": [artifact], "evidenceFiles": ["fixture.xml"]}),
+        encoding="utf-8",
+    )
+    return path, archive
 
 
-def test_evidence_round_trip_checks_integrity_and_never_overwrites(tmp_path):
+def test_evidence_keeps_payload_external_and_download_validation_is_read_only(tmp_path):
     plan = verify.Plan(tmp_path)
     (plan.directory / "fixture.xml").write_text(
-        '<testsuite><testcase name="fixture"/></testsuite>', encoding="utf-8"
+        '<testsuite><testcase name="external-only-fixture-payload"/></testsuite>',
+        encoding="utf-8",
     )
     assert verify.evidence(plan)["files"] == 1
     plan.save()
-    target = tmp_path / "output.zip"
-    recovery.recover(tmp_path / verify.REPORT, target)
-    assert target.read_bytes().startswith(b"PK")
+    report = tmp_path / verify.REPORT
+    archive = tmp_path / "reports/rclone-ci-evidence.zip"
+    before_report, before_archive = report.read_bytes(), archive.read_bytes()
+    result = recovery.validate(report, archive)
+    assert result["files"] == 1 and result["bytes"] == len(before_archive)
+    assert archive.read_bytes() == before_archive
+    assert report.read_bytes() == before_report
+    artifact = plan.report["artifacts"][0]
+    assert set(artifact) == {"name", "path", "encoding", "sha256", "bytes", "files"}
+    assert artifact["encoding"] == "binary"
+    assert b"external-only-fixture-payload" not in before_report
+    assert "content" not in artifact
     with pytest.raises(FileExistsError):
-        recovery.recover(tmp_path / verify.REPORT, target)
+        verify.evidence(plan)
 
 
-def test_recovery_rejects_non_zip_payload_even_with_a_matching_digest(tmp_path):
-    path = artifact_report(tmp_path)
+def test_download_validation_rejects_non_zip_payload_with_matching_digest(tmp_path):
+    path, archive = artifact_report(tmp_path, raw=b"not an archive")
     with pytest.raises(ValueError, match="not a ZIP archive"):
-        recovery.recover(path, tmp_path / "output.zip")
-    assert not (tmp_path / "output.zip").exists()
+        recovery.validate(path, archive)
 
 
-@pytest.mark.parametrize("change", ["digest", "encoding", "duplicate", "empty"])
-def test_evidence_recovery_rejects_corruption_or_ambiguous_archives(tmp_path, change):
-    path = artifact_report(
+@pytest.mark.parametrize(
+    "change",
+    [
+        "digest",
+        "encoding",
+        "duplicate",
+        "empty",
+        "bytes",
+        "files",
+        "payload",
+        "unsafe-manifest",
+        "wrong-manifest",
+    ],
+)
+def test_download_validation_rejects_corrupt_or_ambiguous_evidence(tmp_path, change):
+    path, archive = artifact_report(
         tmp_path,
         digest="0" * 64 if change == "digest" else None,
-        raw=b"" if change == "empty" else b"fixture",
+        raw=b"" if change == "empty" else None,
     )
     data = json.loads(path.read_text())
     if change == "encoding":
-        data["artifacts"][0]["content"] = "!invalid!"
+        data["artifacts"][0]["encoding"] = "base64"
     if change == "duplicate":
         data["artifacts"].append(dict(data["artifacts"][0]))
+    if change == "bytes":
+        data["artifacts"][0]["bytes"] += 1
+    if change == "files":
+        data["artifacts"][0]["files"] += 1
+    if change == "payload":
+        data["artifacts"][0]["content"] = "inline-payload-forbidden"
+    if change == "unsafe-manifest":
+        data["evidenceFiles"] = ["../outside.xml"]
+    if change == "wrong-manifest":
+        data["evidenceFiles"] = ["missing.xml"]
     path.write_text(json.dumps(data))
+    original = archive.read_bytes()
     with pytest.raises(ValueError):
-        recovery.recover(path, tmp_path / "output.zip")
-    assert not (tmp_path / "output.zip").exists()
+        recovery.validate(path, archive)
+    assert archive.read_bytes() == original
+
+
+def test_download_validation_enforces_64_mib_metadata_limit_before_reading_archive(
+    tmp_path,
+):
+    assert recovery.MAX_ARCHIVE_BYTES == 64 * 1024 * 1024
+    path, archive = artifact_report(tmp_path)
+    data = json.loads(path.read_text())
+    data["artifacts"][0]["bytes"] = 64 * 1024 * 1024 + 1
+    path.write_text(json.dumps(data))
+    archive.unlink()
+    with pytest.raises(ValueError, match="Invalid external"):
+        recovery.validate(path, archive)
+
+
+def test_download_validation_accepts_exact_size_boundary_and_rejects_one_byte_over(
+    tmp_path, monkeypatch
+):
+    path, archive = artifact_report(tmp_path)
+    monkeypatch.setattr(recovery, "MAX_ARCHIVE_BYTES", archive.stat().st_size)
+    assert recovery.validate(path, archive)["bytes"] == archive.stat().st_size
+    monkeypatch.setattr(recovery, "MAX_ARCHIVE_BYTES", archive.stat().st_size - 1)
+    with pytest.raises(ValueError, match="Invalid external"):
+        recovery.validate(path, archive)
+
+
+def test_evidence_builder_refuses_oversized_archive_without_publishable_metadata(
+    tmp_path, monkeypatch
+):
+    assert verify.MAX_ARCHIVE_BYTES == 64 * 1024 * 1024
+    plan = verify.Plan(tmp_path)
+    (plan.directory / "fixture.xml").write_text("fixture")
+    monkeypatch.setattr(verify, "MAX_ARCHIVE_BYTES", 1)
+    with pytest.raises(ValueError, match="oversized"):
+        verify.evidence(plan)
+    assert "artifacts" not in plan.report
