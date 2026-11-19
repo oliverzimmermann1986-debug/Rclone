@@ -974,3 +974,23 @@ def test_restore_test_throttles_scheduled_runs_only_not_manual(
     assert manual_res["ok"] is True
     assert manual_res.get("throttled") is not True
     assert pair_calls == ["Docs"]
+
+
+def test_remote_reachable_explains_disabled_google_drive_api(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stderr = (
+        "2026/11/19 19:02:14 NOTICE: Failed to lsjson: couldn't list directory: "
+        "googleapi: Error 403: Google Drive API has not been used in project "
+        "590686565400 before or it is disabled."
+    )
+    monkeypatch.setattr(
+        rclone_sync.subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(a[0], 1, stdout="", stderr=stderr),
+    )
+    ok, msg = rclone_sync._remote_reachable("gdrive:/Fotos", allow_missing=True)
+    assert ok is False
+    assert "590686565400" in msg
+    assert "Google Drive API" in msg
+    assert "aktivieren" in msg

@@ -340,7 +340,7 @@ if [[ -d "$APP_DIR/data" || -d "/home/$APP_USER/.config/rclone" ]]; then
     shopt -u dotglob nullglob
     for item in "${data_items[@]}"; do
       case "$(basename "$item")" in
-        rclone-sync.db|rclone-sync.db-wal|rclone-sync.db-shm) continue ;;
+        rclone-sync.db|rclone-sync.db-wal|rclone-sync.db-shm|recovery-snapshots|.rclone-cache) continue ;;
       esac
       cp -a -- "$item" "$backup_dir/data/"
     done

@@ -290,6 +290,40 @@ def notification_dedupe_key(
     *,
     now: float | None = None,
 ) -> str:
+    now_value = float(time.time() if now is None else now)
+    summary = extra.get("summary")
+    source: Mapping[str, Any] = summary if isinstance(summary, Mapping) else extra
+    scheduled_slot = str(
+        source.get("scheduled_slot", extra.get("scheduled_slot")) or ""
+    ).strip()
+    if scheduled_slot.startswith("retry|"):
+        raw_pairs = source.get("pairs")
+        failed_pairs = (
+            sorted(
+                str(item.get("name") or "").strip()
+                for item in raw_pairs
+                if isinstance(item, Mapping) and not item.get("ok")
+            )
+            if isinstance(raw_pairs, list)
+            else []
+        )
+        slot_parts = scheduled_slot.split("|", 2)
+        retry_scope = str(
+            source.get("definition_id", extra.get("definition_id")) or ""
+        ).strip() or (slot_parts[1] if len(slot_parts) > 1 else scheduled_slot)
+        identity: dict[str, Any] = {
+            "retry_scope": retry_scope,
+            "failed_pairs": failed_pairs,
+            "content": hashlib.sha256(
+                f"{title}\0{message}".encode("utf-8", errors="replace")
+            ).hexdigest()[:16]
+            if not failed_pairs
+            else "",
+            "bucket_12h": int(now_value // 43200),
+        }
+        raw = json.dumps(identity, ensure_ascii=False, sort_keys=True, default=str)
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return f"{event}:{digest}"
     context = _push_context(extra)
     identity = {
         key: context[key]
@@ -304,9 +338,8 @@ def notification_dedupe_key(
         if key in context
     }
     if not identity:
-        # Identische statuslose Alarme werden in einem Fünf-Minuten-Fenster
-        # zusammengefasst, bleiben in späteren Störfällen aber erneut sichtbar.
-        now_value = float(time.time() if now is None else now)
+        # Identische statuslose Alarme werden in einem F?nf-Minuten-Fenster
+        # zusammengefasst, bleiben in sp?teren St?rf?llen aber erneut sichtbar.
         identity = {
             "content": hashlib.sha256(
                 f"{title}\0{message}".encode("utf-8", errors="replace")
