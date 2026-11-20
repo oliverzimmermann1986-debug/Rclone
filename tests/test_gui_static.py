@@ -70,13 +70,14 @@ def test_main_template_has_unique_ids_and_required_navigation():
 
 def test_template_direct_calls_exist_in_alpine_component():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = _app_javascript()
+    workspace = (STATIC / "workspace.js").read_text(encoding="utf-8")
+    javascript = _app_javascript() + "\n" + workspace
     parser = _TemplateParser()
     parser.feed(html)
 
     methods = set(
         re.findall(
-            r"^\s{2}(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^\n]*\)\s*\{",
+            r"^ +(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^\n]*\)\s*\{",
             javascript,
             re.MULTILINE,
         )

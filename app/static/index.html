@@ -400,19 +400,19 @@
         <!-- DATENWEGE -->
         <section class="console-page data-paths-page" x-show="page==='pairs'" x-cloak>
           <div class="page-heading console-heading">
-            <div class="page-intro"><span class="section-kicker page-eyebrow">Verbindungen</span><h2>Datenwege</h2><p>Quelle, Ziel und Schutzregeln festlegen. Wann sie laufen, bestimmst du unter Jobs.</p></div>
-            <div class="heading-actions">
+            <div class="page-intro"><h2 x-text="workspaceViews.pairs === 'clouds' ? 'Clouds' : 'Datenwege'">Datenwege</h2><p x-text="workspaceViews.pairs === 'clouds' ? 'Cloud-Zugänge einrichten und sehen, welche Datenwege sie nutzen.' : 'Quelle, Ziel und Schutzregeln für deine Sicherungen festlegen.'"></p></div>
+            <div class="heading-actions" x-show="workspaceViews.pairs !== 'clouds'">
               <button id="start-pair-wizard" class="button primary" @click="openPairWizard()" :disabled="configLoading || !configLoaded || Boolean(configError)">Datenweg einrichten</button>
               <details class="console-action-menu">
-                <summary>Einrichten &amp; prüfen</summary>
+                <summary>Weitere Aktionen</summary>
                 <div class="console-action-menu-items">
-                  <button class="button secondary" @click="openRemoteSetup('iclouddrive')" :disabled="configLoading || !configLoaded">iCloud einbinden</button>
-                  <button class="button secondary" @click="openRemoteSetup('drive')" :disabled="configLoading || !configLoaded">Google Drive / Remote einbinden</button>
                   <button class="button secondary" @click="addPairFromMenu($event)" :disabled="configLoading || !configLoaded">Direkt im Editor anlegen</button>
-                  <button class="button secondary" @click="testRclone()" :disabled="configLoading || !configLoaded">Verbindungen testen</button>
                   <button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading || !configLoaded" x-text="configValidation.loading ? 'Prüfung…' : 'Konfiguration prüfen'"></button>
                 </div>
               </details>
+            </div>
+            <div class="heading-actions" x-show="workspaceViews.pairs === 'clouds'">
+              <button class="button primary" @click="openRemoteSetup()">Cloud verbinden</button>
             </div>
           </div>
           <div class="console-savebar" x-show="configDirty || pending.save" x-cloak>
@@ -443,11 +443,6 @@
                 <label class="field"><span>Zielpfad · Cloud oder lokal</span><div class="input-action"><input class="mono" x-model="pairWizard.target" placeholder="gdrive:/Backup/Dokumente"><button type="button" @click="openPicker('wizard-target-local', -2)" aria-label="Lokalen Zielordner im Assistenten wählen">Lokal</button><button type="button" @click="openPicker('wizard-target-remote', -2)" aria-label="Cloud-Zielordner im Assistenten wählen">Cloud</button><button type="button" @click="openRemoteSetup()" aria-label="Neues Cloud-Remote für Ziel einbinden">Neues Remote</button></div></label>
                 <label class="field"><span>Sync-Richtung</span><select x-model="pairWizard.twoWay"><option :value="false">Einweg (Quelle → Ziel)</option><option :value="true">Bidirektional (Bi-Sync)</option></select></label>
               </div>
-              <div class="button-row">
-                <button type="button" class="button secondary small" @click="openRemoteSetup('iclouddrive')">Apple iCloud verbinden</button>
-                <button type="button" class="button secondary small" @click="openRemoteSetup('drive')">Neues Google-Drive-Remote verbinden</button>
-                <button type="button" class="button secondary small" @click="openRemoteSetup()">Anderes Cloud-Remote einbinden</button>
-              </div>
             </div>
             <div class="stack" x-show="pairWizard.step === 3">
               <div class="form-grid three">
@@ -470,12 +465,16 @@
 
           <div class="toolbar panel slim">
             <label class="search-field"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg></span><input id="pair-search" x-model="pairSearch" placeholder="Name oder Pfad durchsuchen" aria-label="Datenwege nach Name oder Pfad durchsuchen"></label>
-            <select x-model="pairFilter" aria-label="Pair-Filter">
+            <select x-model="pairFilter" aria-label="Datenwege nach Status filtern">
               <option value="all">Alle Datenwege</option><option value="enabled">Nur aktiv</option><option value="disabled">Nur deaktiviert</option><option value="issues">Mit Hinweisen</option><option value="destructive">Mirror / Bi-Sync</option>
             </select>
             <div class="pair-template-action"><select x-model="newPairPreset" aria-label="Vorlage für neues Pair"><option value="push-copy">Backup: Lokaler Pfad → Remote-Pfad (Copy)</option><option value="pull-copy">Restore: Remote-Pfad → Lokaler Pfad (Copy)</option><option value="bisync">Bidirektional (Bi-Sync)</option><option value="push-sync">Mirror: Lokaler Pfad → Remote-Pfad (Sync)</option><option value="pbs">Backup: Lokale Pfade → Proxmox Backup Server</option></select><button class="button secondary small" @click="addPair(newPairPreset)">Aus Vorlage</button></div>
             <div class="toolbar-actions"><button class="button ghost small" @click="setAllPairsOpen(true)">Alle öffnen</button><button class="button ghost small" @click="setAllPairsOpen(false)">Alle schließen</button><button class="button ghost small" @click="loadPairSizes()" :disabled="storageLoading" x-text="storageLoading ? 'Berechne…' : 'Größen berechnen'"></button></div>
             <div class="toolbar-meta"><span x-text="visiblePairCount()"></span> von <span x-text="config.backup.pairs.length"></span></div>
+          </div>
+          <div class="cloud-path-filter" x-show="pairCloudFilter">
+            <span>Cloud <strong x-text="pairCloudFilter"></strong></span>
+            <button type="button" class="button ghost small" @click="clearPairCloudFilter()">Cloud-Filter entfernen</button>
           </div>
 
           <div class="toolbar panel slim" x-show="pairTags().length" x-cloak>
@@ -502,67 +501,51 @@
             </div>
           </div>
 
-          <div x-show="testResults._global" class="alert" :class="testResults._global?.ok ? 'ok' : 'error'">
-            <span class="alert-icon" x-text="testResults._global?.ok ? '✓' : '!' "></span>
-            <span><strong x-text="testResults._global?.message || testResults._global?.error"></strong><small x-show="testResults._global?.remotes" x-text="'Verfügbar: ' + (testResults._global?.remotes || []).join(', ')"></small></span>
-          </div>
-
           <div class="pair-card-list" @input="markConfigDirty()" @change="markConfigDirty()">
             <template x-for="(pair, idx) in config.backup.pairs" :key="pair.id || ('draft-' + idx)">
               <article class="pair-card" :id="`pair-${idx}`" x-show="pairVisible(pair)" :class="pairStatus(pair)">
                 <div class="pair-card-top">
-                  <label class="pair-select" title="Für Bulk-Aktion auswählen"><input type="checkbox" :checked="!!pairSelection[pair.name]" @change.stop="togglePairSelection(pair.name)" @input.stop :disabled="!pair.name" :aria-label="'Datenweg ' + (pair.name || 'ohne Namen') + ' für Bulk-Aktion auswählen'"></label>
-                  <button class="pair-expand" @click="pairOpen[idx]=!pairOpen[idx]" :aria-label="(pairOpen[idx] ? 'Details schließen: ' : 'Details öffnen: ') + (pair.name || 'Neues Pair')" :aria-expanded="!!pairOpen[idx]" :aria-controls="`pair-details-${idx}`">
-                    <span class="status-dot" :class="pairStatus(pair)"></span>
+                  <label class="pair-select" title="Für Sammelaktion auswählen"><input type="checkbox" :checked="!!pairSelection[pair.name]" @change.stop="togglePairSelection(pair.name)" @input.stop :disabled="!pair.name" :aria-label="'Datenweg ' + (pair.name || 'ohne Namen') + ' für Sammelaktion auswählen'"></label>
+                  <button class="pair-expand record-summary" @click="pairOpen[idx]=!pairOpen[idx]" :aria-expanded="!!pairOpen[idx]" :aria-controls="`pair-details-${idx}`">
                     <span class="pair-title">
-                      <strong x-text="pair.name || 'Neues Pair'"></strong>
-              <small><span x-text="directionLabel(pair)"></span> · <span x-text="pairJobLabel(pair)"></span></small>
+                      <strong x-text="pair.name || 'Neuer Datenweg'"></strong>
+                      <small><span x-text="pairModeLabel(pair)"></span> · <span x-text="pairJobLabel(pair)"></span></small>
                     </span>
-                    <span class="pair-path-preview mono" x-text="(pair.target ?? pair.local) || 'Ziel fehlt'"></span>
+                    <span class="pair-route">
+                      <span><small x-text="pair.two_way || pair.direction === 'bisync' ? 'Seite A' : 'Quelle'"></small><code x-text="pairEndpoints(pair).source || 'Fehlt'"></code></span>
+                      <span class="pair-route-arrow" aria-hidden="true" x-text="pair.two_way || pair.direction === 'bisync' ? '⇄' : '→'"></span>
+                      <span><small x-text="pair.two_way || pair.direction === 'bisync' ? 'Seite B' : 'Ziel'"></small><code x-text="pairEndpoints(pair).target || 'Fehlt'"></code></span>
+                    </span>
+                    <span class="record-state"><i class="status-dot" :class="pair.enabled ? 'ok' : 'neutral'" aria-hidden="true"></i><span x-text="pair.enabled ? 'Aktiv' : 'Deaktiviert'"></span></span>
                     <span class="chevron" :class="pairOpen[idx] && 'rotated'" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
                   </button>
-                  <label class="switch" title="Pair aktivieren/deaktivieren"><input type="checkbox" x-model="pair.enabled"><span></span><em x-text="pair.enabled ? 'Aktiv' : 'Aus'"></em></label>
                 </div>
-
-                <ul class="pair-tags" x-show="(pair.tags || []).length" aria-label="Tags"><template x-for="tag in (pair.tags || [])" :key="tag"><li x-text="tag"></li></template></ul>
 
                 <div class="pair-warning-row" x-show="pairIssues(pair).length || pairRuntimeIssue(pair)">
                   <template x-for="issue in pairIssues(pair)" :key="issue"><span class="issue-chip" x-text="issue"></span></template>
                   <span class="issue-chip" :class="pairRuntimeIssueLevel(pair)" x-show="pairRuntimeIssue(pair)" x-text="pairRuntimeIssue(pair)"></span>
                 </div>
 
-                <div class="pair-size-row" x-show="pairSize(pair.name)" x-cloak>
-                  <span class="pair-size-cell"><small>Quelle</small><strong x-text="pairSizeText(pair.name, 'source')"></strong><small x-text="pairSizeAge(pair.name, 'source')"></small><small class="error-text" x-show="pairSizeError(pair.name, 'source')" x-text="pairSizeError(pair.name, 'source')"></small></span>
-                  <span class="pair-size-arrow" aria-hidden="true">→</span>
-                  <span class="pair-size-cell"><small>Ziel</small><strong x-text="pairSizeText(pair.name, 'target')"></strong><small x-text="pairSizeAge(pair.name, 'target')"></small><small class="error-text" x-show="pairSizeError(pair.name, 'target')" x-text="pairSizeError(pair.name, 'target')"></small></span>
-                </div>
-
-                <div class="pair-quick-actions">
-                  <button @click="runSinglePair(pair.name, true)" :disabled="startBlocked() || !pair.name">Probelauf</button>
-                  <button class="danger" @click="runSinglePair(pair.name, false)" :disabled="startBlocked() || !pair.name || !pair.enabled">Produktiv</button>
-                  <button @click="checkPair(pair.name)" :disabled="startBlocked() || !pair.name">Read-only Check</button>
-                  <button @click="testPair(idx)">Entwurf testen</button>
-                  <button @click="measureSinglePairSize(pair.name, true)" :disabled="!pair.name">Größe messen</button>
-                  <button @click="openConflicts(pair.name)" x-show="pair.direction === 'bisync'" :disabled="!pair.name" :aria-label="'Konflikte prüfen' + (conflictCounts[pair.name] !== undefined ? ': ' + conflictCounts[pair.name] + ' offen' : '')">Konflikte prüfen <span class="badge compact" :class="conflictCounts[pair.name] ? 'warn' : 'ok'" x-show="conflictCounts[pair.name] !== undefined" x-text="conflictCounts[pair.name]" aria-hidden="true"></span></button>
-                  <span class="pair-last" x-show="pairLastRun(pair)?.last_run">Letzter Lauf: <strong x-text="formatTs(pairLastRun(pair)?.last_run)"></strong></span>
-                  <span class="pair-last" x-show="pairLastRun(pair)?.next_run">Nächster Lauf: <strong x-text="formatTs(pairLastRun(pair)?.next_run)"></strong></span>
-                </div>
-
-                <details class="composition-detail">
-                  <summary>Speicherzusammensetzung anzeigen</summary>
-                  <div class="composition-side-tabs" role="group" :aria-label="'Speicherseite für ' + (pair.name || 'Datenweg')">
-                    <button class="button secondary small" @click="loadStorageComposition(pair.name, 'source')" :disabled="!pair.name || compositionLoading(pair.name, 'source')" x-text="compositionLoading(pair.name, 'source') ? 'Quelle wird gemessen…' : 'Quelle messen'"></button>
-                    <button class="button secondary small" @click="loadStorageComposition(pair.name, 'target')" :disabled="!pair.name || compositionLoading(pair.name, 'target')" x-text="compositionLoading(pair.name, 'target') ? 'Ziel wird gemessen…' : 'Ziel messen'"></button>
-                  </div>
-                  <template x-for="side in ['source', 'target']" :key="side"><div class="composition-result" x-show="compositionFor(pair.name, side) || compositionError(pair.name, side)">
-                    <strong x-text="side==='source' ? 'Quelle' : 'Ziel'"></strong><span class="error-text" x-show="compositionError(pair.name, side)" x-text="compositionError(pair.name, side)"></span>
-                    <template x-if="compositionFor(pair.name, side)"><div><div class="composition-bar" role="img" :aria-label="'Dateitypen nach Speichergröße auf ' + (side==='source' ? 'der Quelle' : 'dem Ziel')"><template x-for="bucket in compositionBuckets(pair.name, side)" :key="bucket.key"><span :style="`width:${compositionPercent(bucket, pair.name, side)}%`" :title="bucket.label + ': ' + formatBytes(bucket.bytes)"></span></template></div><div class="composition-legend"><template x-for="bucket in compositionBuckets(pair.name, side)" :key="bucket.key"><span><i aria-hidden="true"></i><strong x-text="bucket.label"></strong><small x-text="formatBytes(bucket.bytes)"></small></span></template></div><small class="text-soft" x-text="'Messung: ' + formatDateTime(compositionFor(pair.name, side).measured_at)"></small></div></template>
-                  </div></template>
-                </details>
-
                 <div class="pair-details" :id="`pair-details-${idx}`" x-show="pairOpen[idx]" x-cloak>
+                  <div class="pair-size-row" x-show="pairSize(pair.name)" x-cloak>
+                    <span class="pair-size-cell"><small>Quelle</small><strong x-text="pairSizeText(pair.name, 'source')"></strong><small x-text="pairSizeAge(pair.name, 'source')"></small><small class="error-text" x-show="pairSizeError(pair.name, 'source')" x-text="pairSizeError(pair.name, 'source')"></small></span>
+                    <span class="pair-size-arrow" aria-hidden="true">→</span>
+                    <span class="pair-size-cell"><small>Ziel</small><strong x-text="pairSizeText(pair.name, 'target')"></strong><small x-text="pairSizeAge(pair.name, 'target')"></small><small class="error-text" x-show="pairSizeError(pair.name, 'target')" x-text="pairSizeError(pair.name, 'target')"></small></span>
+                  </div>
+
+                  <div class="pair-quick-actions">
+                    <button @click="runSinglePair(pair.name, true)" :disabled="startBlocked() || !pair.name">Probelauf</button>
+                    <button class="danger" @click="runSinglePair(pair.name, false)" :disabled="startBlocked() || !pair.name || !pair.enabled">Produktiv</button>
+                    <button @click="checkPair(pair.name)" :disabled="startBlocked() || !pair.name">Nur vergleichen</button>
+                    <button @click="testPair(idx)">Entwurf testen</button>
+                    <button @click="measureSinglePairSize(pair.name, true)" :disabled="!pair.name">Größe messen</button>
+                    <button @click="openConflicts(pair.name)" x-show="pair.direction === 'bisync'" :disabled="!pair.name" :aria-label="'Konflikte prüfen' + (conflictCounts[pair.name] !== undefined ? ': ' + conflictCounts[pair.name] + ' offen' : '')">Konflikte prüfen <span class="badge compact" :class="conflictCounts[pair.name] ? 'warn' : 'ok'" x-show="conflictCounts[pair.name] !== undefined" x-text="conflictCounts[pair.name]" aria-hidden="true"></span></button>
+                    <span class="pair-last" x-show="pairLastRun(pair)?.last_run">Letzter Lauf: <strong x-text="formatTs(pairLastRun(pair)?.last_run)"></strong></span>
+                    <span class="pair-last" x-show="pairLastRun(pair)?.next_run">Nächster Lauf: <strong x-text="formatTs(pairLastRun(pair)?.next_run)"></strong></span>
+                  </div>
+
                   <div class="pair-section">
-                  <h4 class="pair-section-title">Grundlagen</h4>
+                  <div class="pair-editor-heading"><h4 class="pair-section-title">Grundlagen</h4><label class="switch"><input type="checkbox" x-model="pair.enabled" aria-label="Datenweg aktivieren"><span></span><em x-text="pair.enabled ? 'Aktiv' : 'Deaktiviert'"></em></label></div>
                   <div class="form-grid three">
                     <label class="field"><span>Name</span><input x-model="pair.name" placeholder="z. B. Fotos"></label>
                     <label class="field"><span>Sync-Art</span><select x-model="pair.two_way" @change="syncPairDirection(pair)"><option :value="false">Einweg: Quelle → Ziel</option><option :value="true">Bidirektional – beide Seiten angleichen</option></select></label>
@@ -683,6 +666,18 @@
                     <strong x-text="pairTestResult(pair)?.message || pairTestResult(pair)?.error || 'Test läuft…'"></strong><small x-show="pairTestResult(pair)?.tested_unsaved">Aktueller GUI-Entwurf wurde geprüft.</small>
                   </div>
 
+                  <details class="composition-detail">
+                    <summary>Speicherzusammensetzung anzeigen</summary>
+                    <div class="composition-side-tabs" role="group" :aria-label="'Speicherseite für ' + (pair.name || 'Datenweg')">
+                      <button class="button secondary small" @click="loadStorageComposition(pair.name, 'source')" :disabled="!pair.name || compositionLoading(pair.name, 'source')" x-text="compositionLoading(pair.name, 'source') ? 'Quelle wird gemessen…' : 'Quelle messen'"></button>
+                      <button class="button secondary small" @click="loadStorageComposition(pair.name, 'target')" :disabled="!pair.name || compositionLoading(pair.name, 'target')" x-text="compositionLoading(pair.name, 'target') ? 'Ziel wird gemessen…' : 'Ziel messen'"></button>
+                    </div>
+                    <template x-for="side in ['source', 'target']" :key="side"><div class="composition-result" x-show="compositionFor(pair.name, side) || compositionError(pair.name, side)">
+                      <strong x-text="side==='source' ? 'Quelle' : 'Ziel'"></strong><span class="error-text" x-show="compositionError(pair.name, side)" x-text="compositionError(pair.name, side)"></span>
+                      <template x-if="compositionFor(pair.name, side)"><div><div class="composition-bar" role="img" :aria-label="'Dateitypen nach Speichergröße auf ' + (side==='source' ? 'der Quelle' : 'dem Ziel')"><template x-for="bucket in compositionBuckets(pair.name, side)" :key="bucket.key"><span :style="`width:${compositionPercent(bucket, pair.name, side)}%`" :title="bucket.label + ': ' + formatBytes(bucket.bytes)"></span></template></div><div class="composition-legend"><template x-for="bucket in compositionBuckets(pair.name, side)" :key="bucket.key"><span><i aria-hidden="true"></i><strong x-text="bucket.label"></strong><small x-text="formatBytes(bucket.bytes)"></small></span></template></div><small class="text-soft" x-text="'Messung: ' + formatDateTime(compositionFor(pair.name, side).measured_at)"></small></div></template>
+                    </div></template>
+                  </details>
+
                   <div class="pair-footer-actions">
                     <div><button class="icon-button" @click="movePair(idx,-1)" :disabled="idx===0" :aria-label="'Datenweg ' + (pair.name || 'ohne Namen') + ' nach oben verschieben'">↑</button><button class="icon-button" @click="movePair(idx,1)" :disabled="idx===config.backup.pairs.length-1" :aria-label="'Datenweg ' + (pair.name || 'ohne Namen') + ' nach unten verschieben'">↓</button></div>
                     <div><button class="button ghost" @click="clonePair(idx)">Duplizieren</button><button class="button danger ghost" @click="removePair(idx)">Entfernen</button></div>
@@ -709,15 +704,41 @@
             </template>
           </div>
 
-            <div class="empty-state" x-show="configLoaded && !configError && config.backup.pairs.length===0 && !pairWizard.open"><strong>Noch keine Datenwege</strong><span>Verbinde einen lokalen Ordner mit einem Sicherungsziel.</span></div>
+          <div class="empty-state" x-show="configLoaded && !configError && config.backup.pairs.length===0 && !pairWizard.open"><strong>Noch keine Datenwege</strong><span>Verbinde einen Ordner mit einem Sicherungsziel.</span></div>
+          <div class="empty-state compact" x-show="configLoaded && !configError && config.backup.pairs.length > 0 && !visiblePairCount() && !pairWizard.open"><strong>Keine passenden Datenwege</strong><span>Ändere die Suche oder die Filter.</span></div>
+
+          <div class="cloud-workspace" data-workspace-group="clouds">
+            <section class="panel cloud-connections" aria-labelledby="cloud-connections-heading" :aria-busy="cloudConnections.loading">
+              <div class="panel-head"><h3 id="cloud-connections-heading">Eingerichtete Zugänge</h3><button type="button" class="button secondary small" @click="loadCloudConnections()" :disabled="cloudConnections.loading">Aktualisieren</button></div>
+              <p class="loading-state compact-loading" role="status" x-show="cloudConnections.loading">Cloud-Zugänge werden geladen…</p>
+              <p class="inline-error" role="alert" x-show="cloudConnections.error" x-text="cloudConnections.error"></p>
+              <p class="muted" x-show="cloudConnections.truncated">Die Liste wurde vom Server begrenzt.</p>
+              <div class="empty-state compact" x-show="cloudConnections.loaded && !cloudConnections.loading && !cloudConnections.error && !cloudConnections.items.length"><strong>Noch keine Cloud-Zugänge</strong><span>Über „Cloud verbinden“ richtest du deinen ersten Zugang ein.</span></div>
+              <ul class="cloud-connection-list" x-show="cloudConnections.items.length">
+                <template x-for="remote in cloudConnections.items" :key="remote.path">
+                  <li><div><strong x-text="remote.name"></strong></div><button type="button" class="button secondary small" x-show="configLoaded && !configError" @click="workspaceShowCloudPaths(remote.path)" :aria-label="dataPathCountLabel(cloudPathCount(remote.path)) + ' für ' + remote.name + ' anzeigen'" x-text="dataPathCountLabel(cloudPathCount(remote.path))"></button></li>
+                </template>
+              </ul>
+            </section>
+            <section class="panel cloud-tools" aria-labelledby="cloud-tools-heading">
+              <h3 id="cloud-tools-heading">Cloud-Werkzeuge</h3>
+              <button type="button" class="button secondary" @click="testRclone()" :disabled="Boolean(testResults._global?.loading)">rclone-Konfiguration testen</button>
+              <button type="button" class="button secondary" @click="openCrypt()">Verschlüsselten Zugang anlegen</button>
+              <button type="button" class="button ghost" @click="workspaceOpen('doctor', 'copies')">Cloud-Kontingente ansehen</button>
+              <p class="loading-state compact-loading" x-show="testResults._global?.loading" role="status">rclone wird geprüft…</p>
+              <div class="alert" x-show="testResults._global && !testResults._global.loading" :class="testResults._global?.ok ? 'ok' : 'error'" role="status">
+                <span x-text="testResults._global?.message || testResults._global?.error"></span>
+              </div>
+            </section>
+          </div>
         </section>
 
         <!-- JOBDEFINITIONEN -->
         <section class="console-page definitions-page" x-show="page==='definitions'" x-cloak>
           <div class="page-heading console-heading">
-            <div class="page-intro"><span class="section-kicker page-eyebrow">Planung &amp; Ausführung</span><h2>Jobs</h2><p>Datenwege zusammenführen, ihre Reihenfolge festlegen und gemeinsam planen.</p></div>
+            <div class="page-intro"><h2>Jobs</h2><p>Lege fest, wann und in welcher Reihenfolge deine Datenwege laufen.</p></div>
             <div class="heading-actions">
-              <button class="button primary" @click="addJobDefinition()">Job hinzufügen</button>
+              <button class="button primary" @click="workspaceAddJob()">Job hinzufügen</button>
               <details class="console-action-menu"><summary>Weitere Aktionen</summary><div class="console-action-menu-items">
                 <button class="button secondary" @click="loadJobDefinitions()" :disabled="jobDefinitions.loading">Aktualisieren</button>
                 <button class="button secondary" @click="validateConfigDraft()" :disabled="configValidation.loading || configLoading">Prüfen</button>
@@ -731,43 +752,54 @@
 
           <div class="loading-state" x-show="jobDefinitions.loading" role="status">Jobdefinitionen werden geladen…</div>
           <div class="inline-error" x-show="jobDefinitions.error" role="alert"><span x-text="jobDefinitions.error"></span><button class="button secondary small" @click="loadJobDefinitions()">Erneut versuchen</button></div>
+          <div class="workspace-attention job-conflict-notice" x-show="jobTimeline.conflicts.length" role="status">
+            <strong>Zeitplan-Konflikte</strong><button type="button" class="button secondary small" @click="workspaceSelect('definitions', 'schedule')">Gleichzeitige Starts prüfen</button>
+          </div>
           <div class="definition-list" @input="markConfigDirty()" @change="markConfigDirty()">
             <template x-for="(job, idx) in (config.backup.jobs || [])" :key="job.id || idx">
-              <article class="definition-row">
-                <div class="definition-main">
-                  <label class="switch"><input type="checkbox" x-model="job.enabled"><span></span><em x-text="job.enabled ? 'Aktiv' : 'Aus'"></em></label>
-                  <label class="field definition-name"><span>Name</span><input x-model="job.name" placeholder="z. B. Nachtbackup"></label>
-                  <label class="field"><span>Zeitplan</span><select x-model="job.schedule" @change="loadJobScheduleTimeline()"><option value="manual">Nur manuell</option><option value="0 2 * * *">Täglich um 02:00 Uhr</option><option value="0 3 * * *">Täglich um 03:00 Uhr</option><option value="0 4 * * *">Täglich um 04:00 Uhr</option><option value="0 4 * * 0">Sonntag um 04:00 Uhr</option><option value="custom">Eigene Cron-Angabe</option></select><input class="mono" x-show="!['manual','0 2 * * *','0 3 * * *','0 4 * * *','0 4 * * 0'].includes(job.schedule)" x-model="job.schedule" @input.debounce.350ms="loadJobScheduleTimeline()" aria-label="Eigener Cron-Ausdruck" placeholder="0 3 * * *"><small x-text="humanCron(job.schedule)"></small></label>
-                </div>
-
-                <div class="definition-assignments">
-                  <div class="definition-label"><strong>Datenwege</strong><small>Die Reihenfolge wird beim Lauf eingehalten.</small></div>
-                  <div class="assignment-list">
-                    <template x-for="(pathId, pathIdx) in job.data_path_ids" :key="pathId + '-' + pathIdx">
-                      <div class="assignment-row"><span class="assignment-order" x-text="pathIdx + 1"></span><strong x-text="dataPathName(pathId)"></strong><span class="assignment-actions"><button class="icon-button" @click="moveJobPath(job, pathIdx, -1)" :disabled="pathIdx===0" :aria-label="'Datenweg ' + dataPathName(pathId) + ' in Job ' + (job.name || 'ohne Namen') + ' nach oben verschieben'">↑</button><button class="icon-button" @click="moveJobPath(job, pathIdx, 1)" :disabled="pathIdx===job.data_path_ids.length-1" :aria-label="'Datenweg ' + dataPathName(pathId) + ' in Job ' + (job.name || 'ohne Namen') + ' nach unten verschieben'">↓</button><button class="icon-button" @click="removeJobPath(job, pathIdx)" :aria-label="'Datenweg ' + dataPathName(pathId) + ' aus Job ' + (job.name || 'ohne Namen') + ' entfernen'">×</button></span></div>
-                    </template>
-                    <span class="muted" x-show="!job.data_path_ids.length">Noch kein Datenweg zugewiesen.</span>
+              <details class="definition-row job-definition-record" :open="!job.id">
+                <summary class="record-summary job-summary">
+                  <span class="record-identity"><strong x-text="job.name || 'Neuer Job'"></strong><small x-text="dataPathCountLabel(job.data_path_ids.length)"></small></span>
+                  <span class="record-schedule" x-text="humanCron(job.schedule)"></span>
+                  <span class="record-state"><i class="status-dot" :class="job.enabled ? 'ok' : 'neutral'" aria-hidden="true"></i><span x-text="job.enabled ? 'Aktiv' : 'Deaktiviert'"></span></span>
+                  <span class="record-chevron" aria-hidden="true">›</span>
+                </summary>
+                <div class="job-editor">
+                  <div class="definition-main">
+                    <label class="switch"><input type="checkbox" x-model="job.enabled" @change="loadJobScheduleTimeline()" aria-label="Job aktivieren"><span></span><em x-text="job.enabled ? 'Aktiv' : 'Deaktiviert'"></em></label>
+                    <label class="field definition-name"><span>Name</span><input :id="'job-name-' + idx" x-model="job.name" placeholder="z. B. Nachtbackup"></label>
+                    <label class="field"><span>Zeitplan</span><select x-model="job.schedule" @change="loadJobScheduleTimeline()"><option value="manual">Nur manuell</option><option value="0 2 * * *">Täglich um 02:00 Uhr</option><option value="0 3 * * *">Täglich um 03:00 Uhr</option><option value="0 4 * * *">Täglich um 04:00 Uhr</option><option value="0 4 * * 0">Sonntag um 04:00 Uhr</option><option value="custom">Eigene Cron-Angabe</option></select><input class="mono" x-show="!['manual','0 2 * * *','0 3 * * *','0 4 * * *','0 4 * * 0'].includes(job.schedule)" x-model="job.schedule" @input.debounce.350ms="loadJobScheduleTimeline()" aria-label="Eigener Cron-Ausdruck" placeholder="0 3 * * *"><small x-text="humanCron(job.schedule)"></small></label>
                   </div>
-                  <div class="assignment-picker"><div class="assignment-picker-head"><span>Datenwege auswählen</span><small x-text="job.data_path_ids.length + ' zugewiesen' "></small></div><div class="assignment-checkboxes"><template x-for="pair in (config.backup.pairs || [])" :key="pair.id || pair.name"><label class="check-row"><input type="checkbox" :checked="job.data_path_ids.includes(pair.id)" :disabled="!pair.id" @change="toggleJobPathAssignment(job, pair.id, $event.target.checked)"><span><strong x-text="pair.name || 'Unbenannter Datenweg'"></strong><small x-text="(pair.local || pair.source || 'Quelle fehlt') + ' → ' + (pair.remote || pair.target || 'Ziel fehlt')"></small></span></label></template><p class="muted" x-show="!(config.backup.pairs || []).length">Lege zuerst einen Datenweg an.</p></div></div>
-                </div>
 
-                <div class="definition-options">
-                  <h4 class="subheading">Ausführung und Wiederholung</h4>
-                  <div class="form-grid three"><label class="field"><span>Ausführung</span><select x-model="job.execution_mode" @change="normalizeJobDefinition(job)"><option value="sequential">Nacheinander</option><option value="parallel">Parallel</option></select></label><label class="field"><span>Maximal parallel</span><input type="number" min="1" x-model.number="job.max_parallel" :disabled="job.execution_mode==='sequential'"></label><label class="field"><span>Wiederholung nach Fehler</span><input type="number" min="1" max="10080" x-model.number="job.retry_minutes"><small>Wartezeit in Minuten bis zum nächsten Versuch.</small></label></div>
-                </div>
+                  <div class="definition-assignments">
+                    <div class="definition-label"><strong>Datenwege</strong><small>Die Reihenfolge wird beim Lauf eingehalten.</small></div>
+                    <div class="assignment-list">
+                      <template x-for="(pathId, pathIdx) in job.data_path_ids" :key="pathId + '-' + pathIdx">
+                        <div class="assignment-row"><span class="assignment-order" x-text="pathIdx + 1"></span><strong x-text="dataPathName(pathId)"></strong><span class="assignment-actions"><button class="icon-button" @click="moveJobPath(job, pathIdx, -1)" :disabled="pathIdx===0" :aria-label="'Datenweg ' + dataPathName(pathId) + ' in Job ' + (job.name || 'ohne Namen') + ' nach oben verschieben'">↑</button><button class="icon-button" @click="moveJobPath(job, pathIdx, 1)" :disabled="pathIdx===job.data_path_ids.length-1" :aria-label="'Datenweg ' + dataPathName(pathId) + ' in Job ' + (job.name || 'ohne Namen') + ' nach unten verschieben'">↓</button><button class="icon-button" @click="removeJobPath(job, pathIdx)" :aria-label="'Datenweg ' + dataPathName(pathId) + ' aus Job ' + (job.name || 'ohne Namen') + ' entfernen'">×</button></span></div>
+                      </template>
+                      <span class="muted" x-show="!job.data_path_ids.length">Noch kein Datenweg zugewiesen.</span>
+                    </div>
+                    <div class="assignment-picker"><div class="assignment-picker-head"><span>Datenwege auswählen</span></div><div class="assignment-checkboxes"><template x-for="pair in (config.backup.pairs || [])" :key="pair.id || pair.name"><label class="check-row"><input type="checkbox" :checked="job.data_path_ids.includes(pair.id)" :disabled="!pair.id" @change="toggleJobPathAssignment(job, pair.id, $event.target.checked)"><span><strong x-text="pair.name || 'Unbenannter Datenweg'"></strong><small x-text="directionLabel(pair)"></small></span></label></template><p class="muted" x-show="!(config.backup.pairs || []).length">Lege zuerst einen Datenweg an.</p></div></div>
+                  </div>
 
-                <div class="definition-actions"><button class="button secondary" @click="planJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id">Plan</button><button class="button secondary" @click="runJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id || lockdownState.active">Probelauf</button><button class="button danger" @click="runJobDefinition(job, false)" :disabled="pending.definition || configDirty || !job.id || !job.enabled || lockdownState.active">Produktiv</button><button class="button ghost" @click="removeJobDefinition(idx)">Entfernen</button><small x-show="configDirty || !job.id">Vor Plan oder Start speichern.</small></div>
-              </article>
+                  <div class="definition-options">
+                    <h4 class="subheading">Ausführung und Wiederholung</h4>
+                    <div class="form-grid three"><label class="field"><span>Ausführung</span><select x-model="job.execution_mode" @change="normalizeJobDefinition(job)"><option value="sequential">Nacheinander</option><option value="parallel">Parallel</option></select></label><label class="field"><span>Maximal parallel</span><input type="number" min="1" x-model.number="job.max_parallel" :disabled="job.execution_mode==='sequential'"></label><label class="field"><span>Wiederholung nach Fehler</span><input type="number" min="1" max="10080" x-model.number="job.retry_minutes"><small>Wartezeit in Minuten bis zum nächsten Versuch.</small></label></div>
+                  </div>
+
+                  <div class="definition-actions"><button class="button secondary" @click="planJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id">Plan prüfen</button><button class="button secondary" @click="runJobDefinition(job, true)" :disabled="pending.definition || configDirty || !job.id || lockdownState.active">Probelauf</button><button class="button danger" @click="runJobDefinition(job, false)" :disabled="pending.definition || configDirty || !job.id || !job.enabled || lockdownState.active">Produktiv starten</button><button class="button ghost" @click="removeJobDefinition(idx)">Entfernen</button><small x-show="configDirty || !job.id">Vor Plan oder Start speichern.</small></div>
+                </div>
+              </details>
             </template>
           </div>
-          <article class="panel schedule-timeline" aria-labelledby="schedule-timeline-heading">
+          <article class="panel schedule-timeline" aria-labelledby="schedule-timeline-heading" data-workspace-group="schedule">
             <div class="panel-head"><div><h3 id="schedule-timeline-heading">Nächste 24 Stunden</h3><p>Termine der aktivierten Jobs in der konfigurierten Zeitzone.</p></div><button class="button secondary small" @click="loadJobScheduleTimeline()" :disabled="jobTimeline.loading" x-text="jobTimeline.loading ? 'Berechnet…' : 'Aktualisieren'"></button></div>
             <div class="inline-error" x-show="jobTimeline.conflicts.length" role="status"><template x-for="conflict in jobTimeline.conflicts" :key="conflict.at"><p><strong>Achtung:</strong> <span x-text="conflict.names.join(' und ') + ' starten gleichzeitig um ' + timelineTime(Date.parse(conflict.at) / 1000)"></span></p></template></div>
             <div class="timeline-axis"><template x-for="hour in [0, 6, 12, 18, 24]" :key="hour"><span :style="`left:${timelineHourPosition(hour)}%`" x-text="timelineHourLabel(hour)"></span></template></div>
             <template x-for="row in jobTimeline.rows" :key="row.id"><div class="timeline-row"><strong x-text="row.name"></strong><div class="timeline-track"><template x-for="(run, runIndex) in row.runs" :key="runIndex"><i :style="`left:${run.position}%;width:${run.widthPercent || 1.2}%`" :title="timelineTime(run.timestamp) + (run.avgDurationSec ? ' · Ø Dauer ' + formatDur(run.avgDurationSec) : '')" :aria-label="'Geplant ' + timelineTime(run.timestamp)"></i></template></div><small x-show="row.error" x-text="row.error"></small></div></template>
             <p class="muted" x-show="!jobTimeline.loading && !jobTimeline.rows.length">Keine aktivierten, geplanten Jobs.</p>
           </article>
-          <article class="panel stack" aria-labelledby="bandwidth-heading">
+          <article class="panel stack" aria-labelledby="bandwidth-heading" data-workspace-group="schedule">
             <div class="panel-head"><div><h3 id="bandwidth-heading">Bandbreite &amp; Zeitfenster</h3><p>Mittlerer Durchsatz erfolgreicher produktiver Läufe je Wochentag und Startstunde<span x-show="bandwidth.heatmap?.timezone" x-text="' (' + bandwidth.heatmap?.timezone + ')'"></span>. Daraus entstehen Vorschläge für günstigere Startzeiten.</p></div>
               <div class="heading-actions"><select x-model.number="bandwidth.days" @change="loadBandwidth()" aria-label="Auswertungszeitraum"><option value="30">30 Tage</option><option value="90">90 Tage</option><option value="180">180 Tage</option></select><button class="button secondary small" @click="loadBandwidth()" :disabled="bandwidth.loading" x-text="bandwidth.loading ? 'Lädt…' : 'Aktualisieren'"></button></div></div>
             <div class="loading-state compact-loading" x-show="bandwidth.loading && !bandwidth.heatmap" role="status">Bandbreite wird ausgewertet…</div>
@@ -799,7 +831,7 @@
               </div>
             </div></template>
           </article>
-          <div class="empty-state" x-show="!jobDefinitions.loading && !(config.backup.jobs || []).length"><strong>Noch keine Jobs</strong><span>Lege einen Job an und weise mindestens einen Datenweg zu.</span><button class="button primary" @click="addJobDefinition()">Ersten Job anlegen</button></div>
+          <div class="empty-state" x-show="!jobDefinitions.loading && !jobDefinitions.error && !(config.backup.jobs || []).length"><strong>Noch keine Jobs</strong><span>Lege einen Job an und weise mindestens einen Datenweg zu.</span><button class="button secondary" @click="navigate('pairs')">Zu den Datenwegen</button></div>
         </section>
 
         <!-- LÄUFE -->
@@ -859,8 +891,7 @@
               <button class="button primary" @click="loadDoctor()" :disabled="doctor.loading"><span x-text="doctor.loading ? 'Prüfung läuft…' : 'Vollständige Prüfung'"></span></button>
               <button class="button secondary" @click="navigate('settings')">Einstellungen</button>
               <details class="console-action-menu"><summary>Werkzeuge</summary><div class="console-action-menu-items">
-                <button type="button" class="button secondary" @click="openRemoteSetup()">Neue Verbindung einrichten</button>
-                <button type="button" class="button secondary" @click="openCrypt()">Verschlüsselte Verbindung anlegen</button>
+                <button type="button" class="button secondary" @click="workspaceOpen('pairs', 'clouds')">Cloud-Zugänge verwalten</button>
                 <button class="button secondary" @click="downloadSupportBundle()">Support-Bundle</button>
               </div></details>
             </div>

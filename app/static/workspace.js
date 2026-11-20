@@ -83,7 +83,7 @@
       panel.setAttribute('tabindex', '0');
       panel.setAttribute('x-show', selected);
       panel.setAttribute('x-cloak', '');
-      panel.append(element('p', 'workspace-view-intro', group.description));
+      if (group.description) panel.append(element('p', 'workspace-view-intro', group.description));
       for (const node of group.nodes) panel.append(node);
       section.append(panel);
     }
@@ -255,83 +255,7 @@
     return details;
   }
 
-  function organizeEditors() {
-    const jobs = page('definitions');
-    const template = jobs?.querySelector('.definition-list > template');
-    if (template) {
-      const root = template.content;
-      root.querySelector('.definition-row')?.classList.add('job-definition-record');
-      const assignments = root.querySelector('.definition-assignments');
-      if (assignments) {
-        const pickerDetails = assignments.querySelector('details.assignment-picker');
-        if (pickerDetails) {
-          const flatPicker = element('div', 'assignment-picker');
-          const pickerSummary = pickerDetails.querySelector(':scope > summary');
-          if (pickerSummary) {
-            const head = element('div', 'assignment-picker-head');
-            while (pickerSummary.firstChild) head.append(pickerSummary.firstChild);
-            flatPicker.append(head);
-            pickerSummary.remove();
-          }
-          while (pickerDetails.firstChild) flatPicker.append(pickerDetails.firstChild);
-          pickerDetails.replaceWith(flatPicker);
-        }
-        const details = disclosure(assignments, 'Datenwege & Ausführung', '', '!job.id');
-        const count = element('small');
-        count.setAttribute('x-text', "job.data_path_ids.length + ' Datenweg(e) zugewiesen'");
-        details.querySelector('summary > span').append(count);
-        const options = root.querySelector('.definition-options');
-        if (options) {
-          const optionsDetails = options.closest('details');
-          if (optionsDetails && optionsDetails !== details) {
-            const summaryText = optionsDetails.querySelector(':scope > summary')?.textContent.trim();
-            if (options === optionsDetails) {
-              const flatOptions = element('div', 'definition-options');
-              if (summaryText) flatOptions.append(element('h4', 'subheading', summaryText));
-              optionsDetails.querySelector(':scope > summary')?.remove();
-              while (optionsDetails.firstChild) flatOptions.append(optionsDetails.firstChild);
-              details.append(flatOptions);
-              optionsDetails.remove();
-            } else {
-              if (summaryText && !options.querySelector('h4, .subheading')) {
-                options.prepend(element('h4', 'subheading', summaryText));
-              }
-              details.append(options);
-              optionsDetails.remove();
-            }
-          } else {
-            details.append(options);
-          }
-        }
-      }
-    }
-    const pairs = page('pairs');
-    const pairTemplate = pairs?.querySelector('.pair-card-list > template');
-    if (pairTemplate) {
-      const root = pairTemplate.content;
-      const card = root.querySelector('.pair-card');
-      const top = root.querySelector('.pair-card-top');
-      if (card && top) {
-        card.classList.add('data-path-record');
-        const summary = element('div', 'data-path-summary');
-        top.after(summary);
-        for (const selector of ['.pair-tags', '.pair-warning-row', '.pair-size-row', '.pair-quick-actions']) {
-          const node = root.querySelector(selector);
-          if (node) summary.append(node);
-        }
-        const composition = root.querySelector('.composition-detail');
-        const footer = root.querySelector('.pair-footer-actions');
-        if (composition && footer) footer.before(composition);
-      }
-      const actions = root.querySelector('.pair-quick-actions');
-      if (actions) {
-        const buttons = Array.from(actions.children).filter((node) => node.tagName === 'BUTTON');
-        if (buttons.length > 2) {
-          const details = actionMenu(buttons.slice(1), 'Weitere Aktionen');
-          buttons[0].after(details);
-        }
-      }
-    }
+  function organizeSettings() {
     const scheduler = document.querySelector('#settings-panel-scheduler .scheduler-main');
     if (scheduler) {
       for (const section of Array.from(scheduler.children)) {
@@ -347,36 +271,30 @@
 
   function organizeDataPaths() {
     const section = page('pairs');
-    const list = section?.querySelector('.pair-card-list');
     const toolbar = section?.querySelector(':scope > .toolbar');
-    if (!list || !toolbar) return;
-    toolbar.classList.add('data-paths-toolbar');
-    const meta = toolbar.querySelector('.toolbar-meta');
-    const tools = [toolbar.querySelector('.pair-template-action'), toolbar.querySelector('.toolbar-actions')].filter(Boolean);
-    if (tools.length) toolbar.append(actionMenu(tools, 'Ansicht & Vorlagen', 'data-paths-options'));
-    const heading = sectionHeading('Deine Datenwege', meta);
-    toolbar.before(heading);
-    list.classList.add('records-list');
+    if (toolbar) {
+      toolbar.classList.add('data-paths-toolbar');
+      const tools = [toolbar.querySelector('.pair-template-action'), toolbar.querySelector('.toolbar-actions')].filter(Boolean);
+      if (tools.length) toolbar.append(actionMenu(tools, 'Ansicht & Vorlagen', 'data-paths-options'));
+    }
+    const template = section?.querySelector('.pair-card-list > template');
+    const actions = template?.content.querySelector('.pair-quick-actions');
+    if (actions) {
+      const buttons = Array.from(actions.children).filter((node) => node.tagName === 'BUTTON');
+      if (buttons.length > 2) buttons[0].after(actionMenu(buttons.slice(1), 'Weitere Aktionen'));
+    }
+    groupPage('pairs', [
+      ['paths', 'Datenwege'],
+      ['clouds', 'Clouds'],
+    ], () => 'paths', new Set([section?.querySelector('.console-savebar')]));
   }
 
   function organizeJobPlanning() {
     const section = page('definitions');
-    const list = section?.querySelector('.definition-list');
-    if (!list) return;
-    const workbench = element('div', 'definitions-workbench records-section');
-    const count = element('span', 'records-meta');
-    count.setAttribute('x-text', "(config.backup.jobs || []).length + ' konfiguriert'");
-    list.before(workbench);
-    workbench.append(sectionHeading('Deine Jobs', count), list);
-    const empty = section.querySelector(':scope > .empty-state');
-    if (empty) workbench.append(empty);
-    const timeline = section.querySelector('.schedule-timeline');
-    timeline?.classList.add('definitions-schedule');
-    const bandwidth = section.querySelector('[aria-labelledby="bandwidth-heading"]');
-    if (bandwidth) {
-      const details = disclosure(bandwidth, 'Bandbreite & Zeitfenster', 'Vergangene Übertragungen auswerten und Zeitplan-Vorschläge prüfen');
-      details.classList.add('console-disclosure', 'definitions-analysis');
-    }
+    groupPage('definitions', [
+      ['jobs', 'Jobliste'],
+      ['schedule', 'Zeitplanung'],
+    ], () => 'jobs', new Set([section?.querySelector('.console-savebar')]));
   }
 
   function organizeHistory() {
@@ -411,7 +329,7 @@
   organizeDashboard();
   organizeSystem();
   organizeRecovery();
-  organizeEditors();
+  organizeSettings();
   organizeDataPaths();
   organizeJobPlanning();
   organizeHistory();
@@ -447,7 +365,28 @@
         const result = await navigate.call(this, next, ...navigateArgs);
         if (this.page !== previous && defaults[this.page]) this.workspaceViews[this.page] = defaults[this.page];
         if (this.page === next && destination) this.workspaceSelect(next, destination.view);
+        else if (this.page === 'pairs' && next === 'pairs') {
+          this.pairCloudFilter = '';
+          this.workspaceSelect('pairs', 'paths');
+        }
         return result;
+      },
+      workspaceOpen(name, id) {
+        this.workspaceDestination = { page: name, view: id };
+        return this.navigate(name);
+      },
+      workspaceShowCloudPaths(remote) {
+        this.pairCloudFilter = remote;
+        this.pairSearch = '';
+        this.pairFilter = 'all';
+        this.activeTag = '';
+        this.workspaceSelect('pairs', 'paths');
+      },
+      workspaceAddJob() {
+        this.workspaceSelect('definitions', 'jobs');
+        this.addJobDefinition();
+        const index = this.config.backup.jobs.length - 1;
+        this.$nextTick(() => document.getElementById(`job-name-${index}`)?.focus());
       },
       workspaceSelect(name, id) {
         const group = pageGroups.get(name)?.find((item) => item.id === id);
@@ -457,6 +396,7 @@
         const previousPanel = document.activeElement?.closest('.workspace-view');
         const restoreFocus = previousPanel && previousPanel.id !== `workspace-panel-${name}-${id}`;
         this.workspaceViews[name] = id;
+        if (name === 'pairs' && id === 'clouds') this.loadCloudConnections?.();
         this.$nextTick(() => {
           if (restoreFocus) {
             document.getElementById(`workspace-tab-${name}-${id}`)?.focus();

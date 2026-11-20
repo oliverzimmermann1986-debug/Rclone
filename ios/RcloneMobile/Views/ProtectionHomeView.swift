@@ -34,6 +34,11 @@ struct ProtectionHomeView: View {
                 } label: {
                     Label("Jobs & Zeitpläne", systemImage: "calendar")
                 }
+                NavigationLink {
+                    CloudsScreen(showingSettings: $showingSettings)
+                } label: {
+                    Label("Clouds", systemImage: "cloud")
+                }
                 if model.config?.backup.jobs.contains(where: { $0.enabled }) == true {
                     Button { confirmRunAll = true } label: {
                         Label("Alle aktiven Jobs starten …", systemImage: "play.circle")

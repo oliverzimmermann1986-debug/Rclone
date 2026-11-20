@@ -73,6 +73,35 @@ function harness() {
   };
 }
 
+test('cloud connections keep the last list on error and count exact remotes on either side', async () => {
+  const { model: m } = harness();
+  m.config.backup.pairs = [
+    { name: 'Backup', direction: 'push', local: '/srv/docs', remote: 'drive:backup' },
+    { name: 'Restore', direction: 'pull', local: '/srv/restore', remote: 'drive:restore' },
+    { name: 'Archive', source: 'drive-archive:/docs', target: '/srv/archive' },
+  ];
+  const remote = { name: 'drive', path: 'drive:', is_dir: true };
+  let response = { entries: [remote] };
+  m.api = async (method, url) => {
+    assert.equal(method, 'GET');
+    assert.equal(url, '/api/browse/rclone');
+    return response;
+  };
+  await m.loadCloudConnections();
+  assert.equal(m.cloudConnections.loaded, true);
+  assert.equal(m.cloudPathCount(remote.path), 2);
+  m.pairCloudFilter = remote.path;
+  assert.deepEqual(m.config.backup.pairs.filter((pair) => m.pairVisible(pair)).map((pair) => pair.name), ['Backup', 'Restore']);
+  response = { __error: true, detail: 'Fixture error' };
+  await m.loadCloudConnections();
+  assert.equal(m.cloudConnections.error, 'Fixture error');
+  assert.deepEqual(m.cloudConnections.items, [remote]);
+  response = { entries: [] };
+  await m.loadCloudConnections();
+  assert.equal(m.cloudConnections.error, '');
+  assert.deepEqual(m.cloudConnections.items, []);
+});
+
 test('Google setup requires its own OAuth client before starting login', async () => {
   const { model: m, calls } = harness();
   Object.assign(m.remoteSetup, { provider: 'drive', name: 'gdrive' });
@@ -735,8 +764,8 @@ test('G-03 & U-04: System nav active states, explicit workspace groups, wizard p
   window.app = () => ({ page: 'dashboard', init() {}, navigate() {} });
   vm.runInNewContext(fs.readFileSync(path.join(root, 'app/static/workspace.js'), 'utf8'), { window, document, console });
   const jobTemplate = document.querySelector('.definition-list > template');
-  assert(jobTemplate.content.querySelector('.workspace-disclosure .definition-assignments'));
-  assert.equal(jobTemplate.content.querySelector('.workspace-disclosure details'), null, 'No nested double <details> in job definition row');
+  assert(jobTemplate.content.querySelector('details.job-definition-record > .job-editor .definition-assignments'));
+  assert.equal(jobTemplate.content.querySelector('.job-definition-record details'), null, 'One disclosure shows the whole job editor');
 
   const { model: m } = harness();
   m.openPairWizard();

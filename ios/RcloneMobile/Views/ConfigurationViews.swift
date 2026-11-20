@@ -4,11 +4,29 @@ struct DataPathsScreen: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var configurationDraft: ConfigurationDraftStore
     @Binding var showingSettings: Bool
+    private let cloudPath: String?
+    @State private var search = ""
     @State private var editor: PairEditorRequest?
     @State private var localError: String?
     @State private var currentPassword = ""
     @State private var pendingPathAction: DataPathAction?
     @State private var confirmFullRestoreTest = false
+
+    init(showingSettings: Binding<Bool>, cloudPath: String? = nil) {
+        _showingSettings = showingSettings
+        self.cloudPath = cloudPath
+    }
+
+    private var visiblePairs: [(offset: Int, element: PairConfig)] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return configurationDraft.pairs.enumerated().filter { entry in
+            let pair = entry.element
+            if let cloudPath, !pair.referencesCloud(cloudPath) { return false }
+            return query.isEmpty || [pair.name, pair.local, pair.remote].contains {
+                $0.localizedStandardContains(query)
+            }
+        }
+    }
 
     var body: some View {
         List {
@@ -29,21 +47,29 @@ struct DataPathsScreen: View {
                 }
             }
             Section {
-                if configurationDraft.pairs.isEmpty {
+                let pairs = visiblePairs
+                if pairs.isEmpty, !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ContentUnavailableView.search(text: search)
+                } else if pairs.isEmpty {
                     ContentUnavailableView(
                         "Keine Datenwege",
                         systemImage: "arrow.left.arrow.right",
-                        description: Text("Lege zuerst die Verbindung zwischen lokalem Ordner und Ziel an.")
+                        description: Text(cloudPath == nil
+                            ? "Verbinde einen Ordner mit einem Sicherungsziel."
+                            : "Für diesen Cloud-Zugang ist kein Datenweg eingerichtet.")
                     )
-                    Button("Datenweg hinzufügen") { editor = PairEditorRequest(index: nil, pair: nil) }
-                        .disabled(configurationDraft.baseRevision == nil)
+                    if cloudPath == nil {
+                        Button("Datenweg hinzufügen") { editor = PairEditorRequest(index: nil, pair: nil) }
+                            .disabled(configurationDraft.baseRevision == nil)
+                    }
                 } else {
-                    ForEach(Array(configurationDraft.pairs.enumerated()), id: \.element.id) { index, pair in
+                    ForEach(pairs, id: \.element.id) { index, pair in
                         Button { editor = PairEditorRequest(index: index, pair: pair) } label: {
                             DataPathConfigurationRow(pair: pair)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Datenweg \(pair.name) bearbeiten")
+                        .accessibilityValue("\(pair.configurationMode), \(pair.configurationStatus). Quelle: \(pair.configurationSource). Ziel: \(pair.configurationTarget)")
                         .accessibilityHint("Öffnet die Einstellungen dieses Datenwegs.")
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
                             Button { pendingPathAction = .check(pair) } label: {
@@ -58,14 +84,18 @@ struct DataPathsScreen: View {
                             .disabled(configurationDraft.isDirty)
                         }
                     }
-                    .onDelete(perform: deletePairs)
+                    .onDelete { offsets in
+                        deletePairs(at: IndexSet(offsets.compactMap { offset in
+                            pairs.indices.contains(offset) ? pairs[offset].offset : nil
+                        }))
+                    }
                 }
             } header: {
-                Text("Datenwege")
+                if let cloudPath { Text(String(cloudPath.dropLast())) }
             } footer: {
                 if configurationDraft.isDirty { Text("Nicht gespeicherte Änderungen") }
             }
-            if !configurationDraft.pairs.isEmpty && configurationDraft.definitions.isEmpty && !configurationDraft.isDirty {
+            if cloudPath == nil, !configurationDraft.pairs.isEmpty, configurationDraft.definitions.isEmpty, !configurationDraft.isDirty {
                 Section {
                     NavigationLink("Ersten Job einrichten") {
                         JobsScreen(showingSettings: $showingSettings)
@@ -74,27 +104,36 @@ struct DataPathsScreen: View {
                     Text("Ein Job legt fest, wann und in welcher Reihenfolge deine Datenwege laufen.")
                 }
             }
-            Section("Werkzeuge") {
-                NavigationLink { QuickSyncView() } label: {
-                    Label("Quick Sync", systemImage: "bolt.horizontal.circle")
+            if cloudPath == nil {
+                Section("Werkzeuge") {
+                    NavigationLink { CloudsScreen(showingSettings: $showingSettings) } label: {
+                        Label("Clouds", systemImage: "cloud")
+                    }
+                    NavigationLink { QuickSyncView() } label: {
+                        Label("Quick Sync", systemImage: "bolt.horizontal.circle")
+                    }
+                    Button { confirmFullRestoreTest = true } label: {
+                        Label("Systemweiten Restore-Test starten", systemImage: "arrow.counterclockwise.circle")
+                    }
+                    .disabled(configurationDraft.isDirty)
                 }
-                Button { confirmFullRestoreTest = true } label: {
-                    Label("Systemweiten Restore-Test starten", systemImage: "arrow.counterclockwise.circle")
-                }
-                .disabled(configurationDraft.isDirty)
             }
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Datenwege")
+        .searchable(text: $search, prompt: "Name, Quelle oder Ziel")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 SettingsButton(showingSettings: $showingSettings)
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button { editor = PairEditorRequest(index: nil, pair: nil) } label: {
-                    Image(systemName: "plus")
+                if cloudPath == nil {
+                    Button { editor = PairEditorRequest(index: nil, pair: nil) } label: {
+                        Image(systemName: "plus")
+                    }
+                    .disabled(configurationDraft.baseRevision == nil)
+                    .accessibilityLabel("Datenweg hinzufügen")
                 }
-                .accessibilityLabel("Datenweg hinzufügen")
                 Button("Speichern") { Task { await save(password: nil) } }
                     .disabled(!configurationDraft.isDirty || model.isSavingConfig)
             }
@@ -237,50 +276,25 @@ struct JobsScreen: View {
                         .disabled(configurationDraft.pairs.isEmpty)
                 } else {
                     ForEach(Array(configurationDraft.definitions.enumerated()), id: \.element.id) { index, definition in
-                        Button {
-                            editor = JobEditorRequest(index: index, definition: definition)
+                        DisclosureGroup {
+                            jobDetails(definition, at: index)
                         } label: {
-                            JobDefinitionRow(
-                                definition: definition,
-                                pathNames: pathNames(for: definition)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Job \(definition.name) bearbeiten")
-                        .accessibilityHint("Öffnet Zeitplan, Datenwege und Ausführung dieses Jobs.")
-                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                            Button {
-                                Task {
-                                    if let result = await model.jobDefinitionPlan(id: definition.id) {
-                                        plan = PlanPresentation(plan: result)
-                                    }
-                                }
-                            } label: { Label("Plan", systemImage: "list.bullet.clipboard") }
-                                .tint(.blue)
-                                .disabled(configurationDraft.isDirty)
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(role: .destructive) {
-                                configurationDraft.removeDefinition(at: index)
-                            } label: { Label("Löschen", systemImage: "trash") }
-                            Button {
-                                pendingRun = PendingJobRun(definition: definition, dryRun: true)
-                            } label: { Label("Test", systemImage: "play.circle") }
-                                .tint(.orange)
-                                .disabled(configurationDraft.isDirty)
+                            JobDefinitionRow(definition: definition)
                         }
                     }
                 }
             } header: {
-                Text("Jobdefinitionen")
+                Text("Jobliste")
             } footer: {
-                Text(configurationDraft.isDirty ? "Änderungen speichern, bevor du Plan oder Lauf startest." : "Wische über einen Job, um den Plan zu prüfen oder einen Probelauf zu starten.")
+                if configurationDraft.isDirty {
+                    Text("Änderungen speichern, bevor du Plan oder Lauf startest.")
+                }
             }
-            if let firstJob = configurationDraft.definitions.first, configurationDraft.definitions.count == 1, !configurationDraft.isDirty {
-                Section {
-                    Button { pendingRun = PendingJobRun(definition: firstJob, dryRun: true) } label: {
-                        Label("Probelauf für \(firstJob.name)", systemImage: "play.circle")
-                    }
+            Section("Zeitplanung") {
+                NavigationLink {
+                    JobScheduleOverview(definitions: configurationDraft.definitions)
+                } label: {
+                    Label("Zeitpläne ansehen", systemImage: "calendar")
                 }
             }
         }
@@ -319,17 +333,11 @@ struct JobsScreen: View {
             titleVisibility: .visible
         ) {
             if let pendingRun {
-                Button(pendingRun.dryRun ? "Probelauf starten" : "Produktiv starten") {
+                Button(pendingRun.dryRun ? "Probelauf starten" : "Produktiv starten",
+                       role: pendingRun.dryRun ? nil : .destructive) {
                     let request = pendingRun
                     self.pendingRun = nil
                     Task { _ = await model.runJobDefinition(id: request.definition.id, dryRun: request.dryRun) }
-                }
-                if pendingRun.dryRun {
-                    Button("Stattdessen produktiv starten", role: .destructive) {
-                        let request = pendingRun
-                        self.pendingRun = nil
-                        Task { _ = await model.runJobDefinition(id: request.definition.id, dryRun: false) }
-                    }
                 }
             }
             Button("Abbrechen", role: .cancel) { pendingRun = nil }
@@ -350,11 +358,49 @@ struct JobsScreen: View {
         }
     }
 
-    private func pathNames(for definition: JobDefinition) -> String {
-        let names = definition.dataPathIDs.compactMap { id in
-            configurationDraft.pairs.first { $0.id == id }?.name
+    private func jobDetails(_ definition: JobDefinition, at index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if !definition.dataPathIDs.isEmpty {
+                Text("Datenwege in Reihenfolge").font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(Array(definition.dataPathIDs.enumerated()), id: \.offset) { offset, id in
+                    let name = configurationDraft.pairs.first { $0.id == id }?.name
+                    Text("\(offset + 1). \(name ?? "Unbekannter Datenweg")")
+                        .font(.subheadline)
+                }
+            }
+            Button { editor = JobEditorRequest(index: index, definition: definition) } label: {
+                Label("Bearbeiten", systemImage: "pencil")
+                    .frame(minHeight: 44, alignment: .leading)
+            }
+            .accessibilityLabel("Job \(definition.name) bearbeiten")
+            Button {
+                Task {
+                    if let result = await model.jobDefinitionPlan(id: definition.id) {
+                        plan = PlanPresentation(plan: result)
+                    }
+                }
+            } label: {
+                Label("Plan prüfen", systemImage: "list.bullet.clipboard")
+                    .frame(minHeight: 44, alignment: .leading)
+            }
+                .disabled(configurationDraft.isDirty)
+            Button { pendingRun = PendingJobRun(definition: definition, dryRun: true) } label: {
+                Label("Probelauf", systemImage: "play.circle")
+                    .frame(minHeight: 44, alignment: .leading)
+            }
+            .disabled(configurationDraft.isDirty)
+            Button(role: .destructive) { pendingRun = PendingJobRun(definition: definition, dryRun: false) } label: {
+                Label("Produktiv starten", systemImage: "play.fill")
+                    .frame(minHeight: 44, alignment: .leading)
+            }
+            .disabled(configurationDraft.isDirty || !definition.enabled)
+            Button(role: .destructive) { configurationDraft.removeDefinition(at: index) } label: {
+                Label("Job entfernen", systemImage: "trash")
+                    .frame(minHeight: 44, alignment: .leading)
+            }
         }
-        return names.isEmpty ? "Keine Datenwege" : names.joined(separator: " → ")
+        .buttonStyle(.borderless)
     }
 
     private func reload(discardDirty: Bool) async {
@@ -421,44 +467,96 @@ private struct DataPathConfigurationRow: View {
     let pair: PairConfig
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: pair.enabled ? "arrow.left.arrow.right.circle.fill" : "pause.circle")
-                .font(.title2)
-                .foregroundStyle(pair.enabled ? .green : .secondary)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(pair.name).font(.headline)
-                Text(pair.local).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Text(pair.remote).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
-            Spacer()
-            Text(pair.direction.uppercased()).font(.caption.weight(.semibold))
+        VStack(alignment: .leading, spacing: 6) {
+            Text(pair.name).font(.headline)
+            Text("\(pair.configurationMode) · \(pair.configurationStatus)")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            configurationEndpoint(pair.direction == "bisync" ? "Seite A" : "Quelle", path: pair.configurationSource)
+            configurationEndpoint(pair.direction == "bisync" ? "Seite B" : "Ziel", path: pair.configurationTarget)
         }
         .accessibilityElement(children: .combine)
-        .padding(.vertical, 3)
+        .padding(.vertical, 4)
+    }
+
+    private func configurationEndpoint(_ title: String, path: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(path.isEmpty ? "Fehlt" : path).font(.subheadline.monospaced())
+        }
     }
 }
 
 private struct JobDefinitionRow: View {
     let definition: JobDefinition
-    let pathNames: String
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: definition.enabled ? "calendar.badge.clock" : "calendar.badge.minus")
-                .font(.title2)
-                .foregroundStyle(definition.enabled ? .green : .secondary)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(definition.name).font(.headline)
-                Text(JobScheduleCodec.summary(definition.schedule))
-                    .font(.caption).foregroundStyle(.secondary)
-                Text(pathNames).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-            }
-            Spacer()
-            Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(definition.name).font(.headline)
+            Text(JobScheduleCodec.summary(definition.schedule))
+                .font(.subheadline).foregroundStyle(.secondary)
+            Text("\(definition.enabled ? "Aktiv" : "Deaktiviert") · \(configurationPathCount(definition.dataPathIDs.count))")
+                .font(.caption).foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
-        .padding(.vertical, 3)
+        .padding(.vertical, 4)
     }
+}
+
+private struct JobScheduleOverview: View {
+    let definitions: [JobDefinition]
+
+    var body: some View {
+        List {
+            Section("Automatisch") {
+                let scheduled = definitions.filter(isScheduled)
+                if scheduled.isEmpty {
+                    Text("Keine aktivierten Jobs mit Zeitplan.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(scheduled) { JobDefinitionRow(definition: $0) }
+                }
+            }
+            let remaining = definitions.filter { !isScheduled($0) }
+            if !remaining.isEmpty {
+                Section("Manuell oder deaktiviert") {
+                    ForEach(remaining) { JobDefinitionRow(definition: $0) }
+                }
+            }
+            Section {
+                NavigationLink { BandwidthHeatmapView() } label: {
+                    Label("Bandbreite & Zeitfenster", systemImage: "chart.bar.xaxis")
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Zeitplanung")
+    }
+
+    private func isScheduled(_ definition: JobDefinition) -> Bool {
+        definition.enabled && JobScheduleCodec.selection(for: definition.schedule).mode != .manual
+    }
+}
+
+extension PairConfig {
+    fileprivate var configurationSource: String { direction == "pull" ? remote : local }
+    fileprivate var configurationTarget: String { direction == "pull" ? local : remote }
+    fileprivate var configurationStatus: String { enabled ? "Aktiv" : "Deaktiviert" }
+
+    fileprivate var configurationMode: String {
+        if direction == "bisync" { return "Bidirektional" }
+        return mode == "sync" ? "Spiegeln" : "Kopieren"
+    }
+
+    func referencesCloud(_ root: String) -> Bool {
+        guard root.hasSuffix(":") else { return false }
+        return [local, remote].contains {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(root)
+        }
+    }
+}
+
+func configurationPathCount(_ count: Int) -> String {
+    count == 1 ? "1 Datenweg" : "\(count) Datenwege"
 }
 
 private struct PairEditorRequest: Identifiable {

@@ -88,6 +88,7 @@ private struct AdministrationView: View {
                 Section("Verwalten") {
                     NavigationLink("Datenwege", value: "paths")
                     NavigationLink("Jobs & Zeitpläne", value: "jobs")
+                    NavigationLink("Clouds", value: "clouds")
                     NavigationLink("Läufe & Protokolle", value: "runs")
                 }
                 Section("Server") {
@@ -109,6 +110,7 @@ private struct AdministrationView: View {
         switch value {
         case "paths": DataPathsScreen(showingSettings: $showingSettings)
         case "jobs": JobsScreen(showingSettings: $showingSettings)
+        case "clouds": CloudsScreen(showingSettings: $showingSettings)
         case "system": SystemView(showingSettings: $showingSettings)
         default: RunsScreen(showingSettings: $showingSettings)
         }

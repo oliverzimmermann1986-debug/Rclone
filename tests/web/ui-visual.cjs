@@ -340,6 +340,46 @@ async function main() {
             assert.equal(jsErrors.length, 0, jsErrors.join('\n'));
           });
         }
+        await checkCase(page, `${name}-clouds`, async () => {
+          await navigate(page, 'pairs', 'Datenwege');
+          await page.getByRole('tab', { name: 'Clouds', exact: true }).click();
+          const used = page.getByRole('button', { name: '3 Datenwege für fixture-cloud anzeigen' });
+          await used.click();
+          const paths = page.getByRole('tabpanel', { name: 'Datenwege', exact: true });
+          assert.equal(await paths.locator('.pair-card:visible').count(), 3);
+          assert(await paths.getByText('fixture-cloud:Unterwegs', { exact: true }).isVisible());
+          assert.equal(await paths.locator('.pair-details:visible').count(), 0);
+          await paths.locator('.pair-expand').first().click();
+          assert.equal(await paths.locator('.pair-details:visible').count(), 1);
+          await noOverflow(page);
+          await paths.locator('.pair-expand').first().click();
+          await page.getByRole('tab', { name: 'Clouds', exact: true }).click();
+          await page.getByRole('button', { name: '0 Datenwege für fixture-archive anzeigen' }).click();
+          assert(await paths.getByText('Keine passenden Datenwege', { exact: true }).isVisible());
+          await paths.getByRole('button', { name: 'Cloud-Filter entfernen' }).click();
+          assert.equal(await paths.locator('.pair-card:visible').count(), 3);
+          await page.getByRole('tab', { name: 'Clouds', exact: true }).click();
+          assert(await used.isVisible());
+          await page.getByRole('button', { name: 'rclone-Konfiguration testen', exact: true }).click();
+          await page.getByText('rclone-Konfiguration geprüft.', { exact: true }).waitFor({ state: 'visible' });
+          await noOverflow(page);
+          assert.equal(jsErrors.length, 0, jsErrors.join('\n'));
+        });
+        await checkCase(page, `${name}-job-editor`, async () => {
+          await navigate(page, 'definitions', 'Jobs');
+          const job = page.locator('.job-definition-record').first();
+          assert.equal(await job.locator('.record-schedule').innerText(), 'Täglich um 03:00 Uhr');
+          assert.equal(await job.locator('.job-editor').isVisible(), false);
+          await job.locator('summary').focus();
+          await page.keyboard.press('Enter');
+          assert(await job.getByRole('button', { name: 'Probelauf', exact: true }).isVisible());
+          await noOverflow(page);
+          await page.getByRole('tab', { name: 'Zeitplanung', exact: true }).click();
+          assert(await page.getByRole('heading', { name: 'Nächste 24 Stunden', exact: true }).isVisible());
+          await noOverflow(page);
+          await page.getByRole('tab', { name: 'Jobliste', exact: true }).click();
+          assert.equal(jsErrors.length, 0, jsErrors.join('\n'));
+        });
         await navigate(page, 'dashboard', 'Lagebild');
         if (scenario.name !== 'desktop-200-percent-reflow') {
           await checkCase(page, `${name}-guided-setup`, async () => {

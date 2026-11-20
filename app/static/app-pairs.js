@@ -142,6 +142,10 @@ export const pairsMethods = {
     this.showToast(this.config.pbs?.enabled ? 'In PBS-Backup umgewandelt – unten prüfen und speichern' : 'PBS-Backup angelegt – Verbindung unter Einstellungen → Proxmox Backup fehlt noch', this.config.pbs?.enabled ? 'ok' : 'warn');
   },
   addPair(preset = this.newPairPreset || 'push-copy') {
+    this.pairSearch = '';
+    this.pairFilter = 'all';
+    this.pairCloudFilter = '';
+    this.activeTag = '';
     if (preset === 'pbs') {
       this.addPbsTarget();
       const idx = this.config.pbs.targets.length - 1;
@@ -178,9 +182,6 @@ export const pairsMethods = {
   addPairFromMenu(event) {
     const menu = event.currentTarget.closest('details');
     if (menu) menu.open = false;
-    this.pairSearch = '';
-    this.pairFilter = 'all';
-    this.activeTag = '';
     this.addPair('push-copy');
   },
 
@@ -272,6 +273,7 @@ export const pairsMethods = {
   },
 
   pairVisible(pair) {
+    if (this.pairCloudFilter && !this.pairUsesCloud(pair, this.pairCloudFilter)) return false;
     const needle = this.pairSearch.trim().toLowerCase();
     if (needle && !`${pair.name || ''} ${pair.remote || ''} ${pair.local || ''} ${pair.source || ''} ${pair.target || ''}`.toLowerCase().includes(needle)) return false;
     if (this.pairFilter === 'enabled' && !pair.enabled) return false;
@@ -280,6 +282,24 @@ export const pairsMethods = {
     if (this.pairFilter === 'issues' && this.pairIssues(pair).length === 0 && !this.pairRuntimeIssue(pair)) return false;
     if (this.activeTag && !(pair.tags || []).includes(this.activeTag)) return false;
     return true;
+  },
+
+  pairUsesCloud(pair, remote) {
+    const { source, target } = this.pairEndpoints(pair);
+    return [source, target].some((path) => String(path || '').trim().startsWith(remote));
+  },
+
+  cloudPathCount(remote) {
+    return (this.config.backup?.pairs || []).filter((pair) => this.pairUsesCloud(pair, remote)).length;
+  },
+
+  dataPathCountLabel(count) {
+    return count === 1 ? '1 Datenweg' : `${count} Datenwege`;
+  },
+
+  clearPairCloudFilter() {
+    this.pairCloudFilter = '';
+    this.$nextTick(() => document.getElementById('pair-search')?.focus());
   },
 
   pairIssues(pair) {
@@ -473,6 +493,24 @@ export const pairsMethods = {
     }
   },
 
+  async loadCloudConnections() {
+    const state = this.cloudConnections;
+    state.loading = true;
+    state.error = '';
+    const result = await this.api('GET', '/api/browse/rclone', undefined, {
+      silent: true, captureError: true, requestKey: 'cloud-connections',
+    });
+    if (this.isStale(result)) return;
+    state.loading = false;
+    if (!Array.isArray(result?.entries)) {
+      state.error = result?.__error ? this.errorText(result) : 'Cloud-Zugänge konnten nicht geladen werden.';
+      return;
+    }
+    state.items = result.entries;
+    state.truncated = result.truncated === true;
+    state.loaded = true;
+  },
+
   async testRclone() {
     this.testResults._global = { loading: true };
     const result = await this.api('POST', '/api/test/rclone', {});
@@ -652,6 +690,7 @@ export const pairsMethods = {
       }
       await this.closeRemoteSetup();
       this.showToast(`Google Drive „${result.name}“ eingerichtet (Service-Account: ${result.client_email})`, 'ok');
+      if (this.page === 'pairs' && this.workspaceViews?.pairs === 'clouds') this.loadCloudConnections();
       if (this.picker.show && this.picker.kind === 'remote') await this.loadPicker('');
       return;
     }
@@ -699,6 +738,7 @@ export const pairsMethods = {
       state.session = null;
       await this.closeRemoteSetup();
       this.showToast(result.reconnected ? `Anmeldung für ${result.name} erneuert.` : `Remote ${result.name} ist angelegt.`, 'ok');
+      if (this.page === 'pairs' && this.workspaceViews?.pairs === 'clouds') this.loadCloudConnections();
       if (this.picker.show && this.picker.kind === 'remote') await this.loadPicker('');
     } else {
       state.busy = false;
@@ -780,8 +820,10 @@ export const pairsMethods = {
       'Die Schlüssel werden nur jetzt angezeigt. Geht die Serverkonfiguration verloren, sind die verschlüsselten Daten ohne sie unwiederbringlich verloren. Trotzdem schließen?',
       { title: 'Schlüssel noch nicht gesichert', confirmLabel: 'Trotzdem schließen' },
     ))) return;
+    const created = Boolean(this.crypt.result);
     this.crypt = emptyCrypt();
     this.restoreDialogFocus();
+    if (created && this.page === 'pairs' && this.workspaceViews?.pairs === 'clouds') this.loadCloudConnections();
   },
 
   openPicker(mode, idx) {
@@ -1150,6 +1192,7 @@ export const pairsMethods = {
     const idx = this.config.backup.pairs.length - 1;
     this.pairSearch = '';
     this.pairFilter = 'all';
+    this.pairCloudFilter = '';
     this.activeTag = '';
     this.pairOpen[idx] = true;
     this.pairWizard.open = false;

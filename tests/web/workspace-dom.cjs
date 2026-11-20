@@ -28,14 +28,6 @@ function runScenario(newerServer = false) {
     extra.id = 'newer-live-restore-plan';
     extra.innerHTML = '<h3>Restore-Plan</h3><button @click="confirmRestorePlan()">Geprüften Plan ausführen</button>';
     recovery.append(extra);
-    const jobTemplate = document.querySelector('.definition-list > template');
-    const options = jobTemplate.content.querySelector('.definition-options');
-    if (options && options.tagName !== 'DETAILS') {
-      const container = document.createElement('details');
-      container.innerHTML = '<summary>Ausführung und Wiederholung</summary>';
-      options.before(container);
-      container.append(options);
-    }
   }
   const originals = allElements(document.documentElement);
   const controls = originals.filter((node) => Array.from(node.attributes)
@@ -85,7 +77,7 @@ function runScenario(newerServer = false) {
   const model = window.app();
   model.init();
   assert.equal(model.originalInitCalled, true);
-  const groupCounts = { dashboard: 4, doctor: 4, recovery: 4 };
+  const groupCounts = { dashboard: 4, doctor: 4, recovery: 4, pairs: 2, definitions: 2 };
   for (const [name, count] of Object.entries(groupCounts)) {
     const tabs = Array.from(document.querySelectorAll(`[data-workspace-page="${name}"] > .workspace-tabs button`));
     assert.equal(tabs.length, count, `${name} view count`);
@@ -116,9 +108,11 @@ function runScenario(newerServer = false) {
   const alertStack = document.querySelector('[data-workspace-page="dashboard"] .alert-stack');
   assert.equal(alertStack.closest('.workspace-view'), null, 'Server alerts must remain visible');
   assert.equal(document.querySelector('.workspace-quarantine-notice').closest('.workspace-view'), null);
-  assert(document.querySelector('.workspace-disclosure .definition-assignments') ||
-    allElements(document.documentElement).some((node) => node.matches('.workspace-disclosure .definition-assignments')),
-  'Job assignments should be disclosed deliberately');
+  const jobTemplate = document.querySelector('.definition-list > template');
+  assert(jobTemplate.content.querySelector('details.job-definition-record > .job-editor .definition-assignments'),
+    'Job assignments must stay together with the rest of the job editor');
+  assert.equal(document.getElementById('cloud-connections-heading').closest('.workspace-view').id, 'workspace-panel-pairs-clouds');
+  assert.equal(document.getElementById('schedule-timeline-heading').closest('.workspace-view').id, 'workspace-panel-definitions-schedule');
   if (newerServer) assert.equal(document.getElementById('newer-live-restore-plan').closest('.workspace-view').id,
     'workspace-panel-recovery-restore', 'New live restore controls must remain in the default restore view');
   const state = { ...model.workspaceViews };
