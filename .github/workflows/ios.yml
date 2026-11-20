@@ -71,14 +71,36 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Print :UILaunchScreen:UIColorName' ios/RcloneMobile/Info.plist | grep -qx 'LaunchBackground'
           /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' ios/RcloneMobile/Info.plist >/dev/null
           grep -q 'TARGETED_DEVICE_FAMILY: "1"' ios/project.yml
+
+      - name: Boot iPhone simulator
+        id: simulator
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          SIMULATOR_ID="$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          runtime = devices.get("com.apple.CoreSimulator.SimRuntime.iOS-26-5", [])
+          print(next((device["udid"] for device in runtime if device["name"] == "iPhone 17"), ""))
+          ')"
+          if [ -z "$SIMULATOR_ID" ]; then
+            xcrun simctl list devices available
+            exit 1
+          fi
+          xcrun simctl bootstatus "$SIMULATOR_ID" -b
+          echo "id=$SIMULATOR_ID" >> "$GITHUB_OUTPUT"
+
       - name: Build and run unit tests
         id: native_tests
+        env:
+          SIMULATOR_ID: ${{ steps.simulator.outputs.id }}
         run: |
           set -o pipefail
           xcodebuild test \
             -project ios/RcloneMobile.xcodeproj \
             -scheme RcloneMobile \
-            -destination "platform=iOS Simulator,name=iPhone 17,OS=26.5" \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -parallel-testing-enabled NO \
             -derivedDataPath "$RUNNER_TEMP/ios-build" \
             -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"
