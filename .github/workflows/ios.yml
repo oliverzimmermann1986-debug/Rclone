@@ -42,6 +42,9 @@ jobs:
   build-and-test:
     runs-on: macos-26
     timeout-minutes: 30
+    env:
+      # The hosted image provides the matching iPhone 17 simulator for iOS 26.5.
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Toolchain
@@ -75,7 +78,7 @@ jobs:
           xcodebuild test \
             -project ios/RcloneMobile.xcodeproj \
             -scheme RcloneMobile \
-            -destination "platform=iOS Simulator,name=iPhone 17,OS=latest" \
+            -destination "platform=iOS Simulator,name=iPhone 17,OS=26.5" \
             -derivedDataPath "$RUNNER_TEMP/ios-build" \
             -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY="-"
