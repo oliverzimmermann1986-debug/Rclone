@@ -91,6 +91,7 @@ private struct AdministrationView: View {
                     NavigationLink("Läufe & Protokolle", value: "runs")
                 }
                 Section("Server") {
+                    NavigationLink("Alle Server", value: "servers")
                     NavigationLink("System & Wartung", value: "system")
                     Button("Konto & Anmeldung") { showingSettings = true }
                 }
@@ -110,6 +111,7 @@ private struct AdministrationView: View {
         case "paths": DataPathsScreen(showingSettings: $showingSettings)
         case "jobs": JobsScreen(showingSettings: $showingSettings)
         case "system": SystemView(showingSettings: $showingSettings)
+        case "servers": ServerOverviewView()
         default: RunsScreen(showingSettings: $showingSettings)
         }
     }
