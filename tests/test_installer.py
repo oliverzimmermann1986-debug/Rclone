@@ -163,3 +163,8 @@ def test_ci_covers_supported_python_dependencies_ui_and_systemd_units():
         "sync-scheduler.timer",
     ):
         assert f"systemd/{unit}" in workflow
+
+
+def test_installer_skips_recovery_snapshots_and_rclone_cache_in_upgrade_copy():
+    script = INSTALLER.read_text(encoding="utf-8")
+    assert "recovery-snapshots|.rclone-cache) continue ;;" in script

@@ -110,6 +110,7 @@ window.app = function app() {
     hooksAvailable: [],
     pairSearch: '',
     pairFilter: 'all',
+    pairCloudFilter: '',
     newPairPreset: 'push-copy',
     pairWizard: {
       open: false, step: 1, preset: '', name: '', source: '', target: '',
@@ -153,6 +154,7 @@ window.app = function app() {
     bootDrill: null,
     bitrot: { loading: false, error: false, data: null, baselines: {} },
     cloudQuota: { loading: false, error: false, data: null },
+    cloudConnections: { loading: false, loaded: false, error: '', items: [], truncated: false },
     ransomwareStatus: { loading: false, error: false, data: null },
     canaryVerify: {},
     vpn: { loading: false, error: false, data: null },

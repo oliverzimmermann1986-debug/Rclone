@@ -82,6 +82,9 @@ const bundle = {
 };
 
 function apiFixture(method, url, caseName = '') {
+  if (method === 'POST' && url.pathname === '/api/test/rclone') {
+    return { ok: true, message: 'rclone-Konfiguration geprüft.' };
+  }
   if (method === 'POST' && url.pathname === '/api/config/schedule-preview') {
     return { ok: true, enabled: true, timezone: 'Europe/Berlin', next_runs: [1, 7, 13, 19].map((hour) => ({ timestamp: now + hour * 3600, iso: new Date((now + hour * 3600) * 1000).toISOString() })) };
   }
@@ -90,6 +93,10 @@ function apiFixture(method, url, caseName = '') {
   const listedRuns = progress.running ? [activeJob, ...runs] : runs;
   const table = {
     '/api/config': config,
+    '/api/browse/rclone': { path: '', parent: null, is_root: true, entries: [
+      { name: 'fixture-cloud', path: 'fixture-cloud:', is_dir: true },
+      { name: 'fixture-archive', path: 'fixture-archive:', is_dir: true },
+    ] },
     '/api/config/hooks': { hooks: [] },
     '/api/config/filter-file': { content: '# Ausschließlich synthetische UI-Prüfdaten\n- *.tmp\n', path: '/var/lib/ui-fixture/filter.rules', revision: 'd'.repeat(64) },
     '/api/lockdown': { active: false },

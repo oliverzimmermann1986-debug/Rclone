@@ -390,9 +390,12 @@ export const jobsMethods = {
 
   async runBackup(dryRun, pairs = null) {
     if (this.pending.backup) return;
+    const setup = this.backupSetupState();
+    if (!pairs && setup === 'empty') return this.startBackupSetup();
+    if (!pairs && setup === 'inactive') return this.navigate('pairs');
     if (!(await this.ensureConfigSavedForRun())) return;
     if (!dryRun && !(await this.requestConfirmation(
-      `Produktiven Lauf für ${pairs?.join(', ') || 'alle aktiven Pairs'} starten? Prüfe vorher möglichst den Plan oder einen Dry-Run.`,
+      `Produktiven Lauf für ${pairs?.join(', ') || 'alle aktiven Datenwege'} starten? Prüfe vorher den Plan oder einen Probelauf.`,
       { title: 'Produktiven Lauf starten', confirmLabel: 'Produktiv starten' },
     ))) return;
     this.pending.backup = true;
@@ -401,7 +404,7 @@ export const jobsMethods = {
       const result = await this.api('POST', `/api/jobs/backup/run?dry_run=${dryRun}${scope}`);
       if (result?.ok) {
         if (dryRun && result.job_id) this.lastDryRun = { id: result.job_id, kind: 'backup', status: 'running', dry_run: true };
-        this.showToast(dryRun ? 'Dry-Run gestartet' : 'Backup gestartet');
+        this.showToast(dryRun ? 'Probelauf gestartet' : 'Sicherung gestartet');
         setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
       }
     } finally {
@@ -423,7 +426,7 @@ export const jobsMethods = {
     if (!name || this.pending.backup) return;
     if (!(await this.ensureConfigSavedForRun())) return;
     if (!dryRun && !(await this.requestConfirmation(
-      `Pair „${name}“ produktiv starten?`,
+      `Datenweg „${name}“ produktiv starten?`,
       { title: 'Datenweg produktiv starten', confirmLabel: 'Produktiv starten' },
     ))) return;
     this.pending.backup = true;
@@ -431,7 +434,7 @@ export const jobsMethods = {
       const result = await this.api('POST', `/api/jobs/backup/run-pair/${encodeURIComponent(name)}?dry_run=${dryRun}`);
       if (result?.ok) {
         if (dryRun && result.job_id) this.lastDryRun = { id: result.job_id, kind: 'backup', status: 'running', dry_run: true, label: name };
-        this.showToast(dryRun ? `Dry-Run für „${name}“ gestartet` : `„${name}“ gestartet`);
+        this.showToast(dryRun ? `Probelauf für „${name}“ gestartet` : `„${name}“ gestartet`);
         setTimeout(() => { this.refreshStatus(true); this.loadProgress(true); }, 400);
       }
     } finally {

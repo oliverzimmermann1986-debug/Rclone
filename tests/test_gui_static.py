@@ -70,13 +70,14 @@ def test_main_template_has_unique_ids_and_required_navigation():
 
 def test_template_direct_calls_exist_in_alpine_component():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    javascript = _app_javascript()
+    workspace = (STATIC / "workspace.js").read_text(encoding="utf-8")
+    javascript = _app_javascript() + "\n" + workspace
     parser = _TemplateParser()
     parser.feed(html)
 
     methods = set(
         re.findall(
-            r"^\s{2}(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^\n]*\)\s*\{",
+            r"^ +(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^\n]*\)\s*\{",
             javascript,
             re.MULTILINE,
         )
@@ -431,7 +432,8 @@ def test_pwa_caches_only_versioned_static_allowlist_and_has_install_icon():
     assert '"sizes": "1024x1024"' in manifest
     assert '"purpose": "any"' in manifest
     assert "const CACHE_PREFIX = 'rclone-sync-static-'" in service_worker
-    assert "const CACHE_NAME = `${CACHE_PREFIX}v5`" in service_worker
+    assert "const CACHE_NAME = `${CACHE_PREFIX}v6`" in service_worker
+    assert "'/static/alpine-expressions.js'" in service_worker
     for module in APP_MODULES:
         assert f"'/static/{module}'" in service_worker
     assert "'/static/workspace.js'" in service_worker

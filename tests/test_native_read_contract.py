@@ -561,9 +561,12 @@ def test_native_f14_revision_safety_history_and_run_all_contracts():
     )
     backups = (ios_root / "Views" / "BackupsView.swift").read_text(encoding="utf-8")
     dashboard = (ios_root / "Views" / "DashboardView.swift").read_text(encoding="utf-8")
+    protection = (ios_root / "Views" / "ProtectionHomeView.swift").read_text(
+        encoding="utf-8"
+    )
 
     assert 'post("/api/jobs/definitions/run-all?dry_run=\\(dryRun)")' in api
-    assert "runAllJobDefinitions()" in dashboard
+    assert "runAllJobDefinitions(dryRun: dryRun)" in protection
     assert "model.runBackup()" not in dashboard
     assert "getJobDefinitions()" not in app_model
     assert "jobDefinitions = newConfig.backup.jobs" in app_model

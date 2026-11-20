@@ -6,16 +6,12 @@ struct SystemView: View {
     @Binding var showingSettings: Bool
     @State private var showPauseOptions = false
     @State private var confirmResume = false
-    @State private var showRemoteSetup = false
 
     var body: some View {
         List {
             Section("Speicher verbinden") {
-                Button { showRemoteSetup = true } label: {
-                    Label("Cloud-Speicher anmelden", systemImage: "externaldrive.badge.plus")
-                }
-                NavigationLink { CryptRemoteWizardView() } label: {
-                    Label("Verschlüsseltes Remote (Crypt) anlegen", systemImage: "lock.icloud")
+                NavigationLink { CloudsScreen(showingSettings: $showingSettings) } label: {
+                    Label("Cloud-Zugänge verwalten", systemImage: "cloud")
                 }
             }
             if let system = model.overview?.system {
@@ -54,9 +50,6 @@ struct SystemView: View {
                     NavigationLink { ObjectLockAndScrubView() } label: {
                         Label("Schutzsiegel, Canary & Bitrot-Scrub", systemImage: "lock.shield")
                     }
-                    NavigationLink { CloudQuotaAndBudgetView() } label: {
-                        Label("Cloud-Kontingent & Egress-Wächter", systemImage: "icloud.and.arrow.up")
-                    }
                     NavigationLink { VersionsLifecycleView() } label: {
                         Label("Versionsverwaltung (GFS)", systemImage: "clock.arrow.2.circlepath")
                     }
@@ -90,7 +83,6 @@ struct SystemView: View {
             }
         }
         .navigationTitle("System")
-        .sheet(isPresented: $showRemoteSetup) { RemoteSetupView() }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
             ToolbarItem(placement: .topBarTrailing) {

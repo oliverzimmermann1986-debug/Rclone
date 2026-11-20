@@ -255,7 +255,7 @@ export const coreMethods = {
   async navigate(next, updateHash = true) {
     if (!this.pages.includes(next)) return;
     if (next === this.page) {
-      this.closeNavigation(false);
+      this.closeNavigation();
       return;
     }
     if ((this.configDirty || this.filterFile.dirty) && ['pairs', 'definitions', 'settings'].includes(this.page) && next !== this.page) {
@@ -354,14 +354,15 @@ export const coreMethods = {
     const items = [
       { label: 'Gehe zu Lagebild', keywords: 'dashboard status', run: () => this.navigate('dashboard') },
       { label: 'Gehe zu Datenwegen', keywords: 'pairs datenwege', run: () => this.navigate('pairs') },
+      { label: 'Gehe zu Clouds', keywords: 'cloud zugang remotes anbieter', run: () => this.workspaceOpen('pairs', 'clouds') },
       { label: 'Gehe zu Jobs', keywords: 'jobs plan', run: () => this.navigate('definitions') },
       { label: 'Gehe zu Läufe', keywords: 'runs verlauf', run: () => this.navigate('runs') },
       { label: 'Gehe zu System', keywords: 'system diagnose', run: () => this.navigate('doctor') },
       { label: 'Gehe zu Wiederherstellung', keywords: 'recovery restore zeitreise staging', run: () => this.navigate('recovery') },
       { label: 'Gehe zu Einstellungen', keywords: 'settings konfiguration filter pbs', run: () => this.navigate('settings') },
-      { label: 'Datenweg-Assistent starten', keywords: 'wizard assistent neuer datenweg', run: () => { this.navigate('pairs'); this.openPairWizard(); } },
+      { label: 'Datenweg-Assistent starten', keywords: 'wizard assistent neuer datenweg', run: () => this.startBackupSetup() },
       { label: 'Quick-Sync öffnen', keywords: 'quick sync kopieren', run: () => this.openQuick() },
-      { label: 'Dry-Run starten', keywords: 'trockenlauf backup', run: () => this.runBackup(true) },
+      { label: 'Probelauf starten', keywords: 'dry-run trockenlauf backup', run: () => this.runBackup(true) },
       { label: 'Notfall-Lockdown öffnen', keywords: 'lockdown notfall ransomware sperre', run: () => this.openLockdown() },
       { label: 'Support-Bundle herunterladen', keywords: 'support diagnose export', run: () => this.downloadSupportBundle() },
     ];
@@ -1041,11 +1042,23 @@ export const coreMethods = {
       const text = String(value || '?');
       return text.length > 28 ? `${text.slice(0, 13)}…${text.slice(-13)}` : text;
     };
-    if (pair.two_way || pair.direction === 'bisync') return `${shorten(pair.source ?? pair.remote)} ⇄ ${shorten(pair.target ?? pair.local)}`;
+    const { source, target } = this.pairEndpoints(pair);
+    if (pair.two_way || pair.direction === 'bisync') return `${shorten(source)} ⇄ ${shorten(target)}`;
     const mode = pair.mode === 'sync' ? 'Mirror' : 'Copy';
-    const src = pair.source ?? (pair.direction === 'pull' ? pair.remote : pair.local);
-    const dst = pair.target ?? (pair.direction === 'pull' ? pair.local : pair.remote);
-    return `${shorten(src)} → ${shorten(dst)} · ${mode}`;
+    return `${shorten(source)} → ${shorten(target)} · ${mode}`;
+  },
+
+  pairEndpoints(pair) {
+    const cloudFirst = pair.direction === 'pull';
+    return {
+      source: pair.source ?? (cloudFirst ? pair.remote : pair.local),
+      target: pair.target ?? (cloudFirst ? pair.local : pair.remote),
+    };
+  },
+
+  pairModeLabel(pair) {
+    if (pair.two_way || pair.direction === 'bisync') return 'Bidirektional';
+    return pair.mode === 'sync' ? 'Spiegeln' : 'Kopieren';
   },
 
   summaryShort(summary) {

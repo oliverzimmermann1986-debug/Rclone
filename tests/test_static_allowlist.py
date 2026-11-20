@@ -26,6 +26,7 @@ def test_production_static_mount_has_an_explicit_complete_allowlist():
 
     assert mounted.allowed_files == main.STATIC_ASSET_ALLOWLIST
     assert main.STATIC_ASSET_ALLOWLIST == {
+        "alpine-expressions.js",
         "alpine.min.js",
         "app.js",
         "app-core.js",

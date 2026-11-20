@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { parseHTML } = require('linkedom');
+const { compileBindings } = require('./compile-alpine.cjs');
 const root = path.resolve(__dirname, '../..');
 const actualBody = fs.readFileSync(path.join(root, 'app/static/index.html'), 'utf8').match(/<body\b[^>]*>/)?.[0];
 assert(actualBody, 'Production HTML has a body');
@@ -74,7 +75,7 @@ window.app = () => ({
   statusLabel(value) { return value; },
   loadDoctor() { this.calls.push('loadDoctor'); },
 });
-vm.createContext(sandbox);
+vm.createContext(sandbox, { codeGeneration: { strings: false, wasm: false } });
 const originalSetAttribute = window.Element.prototype.setAttribute;
 window.Element.prototype.setAttribute = function checkedAttribute(name, value) {
   assert.match(name, /^[A-Za-z_:][A-Za-z0-9_.:-]*$/, 'Dynamic attribute must be a valid DOM XMLName');
@@ -86,6 +87,7 @@ try {
   window.Element.prototype.setAttribute = originalSetAttribute;
 }
 sandbox.app = window.app;
+vm.runInContext(compileBindings(fixture), sandbox, { filename: 'alpine-expressions.js' });
 vm.runInContext(fs.readFileSync(path.join(root, 'app/static/alpine.min.js'), 'utf8'), sandbox, { filename: 'alpine.min.js' });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 15));
 

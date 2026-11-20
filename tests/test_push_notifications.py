@@ -441,3 +441,90 @@ def test_slow_apns_post_heartbeats_current_claim_against_second_dispatcher(
     assert result["sent"] == 1
     assert competitor_results == [{"sent": 0, "failed": 0, "removed": 0, "retrying": 0}]
     assert database.push_outbox_status()["sent"] == 1
+
+
+def test_scheduler_retry_dedupes_repeated_hourly_failure_pushes():
+    retry_one = {
+        "summary": {
+            "job_id": 302,
+            "run_id": "run-302",
+            "definition_id": "def-fotos",
+            "trigger": "scheduler",
+            "scheduled_slot": "retry|jobdef:id:def-fotos|299",
+            "pairs": [
+                {"name": "Fotos pCloud", "ok": True},
+                {"name": "Fotos gdrive", "ok": False},
+            ],
+        }
+    }
+    retry_two = {
+        "summary": {
+            "job_id": 305,
+            "run_id": "run-305",
+            "definition_id": "def-fotos",
+            "trigger": "scheduler",
+            "scheduled_slot": "retry|jobdef:id:def-fotos|302",
+            "pairs": [
+                {"name": "Fotos pCloud", "ok": True},
+                {"name": "Fotos gdrive", "ok": False},
+            ],
+        }
+    }
+    changed_failure = {
+        "summary": {
+            **retry_two["summary"],
+            "pairs": [
+                {"name": "Fotos pCloud", "ok": False},
+                {"name": "Fotos gdrive", "ok": False},
+            ],
+        }
+    }
+    manual_run = {
+        "summary": {
+            "job_id": 306,
+            "run_id": "run-306",
+            "definition_id": "def-fotos",
+            "trigger": "manual",
+            "scheduled_slot": None,
+            "pairs": [{"name": "Fotos gdrive", "ok": False}],
+        }
+    }
+    k1 = push_notifications.notification_dedupe_key(
+        "sync_error",
+        "Sync mit Fehlern",
+        "Fehlgeschlagen: Fotos gdrive",
+        retry_one,
+        now=1_000.0,
+    )
+    k2 = push_notifications.notification_dedupe_key(
+        "sync_error",
+        "Sync mit Fehlern",
+        "Fehlgeschlagen: Fotos gdrive",
+        retry_two,
+        now=4_600.0,
+    )
+    k_next_bucket = push_notifications.notification_dedupe_key(
+        "sync_error",
+        "Sync mit Fehlern",
+        "Fehlgeschlagen: Fotos gdrive",
+        retry_two,
+        now=50_000.0,
+    )
+    k_changed = push_notifications.notification_dedupe_key(
+        "sync_error",
+        "Sync mit Fehlern",
+        "Fehlgeschlagen: Fotos pCloud, Fotos gdrive",
+        changed_failure,
+        now=4_600.0,
+    )
+    k_manual = push_notifications.notification_dedupe_key(
+        "sync_error",
+        "Sync mit Fehlern",
+        "Fehlgeschlagen: Fotos gdrive",
+        manual_run,
+        now=4_600.0,
+    )
+    assert k1 == k2
+    assert k1 != k_next_bucket
+    assert k1 != k_changed
+    assert k1 != k_manual

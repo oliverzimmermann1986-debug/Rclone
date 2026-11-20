@@ -1035,6 +1035,25 @@ def _remote_reachable(
                     f"Remote-Pfad nicht gefunden (rclone exit {result.returncode})",
                 )
             if (
+                "google drive api has not been used in project" in lowered_error
+                or "service_disabled" in lowered_error
+                or "accessnotconfigured" in lowered_error
+            ):
+                project_match = re.search(
+                    r"\bproject\s+(\d{6,20})\b", error, re.IGNORECASE
+                )
+                project_hint = (
+                    f" im Google-Cloud-Projekt {project_match.group(1)}"
+                    if project_match
+                    else ""
+                )
+                return (
+                    False,
+                    f"Google Drive API{project_hint} ist noch nicht aktiviert "
+                    "(Error 403) ? bitte in der Google Cloud Console unter "
+                    "?APIs & Dienste ? Google Drive API? aktivieren",
+                )
+            if (
                 "ratelimitexceeded" in lowered_error
                 or "rate_limit_exceeded" in lowered_error
             ):

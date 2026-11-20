@@ -1,20 +1,65 @@
 import SwiftUI
 
 struct ProtectionHomeView: View {
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var configurationDraft: ConfigurationDraftStore
+    @Binding var showingSettings: Bool
+    @State private var confirmRunAll = false
+    @State private var successFeedback = 0
+    @State private var starting = false
+
+    private var canRunJobs: Bool {
+        model.config?.backup.jobs.contains(where: { $0.enabled }) == true
+            && !configurationDraft.isDirty
+            && !model.batchIsRunning
+            && model.progress?.running != true
+            && model.lockdownStatus?.active != true
+            && !starting
+    }
+
     var body: some View {
         List {
-            Section {
+            Section("Sicherungen auf dem Server") {
+                if let config = model.config, config.backup.pairs.isEmpty {
+                    Text("Lege zuerst Quelle und Ziel an. Weise den Datenweg dann einem Job zu und starte einen Probelauf.")
+                        .foregroundStyle(.secondary)
+                }
+                NavigationLink {
+                    DataPathsScreen(showingSettings: $showingSettings)
+                } label: {
+                    Label(model.config?.backup.pairs.isEmpty == true ? "Ersten Datenweg einrichten" : "Datenwege verwalten", systemImage: "arrow.left.arrow.right")
+                }
+                NavigationLink {
+                    JobsScreen(showingSettings: $showingSettings)
+                } label: {
+                    Label("Jobs & Zeitpläne", systemImage: "calendar")
+                }
+                NavigationLink {
+                    CloudsScreen(showingSettings: $showingSettings)
+                } label: {
+                    Label("Clouds", systemImage: "cloud")
+                }
+                if model.config?.backup.jobs.contains(where: { $0.enabled }) == true {
+                    Button { confirmRunAll = true } label: {
+                        Label("Alle aktiven Jobs starten …", systemImage: "play.circle")
+                    }
+                    .disabled(!canRunJobs)
+                }
+            }
+            Section("Von diesem iPhone") {
                 NavigationLink { DeviceVaultView() } label: {
                     Label { VStack(alignment: .leading, spacing: 4) {
                         Text("Fotos & Dateien sichern")
-                        Text("Vom Gerät übertragen und die Zielkopie zurücklesen.")
+                        Text("Vom Gerät zum Sicherungsziel übertragen.")
                             .font(.caption).foregroundStyle(.secondary)
                     } } icon: { Image(systemName: "square.and.arrow.up") }
                 }
             }
-            Section("Schutz einrichten") {
-                NavigationLink { ProtectionSetupView() } label: {
-                    Label("Geführter Schutzassistent", systemImage: "checkmark.shield")
+            Section("Schutz prüfen") {
+                if model.config?.backup.pairs.contains(where: { $0.direction == "push" }) == true {
+                    NavigationLink { ProtectionSetupView() } label: {
+                        Label("Schutzprofil für Datenweg wählen", systemImage: "checkmark.shield")
+                    }
                 }
                 NavigationLink { RecoveryCenterView() } label: {
                     Label("Sicherungsbelege prüfen", systemImage: "checkmark.seal")
@@ -22,6 +67,23 @@ struct ProtectionHomeView: View {
             }
         }
         .navigationTitle("Sichern")
+        .confirmationDialog("Alle aktiven Jobs starten?", isPresented: $confirmRunAll, titleVisibility: .visible) {
+            Button("Probelauf starten") { startAll(dryRun: true) }
+            Button("Produktive Sicherung starten", role: .destructive) { startAll(dryRun: false) }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Ein Probelauf zeigt geplante Änderungen. Produktive Spiegelungen und Abgleiche können Dateien am Ziel löschen.")
+        }
+        .sensoryFeedback(.success, trigger: successFeedback)
+    }
+
+    private func startAll(dryRun: Bool) {
+        guard canRunJobs else { return }
+        starting = true
+        Task {
+            defer { starting = false }
+            if await model.runAllJobDefinitions(dryRun: dryRun), !dryRun { successFeedback += 1 }
+        }
     }
 }
 
@@ -54,7 +116,7 @@ struct ProtectionSetupView: View {
                     LabeledContent("Quelle", value: pair.local)
                     LabeledContent("Ziel", value: pair.remote)
                 } else {
-                    Text("Noch kein Push-Datenweg? Unter Mehr → Datenwege zuerst Quelle und Ziel anlegen.")
+                    Text("Wähle den Datenweg, dessen Sicherungsziel du schützen möchtest.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

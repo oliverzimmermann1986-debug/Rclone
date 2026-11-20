@@ -60,7 +60,12 @@ async function serve(request, response) {
     if (path.extname(file) === '.html') {
       body = Buffer.from(body.toString('utf8').replaceAll('__APP_VERSION__', 'ui-fixture').replace('<!--LOGIN_ERROR-->', '').replace('<!--LOGIN_CSRF-->', 'synthetic-ui-csrf-not-a-session').replace('<!--LOGIN_NEXT-->', ''));
     }
-    response.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store', 'Set-Cookie': 'rclone_sync_csrf=synthetic-ui-csrf; Path=/; SameSite=Strict' });
+    response.writeHead(200, {
+      'Content-Type': mime[path.extname(file)] || 'application/octet-stream',
+      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+      'Cache-Control': 'no-store',
+      'Set-Cookie': 'rclone_sync_csrf=synthetic-ui-csrf; Path=/; SameSite=Strict',
+    });
     response.end(body);
   } catch (error) {
     report.unexpectedRequests.push({ method: request.method, path: url.pathname, error: error.code || String(error) });
@@ -322,6 +327,11 @@ async function main() {
         await page.keyboard.press('Tab');
         assert(await page.locator('.skip-link').evaluate((element) => element === document.activeElement), 'First keyboard step must expose the skip link.');
         await focusedControlIsVisible(page);
+        if (await page.locator('.mobile-nav').isVisible()) {
+          await page.keyboard.press('Tab');
+          assert(await page.getByRole('button', { name: 'Navigation öffnen' }).evaluate((element) => element === document.activeElement), 'Closing the mobile sidebar must remove its links from the tab order.');
+          await page.keyboard.press('Shift+Tab');
+        }
         await page.keyboard.press('Enter');
         assert(await page.locator('#main-content').evaluate((element) => element === document.activeElement), 'Skip link must focus the main content.');
         for (const [id, label] of pages) {
@@ -330,8 +340,59 @@ async function main() {
             assert.equal(jsErrors.length, 0, jsErrors.join('\n'));
           });
         }
+        await checkCase(page, `${name}-clouds`, async () => {
+          await navigate(page, 'pairs', 'Datenwege');
+          await page.getByRole('tab', { name: 'Clouds', exact: true }).click();
+          const used = page.getByRole('button', { name: '3 Datenwege für fixture-cloud anzeigen' });
+          await used.click();
+          const paths = page.getByRole('tabpanel', { name: 'Datenwege', exact: true });
+          assert.equal(await paths.locator('.pair-card:visible').count(), 3);
+          assert(await paths.getByText('fixture-cloud:Unterwegs', { exact: true }).isVisible());
+          assert.equal(await paths.locator('.pair-details:visible').count(), 0);
+          await paths.locator('.pair-expand').first().click();
+          assert.equal(await paths.locator('.pair-details:visible').count(), 1);
+          await noOverflow(page);
+          await paths.locator('.pair-expand').first().click();
+          await page.getByRole('tab', { name: 'Clouds', exact: true }).click();
+          await page.getByRole('button', { name: '0 Datenwege für fixture-archive anzeigen' }).click();
+          assert(await paths.getByText('Keine passenden Datenwege', { exact: true }).isVisible());
+          await paths.getByRole('button', { name: 'Cloud-Filter entfernen' }).click();
+          assert.equal(await paths.locator('.pair-card:visible').count(), 3);
+          await page.getByRole('tab', { name: 'Clouds', exact: true }).click();
+          assert(await used.isVisible());
+          await page.getByRole('button', { name: 'rclone-Konfiguration testen', exact: true }).click();
+          await page.getByText('rclone-Konfiguration geprüft.', { exact: true }).waitFor({ state: 'visible' });
+          await noOverflow(page);
+          assert.equal(jsErrors.length, 0, jsErrors.join('\n'));
+        });
+        await checkCase(page, `${name}-job-editor`, async () => {
+          await navigate(page, 'definitions', 'Jobs');
+          const job = page.locator('.job-definition-record').first();
+          assert.equal(await job.locator('.record-schedule').innerText(), 'Täglich um 03:00 Uhr');
+          assert.equal(await job.locator('.job-editor').isVisible(), false);
+          await job.locator('summary').focus();
+          await page.keyboard.press('Enter');
+          assert(await job.getByRole('button', { name: 'Probelauf', exact: true }).isVisible());
+          await noOverflow(page);
+          await page.getByRole('tab', { name: 'Zeitplanung', exact: true }).click();
+          assert(await page.getByRole('heading', { name: 'Nächste 24 Stunden', exact: true }).isVisible());
+          await noOverflow(page);
+          await page.getByRole('tab', { name: 'Jobliste', exact: true }).click();
+          assert.equal(jsErrors.length, 0, jsErrors.join('\n'));
+        });
         await navigate(page, 'dashboard', 'Lagebild');
         if (scenario.name !== 'desktop-200-percent-reflow') {
+          await checkCase(page, `${name}-guided-setup`, async () => {
+            await navigate(page, 'pairs', 'Datenwege');
+            await page.getByRole('button', { name: 'Datenweg einrichten', exact: true }).click();
+            const wizard = page.locator('article[aria-labelledby="pair-wizard-heading"]');
+            await wizard.waitFor({ state: 'visible' });
+            await page.waitForFunction(() => document.activeElement?.id === 'pair-wizard-heading');
+            await noOverflow(page);
+            await wizard.getByRole('button', { name: 'Schließen', exact: true }).click();
+            assert.equal(jsErrors.length, 0, jsErrors.join('\n'));
+          });
+          await navigate(page, 'dashboard', 'Lagebild');
           await checkCase(page, `${name}-menus`, async () => { await menusCase(page); assert.equal(jsErrors.length, 0, jsErrors.join('\n')); });
           await page.keyboard.press('Escape');
           assert.equal(await page.locator('.console-utilities').evaluate((element) => element.open), false);

@@ -106,10 +106,19 @@ def test_ios_operational_extension_views_and_navigation() -> None:
     system_view = (IOS_VIEWS / "SystemView.swift").read_text(encoding="utf-8")
     assert "LockdownControlView()" in system_view
     assert "ObjectLockAndScrubView()" in system_view
-    assert "CloudQuotaAndBudgetView()" in system_view
-    assert "CryptRemoteWizardView()" in system_view
+    assert "CloudsScreen(showingSettings: $showingSettings)" in system_view
     assert "VersionsLifecycleView()" in system_view
     assert "BandwidthHeatmapView()" in system_view
+
+    clouds_view = (IOS_VIEWS / "CloudsScreen.swift").read_text(encoding="utf-8")
+    assert 'browseRemote(path: "")' in clouds_view
+    assert (
+        "DataPathsScreen(showingSettings: $showingSettings, cloudPath: remote.path)"
+        in clouds_view
+    )
+    assert "CloudQuotaAndBudgetView()" in clouds_view
+    assert "CryptRemoteWizardView()" in clouds_view
+    assert "RemoteSetupView()" in clouds_view
 
     recovery_view = (IOS_VIEWS / "RecoveryCenterView.swift").read_text(encoding="utf-8")
     assert "TimeTravelBrowserView(" in recovery_view

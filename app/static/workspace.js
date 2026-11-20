@@ -83,7 +83,7 @@
       panel.setAttribute('tabindex', '0');
       panel.setAttribute('x-show', selected);
       panel.setAttribute('x-cloak', '');
-      panel.append(element('p', 'workspace-view-intro', group.description));
+      if (group.description) panel.append(element('p', 'workspace-view-intro', group.description));
       for (const node of group.nodes) panel.append(node);
       section.append(panel);
     }
@@ -98,19 +98,17 @@
       for (const child of Array.from(grid.children)) grid.before(child);
       grid.remove();
     }
+    const always = new Set();
     const metrics = section.querySelector(':scope > .metric-grid');
-    if (metrics && metrics.children.length > 1) {
-      const summary = element('div', 'overview-summary');
-      summary.setAttribute('data-workspace-group', 'overview');
-      const lead = metrics.firstElementChild;
+    const lead = metrics?.firstElementChild;
+    if (lead && metrics.children.length > 1) {
       lead.classList.add('overview-lead');
       metrics.classList.add('overview-facts');
-      metrics.before(summary);
-      summary.append(lead, metrics);
+      metrics.before(lead);
+      always.add(lead);
     }
     section.querySelector('.copy-overview')?.classList.add('overview-primary');
     section.querySelector('.copy-matrix-summary')?.classList.add('overview-secondary');
-    const always = new Set();
     const live = section.querySelector('.control-panel .live-progress');
     if (live) {
       const progress = element('article', 'panel workspace-live overview-live');
@@ -151,12 +149,10 @@
     attention.append(copy, button);
     section.querySelector(':scope > .page-heading')?.after(attention);
     always.add(attention);
-    const scheduler = section.querySelector(':scope > .scheduler-control-strip');
-    if (scheduler) always.add(scheduler);
     groupPage('dashboard', [
       ['overview', 'Überblick', 'Schutzstatus, Sicherungskopien und die letzten Läufe.'],
       ['paths', 'Datenweg-Status', 'Ergebnis und nächste Schritte je Datenweg.'],
-      ['control', 'Manuell ausführen', 'Vor einem produktiven Lauf zuerst den Plan oder einen Probelauf prüfen.'],
+      ['control', 'Ausführen', 'Hier kannst du Läufe starten und die Automatik pausieren.'],
       ['resources', 'Serverdaten', 'Ressourcen und technische Informationen dieses Servers.'],
     ], (node) => {
       if (node.classList.contains('control-panel') || node.querySelector('#pbs-targets-heading')) return 'control';
@@ -168,11 +164,11 @@
     // reading order on desktop and mobile. No state is inferred from layout.
     let anchor = section.querySelector(':scope > .page-heading');
     for (const node of [
+      lead,
       section.querySelector(':scope > .skeleton-grid'),
       section.querySelector(':scope > .alert-stack'),
       attention,
       section.querySelector(':scope > .workspace-live'),
-      scheduler,
       section.querySelector(':scope > .workspace-tabs'),
     ].filter(Boolean)) {
       if (anchor) anchor.after(node);
@@ -180,7 +176,7 @@
     }
     const overview = section.querySelector('#workspace-panel-dashboard-overview');
     const copies = overview?.querySelector('.copy-overview');
-    const summary = overview?.querySelector('.overview-summary');
+    const summary = overview?.querySelector('.overview-facts');
     if (copies && summary) summary.after(copies);
     const matrix = overview?.querySelector('.copy-matrix-summary');
     const recent = overview?.querySelector('.job-list')?.closest('article');
@@ -220,7 +216,7 @@
       secondary.remove();
     }
     groupPage('recovery', [
-      ['restore', 'Dateien zurückholen', 'Stand und Dateien auswählen. Wiederherstellungen bleiben zuerst im Staging.'],
+      ['restore', 'Dateien zurückholen', 'Zurückgeholte Dateien landen zuerst in einem separaten Ordner.'],
       ['staging', 'Zurückgeholte Dateien', 'Ergebnis, Prüfstatus und Ablageort deiner Wiederherstellungen.'],
       ['quarantine', 'Quarantäne', 'Unerwartete Quellenänderungen prüfen, bevor produktive Läufe wieder freigegeben werden.'],
       ['handover', 'Notfallpaket', 'Eine verschlüsselte Übergabeakte für erreichbare Vault-Zielkopien erstellen.'],
@@ -259,83 +255,7 @@
     return details;
   }
 
-  function organizeEditors() {
-    const jobs = page('definitions');
-    const template = jobs?.querySelector('.definition-list > template');
-    if (template) {
-      const root = template.content;
-      root.querySelector('.definition-row')?.classList.add('job-definition-record');
-      const assignments = root.querySelector('.definition-assignments');
-      if (assignments) {
-        const pickerDetails = assignments.querySelector('details.assignment-picker');
-        if (pickerDetails) {
-          const flatPicker = element('div', 'assignment-picker');
-          const pickerSummary = pickerDetails.querySelector(':scope > summary');
-          if (pickerSummary) {
-            const head = element('div', 'assignment-picker-head');
-            while (pickerSummary.firstChild) head.append(pickerSummary.firstChild);
-            flatPicker.append(head);
-            pickerSummary.remove();
-          }
-          while (pickerDetails.firstChild) flatPicker.append(pickerDetails.firstChild);
-          pickerDetails.replaceWith(flatPicker);
-        }
-        const details = disclosure(assignments, 'Datenwege & Ausführung', '', '!job.id');
-        const count = element('small');
-        count.setAttribute('x-text', "job.data_path_ids.length + ' Datenweg(e) zugewiesen'");
-        details.querySelector('summary > span').append(count);
-        const options = root.querySelector('.definition-options');
-        if (options) {
-          const optionsDetails = options.closest('details');
-          if (optionsDetails && optionsDetails !== details) {
-            const summaryText = optionsDetails.querySelector(':scope > summary')?.textContent.trim();
-            if (options === optionsDetails) {
-              const flatOptions = element('div', 'definition-options');
-              if (summaryText) flatOptions.append(element('h4', 'subheading', summaryText));
-              optionsDetails.querySelector(':scope > summary')?.remove();
-              while (optionsDetails.firstChild) flatOptions.append(optionsDetails.firstChild);
-              details.append(flatOptions);
-              optionsDetails.remove();
-            } else {
-              if (summaryText && !options.querySelector('h4, .subheading')) {
-                options.prepend(element('h4', 'subheading', summaryText));
-              }
-              details.append(options);
-              optionsDetails.remove();
-            }
-          } else {
-            details.append(options);
-          }
-        }
-      }
-    }
-    const pairs = page('pairs');
-    const pairTemplate = pairs?.querySelector('.pair-card-list > template');
-    if (pairTemplate) {
-      const root = pairTemplate.content;
-      const card = root.querySelector('.pair-card');
-      const top = root.querySelector('.pair-card-top');
-      if (card && top) {
-        card.classList.add('data-path-record');
-        const summary = element('div', 'data-path-summary');
-        top.after(summary);
-        for (const selector of ['.pair-tags', '.pair-warning-row', '.pair-size-row', '.pair-quick-actions']) {
-          const node = root.querySelector(selector);
-          if (node) summary.append(node);
-        }
-        const composition = root.querySelector('.composition-detail');
-        const footer = root.querySelector('.pair-footer-actions');
-        if (composition && footer) footer.before(composition);
-      }
-      const actions = root.querySelector('.pair-quick-actions');
-      if (actions) {
-        const buttons = Array.from(actions.children).filter((node) => node.tagName === 'BUTTON');
-        if (buttons.length > 2) {
-          const details = actionMenu(buttons.slice(1), 'Weitere Aktionen');
-          buttons[0].after(details);
-        }
-      }
-    }
+  function organizeSettings() {
     const scheduler = document.querySelector('#settings-panel-scheduler .scheduler-main');
     if (scheduler) {
       for (const section of Array.from(scheduler.children)) {
@@ -351,36 +271,30 @@
 
   function organizeDataPaths() {
     const section = page('pairs');
-    const list = section?.querySelector('.pair-card-list');
     const toolbar = section?.querySelector(':scope > .toolbar');
-    if (!list || !toolbar) return;
-    toolbar.classList.add('data-paths-toolbar');
-    const meta = toolbar.querySelector('.toolbar-meta');
-    const tools = [toolbar.querySelector('.pair-template-action'), toolbar.querySelector('.toolbar-actions')].filter(Boolean);
-    if (tools.length) toolbar.append(actionMenu(tools, 'Ansicht & Vorlagen', 'data-paths-options'));
-    const heading = sectionHeading('Deine Datenwege', meta);
-    toolbar.before(heading);
-    list.classList.add('records-list');
+    if (toolbar) {
+      toolbar.classList.add('data-paths-toolbar');
+      const tools = [toolbar.querySelector('.pair-template-action'), toolbar.querySelector('.toolbar-actions')].filter(Boolean);
+      if (tools.length) toolbar.append(actionMenu(tools, 'Ansicht & Vorlagen', 'data-paths-options'));
+    }
+    const template = section?.querySelector('.pair-card-list > template');
+    const actions = template?.content.querySelector('.pair-quick-actions');
+    if (actions) {
+      const buttons = Array.from(actions.children).filter((node) => node.tagName === 'BUTTON');
+      if (buttons.length > 2) buttons[0].after(actionMenu(buttons.slice(1), 'Weitere Aktionen'));
+    }
+    groupPage('pairs', [
+      ['paths', 'Datenwege'],
+      ['clouds', 'Clouds'],
+    ], () => 'paths', new Set([section?.querySelector('.console-savebar')]));
   }
 
   function organizeJobPlanning() {
     const section = page('definitions');
-    const list = section?.querySelector('.definition-list');
-    if (!list) return;
-    const workbench = element('div', 'definitions-workbench records-section');
-    const count = element('span', 'records-meta');
-    count.setAttribute('x-text', "(config.backup.jobs || []).length + ' konfiguriert'");
-    list.before(workbench);
-    workbench.append(sectionHeading('Deine Jobs', count), list);
-    const empty = section.querySelector(':scope > .empty-state');
-    if (empty) workbench.append(empty);
-    const timeline = section.querySelector('.schedule-timeline');
-    timeline?.classList.add('definitions-schedule');
-    const bandwidth = section.querySelector('[aria-labelledby="bandwidth-heading"]');
-    if (bandwidth) {
-      const details = disclosure(bandwidth, 'Bandbreite & Zeitfenster', 'Vergangene Übertragungen auswerten und Zeitplan-Vorschläge prüfen');
-      details.classList.add('console-disclosure', 'definitions-analysis');
-    }
+    groupPage('definitions', [
+      ['jobs', 'Jobliste'],
+      ['schedule', 'Zeitplanung'],
+    ], () => 'jobs', new Set([section?.querySelector('.console-savebar')]));
   }
 
   function organizeHistory() {
@@ -415,7 +329,7 @@
   organizeDashboard();
   organizeSystem();
   organizeRecovery();
-  organizeEditors();
+  organizeSettings();
   organizeDataPaths();
   organizeJobPlanning();
   organizeHistory();
@@ -451,7 +365,28 @@
         const result = await navigate.call(this, next, ...navigateArgs);
         if (this.page !== previous && defaults[this.page]) this.workspaceViews[this.page] = defaults[this.page];
         if (this.page === next && destination) this.workspaceSelect(next, destination.view);
+        else if (this.page === 'pairs' && next === 'pairs') {
+          this.pairCloudFilter = '';
+          this.workspaceSelect('pairs', 'paths');
+        }
         return result;
+      },
+      workspaceOpen(name, id) {
+        this.workspaceDestination = { page: name, view: id };
+        return this.navigate(name);
+      },
+      workspaceShowCloudPaths(remote) {
+        this.pairCloudFilter = remote;
+        this.pairSearch = '';
+        this.pairFilter = 'all';
+        this.activeTag = '';
+        this.workspaceSelect('pairs', 'paths');
+      },
+      workspaceAddJob() {
+        this.workspaceSelect('definitions', 'jobs');
+        this.addJobDefinition();
+        const index = this.config.backup.jobs.length - 1;
+        this.$nextTick(() => document.getElementById(`job-name-${index}`)?.focus());
       },
       workspaceSelect(name, id) {
         const group = pageGroups.get(name)?.find((item) => item.id === id);
@@ -461,6 +396,7 @@
         const previousPanel = document.activeElement?.closest('.workspace-view');
         const restoreFocus = previousPanel && previousPanel.id !== `workspace-panel-${name}-${id}`;
         this.workspaceViews[name] = id;
+        if (name === 'pairs' && id === 'clouds') this.loadCloudConnections?.();
         this.$nextTick(() => {
           if (restoreFocus) {
             document.getElementById(`workspace-tab-${name}-${id}`)?.focus();
@@ -495,6 +431,7 @@
           }
         }
         for (const pair of this.storagePairs?.() || []) {
+          if (pair.enabled === false || this.config?.backup?.pairs?.some((entry) => entry.name === pair.name && entry.enabled === false)) continue;
           const evidence = pair.restore_evidence;
           if (!evidence || (evidence.state === 'passed' && evidence.valid !== false
             && Number(evidence.valid_until) * 1000 > Date.now())) continue;

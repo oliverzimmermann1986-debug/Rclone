@@ -91,7 +91,7 @@ Mehrere der folgenden Funktionen brauchen Rechte, die die Standard-Units nicht v
 - Der Crypt-Assistent legt ein rclone-`crypt`-Remote über einem vorhandenen Basis-Remote an und zeigt die Schlüssel genau einmal an. Sie fehlen im Notfallpaket und gehören in einen Passwortmanager. „Zero-Knowledge“ gilt nur gegenüber dem Cloud-Anbieter: `rclone.conf` enthält die Schlüssel obscured, also umkehrbar verschleiert und nicht verschlüsselt.
 - Datenwege tragen bis zu 10 `tags`; die Oberfläche filtert danach und startet gleich markierte Datenwege gesammelt.
 
-Nicht umgesetzt ist eine Content-Security-Policy ohne `'unsafe-eval'`, weil die Oberfläche Alpine-Ausdrücke direkt im HTML nutzt und die CSP-Variante von Alpine sie nicht unterstützt. Die iOS-App zeigt die neuen Funktionen noch nicht.
+Alpine verwendet vorab erzeugte Bindungen für die Weboberfläche. Die Content-Security-Policy erlaubt keine dynamische Auswertung von JavaScript-Strings. Nach Änderungen an Alpine-Bindungen in `index.html` oder `workspace.js` die mitgelieferte Datei mit `npm run build:bindings --prefix tests/web` aktualisieren. Der Server braucht dafür keine Node-Installation. Die iOS-App zeigt die neuen Funktionen noch nicht.
 
 ## Native iPhone-App
 
