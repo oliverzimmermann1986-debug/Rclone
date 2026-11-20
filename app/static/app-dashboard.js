@@ -81,16 +81,28 @@ export const dashboardMethods = {
     if (!data) return 'pending';
     if ((data.alerts || []).some((a) => a.level === 'error')) return 'error';
     if ((data.pairs?.health || []).some((p) => ['error', 'failed', 'timeout', 'stale'].includes(p.last_status) || (p.error && !['ok', 'success', 'cancelled'].includes(p.last_status)))) return 'error';
-    if (this.storagePairs().some((p) => p.restore_evidence?.state === 'failed')) return 'error';
+    if (this.storagePairs().some((p) => p.enabled !== false && p.restore_evidence?.state === 'failed')) return 'error';
     if (data.services?.scheduler?.configured_enabled === false || data.services?.scheduler?.control?.paused) return 'warn';
     if ((data.alerts || []).some((a) => ['warn', 'warning'].includes(a.level))) return 'warn';
     if (this.busy()) return 'running';
+    if (['empty', 'inactive'].includes(this.backupSetupState())) return 'setup';
     return 'ok';
   },
 
   systemLabel() {
     const level = this.systemLevel();
+    if (level === 'setup') {
+      if (this.backupSetupState() === 'inactive') return 'Keine aktiven Datenwege';
+      return this.config.pbs?.enabled ? 'Noch keine Datenwege eingerichtet' : 'Noch keine Sicherung eingerichtet';
+    }
     return ({ error: 'Handlungsbedarf', warn: 'Hinweise', running: `${this.runningKind()} läuft`, pending: 'Lädt', ok: 'Betrieb normal' })[level];
+  },
+
+  backupSetupState() {
+    if (!this.configLoaded || this.configError) return 'unknown';
+    const pairs = this.config.backup?.pairs || [];
+    if (!pairs.length) return 'empty';
+    return pairs.some((pair) => pair.enabled !== false) ? 'ready' : 'inactive';
   },
 
   async loadOverview(silent = false) {

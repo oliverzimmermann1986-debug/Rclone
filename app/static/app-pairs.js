@@ -172,7 +172,16 @@ export const pairsMethods = {
     this.pairOpen[idx] = true;
     this.markConfigDirty();
     this.showToast(selected.mode === 'copy' ? 'Sichere Copy-Vorlage angelegt' : 'Deaktivierte Vorlage angelegt – Löschschutz prüfen', selected.mode === 'copy' ? 'ok' : 'warn');
-    this.$nextTick(() => document.getElementById(`pair-${idx}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    this.$nextTick(() => document.getElementById(`pair-${idx}`)?.querySelector('.pair-expand')?.focus());
+  },
+
+  addPairFromMenu(event) {
+    const menu = event.currentTarget.closest('details');
+    if (menu) menu.open = false;
+    this.pairSearch = '';
+    this.pairFilter = 'all';
+    this.activeTag = '';
+    this.addPair('push-copy');
   },
 
   // rclone bricht ab, wenn --backup-dir im Ziel liegt. Der Vorschlag setzt die
@@ -996,7 +1005,20 @@ export const pairsMethods = {
     if (result?.hooks) this.hooksAvailable = result.hooks;
   },
 
+  async startBackupSetup() {
+    await this.navigate('pairs');
+    if (this.page === 'pairs') this.openPairWizard();
+  },
+
+  focusPairWizard() {
+    this.$nextTick(() => document.getElementById('pair-wizard-heading')?.focus());
+  },
+
   openPairWizard() {
+    if (this.pairWizard.open) {
+      this.focusPairWizard();
+      return;
+    }
     this.pairWizard = {
       open: true,
       step: 1,
@@ -1011,6 +1033,7 @@ export const pairsMethods = {
       backupDir: '',
       requireMountpoint: false,
     };
+    this.focusPairWizard();
   },
 
   applyPairWizardPreset(presetId) {
@@ -1055,6 +1078,7 @@ export const pairsMethods = {
 
   closePairWizard() {
     this.pairWizard.open = false;
+    this.$nextTick(() => document.getElementById('start-pair-wizard')?.focus());
   },
 
   nextPairWizardStep() {
@@ -1069,11 +1093,17 @@ export const pairsMethods = {
     if (this.pairWizard.step === 2 && !this.pairWizard.backupDir) {
       this.pairWizard.backupDir = this.suggestedBackupDir(this.pairWizard.target);
     }
-    if (this.pairWizard.step < 4) this.pairWizard.step += 1;
+    if (this.pairWizard.step < 4) {
+      this.pairWizard.step += 1;
+      this.focusPairWizard();
+    }
   },
 
   prevPairWizardStep() {
-    if (this.pairWizard.step > 1) this.pairWizard.step -= 1;
+    if (this.pairWizard.step > 1) {
+      this.pairWizard.step -= 1;
+      this.focusPairWizard();
+    }
   },
 
   applyPairWizard() {
@@ -1118,9 +1148,13 @@ export const pairsMethods = {
     };
     this.config.backup.pairs.push(pair);
     const idx = this.config.backup.pairs.length - 1;
+    this.pairSearch = '';
+    this.pairFilter = 'all';
+    this.activeTag = '';
     this.pairOpen[idx] = true;
     this.pairWizard.open = false;
     this.markConfigDirty();
-    this.showToast(`Datenweg „${pair.name}“ über den Assistenten angelegt – vor dem Aktivieren prüfen`);
+    this.showToast(`Entwurf „${pair.name}“ angelegt. Starte einen Probelauf, bevor du den Datenweg aktivierst.`);
+    this.$nextTick(() => document.getElementById(`pair-${idx}`)?.querySelector('.pair-expand')?.focus());
   },
 };

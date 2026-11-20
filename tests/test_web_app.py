@@ -179,12 +179,14 @@ def test_login_csrf_config_revision_and_secret_redaction(tmp_path: Path, monkeyp
 
         index_page = client.get("/")
         assert index_page.status_code == 200
+        assert "'unsafe-eval'" not in index_page.headers["content-security-policy"]
         assert app_version == "2.5.1"
         asset_revision = main.web_asset_cache_revision(main.STATIC_DIR, app_version)
         for asset in (
             "manifest.json",
             "style.css",
             "alpine.min.js",
+            "alpine-expressions.js",
             "ui-helpers.js",
             "app.js",
             "workspace.js",

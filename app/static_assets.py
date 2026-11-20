@@ -16,6 +16,7 @@ from starlette.types import Scope
 WEB_CACHE_ASSETS = (
     "style.css",
     "alpine.min.js",
+    "alpine-expressions.js",
     "ui-helpers.js",
     "app.js",
     "app-core.js",

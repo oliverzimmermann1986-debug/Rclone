@@ -255,7 +255,7 @@ export const coreMethods = {
   async navigate(next, updateHash = true) {
     if (!this.pages.includes(next)) return;
     if (next === this.page) {
-      this.closeNavigation(false);
+      this.closeNavigation();
       return;
     }
     if ((this.configDirty || this.filterFile.dirty) && ['pairs', 'definitions', 'settings'].includes(this.page) && next !== this.page) {
@@ -359,9 +359,9 @@ export const coreMethods = {
       { label: 'Gehe zu System', keywords: 'system diagnose', run: () => this.navigate('doctor') },
       { label: 'Gehe zu Wiederherstellung', keywords: 'recovery restore zeitreise staging', run: () => this.navigate('recovery') },
       { label: 'Gehe zu Einstellungen', keywords: 'settings konfiguration filter pbs', run: () => this.navigate('settings') },
-      { label: 'Datenweg-Assistent starten', keywords: 'wizard assistent neuer datenweg', run: () => { this.navigate('pairs'); this.openPairWizard(); } },
+      { label: 'Datenweg-Assistent starten', keywords: 'wizard assistent neuer datenweg', run: () => this.startBackupSetup() },
       { label: 'Quick-Sync öffnen', keywords: 'quick sync kopieren', run: () => this.openQuick() },
-      { label: 'Dry-Run starten', keywords: 'trockenlauf backup', run: () => this.runBackup(true) },
+      { label: 'Probelauf starten', keywords: 'dry-run trockenlauf backup', run: () => this.runBackup(true) },
       { label: 'Notfall-Lockdown öffnen', keywords: 'lockdown notfall ransomware sperre', run: () => this.openLockdown() },
       { label: 'Support-Bundle herunterladen', keywords: 'support diagnose export', run: () => this.downloadSupportBundle() },
     ];

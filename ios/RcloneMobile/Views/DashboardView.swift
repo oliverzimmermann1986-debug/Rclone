@@ -3,9 +3,7 @@ import SwiftUI
 struct DashboardView: View {
     @EnvironmentObject private var model: AppModel
     @Binding var showingSettings: Bool
-    @State private var confirmRunAll = false
     @State private var confirmCancel = false
-    @State private var successFeedback = 0
     @State private var selectedProtectionPath: StoragePair?
     @State private var showingAssessment = false
     @State private var showingIncidents = false
@@ -204,24 +202,8 @@ struct DashboardView: View {
             ToolbarItem(placement: .topBarLeading) {
                 SettingsButton(showingSettings: $showingSettings)
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { confirmRunAll = true } label: {
-                    Image(systemName: "play.fill")
-                }
-                .accessibilityLabel("Alle Jobs starten")
-            }
         }
         .refreshable { await model.refresh() }
-        .confirmationDialog("Alle Jobs jetzt starten?", isPresented: $confirmRunAll, titleVisibility: .visible) {
-            Button("Probelauf starten") { Task { _ = await model.runAllJobDefinitions(dryRun: true) } }
-            Button("Produktive Sicherung starten", role: .destructive) {
-                Task { if await model.runAllJobDefinitions() { successFeedback += 1 } }
-            }
-
-            Button("Abbrechen", role: .cancel) {}
-        } message: {
-            Text("Produktive Sync- und Bisync-Läufe können Zieldaten löschen. Prüfe zuerst einen Plan oder Probelauf.")
-        }
         .confirmationDialog("Lauf abbrechen?", isPresented: $confirmCancel, titleVisibility: .visible) {
             Button("Abbruch anfordern", role: .destructive) {
                 Task { _ = await model.cancelBackup() }
@@ -230,7 +212,6 @@ struct DashboardView: View {
         } message: {
             Text("Bereits übertragene Dateien bleiben bestehen.")
         }
-        .sensoryFeedback(.success, trigger: successFeedback)
         .sheet(item: $selectedProtectionPath) { pair in
             NavigationStack { ProtectionPathDetailView(pair: pair) }
                 .presentationDetents([.medium, .large])

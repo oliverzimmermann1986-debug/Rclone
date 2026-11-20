@@ -19,7 +19,7 @@ struct RootTabView: View {
                 .tabItem { Label("Übersicht", systemImage: "shield.checkered") }
                 .tag(0)
 
-            NavigationStack { ProtectionHomeView() }
+            NavigationStack { ProtectionHomeView(showingSettings: $showingSettings) }
                 .tabItem { Label("Sichern", systemImage: "square.and.arrow.up") }
                 .tag(1)
 

@@ -2,7 +2,8 @@
   "name": "sicherpfad-web-checks",
   "private": true,
   "scripts": {
-    "test": "node runtime-behavior.cjs && node review-regressions.cjs && node workspace-dom.cjs && node workspace-alpine.cjs",
+    "test": "node compile-alpine.cjs --check && node runtime-behavior.cjs && node review-regressions.cjs && node workspace-dom.cjs && node workspace-alpine.cjs",
+    "build:bindings": "node compile-alpine.cjs",
     "test:visual": "node ui-visual.cjs"
   },
   "devDependencies": {

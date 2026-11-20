@@ -436,6 +436,7 @@ def test_security_hardening_path_encoding_no_force_url_inbox_quota_and_protected
 def test_usability_staging_export_diff_lockdown_banner_safe_run_and_pair_zfs_guard():
     staging = _swift("Views/RecoveryStagingView.swift")
     dashboard = _swift("Views/DashboardView.swift")
+    protection = _swift("Views/ProtectionHomeView.swift")
     model = _swift("Core/AppModel.swift")
     models = _swift("Core/Models.swift")
     config = _swift("Views/ConfigurationViews.swift")
@@ -453,7 +454,7 @@ def test_usability_staging_export_diff_lockdown_banner_safe_run_and_pair_zfs_gua
     assert "NOTFALL-LOCKDOWN AKTIV" in dashboard
     assert "LockdownControlView()" in dashboard
 
-    assert dashboard.index('Button("Probelauf starten")') < dashboard.index(
+    assert protection.index('Button("Probelauf starten")') < protection.index(
         'Button("Produktive Sicherung starten"'
     )
 

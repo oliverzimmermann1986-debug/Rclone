@@ -98,19 +98,17 @@
       for (const child of Array.from(grid.children)) grid.before(child);
       grid.remove();
     }
+    const always = new Set();
     const metrics = section.querySelector(':scope > .metric-grid');
-    if (metrics && metrics.children.length > 1) {
-      const summary = element('div', 'overview-summary');
-      summary.setAttribute('data-workspace-group', 'overview');
-      const lead = metrics.firstElementChild;
+    const lead = metrics?.firstElementChild;
+    if (lead && metrics.children.length > 1) {
       lead.classList.add('overview-lead');
       metrics.classList.add('overview-facts');
-      metrics.before(summary);
-      summary.append(lead, metrics);
+      metrics.before(lead);
+      always.add(lead);
     }
     section.querySelector('.copy-overview')?.classList.add('overview-primary');
     section.querySelector('.copy-matrix-summary')?.classList.add('overview-secondary');
-    const always = new Set();
     const live = section.querySelector('.control-panel .live-progress');
     if (live) {
       const progress = element('article', 'panel workspace-live overview-live');
@@ -151,12 +149,10 @@
     attention.append(copy, button);
     section.querySelector(':scope > .page-heading')?.after(attention);
     always.add(attention);
-    const scheduler = section.querySelector(':scope > .scheduler-control-strip');
-    if (scheduler) always.add(scheduler);
     groupPage('dashboard', [
       ['overview', 'Überblick', 'Schutzstatus, Sicherungskopien und die letzten Läufe.'],
       ['paths', 'Datenweg-Status', 'Ergebnis und nächste Schritte je Datenweg.'],
-      ['control', 'Manuell ausführen', 'Vor einem produktiven Lauf zuerst den Plan oder einen Probelauf prüfen.'],
+      ['control', 'Ausführen', 'Hier kannst du Läufe starten und die Automatik pausieren.'],
       ['resources', 'Serverdaten', 'Ressourcen und technische Informationen dieses Servers.'],
     ], (node) => {
       if (node.classList.contains('control-panel') || node.querySelector('#pbs-targets-heading')) return 'control';
@@ -168,11 +164,11 @@
     // reading order on desktop and mobile. No state is inferred from layout.
     let anchor = section.querySelector(':scope > .page-heading');
     for (const node of [
+      lead,
       section.querySelector(':scope > .skeleton-grid'),
       section.querySelector(':scope > .alert-stack'),
       attention,
       section.querySelector(':scope > .workspace-live'),
-      scheduler,
       section.querySelector(':scope > .workspace-tabs'),
     ].filter(Boolean)) {
       if (anchor) anchor.after(node);
@@ -180,7 +176,7 @@
     }
     const overview = section.querySelector('#workspace-panel-dashboard-overview');
     const copies = overview?.querySelector('.copy-overview');
-    const summary = overview?.querySelector('.overview-summary');
+    const summary = overview?.querySelector('.overview-facts');
     if (copies && summary) summary.after(copies);
     const matrix = overview?.querySelector('.copy-matrix-summary');
     const recent = overview?.querySelector('.job-list')?.closest('article');
@@ -220,7 +216,7 @@
       secondary.remove();
     }
     groupPage('recovery', [
-      ['restore', 'Dateien zurückholen', 'Stand und Dateien auswählen. Wiederherstellungen bleiben zuerst im Staging.'],
+      ['restore', 'Dateien zurückholen', 'Zurückgeholte Dateien landen zuerst in einem separaten Ordner.'],
       ['staging', 'Zurückgeholte Dateien', 'Ergebnis, Prüfstatus und Ablageort deiner Wiederherstellungen.'],
       ['quarantine', 'Quarantäne', 'Unerwartete Quellenänderungen prüfen, bevor produktive Läufe wieder freigegeben werden.'],
       ['handover', 'Notfallpaket', 'Eine verschlüsselte Übergabeakte für erreichbare Vault-Zielkopien erstellen.'],
@@ -495,6 +491,7 @@
           }
         }
         for (const pair of this.storagePairs?.() || []) {
+          if (pair.enabled === false || this.config?.backup?.pairs?.some((entry) => entry.name === pair.name && entry.enabled === false)) continue;
           const evidence = pair.restore_evidence;
           if (!evidence || (evidence.state === 'passed' && evidence.valid !== false
             && Number(evidence.valid_until) * 1000 > Date.now())) continue;

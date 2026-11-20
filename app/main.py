@@ -555,7 +555,7 @@ def _apply_security_headers(response, request: Request, request_id: str):
     response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; "
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     )
     hsts_seconds = int(
@@ -728,6 +728,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 STATIC_ASSET_ALLOWLIST = frozenset(
     {
         "alpine.min.js",
+        "alpine-expressions.js",
         "app.js",
         "app-core.js",
         "app-dashboard.js",

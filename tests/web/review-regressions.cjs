@@ -666,6 +666,31 @@ test('G-01: stacked remoteSetup sits above picker, Escape closes only the top la
   assert.equal(focusLog.at(-1), 'pageTrigger');
 });
 
+test('First-run status distinguishes missing configuration, inactive paths and a ready backup', async () => {
+  const { model: m } = harness();
+  m.configLoaded = false;
+  assert.equal(m.backupSetupState(), 'unknown');
+  m.configLoaded = true;
+  m.config.backup.pairs = [];
+  m.overview.data = { alerts: [], pairs: { health: [] } };
+  m.online = true;
+  assert.equal(m.backupSetupState(), 'empty');
+  assert.equal(m.systemLabel(), 'Noch keine Sicherung eingerichtet');
+
+  let openedSetup = false;
+  m.startBackupSetup = async () => { openedSetup = true; };
+  m.api = () => assert.fail('An empty configuration must never start a backup');
+  await m.runBackup(true);
+  assert.equal(openedSetup, true);
+
+  m.config.backup.pairs = [{ name: 'Archiv', enabled: false }];
+  assert.equal(m.backupSetupState(), 'inactive');
+  assert.equal(m.systemLabel(), 'Keine aktiven Datenwege');
+  m.config.backup.pairs[0].enabled = true;
+  assert.equal(m.backupSetupState(), 'ready');
+  assert.equal(m.systemLabel(), 'Betrieb normal');
+});
+
 test('G-03 & U-04: System nav active states, explicit workspace groups, wizard picker, flat job disclosures and PBS copy', () => {
   const html = fs.readFileSync(path.join(root, 'app/static/index.html'), 'utf8');
   const { document, window } = parseHTML(html);
@@ -676,10 +701,15 @@ test('G-03 & U-04: System nav active states, explicit workspace groups, wizard p
     assert(btn, 'System nav button exists');
     const cls = btn.getAttribute(':class');
     const cur = btn.getAttribute(':aria-current');
-    for (const subpage of ['doctor', 'recovery', 'settings']) {
+    for (const subpage of ['doctor', 'settings']) {
       assert(cls.includes(subpage), `active class includes ${subpage}`);
       assert(cur.includes(subpage), `aria-current includes ${subpage}`);
     }
+    assert(!cur.includes('recovery'), 'Recovery has its own navigation item');
+  }
+  for (const nav of ['.main-nav', '.mobile-nav']) {
+    const recovery = [...document.querySelectorAll(`${nav} button`)].find((btn) => btn.getAttribute('@click') === "navigate('recovery')");
+    assert.equal(recovery.getAttribute(':aria-current'), "page==='recovery' ? 'page' : null");
   }
 
   for (const sectionName of ['doctor', 'recovery']) {
@@ -934,6 +964,7 @@ test('U-05 & U-06: lockdown WebAuthn passkey step-up and dry-run preflight matri
   assert.equal(lockdownCall[2].reason, 'Verdachtsfall');
 
   // Dry-run records lastDryRun and openPreflightMatrix opens preflight matrix once completed
+  m.config.backup.pairs = [{ name: 'Fotos', enabled: true }];
   await m.runBackup(true);
   assert.equal(m.lastDryRun.id, 77);
   m.recentJobs = [{ id: 77, kind: 'backup', dry_run: true, status: 'ok' }];

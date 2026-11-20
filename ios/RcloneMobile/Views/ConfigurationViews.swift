@@ -35,6 +35,8 @@ struct DataPathsScreen: View {
                         systemImage: "arrow.left.arrow.right",
                         description: Text("Lege zuerst die Verbindung zwischen lokalem Ordner und Ziel an.")
                     )
+                    Button("Datenweg hinzufügen") { editor = PairEditorRequest(index: nil, pair: nil) }
+                        .disabled(configurationDraft.baseRevision == nil)
                 } else {
                     ForEach(Array(configurationDraft.pairs.enumerated()), id: \.element.id) { index, pair in
                         Button { editor = PairEditorRequest(index: index, pair: pair) } label: {
@@ -62,6 +64,15 @@ struct DataPathsScreen: View {
                 Text("Datenwege")
             } footer: {
                 if configurationDraft.isDirty { Text("Nicht gespeicherte Änderungen") }
+            }
+            if !configurationDraft.pairs.isEmpty && configurationDraft.definitions.isEmpty && !configurationDraft.isDirty {
+                Section {
+                    NavigationLink("Ersten Job einrichten") {
+                        JobsScreen(showingSettings: $showingSettings)
+                    }
+                } footer: {
+                    Text("Ein Job legt fest, wann und in welcher Reihenfolge deine Datenwege laufen.")
+                }
             }
             Section("Werkzeuge") {
                 NavigationLink { QuickSyncView() } label: {
@@ -222,6 +233,8 @@ struct JobsScreen: View {
                         systemImage: "calendar.badge.plus",
                         description: Text("Jobs legen Zeitplan, Reihenfolge und Ausführung der Datenwege fest.")
                     )
+                    Button("Job hinzufügen") { editor = JobEditorRequest(index: nil, definition: nil) }
+                        .disabled(configurationDraft.pairs.isEmpty)
                 } else {
                     ForEach(Array(configurationDraft.definitions.enumerated()), id: \.element.id) { index, definition in
                         Button {
@@ -261,7 +274,14 @@ struct JobsScreen: View {
             } header: {
                 Text("Jobdefinitionen")
             } footer: {
-                Text(configurationDraft.isDirty ? "Änderungen speichern, bevor du Plan oder Lauf startest." : "Nach links wischen: Plan prüfen. Nach rechts wischen: Probelauf oder Löschen.")
+                Text(configurationDraft.isDirty ? "Änderungen speichern, bevor du Plan oder Lauf startest." : "Wische über einen Job, um den Plan zu prüfen oder einen Probelauf zu starten.")
+            }
+            if let firstJob = configurationDraft.definitions.first, configurationDraft.definitions.count == 1, !configurationDraft.isDirty {
+                Section {
+                    Button { pendingRun = PendingJobRun(definition: firstJob, dryRun: true) } label: {
+                        Label("Probelauf für \(firstJob.name)", systemImage: "play.circle")
+                    }
+                }
             }
         }
         .listStyle(.insetGrouped)

@@ -60,7 +60,12 @@ async function serve(request, response) {
     if (path.extname(file) === '.html') {
       body = Buffer.from(body.toString('utf8').replaceAll('__APP_VERSION__', 'ui-fixture').replace('<!--LOGIN_ERROR-->', '').replace('<!--LOGIN_CSRF-->', 'synthetic-ui-csrf-not-a-session').replace('<!--LOGIN_NEXT-->', ''));
     }
-    response.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store', 'Set-Cookie': 'rclone_sync_csrf=synthetic-ui-csrf; Path=/; SameSite=Strict' });
+    response.writeHead(200, {
+      'Content-Type': mime[path.extname(file)] || 'application/octet-stream',
+      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+      'Cache-Control': 'no-store',
+      'Set-Cookie': 'rclone_sync_csrf=synthetic-ui-csrf; Path=/; SameSite=Strict',
+    });
     response.end(body);
   } catch (error) {
     report.unexpectedRequests.push({ method: request.method, path: url.pathname, error: error.code || String(error) });
@@ -322,6 +327,11 @@ async function main() {
         await page.keyboard.press('Tab');
         assert(await page.locator('.skip-link').evaluate((element) => element === document.activeElement), 'First keyboard step must expose the skip link.');
         await focusedControlIsVisible(page);
+        if (await page.locator('.mobile-nav').isVisible()) {
+          await page.keyboard.press('Tab');
+          assert(await page.getByRole('button', { name: 'Navigation öffnen' }).evaluate((element) => element === document.activeElement), 'Closing the mobile sidebar must remove its links from the tab order.');
+          await page.keyboard.press('Shift+Tab');
+        }
         await page.keyboard.press('Enter');
         assert(await page.locator('#main-content').evaluate((element) => element === document.activeElement), 'Skip link must focus the main content.');
         for (const [id, label] of pages) {
@@ -332,6 +342,17 @@ async function main() {
         }
         await navigate(page, 'dashboard', 'Lagebild');
         if (scenario.name !== 'desktop-200-percent-reflow') {
+          await checkCase(page, `${name}-guided-setup`, async () => {
+            await navigate(page, 'pairs', 'Datenwege');
+            await page.getByRole('button', { name: 'Datenweg einrichten', exact: true }).click();
+            const wizard = page.locator('article[aria-labelledby="pair-wizard-heading"]');
+            await wizard.waitFor({ state: 'visible' });
+            await page.waitForFunction(() => document.activeElement?.id === 'pair-wizard-heading');
+            await noOverflow(page);
+            await wizard.getByRole('button', { name: 'Schließen', exact: true }).click();
+            assert.equal(jsErrors.length, 0, jsErrors.join('\n'));
+          });
+          await navigate(page, 'dashboard', 'Lagebild');
           await checkCase(page, `${name}-menus`, async () => { await menusCase(page); assert.equal(jsErrors.length, 0, jsErrors.join('\n')); });
           await page.keyboard.press('Escape');
           assert.equal(await page.locator('.console-utilities').evaluate((element) => element.open), false);
