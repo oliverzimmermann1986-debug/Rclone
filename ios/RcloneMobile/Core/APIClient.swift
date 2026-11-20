@@ -436,7 +436,9 @@ final class APIClient: APIClientProtocol {
         session: URLSession? = nil,
         loginSession: URLSession? = nil,
         cookieStorage: HTTPCookieStorage? = nil,
-        sessionPersistence: (any SessionPersisting)? = nil
+        sessionPersistence: (any SessionPersisting)? = nil,
+        waitsForConnectivity: Bool = true,
+        resourceTimeout: TimeInterval = 90
     ) {
         self.baseURL = baseURL
         let originPolicy = APIOriginPolicy(baseURL: baseURL)
@@ -454,9 +456,9 @@ final class APIClient: APIClientProtocol {
         // route while iOS presents its permission dialog. Keep the request alive
         // long enough to continue after approval, but retain a bounded resource
         // timeout and the login screen's explicit cancel action.
-        configuration.waitsForConnectivity = true
+        configuration.waitsForConnectivity = waitsForConnectivity
         configuration.timeoutIntervalForRequest = 15
-        configuration.timeoutIntervalForResource = 90
+        configuration.timeoutIntervalForResource = resourceTimeout
         self.session = session ?? URLSession(configuration: configuration, delegate: originPolicy, delegateQueue: nil)
 
         if let loginSession {

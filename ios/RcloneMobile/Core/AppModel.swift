@@ -115,6 +115,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var isDemoMode = false
     @Published private(set) var savedServerProfiles: [SavedServerProfile] = []
 
+    let serverOverview: ServerOverviewModel
+
     private(set) var client: (any APIClientProtocol)?
     private var registeredPushToken: String?
     private var pushServerBinding: PushServerBinding?
@@ -205,6 +207,7 @@ final class AppModel: ObservableObject {
         clientFactory: @escaping (URL) -> any APIClientProtocol = { APIClient(baseURL: $0) }
     ) {
         self.defaults = defaults
+        self.serverOverview = ServerOverviewModel(defaults: defaults)
         self.runPollInterval = runPollInterval
         self.clientFactory = clientFactory
         self.webAuthnBrowserFactory = webAuthnBrowserFactory
@@ -1554,6 +1557,7 @@ final class AppModel: ObservableObject {
     }
 
     func forgetServerProfile(_ profile: SavedServerProfile) {
+        serverOverview.remove(profile)
         RecoveryOfflineStore().remove(server: profile.address, username: profile.username)
         if let url = try? APIClient.normalizedServerURL(profile.address) {
             SessionCookieStore().remove(for: url)
@@ -1569,6 +1573,18 @@ final class AppModel: ObservableObject {
         }
         savedServerProfiles.removeAll { $0.id == profile.id }
         persistServerProfiles()
+    }
+
+    func prepareOverviewConnection(url: URL) async {
+        await waitForLogoutCleanup(server: url.absoluteString)
+    }
+
+    func rememberOverviewServer(url: URL, username: String, rememberSession: Bool) {
+        var sessionOnly = Set(defaults.stringArray(forKey: "sessionOnlyServers") ?? [])
+        if rememberSession { sessionOnly.remove(url.absoluteString) }
+        else { sessionOnly.insert(url.absoluteString) }
+        defaults.set(Array(sessionOnly), forKey: "sessionOnlyServers")
+        rememberServerProfile(url: url, username: username)
     }
 
     private func rememberServerProfile(url: URL, username: String) {
@@ -1755,6 +1771,7 @@ final class AppModel: ObservableObject {
     }
 
     private func clearSessionState() {
+        serverOverview.reset()
         pushServerBinding = nil
         ProtectionWidgetSnapshot.clear()
         liveActivityCoordinator.endAll()

@@ -15,6 +15,7 @@ struct LoginView: View {
     @State private var loginTask: Task<Void, Never>?
     @State private var showHTTPWarning = false
     @State private var showingOfflineCard = false
+    @State private var showingServerOverview = false
     @State private var showingLegalInformation = false
     @FocusState private var focusedField: LoginFieldID?
 
@@ -82,6 +83,14 @@ struct LoginView: View {
                         loginButton.padding(.top, 22)
                         secureLoginButtons.padding(.top, 14)
                     }
+                    if !model.savedServerProfiles.isEmpty {
+                        Button("Alle Server ansehen") {
+                            focusedField = nil
+                            showingServerOverview = true
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .disabled(isSigningIn)
+                    }
                     Button("Offline-Notfallkarte") { showingOfflineCard = true }
                         .font(.footnote).frame(maxWidth: .infinity, minHeight: 44).padding(.top, 14)
                         .disabled(isSigningIn)
@@ -146,6 +155,16 @@ struct LoginView: View {
         }
         .sheet(isPresented: $showingLegalInformation) { LegalInformationSheet() }
         .sheet(isPresented: $showingOfflineCard) { OfflineRecoveryCardView() }
+        .sheet(isPresented: $showingServerOverview) {
+            NavigationStack {
+                ServerOverviewView()
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Fertig") { showingServerOverview = false }
+                        }
+                    }
+            }
+        }
         .alert("Passwort unverschlüsselt senden?", isPresented: $showHTTPWarning) {
             Button("Abbrechen", role: .cancel) {}
             Button("Über HTTP anmelden", role: .destructive, action: performLogin)

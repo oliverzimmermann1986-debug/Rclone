@@ -10,6 +10,15 @@ struct ServerLoginTarget: Equatable {
         url = try APIClient.normalizedServerURL(serverURL.absoluteString)
     }
 
+    init(address: String, persistedAddress: String?) throws {
+        if address == persistedAddress {
+            guard let savedURL = URL(string: address) else { throw APIError.invalidServer }
+            try self.init(serverURL: savedURL)
+        } else {
+            try self.init(address: address)
+        }
+    }
+
     init(address: String) throws {
         let input = try APIClient.normalizedServerURL(address)
         guard var components = URLComponents(url: input, resolvingAgainstBaseURL: false) else {
