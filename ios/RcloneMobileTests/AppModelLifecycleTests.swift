@@ -683,7 +683,12 @@ final class AppModelLifecycleTests: XCTestCase {
     }
 }
 
-private final class StubAPIClient: APIClientProtocol {
+final class StubAPIClient: APIClientProtocol {
+    var overviewResult: Result<OverviewResponse, Error>?
+    var baseStorage: StorageOverview?
+    var suspendOverview = false
+    private var overviewContinuation: CheckedContinuation<Void, Never>?
+    private(set) var overviewCallCount = 0
     var configError: Error?
     var logoutResult = LogoutResult(
         globalRevocation: true,
@@ -723,6 +728,8 @@ private final class StubAPIClient: APIClientProtocol {
 
     func login(username: String, password: String) async throws {}
 
+    func exchangeWebAuthnToken(_ token: String, verifier: String) async throws {}
+
     func setSessionPersistence(_ enabled: Bool) {
         persistenceChoices.append(enabled)
     }
@@ -732,7 +739,19 @@ private final class StubAPIClient: APIClientProtocol {
     }
 
     func getOverview() async throws -> OverviewResponse {
+        overviewCallCount += 1
+        let result = overviewResult
+        if suspendOverview {
+            await withCheckedContinuation { overviewContinuation = $0 }
+        }
+        if let result { return try result.get() }
         throw APIError.server(status: 503, message: "Overview nicht verfügbar")
+    }
+
+    func resumeOverview() {
+        suspendOverview = false
+        overviewContinuation?.resume()
+        overviewContinuation = nil
     }
 
     func getStorage(includeSizes: Bool, forceRefresh: Bool) async throws -> StorageOverview {
@@ -741,7 +760,7 @@ private final class StubAPIClient: APIClientProtocol {
             if let detailedStorage { return detailedStorage }
             throw URLError(.timedOut)
         }
-        return StorageOverview(pairs: [])
+        return baseStorage ?? StorageOverview(pairs: [])
     }
 
     func getConfig() async throws -> ConfigSnapshot {

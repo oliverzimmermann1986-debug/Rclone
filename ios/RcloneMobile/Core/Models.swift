@@ -605,6 +605,13 @@ struct ConfigSnapshot: Codable {
         )
     }
 
+    var configuredUsername: String? {
+        guard let web = extraSections["web"], case let .object(fields) = web,
+              let raw = fields["username"], case let .string(username) = raw,
+              !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return username
+    }
+
     var pbsConfiguration: PBSConfiguration {
         guard let value = extraSections["pbs"],
               let data = try? JSONEncoder().encode(value),

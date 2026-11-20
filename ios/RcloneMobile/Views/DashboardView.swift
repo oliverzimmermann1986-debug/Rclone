@@ -10,6 +10,11 @@ struct DashboardView: View {
 
     var body: some View {
         List {
+            Section {
+                NavigationLink { ServerOverviewView() } label: {
+                    Label("Alle Server", systemImage: "server.rack")
+                }
+            }
             if let lockdown = model.lockdownStatus, lockdown.active {
                 Section {
                     NavigationLink {
