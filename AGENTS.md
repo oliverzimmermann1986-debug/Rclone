@@ -1,5 +1,9 @@
 # Projektanweisungen
 
+Die verbindlichen automatischen Prüfungen und Laufzeitgrenzen stehen in
+[docs/GATE.md](docs/GATE.md). Vor Integration die dort genannten Ergebnisse für
+den exakten Commit prüfen.
+
 Dieser Einstieg verknüpft die vorhandenen Projektquellen mit gemeinsamen Arbeitsgrundsätzen. Bestehende CLAUDE-/Cursor-Regeln, bereichsspezifische Anweisungen und dokumentierte Zuständigkeiten bleiben erhalten.
 
 <!-- agent-os:instructions:v1 begin -->

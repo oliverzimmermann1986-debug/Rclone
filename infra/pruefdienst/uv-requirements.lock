@@ -1,0 +1,3 @@
+# Official PyPI wheel metadata verified 2026-11-18. Its managed-Python catalog
+# and checksum verification are pinned by this exact tool wheel.
+uv==0.13.9 --hash=sha256:d7f459fe4fd247d830351c75686d3996ace3c6f3f728eb0e85a30b7ada0cef19

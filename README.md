@@ -766,8 +766,13 @@ bereitgestelltes `gpg`. Fehlt es, bricht der Build ab; vor der Herkunftsprüfung
 wird kein `brew install` mehr ausgeführt. Build-Image und GPG-Bereitstellung sind
 Teil der externen Runner-Vertrauensbasis.
 
-CI prüft Python 3.10 bis 3.13. Lokal nach Installation von
-`requirements-dev.txt`:
+Die automatischen Linux-Prüfungen laufen auf dem zentralen Prüfserver über
+`.pruefdienst.json` und `scripts/ci/verify.sh`: Python 3.10 bis 3.13,
+Abhängigkeiten, Ruff, vollständige Testsuiten, Installer und Weboberfläche.
+Verbindlich sind `pruefdienst/release` und die weiterhin auf einem Mac laufende
+iOS-Prüfung `build-and-test` für den exakten Commit. Ablauf und Grenzen stehen
+in [docs/GATE.md](docs/GATE.md). Die folgenden Befehle gehören ausschließlich
+in eine dafür vorgesehene isolierte Testumgebung:
 
 ```bash
 python -m pip check
@@ -791,13 +796,14 @@ simulierten Verbindungsfehlern prüfen außerdem Teilausfälle, Fortschrittsabfr
 Wiederverbindung und die Bestätigung vor Restore-Tests. Eine Sichtprüfung auf
 Desktop und Mobilgerät bleibt zusätzlich erforderlich.
 
-Der Workflow `Web visual QA` rendert die tatsächlichen Webdateien mit synthetischen
-API-Antworten in einer isolierten Chromium-Umgebung. Seine Artefakte enthalten
+Die Browserstufe des Prüfdienstes rendert die tatsächlichen Webdateien mit synthetischen
+API-Antworten in einer isolierten Chromium-Umgebung. Ihre Nachweise enthalten
 Screenshots für Desktop und Mobilgerät in heller und dunkler Darstellung sowie
 einen maschinenlesbaren Prüfbericht. Geprüft werden außerdem Tastaturbedienung,
 Dialogfokus, reduzierte Bewegung und ein schmaler Reflow als Annäherung an 200 %
 Browserzoom. Die echte Zoomfunktion eines konkreten Gerätebrowsers bleibt eine
-zusätzliche Sichtprüfung.
+zusätzliche Sichtprüfung. Die bisherigen GitHub-Linux-/Browser-Workflows bleiben
+manuell ausführbar; die iOS-Prüfung bleibt automatisch aktiv.
 
 
 ### Recovery-Aufbewahrung und lokale Pfade

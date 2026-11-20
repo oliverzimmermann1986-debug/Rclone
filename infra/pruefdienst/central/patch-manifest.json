@@ -1,0 +1,156 @@
+{
+  "version": 1,
+  "description": "Exact-match integration patch for the existing trusted controller. Apply to a private staging copy, run all central unit tests there, then deploy reviewed files without changing credentials.",
+  "files": [
+    {
+      "name": "core.cjs",
+      "sha256Before": "7b86687eeba14d2dcd55340e88696216d994952e3d9710037782e97905c147e6",
+      "replacements": [
+        {
+          "before": "const crypto = require('node:crypto');",
+          "after": "const crypto = require('node:crypto');\nconst { PULL_SUPERSEDED, isPullRef, isAllowedPullRef, augmentRefs, preserveSharedPullRun } = require('./pull-requests.cjs');"
+        },
+        {
+          "before": "const cancellationReason = signal => signal.reason === BRANCH_SUPERSEDED ? BRANCH_SUPERSEDED : MAIN_SUPERSEDED;",
+          "after": "const cancellationReason = signal => signal.reason === PULL_SUPERSEDED ? PULL_SUPERSEDED : signal.reason === BRANCH_SUPERSEDED ? BRANCH_SUPERSEDED : MAIN_SUPERSEDED;"
+        },
+        {
+          "before": "const superseded = j => j.result?.state === 'error' && [MAIN_SUPERSEDED, BRANCH_SUPERSEDED].includes(j.result.description);",
+          "after": "const superseded = j => j.result?.state === 'error' && [MAIN_SUPERSEDED, BRANCH_SUPERSEDED, PULL_SUPERSEDED].includes(j.result.description);"
+        },
+        {
+          "before": "    const reason = ref === 'refs/heads/main' ? MAIN_SUPERSEDED : BRANCH_SUPERSEDED;",
+          "after": "    const reason = isPullRef(ref) ? PULL_SUPERSEDED : ref === 'refs/heads/main' ? MAIN_SUPERSEDED : BRANCH_SUPERSEDED;"
+        },
+        {
+          "before": "      if (old.repo !== repo || !refsOf(old).includes(ref) || hasTag(old) || old.sha === sha || old.phase === 'done') continue;",
+          "after": "      if (old.repo !== repo || !refsOf(old).includes(ref) || hasTag(old) || old.sha === sha || old.phase === 'done') continue;\n      if (refsOf(old).some(isPullRef)) {\n        old.replacedRefs = [...new Set([...(old.replacedRefs || []), ref])];\n        if (preserveSharedPullRun(refsOf(old), ref, old.replacedRefs)) continue;\n      }"
+        },
+        {
+          "before": "    if (ref.startsWith('refs/heads/')) this.cancelBranch(repo, ref, sha);",
+          "after": "    if (ref.startsWith('refs/heads/') || isPullRef(ref)) this.cancelBranch(repo, ref, sha);"
+        },
+        {
+          "before": "    const refs = await api.refs(repo.full_name, branch);",
+          "after": "    const refs = await augmentRefs(api, repo.full_name, branch, await api.refs(repo.full_name, branch), config.pullRequestRepos);"
+        },
+        {
+          "before": "      if (ref !== branchRef && !ref.startsWith('refs/tags/')) continue;",
+          "after": "      if (ref !== branchRef && !ref.startsWith('refs/tags/') && !isAllowedPullRef(repo.full_name, ref, config.pullRequestRepos)) continue;"
+        },
+        {
+          "before": "      if (ref === branchRef) queue.cancelBranch(repo.full_name, branchRef, sha);",
+          "after": "      if (ref === branchRef || isAllowedPullRef(repo.full_name, ref, config.pullRequestRepos)) queue.cancelBranch(repo.full_name, ref, sha);"
+        },
+        {
+          "before": "  attach(job, ref) {\n    const refs = refsOf(job);",
+          "after": "  attach(job, ref) {\n    if (Array.isArray(job.replacedRefs)) job.replacedRefs = job.replacedRefs.filter(value => value !== ref);\n    const refs = refsOf(job);"
+        },
+        {
+          "before": "  return v;",
+          "after": "  if (v.image === 'rclone' && (v.postgres || v.command !== 'bash scripts/ci/verify.sh'))\n    throw new Error('Pruefdatei: rclone verlangt den vollstaendigen festen Pruefplan ohne Datenbank');\n  return v;"
+        },
+        {
+          "before": "      try { parsed = validate(file, config.images); } catch (e) { invalid = e.message; }",
+          "after": "      try {\n        parsed = validate(file, config.images);\n        const required = config.requiredProfiles?.[repo.full_name.toLowerCase()];\n        if (required && parsed.image !== required) throw new Error('Pruefdatei: verbindliches Repository-Profil stimmt nicht');\n      } catch (e) { invalid = e.message; }"
+        }
+      ]
+    },
+    {
+      "name": "service.cjs",
+      "sha256Before": "82a7b5f9c659db0528df2ce7ab2392493e295267ee19f6097570d8ecd2427670",
+      "replacements": [
+        {
+          "before": "const fs = require('node:fs');",
+          "after": "const fs = require('node:fs');\nconst { pullRequestRepos, requiredProfiles } = require('./pull-requests.cjs');\nconst { validateArtifact, artifactReference } = require('./rclone-evidence.cjs');"
+        },
+        {
+          "before": "  return { ...v, stateDir: '/var/lib/ci-runner' };",
+          "after": "  return { ...v, pullRequestRepos: pullRequestRepos(v.pullRequestRepos, v.owner), requiredProfiles: requiredProfiles(v.requiredProfiles, v.owner, v.images), stateDir: '/var/lib/ci-runner' };"
+        },
+        {
+          "before": "    if (job.report) extra.report = JSON.stringify(maskDeep(job.report, secrets), null, 2);",
+          "after": "    if (job.config?.image === 'rclone' && job.result.state === 'success' && !job.artifact) throw new Error('Rclone ZIP-Nachweis fehlt vor Veroeffentlichung');\n    if (job.config?.image === 'rclone' && job.artifact) extra.artifact = validateArtifact(job.artifact);\n    if (job.report) extra.report = JSON.stringify(maskDeep({ ...job.report, ...(extra.artifact ? { publishedArtifact: artifactReference(job, extra.artifact) } : {}) }, secrets), null, 2);"
+        },
+        {
+          "before": "    job.phase = 'done'; delete job.log; delete job.report; save();",
+          "after": "    job.phase = 'done'; delete job.log; delete job.report; delete job.artifact; save();"
+        }
+      ]
+    },
+    {
+      "name": "executor.cjs",
+      "sha256Before": "c1dd8d0119988cf4fefe55673043838941ec0e5137d363f71240fb58bc0368a1",
+      "replacements": [
+        {
+          "before": "['schoenmackers', 'aeon-seals'].includes(job.config.image)",
+          "after": "['schoenmackers', 'aeon-seals', 'rclone'].includes(job.config.image)"
+        },
+        {
+          "before": "const { spawn } = require('node:child_process');",
+          "after": "const { spawn } = require('node:child_process');\nconst { validateReport, validateFailureReport, captureEvidence } = require('./rclone-evidence.cjs');"
+        },
+        {
+          "before": "    let timedOut = false, log = '', result, created = false, report, validReport = false;",
+          "after": "    let timedOut = false, log = '', result, created = false, report, validReport = false, artifact;"
+        },
+        {
+          "before": "      result = outcome(run.code, report, ['schoenmackers', 'aeon-seals', 'rclone'].includes(job.config.image) && !validReport ? 'Release-Report fehlt oder ist ungueltig' : undefined);",
+          "after": "      if (job.config.image === 'rclone' && validReport) {\n        if (run.code === 0) validateReport(report, job.sha);\n        else validateFailureReport(report, job.sha);\n        try { artifact = await captureEvidence(this.run, dockerArgs, name, report, controller.signal); }\n        catch (error) {\n          if (run.code === 0) throw error;\n          report.controllerEvidenceError = redact(error.message);\n        }\n      }\n      result = outcome(run.code, report, ['schoenmackers', 'aeon-seals', 'rclone'].includes(job.config.image) && !validReport ? 'Release-Report fehlt oder ist ungueltig' : undefined);"
+        },
+        {
+          "before": "    if (validReport) out.report = maskDeep(report, dynamic);",
+          "after": "    if (validReport) out.report = maskDeep(report, dynamic);\n    if (artifact) out.artifact = artifact;"
+        }
+      ]
+    },
+    {
+      "name": "direct-run.cjs",
+      "sha256Before": "9071c616712a2f3546cbf99d7f08432b17f17af4e15ab2ecf2d8ca6dacca065b",
+      "replacements": [
+        {
+          "before": "if (!validReport && customCommand) {",
+          "after": "if (!validReport && customCommand && jobConfig.image !== 'rclone') {"
+        },
+        {
+          "before": "['schoenmackers', 'aeon-seals'].includes(jobConfig.image)",
+          "after": "['schoenmackers', 'aeon-seals', 'rclone'].includes(jobConfig.image)"
+        },
+        {
+          "before": "const crypto = require('node:crypto');",
+          "after": "const crypto = require('node:crypto');\nconst { EVIDENCE_NAME, validateReport, validateFailureReport, captureEvidence } = require('./rclone-evidence.cjs');"
+        },
+        {
+          "before": "  let timedOut = false, created = false, log = '', report = null, validReport = false, finalResult = null;",
+          "after": "  let timedOut = false, created = false, log = '', report = null, validReport = false, finalResult = null, artifact;"
+        },
+        {
+          "before": "    finalResult = outcome(run.code, report, ['schoenmackers', 'aeon-seals', 'rclone'].includes(jobConfig.image) && !validReport ? 'Release-Report fehlt oder ist ungueltig' : undefined);",
+          "after": "    if (jobConfig.image === 'rclone' && validReport) {\n      if (run.code === 0) validateReport(report, opts.sha);\n      else validateFailureReport(report, opts.sha);\n      try {\n        artifact = await captureEvidence(command, dockerArgs, containerName, report, controller.signal);\n        await fsp.writeFile(path.join(workDir, EVIDENCE_NAME), Buffer.from(artifact.content, 'base64'), { mode: 0o600 });\n      } catch (error) {\n        if (run.code === 0) throw error;\n        artifact = undefined;\n        report.controllerEvidenceError = redact(error.message);\n      }\n    }\n    finalResult = outcome(run.code, report, ['schoenmackers', 'aeon-seals', 'rclone'].includes(jobConfig.image) && !validReport ? 'Release-Report fehlt oder ist ungueltig' : undefined);"
+        },
+        {
+          "before": "  await fsp.writeFile(path.join(workDir, 'run.log'), fullLog, { mode: 0o600 });",
+          "after": "  if (artifact) outObj.artifact = { name: artifact.name, bytes: artifact.bytes, sha256: artifact.sha256 };\n  await fsp.writeFile(path.join(workDir, 'run.log'), fullLog, { mode: 0o600 });"
+        }
+      ]
+    },
+    {
+      "name": "github.cjs",
+      "sha256Before": "ccee0b1f0c840984e56afe178e37a7513ad39451736a12e75381f641fccc3cf9",
+      "replacements": [
+        {
+          "before": "const fs = require('node:fs');",
+          "after": "const fs = require('node:fs');\nconst { validateArtifact, artifactPath } = require('./rclone-evidence.cjs');"
+        },
+        {
+          "before": "(?:log|json)",
+          "after": "(?:log|json|zip)"
+        },
+        {
+          "before": "      const files = [];",
+          "after": "      if (extra.artifact) {\n        if (job.config?.image !== 'rclone') throw new Error('ZIP-Nachweis nur fuer Rclone erlaubt');\n        const artifact = validateArtifact(extra.artifact);\n        const binaryPath = artifactPath(job);\n        const blob = await this.api.request(`${base}/git/blobs`, 'POST', { content: artifact.content, encoding: 'base64' });\n        entries = entries.filter(entry => entry.path !== binaryPath);\n        entries.push({ path: binaryPath, mode: '100644', type: 'blob', sha: blob.sha });\n      }\n      const files = [];"
+        }
+      ]
+    }
+  ]
+}

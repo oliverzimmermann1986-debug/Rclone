@@ -1,35 +1,15 @@
 name: iOS
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
+    # Every protected commit needs the native check, including CI/docs changes.
     paths:
-      - "ios/**"
-      - "app/**"
-      - "contracts/**"
-      - "tests/test_native_*.py"
-      - "tests/test_ios_*.py"
-      - "tests/test_install_pinned_xcodegen.py"
-      - "scripts/ios_release*.py"
-      - "scripts/install_pinned_xcodegen.py"
-      - "requirements*.txt"
-      - "pytest.ini"
-      - "codemagic.yaml"
-      - ".github/workflows/ios.yml"
+      - "**"
   pull_request:
     paths:
-      - "ios/**"
-      - "app/**"
-      - "contracts/**"
-      - "tests/test_native_*.py"
-      - "tests/test_ios_*.py"
-      - "tests/test_install_pinned_xcodegen.py"
-      - "scripts/ios_release*.py"
-      - "scripts/install_pinned_xcodegen.py"
-      - "requirements*.txt"
-      - "pytest.ini"
-      - "codemagic.yaml"
-      - ".github/workflows/ios.yml"
+      - "**"
 
 concurrency:
   group: ios-${{ github.ref }}
