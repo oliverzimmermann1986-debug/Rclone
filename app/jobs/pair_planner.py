@@ -41,11 +41,49 @@ def paths_overlap(a: str, b: str) -> bool:
         return True
 
 
+def is_read_only_fanout_pair(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    """True when both pairs only read from the same local source and write to disjoint remotes.
+
+    Explicitly requires ``direction == 'push'`` on both pairs (missing/unknown
+    directions stay fail-closed), no shared airgap device, no local mutating
+    helpers (``zfs_snapshot`` / ``sqlite_backup``), and no overlap involving
+    either remote destination.
+    """
+    if (
+        str(first.get("direction") or "").strip().lower() != "push"
+        or str(second.get("direction") or "").strip().lower() != "push"
+    ):
+        return False
+    if (
+        first.get("zfs_snapshot")
+        or second.get("zfs_snapshot")
+        or first.get("sqlite_backup")
+        or second.get("sqlite_backup")
+    ):
+        return False
+    device = str(first.get("airgap_device") or "")
+    if device and device == str(second.get("airgap_device") or ""):
+        return False
+    first_local = str(first.get("local") or "")
+    second_local = str(second.get("local") or "")
+    first_remote = str(first.get("remote") or "")
+    second_remote = str(second.get("remote") or "")
+    if paths_overlap(first_remote, second_remote):
+        return False
+    if paths_overlap(first_local, second_remote) or paths_overlap(
+        first_remote, second_local
+    ):
+        return False
+    return True
+
+
 def pairs_conflict(first: dict[str, Any], second: dict[str, Any]) -> bool:
     # Gleiches Airgap-Gerät: der Auswurf des ersten Laufs träfe den zweiten.
     device = str(first.get("airgap_device") or "")
     if device and device == str(second.get("airgap_device") or ""):
         return True
+    if is_read_only_fanout_pair(first, second):
+        return False
     return any(
         paths_overlap(
             str(first.get(first_key) or ""), str(second.get(second_key) or "")

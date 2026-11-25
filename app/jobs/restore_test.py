@@ -732,6 +732,34 @@ def run_pair_restore_test(
     return result
 
 
+def _pair_has_ever_succeeded(pair: Mapping[str, Any]) -> bool:
+    """True when the pair already completed at least one successful sync run."""
+    try:
+        from ..db import get_db
+        from .rclone_sync import pair_history_key as rclone_pair_history_key
+
+        db = get_db()
+        key = rclone_pair_history_key(dict(pair))
+        history = db.get_pair_history_state([key])
+        entry = history.get(key) or {}
+        if entry.get("ever_succeeded") or entry.get("last_success_at"):
+            return True
+        # Fallback: ältere Installationen ohne Fingerprint-Key nach Namen prüfen
+        name = str(pair.get("name") or "").strip()
+        if name:
+            row = db.latest_pair_run(name, ok_only=True)
+            if row:
+                return True
+        return False
+    except Exception:
+        # Fail-closed: bei unklarer DB-Lage lieber regulär prüfen.
+        return True
+
+
+def _is_automatic_trigger(trigger: str) -> bool:
+    return str(trigger or "").strip().lower() in {"scheduler", "auto", "automatic"}
+
+
 def _selectable_pairs(cfg, pairs_filter: Optional[list[str]]) -> list[dict[str, Any]]:
     backup = cfg.get("backup", default={}) or {}
     wanted = {str(item) for item in (pairs_filter or [])}
@@ -810,9 +838,29 @@ def run_restore_test(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     pairs = _selectable_pairs(cfg, pairs_filter)
+    is_auto = _is_automatic_trigger(trigger) and not pairs_filter
     results: list[dict[str, Any]] = []
     for pair in pairs:
         name = str(pair.get("name") or "?")
+        if is_auto and not _pair_has_ever_succeeded(pair):
+            logger.info(
+                "[%s] noch kein erfolgreicher Lauf – automatischer Restore-Drill übersprungen",
+                name,
+            )
+            results.append(
+                {
+                    "name": name,
+                    "ok": True,
+                    "skipped": True,
+                    "verified": 0,
+                    "sample_size": 0,
+                    "scanned": 0,
+                    "reason": "no_prior_success",
+                    "history_key": restore_history_key(pair),
+                    "evidence_binding": pair_binding(pair),
+                }
+            )
+            continue
         if is_cancelled():
             results.append(
                 {

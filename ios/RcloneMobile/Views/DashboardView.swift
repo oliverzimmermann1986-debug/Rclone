@@ -109,13 +109,22 @@ struct DashboardView: View {
 
                 Section {
                     if let pairs = model.storage?.pairs, !pairs.isEmpty {
-                        ForEach(pairs) { pair in
-                            CopyListRow(
-                                pair: pair,
-                                isMeasuring: model.storageSizesAreLoading,
-                                isRestoreTesting: model.isRestoreTestRunning(for: pair.name)
-                            ) {
-                                selectedProtectionPath = pair
+                        ForEach(SourceFolderGroup.group(pairs)) { group in
+                            if group.pairs.count > 1 {
+                                GroupedSourceCopyCard(
+                                    group: group,
+                                    isMeasuring: model.storageSizesAreLoading,
+                                    isRestoreTesting: { model.isRestoreTestRunning(for: $0) },
+                                    onSelectPair: { selectedProtectionPath = $0 }
+                                )
+                            } else if let pair = group.pairs.first {
+                                CopyListRow(
+                                    pair: pair,
+                                    isMeasuring: model.storageSizesAreLoading,
+                                    isRestoreTesting: model.isRestoreTestRunning(for: pair.name)
+                                ) {
+                                    selectedProtectionPath = pair
+                                }
                             }
                         }
                     } else if let configured = model.config?.backup.pairs, !configured.isEmpty {

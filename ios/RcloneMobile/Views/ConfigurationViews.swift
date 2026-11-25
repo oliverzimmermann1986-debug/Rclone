@@ -7,6 +7,7 @@ struct DataPathsScreen: View {
     private let cloudPath: String?
     @State private var search = ""
     @State private var editor: PairEditorRequest?
+    @State private var showingMultiCloudSetup = false
     @State private var localError: String?
     @State private var currentPassword = ""
     @State private var pendingPathAction: DataPathAction?
@@ -106,6 +107,10 @@ struct DataPathsScreen: View {
             }
             if cloudPath == nil {
                 Section("Werkzeuge") {
+                    Button { showingMultiCloudSetup = true } label: {
+                        Label("Ordner in mehrere Clouds sichern", systemImage: "square.stack.3d.up.fill")
+                    }
+                    .disabled(configurationDraft.baseRevision == nil)
                     NavigationLink { CloudsScreen(showingSettings: $showingSettings) } label: {
                         Label("Clouds", systemImage: "cloud")
                     }
@@ -122,6 +127,9 @@ struct DataPathsScreen: View {
         .listStyle(.insetGrouped)
         .sicherpfadGlassScreen()
         .navigationTitle("Datenwege")
+        .sheet(isPresented: $showingMultiCloudSetup) {
+            MultiCloudSetupSheet()
+        }
         .searchable(text: $search, prompt: "Name, Quelle oder Ziel")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -251,10 +259,23 @@ struct JobsScreen: View {
     @EnvironmentObject private var configurationDraft: ConfigurationDraftStore
     @Binding var showingSettings: Bool
     @State private var editor: JobEditorRequest?
+    @State private var showingMultiCloudSetup = false
     @State private var plan: PlanPresentation?
     @State private var pendingRun: PendingJobRun?
     @State private var currentPassword = ""
     @State private var localError: String?
+
+    private var scheduledDefinitions: [(offset: Int, element: JobDefinition)] {
+        configurationDraft.definitions.enumerated().filter { _, def in
+            def.enabled && JobScheduleCodec.selection(for: def.schedule).mode != .manual
+        }
+    }
+
+    private var manualOrPausedDefinitions: [(offset: Int, element: JobDefinition)] {
+        configurationDraft.definitions.enumerated().filter { _, def in
+            !def.enabled || JobScheduleCodec.selection(for: def.schedule).mode == .manual
+        }
+    }
 
     var body: some View {
         List {
@@ -266,42 +287,74 @@ struct JobsScreen: View {
                     retryWithPassword: saveWithPassword
                 )
             }
-            Section {
-                if configurationDraft.definitions.isEmpty {
+            if configurationDraft.definitions.isEmpty {
+                Section("Jobliste") {
                     ContentUnavailableView(
                         "Keine Jobs",
                         systemImage: "calendar.badge.plus",
                         description: Text("Jobs legen Zeitplan, Reihenfolge und Ausführung der Datenwege fest.")
                     )
+                    Button("Ordner in mehrere Clouds sichern") { showingMultiCloudSetup = true }
+                        .disabled(configurationDraft.baseRevision == nil)
                     Button("Job hinzufügen") { editor = JobEditorRequest(index: nil, definition: nil) }
                         .disabled(configurationDraft.pairs.isEmpty)
-                } else {
-                    ForEach(Array(configurationDraft.definitions.enumerated()), id: \.element.id) { index, definition in
-                        DisclosureGroup {
-                            jobDetails(definition, at: index)
-                        } label: {
-                            JobDefinitionRow(definition: definition)
+                }
+            } else {
+                if !scheduledDefinitions.isEmpty {
+                    Section {
+                        ForEach(scheduledDefinitions, id: \.element.id) { index, definition in
+                            DisclosureGroup {
+                                jobDetails(definition, at: index)
+                            } label: {
+                                JobDefinitionRow(definition: definition, pairs: configurationDraft.pairs)
+                            }
+                        }
+                    } header: {
+                        Text("Geplante Automatik (\(scheduledDefinitions.count))")
+                    } footer: {
+                        if configurationDraft.isDirty {
+                            Text("Änderungen speichern, bevor du Plan oder Lauf startest.")
                         }
                     }
+                    .sicherpfadGlassListRow()
                 }
-            } header: {
-                Text("Jobliste")
-            } footer: {
-                if configurationDraft.isDirty {
-                    Text("Änderungen speichern, bevor du Plan oder Lauf startest.")
+
+                if !manualOrPausedDefinitions.isEmpty {
+                    Section {
+                        ForEach(manualOrPausedDefinitions, id: \.element.id) { index, definition in
+                            DisclosureGroup {
+                                jobDetails(definition, at: index)
+                            } label: {
+                                JobDefinitionRow(definition: definition, pairs: configurationDraft.pairs)
+                            }
+                        }
+                    } header: {
+                        Text("Manuelle Sicherungen (\(manualOrPausedDefinitions.count))")
+                    } footer: {
+                        Text("Manuelle Jobs starten nur auf deinen ausdrücklichen Aufruf.")
+                    }
+                    .sicherpfadGlassListRow()
                 }
             }
-            Section("Zeitplanung") {
+            Section("Schnell einrichten & Zeitplanung") {
+                Button { showingMultiCloudSetup = true } label: {
+                    Label("Ordner in mehrere Clouds sichern", systemImage: "square.stack.3d.up.fill")
+                }
+                .disabled(configurationDraft.baseRevision == nil)
                 NavigationLink {
-                    JobScheduleOverview(definitions: configurationDraft.definitions)
+                    JobScheduleOverview(definitions: configurationDraft.definitions, pairs: configurationDraft.pairs)
                 } label: {
-                    Label("Zeitpläne ansehen", systemImage: "calendar")
+                    Label("Zeitpläne & Bandbreite ansehen", systemImage: "calendar")
                 }
             }
+            .sicherpfadGlassListRow()
         }
         .listStyle(.insetGrouped)
         .sicherpfadGlassScreen()
         .navigationTitle("Jobs")
+        .sheet(isPresented: $showingMultiCloudSetup) {
+            MultiCloudSetupSheet()
+        }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 SettingsButton(showingSettings: $showingSettings)
@@ -491,14 +544,61 @@ private struct DataPathConfigurationRow: View {
 
 private struct JobDefinitionRow: View {
     let definition: JobDefinition
+    var pairs: [PairConfig] = []
+
+    private var linkedPairs: [PairConfig] {
+        definition.dataPathIDs.compactMap { id in pairs.first { $0.id == id } }
+    }
+
+    private var isManual: Bool {
+        JobScheduleCodec.selection(for: definition.schedule).mode == .manual
+    }
+
+    private var statusColor: Color {
+        if !definition.enabled { return .secondary }
+        return isManual ? .blue : .green
+    }
+
+    private var statusLabel: String {
+        if !definition.enabled { return "Deaktiviert" }
+        return isManual ? "Manuell" : "Aktiv"
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(definition.name).font(.headline)
-            Text(JobScheduleCodec.summary(definition.schedule))
-                .font(.subheadline).foregroundStyle(.secondary)
-            Text("\(definition.enabled ? "Aktiv" : "Deaktiviert") · \(configurationPathCount(definition.dataPathIDs.count))")
-                .font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text(definition.name).font(.headline)
+                Spacer(minLength: 4)
+                Text(statusLabel)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(statusColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .sicherpfadGlassBadge(color: statusColor)
+            }
+            HStack(spacing: 6) {
+                Label(JobScheduleCodec.summary(definition.schedule), systemImage: isManual ? "hand.tap" : "clock")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                if linkedPairs.count >= 2 {
+                    Text("· \(definition.executionMode == "parallel" ? "Parallel" : "Seriell")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if !linkedPairs.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(linkedPairs) { pair in
+                            CloudTargetChip(remotePath: pair.direction == "pull" ? pair.local : pair.remote)
+                        }
+                    }
+                }
+            } else {
+                Text(configurationPathCount(definition.dataPathIDs.count))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .accessibilityElement(children: .combine)
         .padding(.vertical, 4)
@@ -507,6 +607,7 @@ private struct JobDefinitionRow: View {
 
 private struct JobScheduleOverview: View {
     let definitions: [JobDefinition]
+    var pairs: [PairConfig] = []
 
     var body: some View {
         List {
@@ -515,22 +616,26 @@ private struct JobScheduleOverview: View {
                 if scheduled.isEmpty {
                     Text("Keine aktivierten Jobs mit Zeitplan.").foregroundStyle(.secondary)
                 } else {
-                    ForEach(scheduled) { JobDefinitionRow(definition: $0) }
+                    ForEach(scheduled) { JobDefinitionRow(definition: $0, pairs: pairs) }
                 }
             }
+            .sicherpfadGlassListRow()
             let remaining = definitions.filter { !isScheduled($0) }
             if !remaining.isEmpty {
                 Section("Manuell oder deaktiviert") {
-                    ForEach(remaining) { JobDefinitionRow(definition: $0) }
+                    ForEach(remaining) { JobDefinitionRow(definition: $0, pairs: pairs) }
                 }
+                .sicherpfadGlassListRow()
             }
             Section {
                 NavigationLink { BandwidthHeatmapView() } label: {
                     Label("Bandbreite & Zeitfenster", systemImage: "chart.bar.xaxis")
                 }
             }
+            .sicherpfadGlassListRow()
         }
         .listStyle(.insetGrouped)
+        .sicherpfadGlassScreen()
         .navigationTitle("Zeitplanung")
     }
 
