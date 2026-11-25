@@ -472,7 +472,10 @@ def run_bitrot_scrub(
             logger.info("[%s] kein Cloud-Remote, übersprungen", name)
             continue
         if is_auto and not _pair_has_ever_succeeded(pair):
-            logger.info("[%s] noch kein erfolgreicher Lauf – automatischer Bitrot-Scrub übersprungen", name)
+            logger.info(
+                "[%s] noch kein erfolgreicher Lauf – automatischer Bitrot-Scrub übersprungen",
+                name,
+            )
             results.append(
                 {
                     "name": name,

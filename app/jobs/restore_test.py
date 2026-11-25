@@ -843,7 +843,10 @@ def run_restore_test(
     for pair in pairs:
         name = str(pair.get("name") or "?")
         if is_auto and not _pair_has_ever_succeeded(pair):
-            logger.info("[%s] noch kein erfolgreicher Lauf – automatischer Restore-Drill übersprungen", name)
+            logger.info(
+                "[%s] noch kein erfolgreicher Lauf – automatischer Restore-Drill übersprungen",
+                name,
+            )
             results.append(
                 {
                     "name": name,
