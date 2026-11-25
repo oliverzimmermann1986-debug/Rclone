@@ -40,3 +40,53 @@ def test_local_overlap_is_fail_closed_across_case_variants():
     assert paths_overlap("/srv/Photos", "/srv/photos") is True
     assert paths_overlap("/srv/Photos", "/srv/PHOTOS/2026") is True
     assert paths_overlap("/srv/Photos", "/srv/Photographs") is False
+
+
+def test_read_only_push_fanout_to_disjoint_clouds_does_not_conflict():
+    pcloud = {
+        "name": "Paperless Tresor pCloud",
+        "local": "/mnt/data/paperless",
+        "remote": "pcloud-tresor:/Paperless",
+        "direction": "push",
+        "mode": "copy",
+    }
+    gdrive = {
+        "name": "Paperless Tresor GDrive",
+        "local": "/mnt/data/paperless",
+        "remote": "gdrive-tresor:/Paperless",
+        "direction": "push",
+        "mode": "copy",
+    }
+    assert pairs_conflict(pcloud, gdrive) is False
+    assert has_overlapping_pairs([pcloud, gdrive]) is False
+
+
+def test_push_fanout_still_conflicts_when_remote_overlaps_or_mutating():
+    a = {
+        "name": "A",
+        "local": "/mnt/data/fotos",
+        "remote": "pcloud:/Fotos",
+        "direction": "push",
+    }
+    b_same_remote = {
+        "name": "B",
+        "local": "/mnt/data/fotos",
+        "remote": "pcloud:/Fotos/Sub",
+        "direction": "push",
+    }
+    b_bisync = {
+        "name": "C",
+        "local": "/mnt/data/fotos",
+        "remote": "gdrive:/Fotos",
+        "direction": "bisync",
+    }
+    b_zfs = {
+        "name": "D",
+        "local": "/mnt/data/fotos",
+        "remote": "gdrive:/Fotos",
+        "direction": "push",
+        "zfs_snapshot": True,
+    }
+    assert pairs_conflict(a, b_same_remote) is True
+    assert pairs_conflict(a, b_bisync) is True
+    assert pairs_conflict(a, b_zfs) is True

@@ -48,7 +48,11 @@ from .rclone_sync import (
     reset_cancel,
 )
 from .restore_sampling import select_budgeted_sample
-from .restore_test import _selectable_pairs
+from .restore_test import (
+    _is_automatic_trigger,
+    _pair_has_ever_succeeded,
+    _selectable_pairs,
+)
 from .scheduler import (
     DEFAULT_TIMEZONE,
     _evaluate_due,
@@ -461,10 +465,30 @@ def run_bitrot_scrub(
     db = get_db()
 
     results: list[dict[str, Any]] = []
+    is_auto = _is_automatic_trigger(trigger) and not pairs_filter
     for pair in _selectable_pairs(cfg, pairs_filter):
         name = str(pair.get("name") or "?")
         if not _cloud_endpoint(pair):
             logger.info("[%s] kein Cloud-Remote, übersprungen", name)
+            continue
+        if is_auto and not _pair_has_ever_succeeded(pair):
+            logger.info("[%s] noch kein erfolgreicher Lauf – automatischer Bitrot-Scrub übersprungen", name)
+            results.append(
+                {
+                    "name": name,
+                    "ok": True,
+                    "skipped": True,
+                    "scanned": 0,
+                    "sampled": 0,
+                    "verified": 0,
+                    "recorded": 0,
+                    "mismatches": [],
+                    "truncated": False,
+                    "error": None,
+                    "reason": "no_prior_success",
+                    "history_key": f"{JOB_KIND}:{rclone_history_key(pair)}",
+                }
+            )
             continue
         if is_cancelled():
             results.append(

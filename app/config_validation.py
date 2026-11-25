@@ -1668,11 +1668,36 @@ def validate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             )
             if overlap_keys:
                 first_key, second_key = overlap_keys
-                warnings.append(
-                    f"Pairs '{first.get('name')}' und '{second.get('name')}' "
-                    f"überlappen bei {first_key}/{second_key}; "
-                    "sie werden zur Sicherheit seriell ausgeführt."
+                # Gleiche Quelle im rein lesenden Push-Fan-Out an zwei verschiedene
+                # Cloud-Ziele ist sicher parallel ausführbar und kein Konflikt.
+                is_safe_fanout = (
+                    first_key == "local"
+                    and second_key == "local"
+                    and str(first.get("direction") or "").strip().lower() == "push"
+                    and str(second.get("direction") or "").strip().lower() == "push"
+                    and not first.get("zfs_snapshot")
+                    and not second.get("zfs_snapshot")
+                    and not first.get("sqlite_backup")
+                    and not second.get("sqlite_backup")
+                    and not _paths_overlap(
+                        str(first.get("remote") or ""),
+                        str(second.get("remote") or ""),
+                    )
+                    and not _paths_overlap(
+                        str(first.get("local") or ""),
+                        str(second.get("remote") or ""),
+                    )
+                    and not _paths_overlap(
+                        str(first.get("remote") or ""),
+                        str(second.get("local") or ""),
+                    )
                 )
+                if not is_safe_fanout:
+                    warnings.append(
+                        f"Pairs '{first.get('name')}' und '{second.get('name')}' "
+                        f"überlappen bei {first_key}/{second_key}; "
+                        "sie werden zur Sicherheit seriell ausgeführt."
+                    )
 
     notifications = cfg.setdefault("notifications", {})
     if not isinstance(notifications, dict):
