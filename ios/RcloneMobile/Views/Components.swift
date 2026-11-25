@@ -17,7 +17,7 @@ struct StatusBadge: View {
             .labelStyle(CompactStatusLabelStyle(usesSemanticIcon: symbolName != "circle.fill"))
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
-            .background(StatusStyle.color(for: status).opacity(0.12), in: Capsule())
+            .sicherpfadGlassBadge(color: StatusStyle.color(for: status))
             .accessibilityLabel("Status: \(StatusStyle.label(for: status))")
     }
 }
@@ -74,7 +74,7 @@ struct ErrorBanner: View {
                 .accessibilityHint("Blendet diese Fehlermeldung aus.")
         }
         .padding(14)
-        .background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .sicherpfadGlassCard(cornerRadius: 18, accent: .red, prominent: false)
         .onAppear { announce(message) }
         .onChange(of: message) { _, newMessage in announce(newMessage) }
     }

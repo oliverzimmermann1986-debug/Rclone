@@ -112,6 +112,7 @@ struct RunsScreen: View {
 
     var body: some View {
         RunsListView()
+            .sicherpfadGlassScreen()
             .navigationTitle("Läufe")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
@@ -442,6 +443,7 @@ struct RunDetailView: View {
                 }
             }
         }
+        .sicherpfadGlassScreen()
         .navigationTitle("Lauf #\(job.id)")
         .navigationBarTitleDisplayMode(.inline)
         .task {

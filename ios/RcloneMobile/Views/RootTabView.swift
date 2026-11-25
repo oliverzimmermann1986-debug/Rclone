@@ -37,7 +37,7 @@ struct RootTabView: View {
                 ErrorBanner(message: error, dismiss: model.dismissMessages)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(.bar)
+                    .background(.ultraThinMaterial)
                     .accessibilityIdentifier("globalErrorBanner")
             }
         }
@@ -97,6 +97,7 @@ private struct AdministrationView: View {
                     Button("Konto & Anmeldung") { showingSettings = true }
                 }
             }
+            .sicherpfadGlassScreen()
             .navigationTitle("Mehr")
             .navigationDestination(for: String.self) { destination($0) }
             .navigationDestination(isPresented: Binding(get: { route != nil }, set: { if !$0 { route = nil } })) {
@@ -196,6 +197,7 @@ struct SettingsView: View {
                         : "Die Abmeldung beendet aus Sicherheitsgründen alle aktiven Administrationssitzungen.")
                 }
             }
+            .sicherpfadGlassScreen()
             .navigationTitle("Konto")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Fertig") { dismiss() } } }

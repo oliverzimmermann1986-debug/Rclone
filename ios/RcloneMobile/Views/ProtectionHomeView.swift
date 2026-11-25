@@ -66,6 +66,7 @@ struct ProtectionHomeView: View {
                 }
             }
         }
+        .sicherpfadGlassScreen()
         .navigationTitle("Sichern")
         .confirmationDialog("Alle aktiven Jobs starten?", isPresented: $confirmRunAll, titleVisibility: .visible) {
             Button("Probelauf starten") { startAll(dryRun: true) }

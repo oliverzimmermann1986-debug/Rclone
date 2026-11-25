@@ -78,6 +78,7 @@ struct DeviceVaultView: View {
     private var navigationContent: some View {
         vaultList
             .listStyle(.insetGrouped)
+            .sicherpfadGlassScreen()
             .navigationTitle("Geräte-Vault")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -678,11 +679,7 @@ private struct VaultHeroCard: View {
                 .foregroundStyle(.secondary)
         }
         .padding(20)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .stroke(.green.opacity(0.15), lineWidth: 1)
-        }
+        .sicherpfadGlassCard(cornerRadius: 28, accent: SicherpfadGlassPalette.emerald, prominent: true)
     }
 }
 

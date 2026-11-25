@@ -56,6 +56,7 @@ struct RecoveryCenterView: View {
                 }
             }
         }
+        .sicherpfadGlassScreen()
         .navigationTitle("Wiederherstellen")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await load() }
@@ -71,16 +72,27 @@ struct RecoveryCenterView: View {
     }
 
     private func protectionHeader(_ pass: RecoveryPassResponse) -> some View {
-        Section {
+        let accent = scoreColor(pass.protection.score)
+        return Section {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 14) {
                     ZStack {
-                        Circle().fill(scoreColor(pass.protection.score).opacity(0.14))
+                        Circle().fill(.ultraThinMaterial)
+                        Circle().fill(accent.opacity(0.20))
+                        Circle().strokeBorder(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.75), accent.opacity(0.55)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1.2
+                        )
                         Image(systemName: "lifepreserver.fill")
                             .font(.title2)
-                            .foregroundStyle(scoreColor(pass.protection.score))
+                            .foregroundStyle(accent)
                     }
-                    .frame(width: 52, height: 52)
+                    .frame(width: 54, height: 54)
+                    .shadow(color: accent.opacity(0.35), radius: 10, y: 4)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Recovery-Pass").font(.headline)
                         Text("\(pass.hostname) · \(AppFormat.relative(pass.generatedAt))")
@@ -89,9 +101,10 @@ struct RecoveryCenterView: View {
                     Spacer()
                     Text("\(pass.protection.score)")
                         .font(.title.monospacedDigit().bold())
+                        .foregroundStyle(accent)
                 }
                 ProgressView(value: Double(pass.protection.score), total: 100)
-                    .tint(scoreColor(pass.protection.score))
+                    .tint(accent)
                 HStack(spacing: 0) {
                     ForEach(pass.protection.components) { component in
                         VStack(spacing: 2) {
@@ -105,7 +118,10 @@ struct RecoveryCenterView: View {
                     }
                 }
             }
-            .padding(.vertical, 6)
+            .padding(20)
+            .sicherpfadGlassCard(cornerRadius: 26, accent: accent, prominent: true)
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
             .accessibilityElement(children: .combine)
         } footer: {
             Text("Der Wert entsteht aus realen Jobs, Zeitplänen, Aktualität, Restore-Prüfungen und Löschschutz.")

@@ -21,8 +21,7 @@ struct LoginView: View {
 
     var body: some View {
         ZStack {
-            Color(.systemGroupedBackground)
-                .ignoresSafeArea()
+            SicherpfadGlassBackdrop()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -71,14 +70,15 @@ struct LoginView: View {
                     }
 
                     if selectedTarget == nil {
-                        Button("Weiter zur Anmeldung", action: chooseServer)
-                            .frame(maxWidth: .infinity, minHeight: 52)
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-                            .tint(.green)
-                            .disabled(isSigningIn || server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            .padding(.top, 22)
-                            .accessibilityHint("Prüft nur das Adressformat. Eine Verbindung wird erst bei der Anmeldung aufgebaut.")
+                        Button(action: chooseServer) {
+                            Text("Weiter zur Anmeldung")
+                                .fontWeight(.semibold)
+                                .frame(maxWidth: .infinity, minHeight: 52)
+                        }
+                        .buttonStyle(SicherpfadGlassProminentButtonStyle())
+                        .disabled(isSigningIn || server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .padding(.top, 22)
+                        .accessibilityHint("Prüft nur das Adressformat. Eine Verbindung wird erst bei der Anmeldung aufgebaut.")
                     } else {
                         loginButton.padding(.top, 22)
                         secureLoginButtons.padding(.top, 14)
@@ -103,8 +103,7 @@ struct LoginView: View {
                             .fontWeight(.semibold)
                             .frame(maxWidth: .infinity, minHeight: 48)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
+                    .buttonStyle(SicherpfadGlassSecondaryButtonStyle())
                     .disabled(isSigningIn)
                     .padding(.top, 10)
                     .accessibilityHint("Öffnet eine lokale, unveränderliche Vorschau ohne Server und ohne echte Daten.")
@@ -174,11 +173,16 @@ struct LoginView: View {
     }
 
     private var brand: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             Image("SicherpfadMark")
                 .resizable().scaledToFit()
-                .frame(width: 44, height: 44)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .frame(width: 48, height: 48)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.50), lineWidth: 1)
+                }
+                .shadow(color: SicherpfadGlassPalette.emerald.opacity(0.42), radius: 14, y: 5)
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -219,11 +223,7 @@ struct LoginView: View {
                 .padding(.bottom, 10)
 
         }
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(.primary.opacity(0.07), lineWidth: 1)
-        }
+        .sicherpfadGlassCard(cornerRadius: 22)
     }
 
     private var credentialForm: some View {
@@ -263,11 +263,7 @@ struct LoginView: View {
             .onSubmit(login)
         }
         .disabled(isSigningIn)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(.primary.opacity(0.07), lineWidth: 1)
-        }
+        .sicherpfadGlassCard(cornerRadius: 22)
     }
 
     private var loginButton: some View {
@@ -281,9 +277,7 @@ struct LoginView: View {
             }
             .frame(maxWidth: .infinity, minHeight: 52)
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-        .tint(.green)
+        .buttonStyle(SicherpfadGlassProminentButtonStyle())
         .disabled(!isSigningIn && (selectedTarget == nil || username.isEmpty || password.isEmpty))
         .accessibilityLabel(isSigningIn ? "Anmeldung abbrechen" : "Bei Sicherpfad anmelden")
         .accessibilityHint(isSigningIn
@@ -327,8 +321,7 @@ struct LoginView: View {
                     .fontWeight(.semibold)
                     .frame(maxWidth: .infinity, minHeight: 48)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
+            .buttonStyle(SicherpfadGlassSecondaryButtonStyle())
             .disabled(isSigningIn || selectedTarget?.supportsPasskeys != true)
 
             Button { performWebAuthn(method: "security_key") } label: {
@@ -336,8 +329,7 @@ struct LoginView: View {
                     .fontWeight(.semibold)
                     .frame(maxWidth: .infinity, minHeight: 48)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
+            .buttonStyle(SicherpfadGlassSecondaryButtonStyle())
             .disabled(isSigningIn || selectedTarget?.supportsPasskeys != true)
 
             if selectedTarget?.supportsPasskeys != true {
@@ -470,7 +462,7 @@ struct ServerLoginTargetCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .sicherpfadGlassCard(cornerRadius: 20, accent: target.usesHTTPS ? SicherpfadGlassPalette.emerald : .orange)
     }
 }
 
