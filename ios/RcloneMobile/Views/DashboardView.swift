@@ -202,6 +202,7 @@ struct DashboardView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .sicherpfadGlassScreen()
         .navigationTitle("Lage")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -507,11 +508,7 @@ private struct ProtectionStatusCard: View {
             }
         }
         .padding(20)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .stroke(level.color.opacity(0.16), lineWidth: 1)
-        }
+        .sicherpfadGlassCard(cornerRadius: 28, accent: level.color, prominent: true)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Schutzstatus \(level.title). Vertrauensscore \(score) von 100. \(activePaths) von \(totalPaths) Datenwegen aktiv. \(nextAction)")
     }
@@ -577,19 +574,31 @@ private struct DataPathSignatureMark: View {
     var body: some View {
         ZStack {
             Circle()
-                .fill(color.opacity(0.11))
+                .fill(.ultraThinMaterial)
+            Circle()
+                .fill(color.opacity(0.18))
+            Circle()
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.75), color.opacity(0.55)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1.25
+                )
             DataPathSignatureShape()
                 .stroke(
-                    .primary.opacity(0.82),
+                    .primary.opacity(0.86),
                     style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round)
                 )
                 .padding(12)
             Circle()
                 .fill(color)
-                .frame(width: 8, height: 8)
+                .frame(width: 9, height: 9)
                 .offset(x: 8, y: 4)
-                .shadow(color: color.opacity(0.3), radius: 3)
+                .shadow(color: color.opacity(0.65), radius: 5)
         }
+        .shadow(color: color.opacity(0.28), radius: 12, y: 4)
     }
 }
 

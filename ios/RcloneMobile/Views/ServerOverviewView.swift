@@ -71,6 +71,7 @@ private struct ServerOverviewContent: View {
                 }
             }
         }
+        .sicherpfadGlassScreen()
         .navigationTitle("Alle Server")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -240,6 +241,7 @@ private struct ServerOverviewDetailView: View {
                 }
             }
         }
+        .sicherpfadGlassScreen()
         .navigationTitle("Serverdetails")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await refresh() }

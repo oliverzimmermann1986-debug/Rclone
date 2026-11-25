@@ -120,6 +120,7 @@ struct DataPathsScreen: View {
             }
         }
         .listStyle(.insetGrouped)
+        .sicherpfadGlassScreen()
         .navigationTitle("Datenwege")
         .searchable(text: $search, prompt: "Name, Quelle oder Ziel")
         .toolbar {
@@ -299,6 +300,7 @@ struct JobsScreen: View {
             }
         }
         .listStyle(.insetGrouped)
+        .sicherpfadGlassScreen()
         .navigationTitle("Jobs")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {

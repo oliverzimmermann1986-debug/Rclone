@@ -43,6 +43,10 @@ struct RcloneMobileApp: App {
     @UIApplicationDelegateAdaptor(PushNotificationCoordinator.self) private var pushDelegate
     @StateObject private var model = AppModel()
 
+    init() {
+        SicherpfadGlassAppearance.configure()
+    }
+
     var body: some Scene {
         WindowGroup {
             AppRootView(pushCoordinator: pushDelegate)
@@ -184,13 +188,19 @@ private struct LaunchStatusView: View {
 
     var body: some View {
         ZStack {
-            Color(.systemGroupedBackground).ignoresSafeArea()
+            SicherpfadGlassBackdrop()
             VStack(spacing: 16) {
                 Image("SicherpfadMark")
-                    .resizable().scaledToFit().frame(width: 64, height: 64)
-                    .clipShape(RoundedRectangle(cornerRadius: 15))
+                    .resizable().scaledToFit().frame(width: 68, height: 68)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.45), lineWidth: 1)
+                    }
+                    .shadow(color: SicherpfadGlassPalette.emerald.opacity(0.42), radius: 16, y: 6)
                     .accessibilityHidden(true)
                 ProgressView()
+                    .tint(SicherpfadGlassPalette.emerald)
                 Text("Verbindung wird geprüft …")
                     .font(.headline)
                 if !model.serverAddress.isEmpty {
@@ -206,22 +216,28 @@ private struct LaunchStatusView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                    HStack {
+                    HStack(spacing: 12) {
                         Button("Abbrechen", role: .cancel) {
                             model.cancelSessionRestore()
                         }
-                        .buttonStyle(.bordered)
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 44)
+                        .buttonStyle(SicherpfadGlassSecondaryButtonStyle(cornerRadius: 12))
                         .accessibilityIdentifier("cancelSessionRestoreButton")
                         Button("Server ändern") {
                             model.changeServerDuringRestore()
                         }
-                        .buttonStyle(.borderedProminent)
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 44)
+                        .buttonStyle(SicherpfadGlassProminentButtonStyle(cornerRadius: 12))
                         .accessibilityIdentifier("changeServerButton")
                     }
                 }
             }
             .frame(maxWidth: 420)
-            .padding(24)
+            .padding(28)
+            .sicherpfadGlassCard(cornerRadius: 28, accent: SicherpfadGlassPalette.emerald, prominent: true)
+            .padding(.horizontal, 24)
         }
         .task {
             if reduceMotion {

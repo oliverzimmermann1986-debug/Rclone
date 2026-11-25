@@ -82,6 +82,7 @@ struct SystemView: View {
                 }
             }
         }
+        .sicherpfadGlassScreen()
         .navigationTitle("System")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { SettingsButton(showingSettings: $showingSettings) }
